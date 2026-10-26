@@ -2,7 +2,7 @@
 // (calls it makes, events it handles, enum values it may rely on), then a
 // summary of everything else.
 
-import { pathMatches } from "./uses.mjs";
+import { endpointsFor } from "./uses.mjs";
 
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const code = (s) => `\`${s}\``;
@@ -39,18 +39,14 @@ function capped(lines) {
 /** Calls Neucord makes that match no endpoint of the client: renamed in
  * Neucord's favour, or never parsed. Worth a look, but not every week. */
 export function unmatched(cur, uses) {
-  return uses.rest.filter(({ path }) => !Object.values(cur.endpoints).some((template) => pathMatches(template, path)));
+  return uses.rest.filter(({ path }) => endpointsFor(cur.endpoints, path).length === 0);
 }
 
 export function compare(old, cur, uses) {
   const affects = [];
 
   for (const { method, path } of uses.rest) {
-    const names = new Set(
-      [old.endpoints, cur.endpoints].flatMap((table) =>
-        Object.keys(table).filter((name) => pathMatches(table[name], path)),
-      ),
-    );
+    const names = new Set([...endpointsFor(old.endpoints, path), ...endpointsFor(cur.endpoints, path)]);
     for (const name of [...names].sort()) {
       const [before, after] = [old.endpoints[name], cur.endpoints[name]];
       const label = `${code(`${method} ${path}`)} (${code(name)})`;

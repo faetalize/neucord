@@ -26,10 +26,18 @@ export async function neucordUses(repo) {
   const events = new Set();
   for (const file of await rustFiles(src)) {
     const code = await readFile(file, "utf8");
+    const add = (method, path) => rest.set(`${method} ${normalizePath(path)}`, { method, path: normalizePath(path) });
+    const PATH = String.raw`&?(?:format!\(\s*)?"(\/[^"]*)"`;
     // ("PUT", &format!("/users/@me/relationships/{user}")) and plain literals.
-    for (const m of code.matchAll(/"(GET|POST|PUT|PATCH|DELETE)"\s*,\s*&?(?:format!\(\s*)?"(\/[^"]*)"/g)) {
-      const key = `${m[1]} ${normalizePath(m[2])}`;
-      rest.set(key, { method: m[1], path: normalizePath(m[2]) });
+    for (const m of code.matchAll(new RegExp(String.raw`"(GET|POST|PUT|PATCH|DELETE)"\s*,\s*` + PATH, "g"))) {
+      add(m[1], m[2]);
+    }
+    // Helpers that fix the method and take the path: `fn auth(&self, path: &str, …)`
+    // calling `self.send("POST", path, …)`, used as `self.auth("/auth/login", …)`.
+    for (const m of code.matchAll(/fn (\w+)\(&self,\s*(\w+): &str[\s\S]*?\n    \}/g)) {
+      const method = m[0].match(new RegExp(String.raw`"(GET|POST|PUT|PATCH|DELETE)"\s*,\s*${m[2]}\b`))?.[1];
+      if (!method) continue;
+      for (const call of code.matchAll(new RegExp(String.raw`self\.${m[1]}\(\s*` + PATH, "g"))) add(method, call[1]);
     }
     if (file.endsWith("gateway.rs")) {
       // Match arms: `"MESSAGE_CREATE" =>` and `"READY" | "RESUMED"`.
@@ -44,11 +52,20 @@ export async function neucordUses(repo) {
 }
 
 /** Whether a client endpoint template (`/users/{0}/relationships`) can be
- * the path Neucord calls (`/users/@me/relationships`). */
-export function pathMatches(template, path) {
+ * the path Neucord calls (`/users/@me/relationships`). Strictly, only the
+ * template's parameters are wildcards; loosely, Neucord's `{}` also stands
+ * for a literal (`/auth/mfa/{}` is totp, sms…), except `@me`. */
+export function pathMatches(template, path, loose = false) {
   const a = normalizePath(template.replace(/\{\d+\}|\{\?\}/g, "{}")).split("/");
   const b = path.split("/");
-  // Only the template's parameters are wildcards: Neucord's `{}` (an id)
-  // must not match a literal like `@me`.
-  return a.length === b.length && a.every((segment, i) => segment === b[i] || segment === "{}");
+  const fits = (x, y) => x === y || x === "{}" || (loose && y === "{}" && x !== "@me");
+  return a.length === b.length && a.every((segment, i) => fits(segment, b[i]));
+}
+
+/** The names of the endpoints a Neucord path calls: exact matches, or the
+ * loose ones if there are none. */
+export function endpointsFor(endpoints, path) {
+  const names = (loose) => Object.keys(endpoints).filter((name) => pathMatches(endpoints[name], path, loose));
+  const strict = names(false);
+  return strict.length > 0 ? strict : names(true);
 }
