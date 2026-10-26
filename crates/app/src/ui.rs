@@ -880,6 +880,8 @@ impl App {
             let button = gtk::Button::builder()
                 .tooltip_text(&guild.name)
                 .css_classes(["guild"])
+                // Clip the icon to the button's rounded corners.
+                .overflow(gtk::Overflow::Hidden)
                 .build();
             match guild.icon.as_deref() {
                 Some(hash) => {

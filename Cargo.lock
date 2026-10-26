@@ -514,6 +514,7 @@ dependencies = [
  "gio",
  "glib",
  "gtk4",
+ "serde_json",
  "soup3",
 ]
 
