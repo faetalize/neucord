@@ -1,0 +1,33 @@
+name: Discord watch
+
+# Compare what Discord's official client sends and reads with last week's
+# build, and open an issue when anything Neucord uses changed.
+on:
+  schedule:
+    - cron: "23 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: discord-watch
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tools/discord-watch/package-lock.json
+      - name: Install
+        run: npm ci --omit=dev
+        working-directory: tools/discord-watch
+      - name: Compare with the last build
+        run: tools/discord-watch/ci.sh
+        env:
+          GH_TOKEN: ${{ github.token }}

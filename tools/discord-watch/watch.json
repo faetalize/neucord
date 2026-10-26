@@ -1,0 +1,12 @@
+{
+  "enums": {
+    "ActivityType": ["PLAYING", "STREAMING", "LISTENING", "WATCHING", "CUSTOM_STATUS", "COMPETING"],
+    "ApiErrorCode": ["UNKNOWN_ACCOUNT", "RELATIONSHIP_INVALID_NO_CONFIRMATION"],
+    "ChannelType": ["DM", "GROUP_DM", "GUILD_TEXT", "GUILD_CATEGORY"],
+    "ConsentStatus": ["UNSPECIFIED", "PENDING", "ACCEPTED", "REJECTED"],
+    "GatewayOpcode": ["DISPATCH", "HEARTBEAT", "IDENTIFY", "RESUME", "HELLO", "HEARTBEAT_ACK"],
+    "MessageType": ["DEFAULT", "REPLY", "CHANNEL_PINNED_MESSAGE"],
+    "RelationshipType": ["FRIEND", "BLOCKED", "PENDING_INCOMING", "PENDING_OUTGOING"],
+    "StatusType": ["ONLINE", "IDLE", "DND", "INVISIBLE", "OFFLINE"]
+  }
+}
