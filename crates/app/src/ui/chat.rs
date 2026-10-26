@@ -11,7 +11,7 @@ use gtk::{gio, glib};
 use super::App;
 use super::embeds::{behind_spoiler, embed_widget, fitted_picture};
 use super::state::now_unix;
-use super::widgets::{avatar_widget, palette_index};
+use super::widgets::avatar_widget;
 use crate::render::Names;
 use crate::{render, timelines};
 
@@ -34,9 +34,7 @@ const GROUP_WINDOW_SECS: i64 = 7 * 60;
 impl App {
     /// The chat column: header, message list (with scrollback) and composer.
     pub(super) fn build_chat(self: &Rc<Self>) -> gtk::Widget {
-        let chat =
-            gtk::Box::builder().orientation(gtk::Orientation::Vertical).hexpand(true).css_classes(["chat"]).build();
-        chat.append(&self.header);
+        let chat = gtk::Box::builder().orientation(gtk::Orientation::Vertical).hexpand(true).build();
 
         let factory = gtk::SignalListItemFactory::new();
         factory.connect_setup(|_, item| {
@@ -95,10 +93,7 @@ impl App {
         });
 
         // After a jump: say so, with the way back.
-        self.present_bar
-            .append(&gtk::Label::builder().label("You're Viewing Older Messages").xalign(0.0).hexpand(true).build());
-        let present = gtk::Button::builder().label("Jump To Present").css_classes(["flat"]).build();
-        present.connect_clicked({
+        self.present_bar.connect_button_clicked({
             let this = Rc::downgrade(self);
             move |_| {
                 let Some(this) = this.upgrade() else { return };
@@ -107,11 +102,12 @@ impl App {
                 }
             }
         });
-        self.present_bar.append(&present);
-        chat.append(&self.present_bar);
 
         self.build_composer(&chat);
-        chat.upcast()
+        let page = adw::ToolbarView::builder().content(&chat).build();
+        page.add_top_bar(&adw::HeaderBar::builder().title_widget(&self.header).build());
+        page.add_top_bar(&self.present_bar);
+        page.upcast()
     }
 
     pub(super) fn on_message(self: &Rc<Self>, message: Message) {
@@ -121,7 +117,7 @@ impl App {
         };
         self.learn_users(std::iter::once(&message.author).chain(&message.mentions).chain(original));
         let channel = message.channel_id;
-        let viewing = self.state.borrow().channel == Some(channel) && self.window.is_active();
+        let viewing = self.state.borrow().channel == Some(channel) && self.chat_visible();
         let notify = {
             let mut state = self.state.borrow_mut();
             state.bump_last_message(channel, message.id);
@@ -225,7 +221,7 @@ impl App {
     pub(super) fn update_present_bar(&self) {
         let channel = self.state.borrow().channel;
         let detached = channel.and_then(|c| self.timelines.borrow().get(c).map(|t| t.detached)).unwrap_or(false);
-        self.present_bar.set_visible(detached);
+        self.present_bar.set_revealed(detached);
     }
 
     /// The bar that stands in for a run of blocked users' messages: how many
@@ -236,8 +232,7 @@ impl App {
         }
         let count = if run.len == 1 { "1 blocked message".to_owned() } else { format!("{} blocked messages", run.len) };
         bar.append(&gtk::Label::builder().label(count).xalign(0.0).build());
-        let button =
-            gtk::Button::builder().label(if revealed { "Hide" } else { "Show" }).css_classes(["link-button"]).build();
+        let button = gtk::Button::builder().label(if revealed { "Hide" } else { "Show" }).css_classes(["link"]).build();
         let this = Rc::downgrade(self);
         let store = store.downgrade();
         button.connect_clicked(move |_| {
@@ -309,7 +304,8 @@ impl App {
         }
         self.content.set_visible_child_name("chat");
         self.rebuild_sidebar();
-        self.header.set_label(&title);
+        self.header.set_title(&title);
+        self.set_content_title(&title);
         self.composer_error.set_visible(false);
         self.update_request_bar();
 
@@ -363,7 +359,9 @@ impl App {
                         if at_bottom {
                             this.scroll_to_end();
                         }
-                        this.mark_read(id);
+                        if this.chat_visible() {
+                            this.mark_read(id);
+                        }
                         this.load_older_if_short();
                     }
                 }
@@ -734,10 +732,9 @@ impl App {
         }
 
         let main = gtk::Box::new(gtk::Orientation::Horizontal, 16);
-        let colour = palette_index(&message.author);
         let gutter = gtk::Box::builder().width_request(40).valign(gtk::Align::Start).build();
         if !grouped {
-            gutter.append(&avatar_widget(&message.author, colour, 40, Some(&self.images)));
+            gutter.append(&avatar_widget(&message.author, 40, Some(&self.images)));
         }
         main.append(&gutter);
 
@@ -745,14 +742,9 @@ impl App {
         let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).hexpand(true).build();
         if !grouped {
             let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            header.append(
-                &gtk::Label::builder()
-                    .label(message.author.display_name())
-                    .css_classes(["author", &format!("author-{colour}")])
-                    .build(),
-            );
+            header.append(&gtk::Label::builder().label(message.author.display_name()).css_classes(["heading"]).build());
             let time = parse_time(&message.timestamp).map(|t| format_time(&t)).unwrap_or_default();
-            header.append(&gtk::Label::builder().label(time).css_classes(["time"]).build());
+            header.append(&gtk::Label::builder().label(time).css_classes(["caption", "dimmed"]).build());
             body.append(&header);
         }
         let media = self.state.borrow().media;
@@ -781,9 +773,7 @@ impl App {
                 glib::markup_escape_text(&attachment.url),
                 glib::markup_escape_text(&attachment.filename)
             );
-            body.append(
-                &gtk::Label::builder().use_markup(true).label(markup).xalign(0.0).css_classes(["attachment"]).build(),
-            );
+            body.append(&gtk::Label::builder().use_markup(true).label(markup).xalign(0.0).build());
         }
         // A link in a spoiler covers all the message's embeds, as in Discord.
         let spoilered = discord::embed::has_spoilered_link(&message.content);
@@ -848,21 +838,18 @@ impl App {
         };
         match original {
             Some(original) => {
-                let colour = palette_index(&original.author);
                 // As in Discord, a blocked author keeps their name but not
                 // their avatar or words.
                 let blocked = self.state.borrow().relationships.is_blocked(original.author.id);
                 if blocked {
                     preview.append(&gtk::Image::from_icon_name("mail-reply-sender-symbolic"));
                 } else {
-                    preview.append(&avatar_widget(&original.author, colour, 16, Some(&self.images)));
+                    preview.append(&avatar_widget(&original.author, 16, Some(&self.images)));
                 }
                 // Discord marks replies that pinged the author with an @.
                 let pinged = message.mentions.iter().any(|u| u.id == original.author.id);
                 let name = format!("{}{}", if pinged { "@" } else { "" }, original.author.display_name());
-                preview.append(
-                    &gtk::Label::builder().label(name).css_classes(["author", &format!("author-{colour}")]).build(),
-                );
+                preview.append(&gtk::Label::builder().label(name).css_classes(["heading"]).build());
                 let names = self.message_names(original);
                 let text = render::plain_text(&discord::markup::parse(&original.content), &names);
                 let text = match text.lines().find(|line| !line.trim().is_empty()) {

@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 discord = { path = "../discord" }
 gtk.workspace = true
+adw.workspace = true
 glib.workspace = true
 gio.workspace = true
 soup.workspace = true

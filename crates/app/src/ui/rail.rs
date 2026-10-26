@@ -175,7 +175,8 @@ impl App {
                 self.content.set_visible_child_name("chat");
                 self.update_request_bar();
                 self.show_blank();
-                self.header.set_label("No text channels you can see here");
+                self.header.set_title("No text channels you can see here");
+                self.set_content_title("Neucord");
                 self.rebuild_sidebar();
             }
         }

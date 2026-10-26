@@ -4,12 +4,13 @@
 //! and quotes become their own widgets (they need distinct surfaces), so one
 //! message is a vertical box of labels and blocks.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Write;
 
 use discord::markup::{Entity, Span, Style};
-use gtk::pango;
 use gtk::prelude::*;
+use gtk::{gdk, pango};
 
 /// Names we can resolve while rendering, gathered from the message and the
 /// open guild. Missing ids fall back to a readable placeholder.
@@ -19,12 +20,27 @@ pub struct Names {
     pub channels: HashMap<u64, String>,
 }
 
-const MENTION_BG: &str = "#3c4270";
-const MENTION_FG: &str = "#c9cdfb";
-const CODE_BG: &str = "#1e1f22";
-const SPOILER_OPEN: &str = "<span background=\"#17181b\">";
+// Pango markup can't use the stylesheet's colours. A grey shade reads on
+// light and dark backgrounds alike; mentions take the accent colour, which
+// the UI keeps current with `set_accent`.
+const CODE_OPEN: &str = "<tt><span background=\"#808080\" bgalpha=\"15%\">";
+const SPOILER_OPEN: &str = "<span background=\"#808080\" bgalpha=\"40%\">";
+const EDITED_MARKER: &str = " <span fgalpha=\"55%\" size=\"small\">(edited)</span>";
 
-const EDITED_MARKER: &str = " <span foreground=\"#949BA4\" size=\"small\">(edited)</span>";
+thread_local! {
+    /// Mention background and text colours, as Pango colour strings.
+    static ACCENT: RefCell<(String, String)> = RefCell::new(("#3584e4".into(), "#1c71d8".into()));
+}
+
+/// Set the colours mentions are drawn in. Messages rendered before keep the
+/// old ones until they are rendered again.
+pub fn set_accent(background: &gdk::RGBA, foreground: &gdk::RGBA) {
+    let hex = |c: &gdk::RGBA| {
+        let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        format!("#{:02x}{:02x}{:02x}", byte(c.red()), byte(c.green()), byte(c.blue()))
+    };
+    ACCENT.with(|accent| *accent.borrow_mut() = (hex(background), hex(foreground)));
+}
 
 /// Build the content widget for one message body. `edited` appends a faint
 /// "(edited)" marker after the content.
@@ -120,7 +136,7 @@ fn inline_markup(span: &Span, names: &Names, out: &mut String) {
             out.push_str(close);
         }
         Span::Code(code) => {
-            let _ = write!(out, "<tt><span background=\"{CODE_BG}\"> {} </span></tt>", escape(code));
+            let _ = write!(out, "{CODE_OPEN} {} </span></tt>", escape(code));
         }
         Span::CodeBlock { code, .. } => {
             // A code block nested where only inline is expected: show inline.
@@ -166,7 +182,12 @@ fn entity_markup(entity: &Entity, names: &Names) -> String {
     match entity {
         // Emoji read as plain text until they render as images.
         Entity::Emoji { .. } => text,
-        _ => format!("<span background=\"{MENTION_BG}\" foreground=\"{MENTION_FG}\">\u{a0}{text}\u{a0}</span>"),
+        _ => ACCENT.with(|accent| {
+            let (background, foreground) = &*accent.borrow();
+            format!(
+                "<span background=\"{background}\" bgalpha=\"25%\" foreground=\"{foreground}\">\u{a0}{text}\u{a0}</span>"
+            )
+        }),
     }
 }
 

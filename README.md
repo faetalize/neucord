@@ -16,6 +16,7 @@ work is in the issue tracker.
 ## Requirements
 
 - GTK 4.24 or newer
+- libadwaita 1.7 or newer
 - libsoup 3
 - libsecret, and a Secret Service provider such as GNOME Keyring or KWallet
 - OpenSSL
@@ -24,7 +25,7 @@ work is in the issue tracker.
 On Arch Linux:
 
 ```sh
-sudo pacman -S --needed rust gtk4 libsoup3 libsecret openssl
+sudo pacman -S --needed rust gtk4 libadwaita libsoup3 libsecret openssl
 ```
 
 ## Building

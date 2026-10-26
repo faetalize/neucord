@@ -2,35 +2,42 @@
 
 use std::rc::Rc;
 
-use discord::Channel;
 use discord::notifications::Place;
+use discord::{Channel, Snowflake};
 use gtk::pango;
 use gtk::prelude::*;
 
 use super::App;
 use super::state::{Page, now_unix};
-use super::widgets::{PALETTE_SIZE, avatar_widget, badge, initials, palette_index};
+use super::widgets::{avatar_widget, badge, round_picture};
 use crate::images::Images;
+
+/// What a sidebar row opens.
+#[derive(Clone, Copy)]
+pub(super) enum Target {
+    Channel(Snowflake),
+    Friends,
+    Requests,
+}
 
 impl App {
     pub(super) fn rebuild_sidebar(self: &Rc<Self>) {
-        while let Some(child) = self.channels.first_child() {
-            self.channels.remove(&child);
-        }
+        self.channels.remove_all();
+        self.targets.borrow_mut().clear();
         let state = self.state.borrow();
         self.drawn.borrow_mut().1 = state.sidebar_signature();
         let Some(id) = state.guild else {
-            self.guild_name.set_label("Direct Messages");
+            self.guild_name.set_title("Direct Messages");
             self.append_home_entry(
                 "Friends",
                 state.page == Some(Page::Friends),
                 state.relationships.incoming(),
-                App::show_friends,
+                Target::Friends,
             );
             let requests = state.requests().len();
             let in_requests = state.page == Some(Page::MessageRequests) || state.open_request().is_some();
             if requests > 0 || in_requests {
-                self.append_home_entry("Message Requests", in_requests, state.waiting_requests(), App::show_requests);
+                self.append_home_entry("Message Requests", in_requests, state.waiting_requests(), Target::Requests);
             }
             let mut dms: Vec<&Channel> = state.dms().collect();
             dms.sort_by_key(|c| std::cmp::Reverse(c.activity()));
@@ -39,42 +46,29 @@ impl App {
                 if let Some(badge) = badge(state.read.mentions(dm.id)) {
                     row.append(&badge);
                 }
-                let button = gtk::Button::builder().child(&row).css_classes(["channel", "dm"]).build();
-                if state.channel == Some(dm.id) {
-                    button.add_css_class("active");
-                }
-                if state.is_unread(dm) {
-                    button.add_css_class("unread");
-                }
+                let row = self.append_row(&row, Some(Target::Channel(dm.id)), state.channel == Some(dm.id));
                 let place = Place { guild: None, guild_default: 0, channel: dm.id, parent: None };
                 if state.notifications.channel_muted(&place, now_unix()) {
-                    button.add_css_class("muted");
+                    row.add_css_class("muted");
+                } else if state.is_unread(dm) {
+                    row.add_css_class("unread");
                 }
-                let id = dm.id;
-                let this = Rc::downgrade(self);
-                button.connect_clicked(move |_| {
-                    if let Some(this) = this.upgrade() {
-                        this.select_channel(id);
-                    }
-                });
-                self.channels.append(&button);
             }
             return;
         };
         let Some(guild) = state.guilds.iter().find(|g| g.id == id) else {
             return;
         };
-        self.guild_name.set_label(&guild.name);
+        self.guild_name.set_title(&guild.name);
         for (category, channels) in guild.sidebar() {
             if let Some(category) = category {
-                self.channels.append(
-                    &gtk::Label::builder()
-                        .label(category.to_uppercase())
-                        .xalign(0.0)
-                        .ellipsize(pango::EllipsizeMode::End)
-                        .css_classes(["category"])
-                        .build(),
-                );
+                let label = gtk::Label::builder()
+                    .label(category)
+                    .xalign(0.0)
+                    .ellipsize(pango::EllipsizeMode::End)
+                    .css_classes(["category", "dimmed"])
+                    .build();
+                self.append_row(&label, None, false);
             }
             for channel in channels {
                 let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -89,10 +83,7 @@ impl App {
                 if let Some(badge) = badge(state.read.mentions(channel.id)) {
                     row.append(&badge);
                 }
-                let button = gtk::Button::builder().child(&row).css_classes(["channel"]).build();
-                if state.channel == Some(channel.id) {
-                    button.add_css_class("active");
-                }
+                let row = self.append_row(&row, Some(Target::Channel(channel.id)), state.channel == Some(channel.id));
                 let place = Place {
                     guild: Some(guild.id),
                     guild_default: guild.default_message_notifications,
@@ -100,72 +91,54 @@ impl App {
                     parent: channel.parent_id,
                 };
                 if state.notifications.channel_muted(&place, now_unix()) {
-                    button.add_css_class("muted");
+                    row.add_css_class("muted");
                 } else if state.is_unread(channel) {
-                    button.add_css_class("unread");
+                    row.add_css_class("unread");
                 }
-                let id = channel.id;
-                let this = Rc::downgrade(self);
-                button.connect_clicked(move |_| {
-                    if let Some(this) = this.upgrade() {
-                        this.select_channel(id);
-                    }
-                });
-                self.channels.append(&button);
             }
         }
     }
-}
 
-impl App {
+    /// Add a row to the channel list. Rows without a target are headings.
+    fn append_row(&self, child: &impl IsA<gtk::Widget>, target: Option<Target>, active: bool) -> gtk::ListBoxRow {
+        let row =
+            gtk::ListBoxRow::builder().child(child).selectable(target.is_some()).activatable(target.is_some()).build();
+        self.channels.append(&row);
+        self.targets.borrow_mut().push(target);
+        if active {
+            self.channels.select_row(Some(&row));
+        }
+        row
+    }
+
     /// One of the entries above the DM list that open a Home page.
-    fn append_home_entry(self: &Rc<Self>, label: &str, active: bool, count: u32, open: fn(&Rc<App>)) {
+    fn append_home_entry(&self, label: &str, active: bool, count: u32, target: Target) {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         row.append(&gtk::Label::builder().label(label).xalign(0.0).hexpand(true).build());
         if let Some(badge) = badge(count) {
             row.append(&badge);
         }
-        let button = gtk::Button::builder().child(&row).css_classes(["channel", "home-entry"]).build();
-        if active {
-            button.add_css_class("active");
+        self.append_row(&row, Some(target), active);
+    }
+
+    /// Open what a row stands for. On a narrow window this also turns from
+    /// the sidebar to the content.
+    pub(super) fn activate_sidebar_row(self: &Rc<Self>, index: i32) {
+        let target = usize::try_from(index).ok().and_then(|i| self.targets.borrow().get(i).copied().flatten());
+        match target {
+            Some(Target::Channel(id)) => self.select_channel(id),
+            Some(Target::Friends) => self.show_friends(),
+            Some(Target::Requests) => self.show_requests(),
+            None => return,
         }
-        let this = Rc::downgrade(self);
-        button.connect_clicked(move |_| {
-            if let Some(this) = this.upgrade() {
-                open(&this);
-            }
-        });
-        self.channels.append(&button);
+        self.split.set_show_content(true);
     }
 }
 
 /// A DM list entry: the other person's avatar (or the group's icon) and the title.
 pub(super) fn dm_row(channel: &Channel, images: &Images) -> gtk::Box {
-    const SIZE: i32 = 32;
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-    let icon: gtk::Widget = match (channel.kind, channel.recipients.first(), channel.icon.as_deref()) {
-        (discord::ChannelKind::GroupDm, _, Some(hash)) => {
-            let picture = gtk::Picture::builder()
-                .width_request(SIZE)
-                .height_request(SIZE)
-                .content_fit(gtk::ContentFit::Cover)
-                .overflow(gtk::Overflow::Hidden)
-                .css_classes(["avatar", "small"])
-                .build();
-            images.set(&picture, &discord::cdn::group_dm_icon_url(channel.id.0, hash, 64), false);
-            picture.upcast()
-        }
-        (discord::ChannelKind::Dm, Some(user), _) => avatar_widget(user, palette_index(user), SIZE, Some(images)),
-        _ => gtk::Label::builder()
-            .label(initials(&channel.title()))
-            .width_request(SIZE)
-            .height_request(SIZE)
-            .css_classes(["avatar", "small", &format!("avatar-{}", channel.id.0 % PALETTE_SIZE)])
-            .build()
-            .upcast(),
-    };
-    icon.set_valign(gtk::Align::Center);
-    row.append(&icon);
+    row.append(&dm_icon(channel, images));
     row.append(
         &gtk::Label::builder()
             .label(channel.title())
@@ -175,4 +148,20 @@ pub(super) fn dm_row(channel: &Channel, images: &Images) -> gtk::Box {
             .build(),
     );
     row
+}
+
+/// The other person's avatar, or the group's icon.
+pub(super) fn dm_icon(channel: &Channel, images: &Images) -> gtk::Widget {
+    const SIZE: i32 = 32;
+    let icon: gtk::Widget = match (channel.kind, channel.recipients.first(), channel.icon.as_deref()) {
+        (discord::ChannelKind::GroupDm, _, Some(hash)) => {
+            let picture = round_picture(SIZE);
+            images.set(&picture, &discord::cdn::group_dm_icon_url(channel.id.0, hash, 64), false);
+            picture.upcast()
+        }
+        (discord::ChannelKind::Dm, Some(user), _) => avatar_widget(user, SIZE, Some(images)),
+        _ => adw::Avatar::new(SIZE, Some(&channel.title()), true).upcast(),
+    };
+    icon.set_valign(gtk::Align::Center);
+    icon
 }
