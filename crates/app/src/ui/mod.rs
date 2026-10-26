@@ -5,6 +5,7 @@ mod chat;
 mod composer;
 mod connection;
 mod friends;
+mod login;
 mod notify;
 mod rail;
 mod requests;
@@ -27,8 +28,7 @@ pub struct App {
     window: gtk::ApplicationWindow,
     stack: gtk::Stack,
     loading_label: gtk::Label,
-    token_entry: gtk::PasswordEntry,
-    login_error: gtk::Label,
+    login: login::Page,
     rail: gtk::Box,
     guild_name: gtk::Label,
     channels: gtk::Box,
@@ -82,8 +82,7 @@ impl App {
             window,
             stack: gtk::Stack::builder().transition_type(gtk::StackTransitionType::Crossfade).build(),
             loading_label: gtk::Label::new(None),
-            token_entry: gtk::PasswordEntry::builder().show_peek_icon(true).hexpand(true).build(),
-            login_error: gtk::Label::builder().wrap(true).xalign(0.0).visible(false).css_classes(["error"]).build(),
+            login: login::Page::new(),
             rail: gtk::Box::new(gtk::Orientation::Vertical, 0),
             guild_name: gtk::Label::builder()
                 .xalign(0.0)
@@ -240,45 +239,6 @@ impl App {
         wrap_page(&page)
     }
 
-    fn build_login(self: &Rc<Self>) -> gtk::Widget {
-        let card = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(12)
-            .valign(gtk::Align::Center)
-            .halign(gtk::Align::Center)
-            .css_classes(["card"])
-            .build();
-        card.append(&gtk::Label::builder().label("Neucord").xalign(0.0).css_classes(["card-title"]).build());
-        card.append(
-            &gtk::Label::builder()
-                .label("Paste your Discord token to log in. It is kept in your desktop keyring, never in a file.")
-                .wrap(true)
-                .max_width_chars(44)
-                .xalign(0.0)
-                .css_classes(["hint"])
-                .build(),
-        );
-        card.append(&self.token_entry);
-        card.append(&self.login_error);
-        let button = gtk::Button::builder().label("Log in").css_classes(["login-button"]).build();
-        card.append(&button);
-
-        let login = {
-            let this = Rc::downgrade(self);
-            move || {
-                if let Some(this) = this.upgrade() {
-                    this.login();
-                }
-            }
-        };
-        self.token_entry.connect_activate({
-            let login = login.clone();
-            move |_| login()
-        });
-        button.connect_clicked(move |_| login());
-        wrap_page(&card)
-    }
-
     fn build_main(self: &Rc<Self>) -> gtk::Widget {
         let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
 
@@ -320,13 +280,6 @@ impl App {
     fn show_loading(&self, text: &str) {
         self.loading_label.set_label(text);
         self.stack.set_visible_child_name("loading");
-    }
-
-    fn show_login(&self, error: Option<&str>) {
-        self.login_error.set_label(error.unwrap_or_default());
-        self.login_error.set_visible(error.is_some());
-        self.stack.set_visible_child_name("login");
-        self.token_entry.grab_focus();
     }
 }
 

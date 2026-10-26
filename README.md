@@ -9,20 +9,22 @@ Another GTK Discord client? Daring today, are we...?
 
 Replies, reactions, embeds, editing or deleting your own messages, uploads,
 emoji and sticker pickers, threads and forums, the member list, voice and
-video. Custom emoji show as `:name:` and videos as links. Logging in only
-works with a token. Planned work is in the issue tracker.
+video. Custom emoji show as `:name:` and videos as links. Logins that
+Discord answers with a captcha, and two-factor with security keys. Planned
+work is in the issue tracker.
 
 ## Requirements
 
 - GTK 4.24 or newer
 - libsoup 3
 - libsecret, and a Secret Service provider such as GNOME Keyring or KWallet
+- OpenSSL
 - Rust 1.92 or newer, to build
 
 On Arch Linux:
 
 ```sh
-sudo pacman -S --needed rust gtk4 libsoup3 libsecret
+sudo pacman -S --needed rust gtk4 libsoup3 libsecret openssl
 ```
 
 ## Building
@@ -35,9 +37,13 @@ cargo run --release
 
 ## Logging in
 
-Until proper login is in place, Neucord needs a Discord token, and I don't
-recommend logging in at all. If you want to beta test anyway, guard your
-token: anyone who has it controls your account SO NEVER SHARE IT ANYWHERE!
+Scan the QR code with the Discord app on your phone, or use your email and
+password. With the QR code, your password never passes through Neucord.
+Discord sometimes answers a password login with a captcha, which Neucord
+can't show yet; use the QR code then.
+
+You can still log in with a token. Guard it: anyone who has it controls your
+account SO NEVER SHARE IT ANYWHERE!
 
 ## Privacy
 

@@ -1,9 +1,10 @@
 //! Discord protocol layer for Neucord: data model, REST client, gateway
-//! connection and keyring-backed session storage.
+//! connection, logging in and keyring-backed session storage.
 //!
 //! Depends on GLib/GIO/libsoup (it runs on the GLib main loop) but never on
 //! GTK, so the UI can be replaced without touching this crate.
 
+pub mod auth;
 pub mod cdn;
 pub mod gateway;
 mod identity;
@@ -12,6 +13,7 @@ pub mod model;
 pub mod notifications;
 pub mod read_state;
 pub mod relationships;
+pub mod remote_auth;
 pub mod rest;
 pub mod session;
 pub mod settings;
@@ -32,6 +34,12 @@ pub enum Error {
     Unauthorized,
     /// Discord sent something we could not parse.
     Decode(serde_json::Error),
+    /// Discord sent something that parsed but makes no sense.
+    Protocol(String),
+    /// Discord turned a login down, and said why.
+    Rejected(String),
+    /// Key generation or decryption failed, for QR login.
+    Crypto(openssl::error::ErrorStack),
     /// The secret service (keyring) failed.
     Keyring(glib::Error),
     /// Discord wants a captcha solved first, which Neucord cannot do yet.
@@ -51,6 +59,9 @@ impl std::fmt::Display for Error {
             }
             Error::Unauthorized => write!(f, "Discord rejected the token"),
             Error::Decode(e) => write!(f, "unexpected data from Discord: {e}"),
+            Error::Protocol(e) => write!(f, "unexpected data from Discord: {e}"),
+            Error::Rejected(why) => f.write_str(why),
+            Error::Crypto(e) => write!(f, "encryption error: {e}"),
             Error::Keyring(e) => write!(f, "keyring error: {e}"),
             Error::Captcha => write!(f, "Discord asked for a captcha, which Neucord can't show yet"),
         }
@@ -68,6 +79,12 @@ impl Error {
 }
 
 impl std::error::Error for Error {}
+
+impl From<openssl::error::ErrorStack> for Error {
+    fn from(e: openssl::error::ErrorStack) -> Self {
+        Error::Crypto(e)
+    }
+}
 
 impl From<serde_json::Error> for Error {
     fn from(e: serde_json::Error) -> Self {
