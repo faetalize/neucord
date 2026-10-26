@@ -4,6 +4,7 @@ members = ["crates/discord", "crates/app"]
 
 [workspace.package]
 edition = "2024"
+rust-version = "1.92"
 version = "0.1.0"
 publish = false
 
