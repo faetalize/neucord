@@ -13,6 +13,7 @@ use super::App;
 use super::friends::clamped;
 use super::sidebar::dm_icon;
 use super::state::Page;
+use super::widgets::Title;
 
 pub(super) struct RequestsPage {
     pub(super) root: adw::ToolbarView,
@@ -33,8 +34,7 @@ impl RequestsPage {
 impl App {
     pub(super) fn build_requests(&self) -> gtk::Widget {
         let page = &self.requests;
-        let header = adw::HeaderBar::builder().title_widget(&adw::WindowTitle::new("Message Requests", "")).build();
-        header.pack_start(&self.sidebar_toggle());
+        let header = Title::new("Message Requests").header_bar(&[self.sidebar_toggle().upcast_ref()]);
         page.root.add_top_bar(&header);
         let column = gtk::Box::new(gtk::Orientation::Vertical, 12);
         column.append(&page.error);

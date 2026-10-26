@@ -15,14 +15,19 @@ use crate::images::Images;
 
 impl App {
     pub(super) fn rebuild_rail(self: &Rc<Self>) {
-        while let Some(child) = self.rail.first_child() {
-            self.rail.remove(&child);
+        for column in [&self.home, &self.rail] {
+            while let Some(child) = column.first_child() {
+                column.remove(&child);
+            }
         }
         let state = self.state.borrow();
         self.drawn.borrow_mut().0 = state.rail_signature();
 
-        let home =
-            gtk::Button::builder().label("DM").tooltip_text("Direct Messages").css_classes(["guild", "home"]).build();
+        let home = gtk::Button::builder()
+            .icon_name("user-home-symbolic")
+            .tooltip_text("Direct Messages")
+            .css_classes(["guild", "home"])
+            .build();
         if state.guild.is_none() {
             home.add_css_class("active");
         }
@@ -34,8 +39,8 @@ impl App {
                 }
             }
         });
-        self.rail.append(&rail_item(&home, false, state.home_badge()));
-        self.rail.append(&gtk::Separator::builder().css_classes(["rail-separator"]).build());
+        self.home.append(&rail_item(&home, false, state.home_badge()));
+        self.home.append(&gtk::Separator::builder().css_classes(["rail-separator"]).build());
 
         let mut folder_css = String::new();
         let guild = |id: Snowflake| state.guilds.iter().find(|g| g.id == id);
@@ -175,7 +180,7 @@ impl App {
                 self.content.set_visible_child_name("chat");
                 self.update_request_bar();
                 self.show_blank();
-                self.header.set_title("No text channels you can see here");
+                self.header.set("No text channels you can see here", None);
                 self.set_content_title("Neucord");
                 self.rebuild_sidebar();
             }

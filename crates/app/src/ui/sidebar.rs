@@ -27,7 +27,7 @@ impl App {
         let state = self.state.borrow();
         self.drawn.borrow_mut().1 = state.sidebar_signature();
         let Some(id) = state.guild else {
-            self.guild_name.set_title("Direct Messages");
+            self.guild_name.set("Direct Messages", None);
             self.append_home_entry(
                 "Friends",
                 state.page == Some(Page::Friends),
@@ -59,7 +59,7 @@ impl App {
         let Some(guild) = state.guilds.iter().find(|g| g.id == id) else {
             return;
         };
-        self.guild_name.set_title(&guild.name);
+        self.guild_name.set(&guild.name, None);
         for (category, channels) in guild.sidebar() {
             if let Some(category) = category {
                 let label = gtk::Label::builder()

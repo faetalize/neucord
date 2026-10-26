@@ -119,6 +119,9 @@ pub struct Channel {
     pub position: Option<i32>,
     #[serde(default)]
     pub parent_id: Option<Snowflake>,
+    /// A server channel's topic, in message markup.
+    #[serde(default)]
+    pub topic: Option<String>,
     /// The other people in a DM or group DM (never includes us).
     #[serde(default)]
     pub recipients: Vec<User>,

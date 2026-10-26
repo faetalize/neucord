@@ -44,13 +44,15 @@ pub struct App {
     split: adw::OverlaySplitView,
     /// The content, with room for a pane on its right.
     right: adw::OverlaySplitView,
+    /// Home, pinned above the scrolling servers.
+    home: gtk::Box,
     rail: gtk::Box,
-    guild_name: adw::WindowTitle,
+    guild_name: widgets::Title,
     channels: gtk::ListBox,
     /// What each row of `channels` opens, by row index.
     targets: RefCell<Vec<Option<sidebar::Target>>>,
     me_label: gtk::Label,
-    header: adw::WindowTitle,
+    header: widgets::Title,
     /// The open channel's chat, or one of Home's pages.
     content: gtk::Stack,
     friends: friends::FriendsPage,
@@ -126,9 +128,15 @@ impl App {
             loading: adw::StatusPage::builder().paintable(&adw::SpinnerPaintable::new(gtk::Widget::NONE)).build(),
             login: login::Page::new(),
             split: adw::OverlaySplitView::new(),
-            right: adw::OverlaySplitView::builder().sidebar_position(gtk::PackType::End).show_sidebar(false).build(),
+            // Pinned, or widening the window would show it, empty.
+            right: adw::OverlaySplitView::builder()
+                .sidebar_position(gtk::PackType::End)
+                .show_sidebar(false)
+                .pin_sidebar(true)
+                .build(),
+            home: gtk::Box::builder().orientation(gtk::Orientation::Vertical).margin_top(6).build(),
             rail: gtk::Box::new(gtk::Orientation::Vertical, 0),
-            guild_name: adw::WindowTitle::new("", ""),
+            guild_name: widgets::Title::new(""),
             channels: gtk::ListBox::builder().css_classes(["navigation-sidebar"]).build(),
             targets: RefCell::default(),
             me_label: gtk::Label::builder()
@@ -137,7 +145,7 @@ impl App {
                 .ellipsize(pango::EllipsizeMode::End)
                 .css_classes(["dimmed"])
                 .build(),
-            header: adw::WindowTitle::new("", ""),
+            header: widgets::Title::new(""),
             content: gtk::Stack::new(),
             friends: friends::FriendsPage::new(),
             requests: requests::RequestsPage::new(),
@@ -319,18 +327,17 @@ impl App {
         // The sidebar: the server rail at full height, beside the channel
         // list and its header bar. Dragging the rail's empty space moves the
         // window, as a header bar would.
-        let rail = gtk::WindowHandle::builder()
-            .child(
-                &gtk::ScrolledWindow::builder()
-                    .hscrollbar_policy(gtk::PolicyType::Never)
-                    .vscrollbar_policy(gtk::PolicyType::External)
-                    .child(&self.rail)
-                    .build(),
-            )
-            .width_request(RAIL as i32)
-            .css_classes(["rail"])
-            .build();
-        self.rail.set_margin_top(6);
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        column.append(&self.home);
+        column.append(
+            &gtk::ScrolledWindow::builder()
+                .vexpand(true)
+                .hscrollbar_policy(gtk::PolicyType::Never)
+                .vscrollbar_policy(gtk::PolicyType::External)
+                .child(&self.rail)
+                .build(),
+        );
+        let rail = gtk::WindowHandle::builder().child(&column).width_request(RAIL as i32).css_classes(["rail"]).build();
         let channels =
             gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(&self.channels).build();
         self.channels.connect_row_activated({
@@ -344,7 +351,7 @@ impl App {
 
         let menu = gio::Menu::new();
         menu.append(Some("_About Neucord"), Some("app.about"));
-        let header = adw::HeaderBar::builder().title_widget(&self.guild_name).build();
+        let header = self.guild_name.header_bar(&[]);
         header.pack_end(
             &gtk::MenuButton::builder()
                 .icon_name("open-menu-symbolic")

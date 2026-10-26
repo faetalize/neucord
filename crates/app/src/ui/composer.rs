@@ -30,10 +30,10 @@ pub(super) struct MentionCtx {
 }
 
 impl App {
-    /// The message box under the list, with its mention popup and keys.
-    pub(super) fn build_composer(self: &Rc<Self>, chat: &gtk::Box) {
-        chat.append(&self.composer_error);
-        chat.append(&self.request_bar);
+    /// The message box floating under the list, with its mention popup and keys.
+    pub(super) fn build_composer(self: &Rc<Self>, area: &gtk::Box) {
+        area.append(&self.composer_error);
+        area.append(&self.request_bar);
         self.reply_bar.append(&self.reply_label);
         self.reply_bar.append(&self.reply_ping);
         self.reply_ping.connect_toggled(|button| {
@@ -58,9 +58,9 @@ impl App {
             }
         });
         self.reply_bar.append(&cancel);
-        chat.append(&self.reply_bar);
+        area.append(&self.reply_bar);
         self.composer_box.append(&self.composer);
-        chat.append(&self.composer_box);
+        area.append(&self.composer_box);
 
         // Mention autocomplete popup, anchored to the composer.
         self.mention_popover.set_child(Some(&self.mention_list));

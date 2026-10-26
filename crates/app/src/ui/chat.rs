@@ -32,10 +32,9 @@ const PREFETCH_SCREENS: f64 = 3.0;
 const GROUP_WINDOW_SECS: i64 = 7 * 60;
 
 impl App {
-    /// The chat column: header, message list (with scrollback) and composer.
+    /// The chat column: the message list (with scrollback) from edge to edge,
+    /// and the header bar and composer floating over it.
     pub(super) fn build_chat(self: &Rc<Self>) -> gtk::Widget {
-        let chat = gtk::Box::builder().orientation(gtk::Orientation::Vertical).hexpand(true).build();
-
         let factory = gtk::SignalListItemFactory::new();
         factory.connect_setup(|_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
@@ -78,7 +77,6 @@ impl App {
         self.list.set_factory(Some(&factory));
         self.list.add_css_class("messages");
         self.scroller.set_child(Some(&self.list));
-        chat.append(&self.scroller);
 
         // Fetch older messages well before the top is reached, and after a
         // jump, newer ones well before the bottom.
@@ -103,12 +101,41 @@ impl App {
             }
         });
 
-        self.build_composer(&chat);
-        let page = adw::ToolbarView::builder().content(&chat).build();
-        let header = adw::HeaderBar::builder().title_widget(&self.header).build();
-        header.pack_start(&self.sidebar_toggle());
+        let composer = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .css_classes(["composer-area", "floating"])
+            .build();
+        self.build_composer(&composer);
+        let page = adw::ToolbarView::builder()
+            .content(&self.scroller)
+            .extend_content_to_top_edge(true)
+            .extend_content_to_bottom_edge(true)
+            .top_bar_style(adw::ToolbarStyle::Flat)
+            .bottom_bar_style(adw::ToolbarStyle::Flat)
+            .css_classes(["floating-bars"])
+            .build();
+        let header = self.header.header_bar(&[self.sidebar_toggle().upcast_ref()]);
         page.add_top_bar(&header);
         page.add_top_bar(&self.present_bar);
+        page.add_bottom_bar(&composer);
+
+        // The list scrolls under the bars, and pads its ends to their height
+        // so its first and last messages can come out from under them.
+        let padding = gtk::CssProvider::new();
+        gtk::style_context_add_provider_for_display(
+            &WidgetExt::display(&page),
+            &padding,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+        let pad = move |page: &adw::ToolbarView| {
+            padding.load_from_string(&format!(
+                "listview.messages {{ padding-top: {}px; padding-bottom: {}px; }}",
+                page.top_bar_height(),
+                page.bottom_bar_height()
+            ));
+        };
+        page.connect_top_bar_height_notify(pad.clone());
+        page.connect_bottom_bar_height_notify(pad);
         page.upcast()
     }
 
@@ -294,6 +321,7 @@ impl App {
             };
             (title, state.rest.clone(), left)
         };
+        let subtitle = self.channel_subtitle(id);
         // The channel we left keeps only its newest messages: live events keep
         // those current, and coming back refetches the newest page anyway.
         if let Some(left) = left
@@ -306,7 +334,7 @@ impl App {
         }
         self.content.set_visible_child_name("chat");
         self.rebuild_sidebar();
-        self.header.set_title(&title);
+        self.header.set(&title, subtitle.as_deref());
         self.set_content_title(&title);
         self.composer_error.set_visible(false);
         self.update_request_bar();
@@ -594,15 +622,20 @@ impl App {
     /// message's own mentions) for users, and every channel of the open guild
     /// for channel references.
     pub(super) fn message_names(&self, message: &Message) -> Names {
-        let state = self.state.borrow();
-        let mut users = state.users.clone();
+        let mut names = self.names();
         let original = match &message.referenced_message {
             Referenced::Message(original) => Some(&original.author),
             _ => None,
         };
         for user in message.mentions.iter().chain(std::iter::once(&message.author)).chain(original) {
-            users.entry(user.id.0).or_insert_with(|| user.display_name().to_string());
+            names.users.entry(user.id.0).or_insert_with(|| user.display_name().to_string());
         }
+        names
+    }
+
+    /// The users we know and the open guild's channels.
+    fn names(&self) -> Names {
+        let state = self.state.borrow();
         let channels = state
             .guild
             .and_then(|id| state.guilds.iter().find(|g| g.id == id))
@@ -610,7 +643,27 @@ impl App {
                 guild.channels.iter().filter_map(|c| c.name.as_ref().map(|name| (c.id.0, name.clone()))).collect()
             })
             .unwrap_or_default();
-        Names { users, channels }
+        Names { users: state.users.clone(), channels }
+    }
+
+    /// The line under a channel's name: a server channel's topic, a friend's
+    /// status in a DM, or a group's size.
+    fn channel_subtitle(&self, id: Snowflake) -> Option<String> {
+        let topic = {
+            let state = self.state.borrow();
+            if let Some(dm) = state.private_channels.iter().find(|c| c.id == id) {
+                if dm.kind != discord::ChannelKind::Dm {
+                    return Some(format!("{} members", dm.recipients.len() + 1));
+                }
+                let user = dm.recipients.first()?;
+                state.relationships.get(user.id).filter(|r| r.kind == discord::relationships::Kind::Friend)?;
+                let presence = state.relationships.presence(user.id);
+                return Some(presence.text.unwrap_or_else(|| presence.status.label().to_owned()));
+            }
+            state.guilds.iter().flat_map(|g| &g.channels).find(|c| c.id == id)?.topic.clone()?
+        };
+        let text = render::plain_text(&discord::markup::parse(&topic), &self.names());
+        text.lines().find(|line| !line.trim().is_empty()).map(str::to_owned)
     }
 
     /// Record display names for later mention resolution.
@@ -660,10 +713,14 @@ impl App {
     pub(super) fn scroll_to_end(&self) {
         let list = self.list.downgrade();
         let messages = self.messages();
+        let adjustment = self.scroller.vadjustment();
         // After layout, so the new rows have sizes.
         glib::idle_add_local_once(move || {
             if let (Some(list), Some(last)) = (list.upgrade(), messages.n_items().checked_sub(1)) {
                 list.scroll_to(last, gtk::ListScrollFlags::NONE, None);
+                // That stops once the row shows, which may be under the
+                // composer; the list's padding below it goes past it.
+                glib::idle_add_local_once(move || adjustment.set_value(adjustment.upper() - adjustment.page_size()));
             }
         });
     }
