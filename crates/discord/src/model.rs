@@ -260,7 +260,13 @@ pub struct Attachment {
 }
 
 impl Attachment {
+    const IS_THUMBNAIL: u64 = 1 << 1;
     const IS_SPOILER: u64 = 1 << 3;
+
+    /// Thumbnails of other attachments, which the official client hides.
+    pub fn is_hidden(&self) -> bool {
+        self.flags & Self::IS_THUMBNAIL != 0
+    }
 
     /// Hidden until the reader reveals it. Older uploads mark it only in the
     /// file name.
@@ -268,11 +274,9 @@ impl Attachment {
         self.flags & Self::IS_SPOILER != 0 || self.filename.starts_with("SPOILER_")
     }
 
-    /// An animated image (GIF, animated WebP or PNG).
+    /// An animated image, by the official client's rule.
     pub fn is_animated(&self) -> bool {
-        self.flags & crate::embed::IS_ANIMATED != 0
-            || self.content_type.as_deref() == Some("image/gif")
-            || self.url.split('?').next().is_some_and(|path| path.to_ascii_lowercase().ends_with(".gif"))
+        crate::embed::looks_animated(&self.url, self.flags)
     }
 
     /// Whether this attachment is an image we can show inline. Videos have
@@ -488,7 +492,8 @@ mod tests {
         assert!(!attachment("").is_image());
         assert!(attachment(r#","flags":8"#).is_spoiler());
         assert!(!attachment("").is_spoiler());
-        assert!(attachment(r#","flags":32"#).is_animated());
+        assert!(attachment(r#","flags":2"#).is_hidden());
+        assert!(!attachment(r#","flags":32"#).is_animated(), "the flag counts for WebP and AVIF only");
     }
 
     #[test]

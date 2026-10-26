@@ -48,11 +48,18 @@ pub fn proxy_sized(url: &str, width: u32, height: u32) -> String {
     if !proxied {
         return url.to_owned();
     }
+    with_params(url, &[("width", &width.to_string()), ("height", &height.to_string())])
+}
+
+/// Set query parameters on a URL, replacing any it already has by those names.
+pub fn with_params(url: &str, set: &[(&str, &str)]) -> String {
     let (base, query) = url.split_once('?').unwrap_or((url, ""));
-    let mut params: Vec<&str> =
-        query.split('&').filter(|p| !p.is_empty() && !p.starts_with("width=") && !p.starts_with("height=")).collect();
-    let size = [format!("width={width}"), format!("height={height}")];
-    params.extend(size.iter().map(String::as_str));
+    let mut params: Vec<String> = query
+        .split('&')
+        .filter(|p| !p.is_empty() && !set.iter().any(|(name, _)| p.split('=').next() == Some(*name)))
+        .map(String::from)
+        .collect();
+    params.extend(set.iter().map(|(name, value)| format!("{name}={value}")));
     format!("{base}?{}", params.join("&"))
 }
 

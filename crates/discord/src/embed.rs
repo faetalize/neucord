@@ -1,12 +1,18 @@
 //! Embeds: bot cards, link previews, and the media behind image, video and
 //! GIF links, plus the rules for what of them to show.
 //!
+//! The rules follow Discord's own client: it reshapes each embed (which
+//! media counts as the large image, the thumbnail, a playable video),
+//! merges embeds that share a URL into one with an image gallery, and only
+//! then decides between a card and bare media.
+//!
 //! Media is only ever loaded through Discord's media proxy (`proxy_url`),
 //! never from the original site, so third parties don't see the user's IP.
-//! Anything without a proxy URL is not shown.
+//! The official client falls back to original URLs; Neucord shows nothing.
 
 use serde::{Deserialize, Deserializer};
 
+use crate::Message;
 use crate::markup::{Span, Style};
 use crate::settings::MediaSettings;
 
@@ -23,8 +29,13 @@ pub enum EmbedKind {
     Gifv,
     Article,
     Link,
-    /// Poll results, component previews and the like, which need their own
-    /// UI. Not shown.
+    Audio,
+    /// Types that need their own UI (poll results, automod notices,
+    /// component previews…), which the official client doesn't draw as cards
+    /// either. Not shown.
+    Hidden,
+    /// Anything else (`tweet`, `text`, newer types): a plain card, as in the
+    /// official client.
     Other,
 }
 
@@ -37,6 +48,18 @@ impl<'de> Deserialize<'de> for EmbedKind {
             "gifv" => Self::Gifv,
             "article" => Self::Article,
             "link" => Self::Link,
+            "audio" => Self::Audio,
+            "auto_moderation_message"
+            | "auto_moderation_notification"
+            | "age_verification_system_notification"
+            | "application_news"
+            | "post_preview"
+            | "safety_policy_notice"
+            | "safety_system_notification"
+            | "voice_channel"
+            | "poll_result"
+            | "gift"
+            | "components" => Self::Hidden,
             _ => Self::Other,
         })
     }
@@ -75,6 +98,9 @@ pub struct Embed {
     pub image: Option<EmbedMedia>,
     #[serde(default)]
     pub video: Option<EmbedMedia>,
+    /// Images of later embeds with the same `url`, gathered by [`merge`].
+    #[serde(skip)]
+    pub gallery: Vec<EmbedMedia>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -135,120 +161,226 @@ pub struct EmbedMedia {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Media {
     pub url: String,
-    pub width: Option<u32>,
-    pub height: Option<u32>,
+    pub width: u32,
+    pub height: u32,
     /// An animated image (a GIF, not a GIF link's video).
     pub animated: bool,
 }
 
 /// Embed media and attachment flag: an animated image.
-pub(crate) const IS_ANIMATED: u64 = 1 << 5;
+const IS_ANIMATED: u64 = 1 << 5;
+
+/// Whether an image animates, by the official client's rule: a `.gif`
+/// original, or a WebP or AVIF one flagged as animated.
+pub fn looks_animated(original: &str, flags: u64) -> bool {
+    let path = original.split(['?', '#']).next().unwrap_or_default().to_ascii_lowercase();
+    path.ends_with(".gif") || (flags & IS_ANIMATED != 0 && (path.ends_with(".webp") || path.ends_with(".avif")))
+}
 
 impl EmbedMedia {
-    fn proxied(&self) -> Option<Media> {
-        let url = self.proxy_url.clone().filter(|u| !u.is_empty())?;
-        // The flag is newer; older embeds only tell by type or extension.
-        let animated = self.flags & IS_ANIMATED != 0
-            || self.content_type.as_deref() == Some("image/gif")
-            || url.split('?').next().is_some_and(|path| path.to_ascii_lowercase().ends_with(".gif"));
-        Some(Media { url, width: self.width, height: self.height, animated })
+    /// Media without a size is dropped, as in the official client.
+    fn sized(&self) -> Option<(u32, u32)> {
+        self.width.zip(self.height).filter(|&(w, h)| w > 0 && h > 0)
     }
+
+    fn proxied(&self) -> Option<Media> {
+        let (width, height) = self.sized()?;
+        let url = self.proxy_url.clone().filter(|u| !u.is_empty())?;
+        let original = self.url.as_deref().filter(|u| !u.is_empty()).unwrap_or(&url);
+        let animated = looks_animated(original, self.flags);
+        Some(Media { url, width, height, animated })
+    }
+}
+
+/// The embed's media after the official client's reshaping.
+#[derive(Default)]
+struct Shaped {
+    image: Option<Media>,
+    thumbnail: Option<Media>,
+    /// A video Discord would show. `None` inside when it has no proxied file,
+    /// as for YouTube: then only its still can be shown.
+    video: Option<Option<Media>>,
+    gallery: Vec<Media>,
+}
+
+/// Large media, shown in a card or bare.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Large {
+    Image(Media),
+    /// Images of several embeds sharing a URL (multi-image posts), up to four.
+    Gallery(Vec<Media>),
+    /// `video` is the playable file, if proxied; otherwise only the still shows.
+    Video {
+        video: Option<Media>,
+        still: Media,
+    },
+    /// A GIF link's muted looping video, over its still.
+    Gifv {
+        video: Media,
+        still: Media,
+    },
 }
 
 /// How an embed shows.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Display {
-    /// An image link: only the image.
-    Image(Media),
-    /// A GIF link: only the looping video, with a still to show until it
-    /// loads (or instead, when GIFs don't autoplay).
-    Gifv { video: Media, still: Option<Media> },
-    /// A card. `media` is shown large inside it: the image, or for a video
-    /// page the playable video if proxied, else its still. `thumbnail` sits
-    /// small to the right.
-    Card { media: Option<CardMedia>, thumbnail: Option<Media> },
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum CardMedia {
-    Image(Media),
-    Video { video: Media, still: Option<Media> },
+    /// Bare media with no card, for image and GIF links and the like.
+    Bare(Large),
+    /// A card, with large media below its text and a small thumbnail beside it.
+    Card { media: Option<Large>, thumbnail: Option<Media> },
 }
 
 impl Embed {
-    /// How to show this embed, with media dropped when `show_media` is off.
-    pub fn display(&self, show_media: bool) -> Display {
-        let proxied = |m: &Option<EmbedMedia>| m.as_ref().and_then(EmbedMedia::proxied).filter(|_| show_media);
-        let (image, thumbnail, video) = (proxied(&self.image), proxied(&self.thumbnail), proxied(&self.video));
+    fn shaped(&self) -> Shaped {
+        let proxied = |m: &Option<EmbedMedia>| m.as_ref().and_then(EmbedMedia::proxied);
+        let mut shaped = Shaped::default();
+        // Image and article links carry their picture as a thumbnail, but
+        // show it large.
         match self.kind {
-            // Discord puts an image link's image in `thumbnail`.
-            EmbedKind::Image => match image.or(thumbnail) {
-                Some(media) => Display::Image(media),
-                None => Display::Card { media: None, thumbnail: None },
-            },
-            EmbedKind::Gifv => match (video, thumbnail) {
-                (Some(video), still) => Display::Gifv { video, still },
-                (None, Some(still)) => Display::Image(still),
-                (None, None) => Display::Card { media: None, thumbnail: None },
-            },
-            // A video page's thumbnail is its still, shown large.
-            EmbedKind::Video => {
-                let media = match (video, thumbnail) {
-                    (Some(video), still) => Some(CardMedia::Video { video, still }),
-                    (None, still) => still.map(CardMedia::Image),
-                };
-                Display::Card { media: media.or(image.map(CardMedia::Image)), thumbnail: None }
-            }
-            _ => Display::Card { media: image.map(CardMedia::Image), thumbnail },
+            EmbedKind::Article | EmbedKind::Image => shaped.image = proxied(&self.thumbnail),
+            _ => shaped.thumbnail = proxied(&self.thumbnail),
         }
+        if let Some(image) = proxied(&self.image) {
+            shaped.image = Some(image);
+        }
+        if let Some(video) = &self.video
+            && let Some((width, height)) = video.sized()
+        {
+            let file = video.proxy_url.clone().filter(|u| !u.is_empty());
+            // A video without a still gets one from the proxy (the official
+            // client asks for WebP; PNG is what GTK can decode everywhere).
+            if shaped.thumbnail.is_none()
+                && let Some(file) = &file
+            {
+                let still = crate::cdn::with_params(file, &[("format", "png")]);
+                shaped.thumbnail = Some(Media { url: still, width, height, animated: false });
+            }
+            let shown = file.is_some() || video.url.as_deref().is_some_and(|u| u.starts_with("https:"));
+            if shaped.thumbnail.is_some() && shown {
+                shaped.video = Some(file.map(|url| Media { url, width, height, animated: false }));
+            }
+        }
+        if !self.gallery.is_empty() {
+            shaped.gallery = shaped
+                .image
+                .iter()
+                .cloned()
+                .chain(self.gallery.iter().filter_map(EmbedMedia::proxied))
+                .take(4)
+                .collect();
+        }
+        shaped
     }
 
-    /// Whether this shows as bare media, with no card around it.
-    pub fn is_bare_media(&self, show_media: bool) -> bool {
-        matches!(self.display(show_media), Display::Image(_) | Display::Gifv { .. })
+    /// How to show this embed. With `show_media` off (the viewer's
+    /// `inline_embed_media`), every embed is a card without media.
+    pub fn display(&self, show_media: bool) -> Display {
+        if !show_media {
+            return Display::Card { media: None, thumbnail: None };
+        }
+        let shaped = self.shaped();
+        let bare = (shaped.image.is_some() || shaped.video.is_some())
+            && (self.kind == EmbedKind::Gifv
+                || (self.kind != EmbedKind::Rich && self.author.is_none() && self.title.is_none()));
+        let media = match (self.kind, shaped.video.clone(), shaped.thumbnail.clone()) {
+            // A GIF link plays only with both its page URL and a still.
+            (EmbedKind::Gifv, Some(Some(video)), Some(still)) if self.url.is_some() => {
+                Some(Large::Gifv { video, still })
+            }
+            (EmbedKind::Gifv, _, still) => shaped.image.clone().or(still).map(Large::Image),
+            (_, Some(video), Some(still)) => Some(Large::Video { video, still }),
+            _ if shaped.gallery.len() > 1 => Some(Large::Gallery(shaped.gallery.clone())),
+            _ => shaped.image.clone().map(Large::Image),
+        };
+        if bare && let Some(media) = media {
+            return Display::Bare(media);
+        }
+        // Cards and audio keep their thumbnail unless a video plays; other
+        // types show it only when there is no large media.
+        let thumbnail = match self.kind {
+            EmbedKind::Rich | EmbedKind::Audio => shaped.thumbnail.filter(|_| shaped.video.is_none()),
+            _ => shaped.thumbnail.filter(|_| media.is_none()),
+        };
+        Display::Card { media, thumbnail }
+    }
+
+    /// Image, video and GIF links show no description.
+    pub fn shows_description(&self) -> bool {
+        !matches!(self.kind, EmbedKind::Image | EmbedKind::Video | EmbedKind::Gifv)
+    }
+
+    /// Only bot cards have fields, and only their text is markup: a link
+    /// preview's title and description come from a website and are shown as
+    /// they are.
+    pub fn is_rich(&self) -> bool {
+        self.kind == EmbedKind::Rich
+    }
+
+    /// The colour of the bar down the card. White means none.
+    pub fn bar_colour(&self) -> Option<u32> {
+        self.color.filter(|&c| c != 0xFFFFFF)
     }
 }
 
-/// The embeds of a message to show, given the viewer's settings and the
-/// message's flags.
-pub fn visible<'a>(embeds: &'a [Embed], suppressed: bool, settings: &MediaSettings) -> Vec<&'a Embed> {
-    if suppressed || !settings.render_embeds {
+/// Merge embeds that share a URL, as the official client does: the first
+/// keeps its place and gathers the others' images into a gallery; the rest
+/// are dropped.
+pub fn merge(embeds: &[Embed]) -> Vec<Embed> {
+    let mut merged: Vec<Embed> = Vec::new();
+    for embed in embeds {
+        let first = embed.url.as_ref().and_then(|url| merged.iter_mut().find(|e| e.url.as_ref() == Some(url)));
+        match first {
+            None => merged.push(embed.clone()),
+            Some(first) => first.gallery.extend(embed.image.clone()),
+        }
+    }
+    merged
+}
+
+/// Message types people write, the only ones whose embeds show.
+const USER_MESSAGES: [u8; 9] = [0, 19, 20, 23, 26, 41, 45, 47, 68];
+
+/// The embeds of `message` to show, merged, given the viewer's settings.
+/// The `SUPPRESS_EMBEDS` flag is honoured too, though Discord already
+/// removes the embeds of such messages.
+pub fn visible(message: &Message, settings: &MediaSettings) -> Vec<Embed> {
+    if message.embeds_suppressed() || !settings.render_embeds || !USER_MESSAGES.contains(&message.kind) {
         return Vec::new();
     }
-    embeds.iter().filter(|e| e.kind != EmbedKind::Other).collect()
+    merge(&message.embeds).into_iter().filter(|e| e.kind != EmbedKind::Hidden).collect()
 }
 
-/// Links the message content puts inside spoilers. As in Discord, their
-/// embeds stay hidden until the reader reveals them.
-pub fn spoilered_links(content: &str) -> Vec<String> {
-    fn walk(spans: &[Span], in_spoiler: bool, out: &mut Vec<String>) {
-        for span in spans {
-            match span {
-                Span::Styled(style, children) => walk(children, in_spoiler || *style == Style::Spoiler, out),
-                Span::Link { url, children } => {
-                    if in_spoiler {
-                        out.push(url.clone());
-                    }
-                    walk(children, in_spoiler, out);
-                }
-                _ => {}
-            }
-        }
+/// Whether the content puts any link inside a spoiler. The official client
+/// then covers every embed of the message, not just that link's.
+pub fn has_spoilered_link(content: &str) -> bool {
+    fn walk(spans: &[Span], in_spoiler: bool) -> bool {
+        spans.iter().any(|span| match span {
+            Span::Styled(style, children) => walk(children, in_spoiler || *style == Style::Spoiler),
+            Span::Link { children, .. } => in_spoiler || walk(children, in_spoiler),
+            _ => false,
+        })
     }
-    let mut links = Vec::new();
-    walk(&crate::markup::parse(content), false, &mut links);
-    links
+    walk(&crate::markup::parse(content), false)
 }
 
-/// Discord hides the text of a message that is nothing but the link of a
-/// bare-media embed (a pasted GIF or image link): the media says it all.
-pub fn hides_content(content: &str, embeds: &[&Embed], show_media: bool) -> bool {
-    let content = content.trim();
-    !content.is_empty() && embeds.iter().any(|e| e.url.as_deref() == Some(content) && e.is_bare_media(show_media))
+/// The official client hides the text of a message that is nothing but
+/// one link when its only embed is a bare image or GIF: the media says it
+/// all. The link needn't be the embed's URL.
+pub fn hides_content(content: &str, embeds: &[Embed], show_media: bool) -> bool {
+    let [embed] = embeds else { return false };
+    if !matches!(embed.kind, EmbedKind::Image | EmbedKind::Gifv)
+        || !matches!(embed.display(show_media), Display::Bare(_))
+    {
+        return false;
+    }
+    let spans = crate::markup::parse(content);
+    let mut nodes = spans.iter().filter(|s| !matches!(s, Span::Text(t) if t.trim().is_empty()));
+    matches!((nodes.next(), nodes.next()), (Some(Span::Link { .. }), None))
 }
 
 /// Lay fields out in rows as Discord does: up to three inline fields share
-/// a row, a field that isn't inline takes a row of its own.
+/// a row, a field that isn't inline takes a row of its own. Each field in
+/// a row is equally wide.
 pub fn field_rows(fields: &[EmbedField]) -> Vec<&[EmbedField]> {
     let mut rows = Vec::new();
     let mut start = 0;
@@ -274,90 +406,152 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
 
-    fn media(url: &str) -> Media {
-        Media { url: url.into(), width: None, height: None, animated: false }
+    fn media(url: &str, width: u32, height: u32) -> Media {
+        Media { url: url.into(), width, height, animated: false }
+    }
+
+    fn tenor() -> Embed {
+        embed(json!({
+            "type": "gifv", "url": "https://tenor.com/view/x",
+            "provider": {"name": "Tenor", "url": "https://tenor.co"},
+            "thumbnail": {"url": "https://media.tenor.com/x.png", "proxy_url": "https://images-ext-1.discordapp.net/x.png",
+                          "width": 498, "height": 280},
+            "video": {"url": "https://media.tenor.com/x.mp4", "proxy_url": "https://images-ext-1.discordapp.net/x.mp4",
+                      "width": 498, "height": 280}
+        }))
     }
 
     #[test]
     fn gif_link_plays_the_proxied_video() {
-        let tenor = embed(json!({
-            "type": "gifv", "url": "https://tenor.com/view/x",
-            "provider": {"name": "Tenor", "url": "https://tenor.co"},
-            "thumbnail": {"url": "https://media.tenor.com/x.png", "proxy_url": "https://images-ext-1.discordapp.net/x.png"},
-            "video": {"url": "https://media.tenor.com/x.mp4", "proxy_url": "https://images-ext-1.discordapp.net/x.mp4"}
-        }));
         assert_eq!(
-            tenor.display(true),
-            Display::Gifv {
-                video: media("https://images-ext-1.discordapp.net/x.mp4"),
-                still: Some(media("https://images-ext-1.discordapp.net/x.png")),
-            }
+            tenor().display(true),
+            Display::Bare(Large::Gifv {
+                video: media("https://images-ext-1.discordapp.net/x.mp4", 498, 280),
+                still: media("https://images-ext-1.discordapp.net/x.png", 498, 280),
+            })
         );
-        let embeds = [&tenor];
-        assert!(hides_content(" https://tenor.com/view/x ", &embeds, true));
-        assert!(!hides_content("look https://tenor.com/view/x", &embeds, true));
-        // Without media there's nothing to stand in for the link.
-        assert_eq!(embeds[0].display(false), Display::Card { media: None, thumbnail: None });
-        assert!(!hides_content("https://tenor.com/view/x", &embeds, false));
+        // Without media it's a card, and there's nothing to stand in for the link.
+        assert_eq!(tenor().display(false), Display::Card { media: None, thumbnail: None });
     }
 
     #[test]
-    fn media_without_a_proxy_is_never_loaded() {
+    fn content_hides_behind_a_single_bare_embed() {
+        let one = [tenor()];
+        assert!(hides_content("https://tenor.com/view/x", &one, true));
+        assert!(hides_content("[look](https://tenor.com/view/other)", &one, true), "any single link");
+        assert!(!hides_content("look https://tenor.com/view/x", &one, true));
+        assert!(!hides_content("https://tenor.com/view/x", &one, false));
+        assert!(!hides_content("https://tenor.com/view/x", &[tenor(), tenor()], true), "more than one embed");
+    }
+
+    #[test]
+    fn video_pages_show_their_still_and_never_the_original() {
         let youtube = embed(json!({
             "type": "video", "url": "https://youtu.be/x", "title": "T",
-            "thumbnail": {"url": "https://i.ytimg.com/x.jpg", "proxy_url": "https://images-ext-1.discordapp.net/y.jpg"},
+            "thumbnail": {"url": "https://i.ytimg.com/x.jpg", "proxy_url": "https://images-ext-1.discordapp.net/y.jpg",
+                          "width": 1280, "height": 720},
             "video": {"url": "https://www.youtube.com/embed/x", "width": 1280, "height": 720}
         }));
+        let still = media("https://images-ext-1.discordapp.net/y.jpg", 1280, 720);
         assert_eq!(
             youtube.display(true),
-            Display::Card {
-                media: Some(CardMedia::Image(media("https://images-ext-1.discordapp.net/y.jpg"))),
-                thumbnail: None
-            }
+            Display::Card { media: Some(Large::Video { video: None, still }), thumbnail: None }
         );
-        let unproxied = embed(json!({"type": "image", "url": "u", "thumbnail": {"url": "https://example.com/a.png"}}));
-        assert_eq!(unproxied.display(true), Display::Card { media: None, thumbnail: None });
     }
 
     #[test]
-    fn link_preview_has_a_side_thumbnail() {
+    fn media_needs_a_proxy_and_a_size() {
+        let unproxied = embed(json!({"type": "image", "url": "u",
+            "thumbnail": {"url": "https://example.com/a.png", "width": 10, "height": 10}}));
+        assert_eq!(unproxied.display(true), Display::Card { media: None, thumbnail: None });
+        let no_size = embed(json!({"type": "image", "url": "u", "thumbnail": {"url": "o", "proxy_url": "p"}}));
+        assert_eq!(no_size.display(true), Display::Card { media: None, thumbnail: None });
+    }
+
+    #[test]
+    fn article_thumbnails_show_large() {
         let article = embed(json!({
             "type": "article", "title": "News", "description": "Words",
             "thumbnail": {"url": "o", "proxy_url": "p", "width": 400, "height": 200}
         }));
-        let thumbnail = Some(Media { url: "p".into(), width: Some(400), height: Some(200), animated: false });
-        assert_eq!(article.display(true), Display::Card { media: None, thumbnail });
-        assert_eq!(article.display(false), Display::Card { media: None, thumbnail: None });
+        assert_eq!(
+            article.display(true),
+            Display::Card { media: Some(Large::Image(media("p", 400, 200))), thumbnail: None }
+        );
+        let link = embed(json!({
+            "type": "link", "title": "Site",
+            "thumbnail": {"url": "o", "proxy_url": "p", "width": 80, "height": 80}
+        }));
+        assert_eq!(link.display(true), Display::Card { media: None, thumbnail: Some(media("p", 80, 80)) });
     }
 
     #[test]
-    fn animation_from_flag_type_or_extension() {
-        let animated =
-            |image: serde_json::Value| match embed(json!({"type": "image", "thumbnail": image})).display(true) {
-                Display::Image(media) => media.animated,
-                other => panic!("{other:?}"),
-            };
-        assert!(animated(json!({"url": "o", "proxy_url": "p.webp", "flags": 32})));
-        assert!(animated(json!({"url": "o", "proxy_url": "p", "content_type": "image/gif"})));
-        assert!(animated(json!({"url": "o", "proxy_url": "https://x/a.GIF?width=1"})));
-        assert!(!animated(json!({"url": "o", "proxy_url": "p.png", "content_type": "image/png"})));
+    fn bot_cards_keep_their_thumbnail_beside_an_image() {
+        let rich = embed(json!({
+            "type": "rich", "title": "Bot",
+            "thumbnail": {"url": "o", "proxy_url": "t", "width": 80, "height": 80},
+            "image": {"url": "o", "proxy_url": "i", "width": 400, "height": 300}
+        }));
+        assert_eq!(
+            rich.display(true),
+            Display::Card { media: Some(Large::Image(media("i", 400, 300))), thumbnail: Some(media("t", 80, 80)) }
+        );
+        // Untitled, authorless media of other types shows bare.
+        let image = embed(
+            json!({"type": "image", "url": "u", "thumbnail": {"url": "o", "proxy_url": "p", "width": 5, "height": 5}}),
+        );
+        assert!(matches!(image.display(true), Display::Bare(Large::Image(_))));
     }
 
     #[test]
-    fn spoilered_links_are_found() {
-        assert_eq!(spoilered_links("see ||https://a.com|| and https://b.com"), ["https://a.com"]);
-        assert_eq!(spoilered_links("||**[x](https://c.com)**||"), ["https://c.com"]);
-        assert!(spoilered_links("https://b.com").is_empty());
+    fn same_url_embeds_merge_into_a_gallery() {
+        let post = |image: &str| {
+            embed(json!({"type": "rich", "url": "https://x.com/p/1", "title": "Post",
+                         "image": {"url": "o", "proxy_url": image, "width": 4, "height": 3}}))
+        };
+        let other = embed(json!({"type": "rich", "url": "https://e.com", "title": "Other"}));
+        let merged = merge(&[post("a"), other, post("b"), post("c")]);
+        assert_eq!(merged.len(), 2);
+        let gallery = ["a", "b", "c"].map(|u| media(u, 4, 3)).to_vec();
+        assert_eq!(merged[0].display(true), Display::Card { media: Some(Large::Gallery(gallery)), thumbnail: None });
     }
 
     #[test]
-    fn settings_and_suppression() {
-        let embeds = vec![Embed::default(), embed(json!({"type": "poll_result"}))];
+    fn animation_by_the_original_url() {
+        assert!(looks_animated("https://e.com/a.GIF?x=1", 0));
+        assert!(looks_animated("https://e.com/a.webp", IS_ANIMATED));
+        assert!(!looks_animated("https://e.com/a.webp", 0));
+        assert!(!looks_animated("https://e.com/a.png", IS_ANIMATED));
+    }
+
+    #[test]
+    fn a_spoilered_link_covers_every_embed() {
+        assert!(has_spoilered_link("see ||https://a.com|| and https://b.com"));
+        assert!(has_spoilered_link("||**[x](https://c.com)**||"));
+        assert!(!has_spoilered_link("||secret|| https://b.com"));
+    }
+
+    #[test]
+    fn settings_type_and_suppression() {
+        let message = |extra: &str| -> Message {
+            serde_json::from_str(&format!(
+                r#"{{"id":"1","channel_id":"2","author":{{"id":"3","username":"a"}},"timestamp":"t",
+                    "embeds":[{{"type":"rich","title":"x"}},{{"type":"poll_result"}}]{extra}}}"#
+            ))
+            .unwrap()
+        };
         let on = MediaSettings::default();
         let off = MediaSettings { render_embeds: false, ..on };
-        assert_eq!(visible(&embeds, false, &on).len(), 1);
-        assert!(visible(&embeds, true, &on).is_empty(), "SUPPRESS_EMBEDS");
-        assert!(visible(&embeds, false, &off).is_empty());
+        assert_eq!(visible(&message(""), &on).len(), 1, "poll results are hidden");
+        assert!(visible(&message(r#","flags":4"#), &on).is_empty(), "SUPPRESS_EMBEDS");
+        assert!(visible(&message(""), &off).is_empty());
+        assert!(visible(&message(r#","type":7"#), &on).is_empty(), "system messages show no embeds");
+    }
+
+    #[test]
+    fn white_means_no_colour() {
+        assert_eq!(embed(json!({"color": 0xFFFFFF})).bar_colour(), None);
+        assert_eq!(embed(json!({"color": 0x5865F2})).bar_colour(), Some(0x5865F2));
     }
 
     #[test]
@@ -370,8 +564,9 @@ mod tests {
     }
 
     #[test]
-    fn unknown_kinds_parse() {
-        assert_eq!(embed(json!({"type": "poll_result"})).kind, EmbedKind::Other);
+    fn kinds() {
+        assert_eq!(embed(json!({"type": "poll_result"})).kind, EmbedKind::Hidden);
+        assert_eq!(embed(json!({"type": "tweet"})).kind, EmbedKind::Other);
         assert_eq!(embed(json!({})).kind, EmbedKind::Rich);
     }
 }

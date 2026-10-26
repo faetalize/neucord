@@ -166,6 +166,7 @@ textview.composer-input, textview.composer-input text { background: none; color:
 .embed-author { color: #F2F3F5; font-size: 14px; font-weight: 600; }
 .embed-author-icon { border-radius: 12px; }
 .embed-title { color: #F2F3F5; font-weight: 600; }
+.embed-description { color: #DBDEE1; font-size: 14px; }
 .embed-field-name { color: #F2F3F5; font-size: 14px; font-weight: 600; }
 .embed-footer { color: #B5BAC1; font-size: 12px; }
 .embed-footer-icon { border-radius: 10px; }
