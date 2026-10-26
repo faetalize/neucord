@@ -37,7 +37,7 @@ cargo run --release
 
 Until proper login is in place, Neucord needs a Discord token, and I don't
 recommend logging in at all. If you want to beta test anyway, guard your
-token: anyone who has it controls your account.
+token: anyone who has it controls your account SO NEVER SHARE IT ANYWHERE!
 
 ## Privacy
 
