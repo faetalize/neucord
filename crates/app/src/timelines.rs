@@ -5,10 +5,14 @@
 //! Stores hold `BoxedAnyObject<Message>`, oldest first. They are filled from
 //! three directions: the newest page when a channel opens (merged into what
 //! is cached), older pages as the user scrolls up, and gateway events.
+//!
+//! Jumping to an old message (a reply's original) replaces the store with the
+//! page around it. Until scrolling down pages back to the newest message, the
+//! store is detached: live messages would leave a gap, so they are not added.
 
 use std::collections::HashMap;
 
-use discord::{Message, Snowflake};
+use discord::{Message, Referenced, Snowflake};
 use gtk::gio;
 use gtk::prelude::*;
 
@@ -21,6 +25,10 @@ pub struct Timeline {
     pub complete: bool,
     /// An older page is being fetched.
     pub loading_older: bool,
+    /// The store does not reach the newest message (after a jump).
+    pub detached: bool,
+    /// A newer page is being fetched.
+    pub loading_newer: bool,
     last_used: u64,
 }
 
@@ -46,6 +54,8 @@ impl Timelines {
             store: gio::ListStore::new::<glib::BoxedAnyObject>(),
             complete: false,
             loading_older: false,
+            detached: false,
+            loading_newer: false,
             last_used: 0,
         });
         timeline.last_used = clock;
@@ -89,6 +99,10 @@ pub fn oldest_id(store: &gio::ListStore) -> Option<Snowflake> {
     id_at(store, 0)
 }
 
+pub fn newest_id(store: &gio::ListStore) -> Option<Snowflake> {
+    store.n_items().checked_sub(1).and_then(|last| id_at(store, last))
+}
+
 /// Merge the newest page (oldest first) into a store that may hold an older
 /// copy of the channel. Where they overlap, the page replaces the cached tail,
 /// which also applies edits and deletes we missed. If the page does not reach
@@ -128,6 +142,34 @@ pub fn keep_newest(timeline: &mut Timeline, keep: u32) {
     if n > keep {
         timeline.store.splice(0, n - keep, &[] as &[glib::BoxedAnyObject]);
         timeline.complete = false;
+    }
+}
+
+/// Replace everything with a page around a message we jumped to.
+pub fn replace(timeline: &mut Timeline, page: Vec<Message>, detached: bool) {
+    let objects: Vec<glib::BoxedAnyObject> = page.into_iter().map(boxed).collect();
+    timeline.store.splice(0, timeline.store.n_items(), &objects);
+    timeline.complete = false;
+    timeline.detached = detached;
+}
+
+/// Append a newer page (oldest first), scrolling down from a jump.
+pub fn append(store: &gio::ListStore, page: Vec<Message>) {
+    let objects: Vec<glib::BoxedAnyObject> = page.into_iter().map(boxed).collect();
+    store.splice(store.n_items(), 0, &objects);
+}
+
+/// Apply `change` to the copy of `original` that each reply to it carries,
+/// so replies follow edits and deletes of what they answer.
+pub fn update_replies(store: &gio::ListStore, original: Snowflake, change: impl Fn(&mut Referenced)) {
+    for position in 0..store.n_items() {
+        let Some(object) = store.item(position).and_downcast::<glib::BoxedAnyObject>() else { continue };
+        if object.borrow::<Message>().reply_to() != Some(original) {
+            continue;
+        }
+        let mut message = object.borrow::<Message>().clone();
+        change(&mut message.referenced_message);
+        store.splice(position, 1, &[boxed(message)]);
     }
 }
 
@@ -199,6 +241,46 @@ mod tests {
         prepend(&store, vec![msg(3, ""), msg(4, "")]);
         assert_eq!(ids(&store), [3, 4, 5, 6]);
         assert_eq!(oldest_id(&store), Some(Snowflake(3)));
+    }
+
+    #[test]
+    fn jump_detaches_until_newest_merges() {
+        let mut timelines = Timelines::default();
+        let timeline = timelines.open(Snowflake(1));
+        for id in 50..=60 {
+            timeline.store.append(&boxed(msg(id, "")));
+        }
+        replace(timeline, vec![msg(10, ""), msg(11, ""), msg(12, "")], true);
+        assert!(timeline.detached && !timeline.complete);
+        append(&timeline.store, vec![msg(13, ""), msg(14, "")]);
+        assert_eq!(ids(&timeline.store), [10, 11, 12, 13, 14]);
+        assert_eq!(newest_id(&timeline.store), Some(Snowflake(14)));
+        // The newest page does not reach back to the jump: a gap, so replaced.
+        assert!(merge_newest(&timeline.store, vec![msg(60, ""), msg(61, "")]));
+    }
+
+    #[test]
+    fn replies_follow_their_original() {
+        let reply: Message = serde_json::from_value(serde_json::json!({
+            "id": "3", "channel_id": "1", "author": {"id": "5", "username": "a"}, "timestamp": "t", "type": 19,
+            "message_reference": {"message_id": "2"},
+            "referenced_message": {"id": "2", "channel_id": "1", "author": {"id": "6", "username": "b"},
+                                   "content": "before", "timestamp": "t"}
+        }))
+        .unwrap();
+        let store = store_with(&[1, 2]);
+        store.append(&boxed(reply));
+        let original = || find(&store, Snowflake(3)).unwrap().1.referenced_message;
+
+        update_replies(&store, Snowflake(2), |r| {
+            if let Referenced::Message(m) = r {
+                m.content = "after".into();
+            }
+        });
+        assert!(matches!(original(), Referenced::Message(m) if m.content == "after"));
+        update_replies(&store, Snowflake(2), |r| *r = Referenced::Deleted);
+        assert!(matches!(original(), Referenced::Deleted));
+        assert_eq!(ids(&store), [1, 2, 3]);
     }
 
     #[test]

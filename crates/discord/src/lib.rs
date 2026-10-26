@@ -17,7 +17,7 @@ pub mod settings;
 pub mod shape;
 
 pub use gateway::{Event, Gateway, Ready, Resume};
-pub use model::{Attachment, Channel, ChannelKind, Guild, Message, Snowflake, User};
+pub use model::{Attachment, Channel, ChannelKind, Guild, Message, MessageReference, Referenced, Snowflake, User};
 pub use rest::Rest;
 
 /// Errors surfaced to the UI. Never contains the token.

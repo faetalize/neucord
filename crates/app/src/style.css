@@ -49,6 +49,11 @@ listview.messages, listview.messages > row { background: none; }
 .message       { padding: 2px 48px 2px 16px; }
 .message.first { padding-top: 14px; }
 .message:hover { background: rgba(0, 0, 0, 0.08); }
+.message.replying  { background: rgba(88, 101, 242, 0.10); box-shadow: inset 2px 0 #5865F2; }
+.message.highlight { background: rgba(250, 166, 26, 0.12); box-shadow: inset 2px 0 #FAA61A; transition: background 300ms; }
+/* Hover actions take their space always, so rows don't reflow on hover. */
+.message .message-action { opacity: 0; min-width: 28px; min-height: 28px; padding: 0; margin-right: -40px; }
+.message:hover .message-action { opacity: 1; }
 .avatar { min-width: 40px; min-height: 40px; border-radius: 20px; font-weight: 700; color: #1E1F22; }
 .channel.dm { padding: 6px 8px; }
 .channel.dm .avatar { min-width: 32px; min-height: 32px; border-radius: 16px; font-size: 13px; }
@@ -56,6 +61,20 @@ listview.messages, listview.messages > row { background: none; }
 .time   { color: #949BA4; font-size: 12px; }
 .attachment { color: #00A8FC; }
 .empty  { color: #949BA4; }
+
+/* Replies: a spine from the avatar up to the original, as in Discord. */
+.reply-preview { color: #B5BAC1; font-size: 13px; }
+.reply-preview .avatar { min-width: 16px; min-height: 16px; border-radius: 8px; font-size: 9px; }
+.reply-preview .author { font-weight: 600; }
+.reply-spine {
+  min-width: 34px; min-height: 8px; margin: 0 0 0 18px; border-top-left-radius: 6px;
+  border-left: 2px solid #4E5058; border-top: 2px solid #4E5058;
+}
+.reply-snippet.missing { font-style: italic; color: #949BA4; }
+.reply-bar { margin: 0 16px; padding: 4px 4px 4px 12px; border-radius: 10px 10px 0 0; background: rgba(0, 0, 0, 0.30); color: #B5BAC1; font-size: 13px; }
+.reply-bar + .composer { margin-top: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
+.reply-ping { font-weight: 700; color: #00A8FC; padding: 2px 8px; }
+.reply-ping:not(:checked) { color: #949BA4; }
 
 .composer { margin: 0 16px 16px 16px; padding: 10px 12px; border-radius: 10px; background: rgba(0, 0, 0, 0.22); }
 textview.composer-input, textview.composer-input text { background: none; color: #DBDEE1; }
