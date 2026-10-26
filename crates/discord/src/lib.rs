@@ -5,6 +5,7 @@
 //! GTK, so the UI can be replaced without touching this crate.
 
 pub mod cdn;
+pub mod embed;
 pub mod gateway;
 mod identity;
 pub mod markup;
@@ -17,7 +18,7 @@ pub mod settings;
 pub mod shape;
 
 pub use gateway::{Event, Gateway, Ready, Resume};
-pub use model::{Attachment, Channel, ChannelKind, Guild, Message, Snowflake, User};
+pub use model::{Attachment, Channel, ChannelKind, Guild, Message, MessageEdit, Snowflake, User};
 pub use rest::Rest;
 
 /// Errors surfaced to the UI. Never contains the token.

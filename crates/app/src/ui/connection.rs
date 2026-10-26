@@ -104,9 +104,7 @@ impl App {
                 Event::PrivateChannelCreate(channel) => self.on_private_channel(channel),
                 Event::PrivateChannelDelete(id) => self.on_private_channel_delete(id),
                 Event::MessageCreate(message) => self.on_message(message),
-                Event::MessageUpdate { id, channel_id, content, edited } => {
-                    self.on_message_update(id, channel_id, content, edited)
-                }
+                Event::MessageUpdate(edit) => self.on_message_update(edit),
                 Event::MessageDelete { id, channel_id } => self.on_message_delete(id, channel_id),
                 Event::MessageAck { channel_id, message_id } => {
                     self.state.borrow_mut().read.ack(channel_id, message_id);
@@ -121,6 +119,10 @@ impl App {
                         }
                     }
                     self.refresh_badges();
+                }
+                Event::MediaSettingsUpdate(patch) => {
+                    self.state.borrow_mut().media.apply(patch);
+                    self.refresh_rows();
                 }
                 Event::GuildFoldersUpdate(folders) => {
                     self.state.borrow_mut().guild_folders = folders;
@@ -160,7 +162,8 @@ impl App {
     }
 
     pub(super) fn on_ready(self: &Rc<Self>, ready: Ready) {
-        let Ready { user, guilds, private_channels, read_states, notification_settings, guild_folders } = ready;
+        let Ready { user, guilds, private_channels, read_states, notification_settings, guild_folders, media_settings } =
+            ready;
         self.learn_users(private_channels.iter().flat_map(|c| &c.recipients));
         let (store, was_ready) = {
             let mut state = self.state.borrow_mut();
@@ -172,6 +175,7 @@ impl App {
             state.read = read_states;
             state.guild_folders = guild_folders;
             state.notifications = notification_settings;
+            state.media = media_settings;
             let store = (!state.persisted).then(|| (state.token.clone(), user.username.clone()));
             state.persisted = true;
             state.users.insert(user.id.0, user.display_name().to_string());

@@ -96,3 +96,16 @@ textview.composer-input, textview.composer-input text { background: none; color:
 
 /* Inline image attachments */
 .attachment-image { border-radius: 8px; margin-top: 4px; background: rgba(0,0,0,0.2); }
+
+/* Embeds. The colour bar is drawn, since each embed picks its own. */
+.embed { margin-top: 4px; border-radius: 4px; background: rgba(0, 0, 0, 0.22); }
+.embed-body { padding: 8px 16px 12px 12px; }
+.embed-provider { color: #B5BAC1; font-size: 12px; }
+.embed-author { color: #F2F3F5; font-size: 14px; font-weight: 600; }
+.embed-author-icon { border-radius: 12px; }
+.embed-title { color: #F2F3F5; font-weight: 600; }
+.embed-field-name { color: #F2F3F5; font-size: 14px; font-weight: 600; }
+.embed-footer { color: #B5BAC1; font-size: 12px; }
+.embed-footer-icon { border-radius: 10px; }
+.embed-media { border-radius: 8px; margin-top: 4px; background: rgba(0, 0, 0, 0.2); }
+.embed-play { min-width: 48px; min-height: 48px; }

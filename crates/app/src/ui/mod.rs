@@ -4,6 +4,7 @@
 mod chat;
 mod composer;
 mod connection;
+mod embeds;
 mod notify;
 mod rail;
 mod sidebar;
@@ -124,6 +125,13 @@ impl App {
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
         this.build();
+
+        // Images from the media proxy are requested at the pixels shown.
+        this.images.set_scale(this.window.scale_factor());
+        this.window.connect_scale_factor_notify({
+            let images = this.images.clone();
+            move |window| images.set_scale(window.scale_factor())
+        });
 
         // Handlers hold weak references, so something must own the App while
         // the window is open. Released on close, which breaks the cycle.

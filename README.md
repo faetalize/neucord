@@ -7,9 +7,9 @@ Another GTK Discord client? Daring today, are we...?
 
 ## What doesn't work yet
 
-Replies, reactions, embeds, editing or deleting your own messages, uploads,
-emoji and sticker pickers, threads and forums, the member list, voice and
-video. Custom emoji show as `:name:` and videos as links. Logging in only
+Replies, reactions, editing or deleting your own messages, uploads, emoji
+and sticker pickers, threads and forums, the member list, voice and video.
+Custom emoji show as `:name:` and video attachments as links. Logging in only
 works with a token. Planned work is in the issue tracker.
 
 ## Requirements
@@ -46,8 +46,11 @@ analytics, no crash reporting, and none of the tracking calls the official
 client makes. It identifies itself to Discord as Neucord instead of
 impersonating the official client.
 
-Your token is stored in the system keyring. Images are cached in
-`~/.cache/neucord/images/`.
+Link previews and GIFs load through Discord's media proxy, never from the
+site they link to, so those sites don't see your IP address.
+
+Your token is stored in the system keyring. Images and embedded videos are
+cached in `~/.cache/neucord/images/`.
 
 ## Contributing
 

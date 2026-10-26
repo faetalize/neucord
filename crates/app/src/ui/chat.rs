@@ -3,11 +3,13 @@
 
 use std::rc::Rc;
 
-use discord::{Message, Snowflake, User};
+use discord::settings::MediaSettings;
+use discord::{Message, MessageEdit, Snowflake, User};
 use gtk::prelude::*;
 use gtk::{gio, glib};
 
 use super::App;
+use super::embeds::{self, embed_widget, fitted_picture};
 use super::state::now_unix;
 use super::widgets::{avatar_widget, palette_index};
 use crate::images::Images;
@@ -50,7 +52,8 @@ impl App {
                 let messages = this.messages();
                 let previous = item.position().checked_sub(1).and_then(|p| timelines::message_at(&messages, p));
                 let names = this.message_names(&message);
-                fill_message_row(&row, &message, previous.as_ref(), &names, Some(&this.images));
+                let media = this.state.borrow().media;
+                fill_message_row(&row, &message, previous.as_ref(), &names, Some(&this.images), &media);
             }
         });
         self.list.set_factory(Some(&factory));
@@ -128,21 +131,10 @@ impl App {
         adjustment.value() + adjustment.page_size() >= adjustment.upper() - 80.0
     }
 
-    pub(super) fn on_message_update(
-        &self,
-        id: Snowflake,
-        channel_id: Snowflake,
-        content: Option<String>,
-        edited: bool,
-    ) {
-        // Embed-only edits carry no content; nothing to re-render yet.
-        let Some(content) = content else { return };
-        let Some(store) = self.timelines.borrow().get(channel_id).map(|t| t.store.clone()) else { return };
-        if let Some((position, mut message)) = timelines::find(&store, id) {
-            message.content = content;
-            if edited && message.edited_timestamp.is_none() {
-                message.edited_timestamp = Some(String::new());
-            }
+    pub(super) fn on_message_update(&self, edit: MessageEdit) {
+        let Some(store) = self.timelines.borrow().get(edit.channel_id).map(|t| t.store.clone()) else { return };
+        if let Some((position, mut message)) = timelines::find(&store, edit.id) {
+            edit.apply(&mut message);
             store.splice(position, 1, &[timelines::boxed(message)]);
         }
     }
@@ -439,6 +431,7 @@ pub(super) fn fill_message_row(
     previous: Option<&Message>,
     names: &Names,
     images: Option<&Images>,
+    media: &MediaSettings,
 ) {
     while let Some(child) = row.first_child() {
         row.remove(&child);
@@ -467,14 +460,19 @@ pub(super) fn fill_message_row(
         body.append(&header);
     }
     let edited = message.edited_timestamp.is_some();
-    if !message.content.is_empty() {
+    let embeds = discord::embed::visible(&message.embeds, message.embeds_suppressed(), media);
+    let show_embed_media = media.inline_embed_media && images.is_some();
+    if discord::embed::hides_content(&message.content, embeds, show_embed_media) {
+        // A bare GIF or image link: the media below stands for it.
+    } else if !message.content.is_empty() {
         body.append(&render::render(&discord::markup::parse(&message.content), names, edited));
     } else if edited {
         body.append(&render::render(&[], names, edited));
     }
+    let attachment_images = images.filter(|_| media.inline_attachment_media);
     for attachment in &message.attachments {
-        match (attachment.is_image(), images) {
-            (true, Some(images)) => body.append(&image_attachment(attachment, images)),
+        match (attachment.is_image(), attachment_images) {
+            (true, Some(images)) => body.append(&image_attachment(attachment, images, media.gif_auto_play)),
             _ => {
                 let markup = format!(
                     "<a href=\"{}\">📎 {}</a>",
@@ -492,30 +490,19 @@ pub(super) fn fill_message_row(
             }
         }
     }
+    for embed in embeds {
+        body.append(&embed_widget(embed, names, images, media));
+    }
     row.append(&body);
 }
 
 /// An inline image attachment, scaled to fit a reasonable box.
-pub(super) fn image_attachment(attachment: &discord::Attachment, images: &Images) -> gtk::Widget {
-    const MAX_W: f64 = 400.0;
-    const MAX_H: f64 = 300.0;
-    let (mut w, mut h) = match (attachment.width, attachment.height) {
-        (Some(w), Some(h)) if w > 0 && h > 0 => (w as f64, h as f64),
-        _ => (MAX_W, MAX_H),
-    };
-    let scale = (MAX_W / w).min(MAX_H / h).min(1.0);
-    w *= scale;
-    h *= scale;
-    let animated = attachment.content_type.as_deref() == Some("image/gif")
-        || attachment.url.split('?').next().is_some_and(|u| u.ends_with(".gif"));
-    let picture = gtk::Picture::builder()
-        .width_request(w as i32)
-        .height_request(h as i32)
-        .halign(gtk::Align::Start)
-        .content_fit(gtk::ContentFit::Contain)
-        .overflow(gtk::Overflow::Hidden)
-        .css_classes(["attachment-image"])
-        .build();
-    images.set(&picture, &attachment.url, animated);
+pub(super) fn image_attachment(attachment: &discord::Attachment, images: &Images, autoplay: bool) -> gtk::Widget {
+    let picture = fitted_picture(attachment.width, attachment.height, embeds::MAX_W, embeds::MAX_H);
+    picture.set_css_classes(&["attachment-image"]);
+    let animated = attachment.content_type.as_deref() == Some("image/gif") || embeds::is_gif(&attachment.url);
+    // Through the media proxy when we can, which sends it at the size shown.
+    let url = attachment.proxy_url.as_deref().unwrap_or(&attachment.url);
+    images.set_sized(&picture, url, attachment.width.zip(attachment.height), autoplay && animated);
     picture.upcast()
 }
