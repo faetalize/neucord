@@ -38,3 +38,8 @@ real IDs, names or payloads: use made-up test data.
 ## Pull requests
 
 One feature or fix per pull request, against `master`, linked to its issue.
+
+Name the branch `<type>/<issue>-<what it does>`, for example
+`feature/21-qr-login`. The type is one of `feature`, `fix`, `docs`,
+`refactor` or `ci`. Pick the name before opening the pull request: renaming
+a branch that has one closes it.
