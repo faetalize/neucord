@@ -118,8 +118,9 @@ impl App {
             targets: RefCell::default(),
             me_label: gtk::Label::builder()
                 .xalign(0.0)
+                .hexpand(true)
                 .ellipsize(pango::EllipsizeMode::End)
-                .css_classes(["me", "dimmed"])
+                .css_classes(["dimmed"])
                 .build(),
             header: adw::WindowTitle::new("", ""),
             content: gtk::Stack::new(),
@@ -329,7 +330,6 @@ impl App {
         panes.append(&channels);
 
         let menu = gio::Menu::new();
-        menu.append(Some("_Log Out"), Some("win.logout"));
         menu.append(Some("_About Neucord"), Some("app.about"));
         let header = adw::HeaderBar::builder().title_widget(&self.guild_name).build();
         header.pack_end(
@@ -340,9 +340,21 @@ impl App {
                 .menu_model(&menu)
                 .build(),
         );
+        let me = gtk::Box::builder().spacing(4).css_classes(["me"]).build();
+        me.append(&self.me_label);
+        let account = gio::Menu::new();
+        account.append(Some("_Log Out"), Some("win.logout"));
+        me.append(
+            &gtk::MenuButton::builder()
+                .icon_name("view-more-symbolic")
+                .tooltip_text("Account")
+                .menu_model(&account)
+                .css_classes(["flat"])
+                .build(),
+        );
         let sidebar = adw::ToolbarView::builder().content(&panes).build();
         sidebar.add_top_bar(&header);
-        sidebar.add_bottom_bar(&self.me_label);
+        sidebar.add_bottom_bar(&me);
         self.split.set_sidebar(Some(&adw::NavigationPage::new(&sidebar, "Neucord")));
 
         self.content.add_named(&self.build_chat(), Some("chat"));

@@ -30,7 +30,7 @@
 .category { margin-top: 12px; font-size: 0.82em; font-weight: bold; }
 .navigation-sidebar > row.unread { font-weight: bold; }
 .navigation-sidebar > row.muted { opacity: var(--dim-opacity); }
-.me { padding: 9px 14px; }
+.me { padding: 3px 6px 3px 14px; }
 
 /* Messages. Rows carry no padding of their own, so a collapsed blocked
    message takes no space. */

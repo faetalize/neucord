@@ -6,17 +6,31 @@ use std::time::Duration;
 
 use discord::{Channel, Event, Gateway, Guild, Ready, Rest, Snowflake, session};
 use gtk::glib;
+use gtk::prelude::*;
 
 use super::App;
 use super::state::{Page, State};
 
 impl App {
     pub(super) fn logout(self: &Rc<Self>) {
-        *self.state.borrow_mut() = State::default();
+        let rest = std::mem::take(&mut *self.state.borrow_mut()).rest;
         self.show_blank();
         self.timelines.borrow_mut().clear();
-        glib::spawn_future_local(async {
+        // Keeps the app running until Discord has heard, even if the window
+        // is closed right away.
+        let hold = self.window.application().map(|app| app.hold());
+        glib::spawn_future_local(async move {
+            let _hold = hold;
+            // Forget the token before the request, which can take a while:
+            // a quick login meanwhile would store a new one, and clearing
+            // after it would delete that instead.
             if let Err(e) = session::clear_token().await {
+                eprintln!("logout: {e}");
+            }
+            // Offline or already revoked, the token is forgotten all the same.
+            if let Some(rest) = rest
+                && let Err(e) = rest.logout().await
+            {
                 eprintln!("logout: {e}");
             }
         });
