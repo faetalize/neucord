@@ -6,7 +6,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::endpoints::{self, Call};
+use crate::endpoints::{Call, call};
 use crate::{Error, Rest};
 
 pub enum Login {
@@ -68,7 +68,7 @@ impl Rest {
     /// `login` is an email address or an E.164 phone number.
     pub async fn login(&self, login: &str, password: &str) -> Result<Login, Error> {
         let body = json!({ "login": login, "password": password, "undelete": false });
-        let response = self.auth(endpoints::LOGIN.call(&[]), body).await?;
+        let response = self.auth(call!(LOGIN), body).await?;
         if let Some(token) = response["token"].as_str() {
             return Ok(Login::Token(token.to_owned()));
         }
@@ -80,7 +80,7 @@ impl Rest {
 
     /// Text a code to the account's phone. Returns the number, redacted.
     pub async fn send_mfa_sms(&self, mfa: &Mfa) -> Result<String, Error> {
-        let response = self.auth(endpoints::SEND_MFA_SMS.call(&[]), json!({ "ticket": mfa.ticket })).await?;
+        let response = self.auth(call!(SEND_MFA_SMS), json!({ "ticket": mfa.ticket })).await?;
         Ok(response["phone"].as_str().unwrap_or_default().to_owned())
     }
 
@@ -89,13 +89,13 @@ impl Rest {
         if let Some(id) = &mfa.login_instance_id {
             body["login_instance_id"] = id.as_str().into();
         }
-        let response = self.auth(endpoints::VERIFY_MFA.call(&[("method", &method.path())]), body).await?;
+        let response = self.auth(call!(VERIFY_MFA, method = method.path()), body).await?;
         token(&response)
     }
 
     /// Trade a QR login ticket for the token, encrypted to the session's key.
     pub(crate) async fn remote_auth_login(&self, ticket: &str) -> Result<String, Error> {
-        let response = self.auth(endpoints::REMOTE_AUTH_LOGIN.call(&[]), json!({ "ticket": ticket })).await?;
+        let response = self.auth(call!(REMOTE_AUTH_LOGIN), json!({ "ticket": ticket })).await?;
         response["encrypted_token"]
             .as_str()
             .map(str::to_owned)

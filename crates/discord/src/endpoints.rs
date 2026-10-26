@@ -1,5 +1,6 @@
 //! Every REST endpoint Neucord calls, and the only way to call one: `Rest`
-//! sends nothing but a [`Call`], and only an [`Endpoint`] makes one.
+//! sends nothing but a [`Call`], and only [`call!`] on an [`Endpoint`] makes
+//! one, checking its parameters against the path at compile time.
 //!
 //! `tools/discord-watch` reads this file as text, so each endpoint stays on
 //! one line: `pub(crate) const NAME: Endpoint = Endpoint::post("/path/{param}");`.
@@ -46,19 +47,79 @@ impl Endpoint {
         Endpoint { method: "DELETE", path }
     }
 
-    /// The call with every `{name}` in the path filled in, escaped; a
-    /// parameter missing or left over is a bug, so it panics.
-    pub(crate) fn call(self, params: &[(&str, &dyn Display)]) -> Call {
+    /// Panics unless `names` are exactly the path's parameters. [`call!`]
+    /// runs it as a `const`, so a wrong name fails the build.
+    pub(crate) const fn check(self, names: &[&str]) {
+        let path = self.path.as_bytes();
+        let (mut i, mut params) = (0, 0);
+        while i < path.len() {
+            if path[i] == b'{' {
+                let start = i + 1;
+                while path[i] != b'}' {
+                    i += 1;
+                }
+                if !names_contain(names, path, start, i) {
+                    panic!("call! leaves out a parameter of this endpoint");
+                }
+                params += 1;
+            }
+            i += 1;
+        }
+        if params != names.len() {
+            panic!("call! names a parameter this endpoint doesn't have");
+        }
+    }
+
+    /// The call with every `{name}` in the path filled in, escaped. Use
+    /// [`call!`], which checks the names first.
+    pub(crate) fn fill(self, params: &[(&str, &dyn Display)]) -> Call {
         let mut path = self.path.to_owned();
         for (name, value) in params {
-            let param = format!("{{{name}}}");
-            assert!(path.contains(&param), "{} has no {param}", self.path);
-            path = path.replace(&param, &glib::uri_escape_string(value.to_string(), None::<&str>, false));
+            let value = glib::uri_escape_string(value.to_string(), None::<&str>, false);
+            path = path.replace(&format!("{{{name}}}"), &value);
         }
-        assert!(!path.contains('{'), "{} needs more parameters", self.path);
         Call { method: self.method, path }
     }
 }
+
+/// Whether `path[start..end]` is one of `names`, in a `const fn`.
+const fn names_contain(names: &[&str], path: &[u8], start: usize, end: usize) -> bool {
+    let mut n = 0;
+    while n < names.len() {
+        let name = names[n].as_bytes();
+        let mut same = name.len() == end - start;
+        let mut i = 0;
+        while same && i < name.len() {
+            same = name[i] == path[start + i];
+            i += 1;
+        }
+        if same {
+            return true;
+        }
+        n += 1;
+    }
+    false
+}
+
+/// An endpoint's [`Call`]: `call!(ACK, channel, message)` passes the
+/// variables named like its parameters, `call!(USER, user = id)` anything
+/// else.
+macro_rules! call {
+    ($endpoint:ident $(, $name:ident $(= $value:expr)?)* $(,)?) => {{
+        // An item, not a `const {}` block: those go unevaluated in an
+        // `async fn` until something polls it.
+        const _: () = $crate::endpoints::$endpoint.check(&[$(stringify!($name)),*]);
+        $crate::endpoints::$endpoint
+            .fill(&[$((stringify!($name), &call!(@value $name $(= $value)?) as &dyn std::fmt::Display)),*])
+    }};
+    (@value $name:ident = $value:expr) => {
+        $value
+    };
+    (@value $name:ident) => {
+        $name
+    };
+}
+pub(crate) use call;
 
 /// An endpoint with its parameters filled in, ready to send.
 #[derive(Debug)]
@@ -90,28 +151,37 @@ mod tests {
 
     #[test]
     fn fills_parameters() {
-        let call = ACK.call(&[("message", &2), ("channel", &1)]);
+        let channel = 1;
+        let call = call!(ACK, message = 2, channel);
         assert_eq!((call.method(), call.path()), ("POST", "/channels/1/messages/2/ack"));
-        assert_eq!(MESSAGES.call(&[("channel", &1)]).query("limit=50").path(), "/channels/1/messages?limit=50");
+        assert_eq!(call!(MESSAGES, channel).query("limit=50").path(), "/channels/1/messages?limit=50");
+        assert_eq!(call!(LOGIN).path(), "/auth/login");
     }
 
     #[test]
     fn escapes_values() {
         // Reactions put emoji in the path: unicode, or `name:id` for custom ones.
-        assert_eq!(USER.call(&[("user", &"🔥")]).path(), "/users/%F0%9F%94%A5");
-        assert_eq!(USER.call(&[("user", &"blob:12/3")]).path(), "/users/blob%3A12%2F3");
+        assert_eq!(call!(USER, user = "🔥").path(), "/users/%F0%9F%94%A5");
+        assert_eq!(call!(USER, user = "blob:12/3").path(), "/users/blob%3A12%2F3");
     }
 
+    // Run here at runtime; call! runs them at compile time.
     #[test]
-    #[should_panic(expected = "needs more parameters")]
+    #[should_panic(expected = "leaves out a parameter")]
     fn missing_parameter() {
-        ACK.call(&[("channel", &1)]);
+        ACK.check(&["channel"]);
     }
 
     #[test]
-    #[should_panic(expected = "has no {user}")]
-    fn unknown_parameter() {
-        OPEN_DM.call(&[("user", &1)]);
+    #[should_panic(expected = "leaves out a parameter")]
+    fn misspelled_parameter() {
+        USER.check(&["usr"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "doesn't have")]
+    fn extra_parameter() {
+        OPEN_DM.check(&["user"]);
     }
 
     /// discord-watch reads the table as text, so a row written any other way

@@ -4,7 +4,7 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 use soup::prelude::*;
 
-use crate::endpoints::{self, Call};
+use crate::endpoints::{Call, call};
 use crate::{Channel, Error, Message, Snowflake, identity};
 
 /// Error code for accepting a stranger's friend request without confirming.
@@ -62,7 +62,7 @@ impl Rest {
             Page::After(id) => format!("&after={id}"),
             Page::Around(id) => format!("&around={id}"),
         };
-        let call = endpoints::MESSAGES.call(&[("channel", &channel)]).query(&format!("limit={limit}{from}"));
+        let call = call!(MESSAGES, channel).query(&format!("limit={limit}{from}"));
         let mut messages: Vec<Message> = self.request(call, None).await?;
         // Discord sends newest first, whichever way the page goes.
         messages.sort_by_key(|m| m.id);
@@ -71,7 +71,7 @@ impl Rest {
 
     /// Look up any user by id, to name a mention whose user we have not seen.
     pub async fn user(&self, id: Snowflake) -> Result<crate::User, Error> {
-        self.request(endpoints::USER.call(&[("user", &id)]), None).await
+        self.request(call!(USER, user = id), None).await
     }
 
     pub async fn send_message(
@@ -97,51 +97,51 @@ impl Rest {
                 body["allowed_mentions"] = json!({ "parse": ["users", "roles", "everyone"], "replied_user": false });
             }
         }
-        self.request(endpoints::SEND_MESSAGE.call(&[("channel", &channel)]), Some(body)).await
+        self.request(call!(SEND_MESSAGE, channel), Some(body)).await
     }
 
     /// Mark everything in `channel` up to `message` as read, for all our clients.
     pub async fn ack(&self, channel: Snowflake, message: Snowflake) -> Result<(), Error> {
         let body = json!({ "token": null });
-        let call = endpoints::ACK.call(&[("channel", &channel), ("message", &message)]);
+        let call = call!(ACK, channel, message);
         let _: serde_json::Value = self.request(call, Some(body)).await?;
         Ok(())
     }
 
     /// Open (or reopen) the DM with `user`.
     pub async fn open_dm(&self, user: Snowflake) -> Result<Channel, Error> {
-        self.request(endpoints::OPEN_DM.call(&[]), Some(json!({ "recipients": [user] }))).await
+        self.request(call!(OPEN_DM), Some(json!({ "recipients": [user] }))).await
     }
 
     /// Send a friend request by username.
     pub async fn send_friend_request(&self, username: &str) -> Result<(), Error> {
         let body = json!({ "username": username, "discriminator": null });
-        self.request(endpoints::SEND_FRIEND_REQUEST.call(&[]), Some(body)).await
+        self.request(call!(SEND_FRIEND_REQUEST), Some(body)).await
     }
 
     /// Accept `user`'s friend request. A request from a stranger fails with
     /// [`STRANGER_NOT_CONFIRMED`] until sent again with `confirm_stranger`.
     pub async fn accept_friend_request(&self, user: Snowflake, confirm_stranger: bool) -> Result<(), Error> {
         let body = if confirm_stranger { json!({ "confirm_stranger_request": true }) } else { json!({}) };
-        self.request(endpoints::ACCEPT_FRIEND_REQUEST.call(&[("user", &user)]), Some(body)).await
+        self.request(call!(ACCEPT_FRIEND_REQUEST, user), Some(body)).await
     }
 
     /// End any relationship with `user`: unfriend, unblock, ignore their
     /// request or cancel ours.
     pub async fn remove_relationship(&self, user: Snowflake) -> Result<(), Error> {
-        self.request(endpoints::REMOVE_RELATIONSHIP.call(&[("user", &user)]), None).await
+        self.request(call!(REMOVE_RELATIONSHIP, user), None).await
     }
 
     /// Accept a message request; the DM moves into the DM list.
     pub async fn accept_message_request(&self, channel: Snowflake) -> Result<Channel, Error> {
         // 2 is ACCEPTED, the only consent status users may set.
         let body = json!({ "consent_status": 2 });
-        self.request(endpoints::ACCEPT_MESSAGE_REQUEST.call(&[("channel", &channel)]), Some(body)).await
+        self.request(call!(ACCEPT_MESSAGE_REQUEST, channel), Some(body)).await
     }
 
     /// Reject a message request, which deletes the DM.
     pub async fn reject_message_request(&self, channel: Snowflake) -> Result<(), Error> {
-        let call = endpoints::REJECT_MESSAGE_REQUEST.call(&[("channel", &channel)]);
+        let call = call!(REJECT_MESSAGE_REQUEST, channel);
         let _: serde_json::Value = self.request(call, None).await?;
         Ok(())
     }
