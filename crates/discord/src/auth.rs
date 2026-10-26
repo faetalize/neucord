@@ -6,6 +6,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::endpoints::{Call, call};
 use crate::{Error, Rest};
 
 pub enum Login {
@@ -67,7 +68,7 @@ impl Rest {
     /// `login` is an email address or an E.164 phone number.
     pub async fn login(&self, login: &str, password: &str) -> Result<Login, Error> {
         let body = json!({ "login": login, "password": password, "undelete": false });
-        let response = self.auth("/auth/login", body).await?;
+        let response = self.auth(call!(LOGIN), body).await?;
         if let Some(token) = response["token"].as_str() {
             return Ok(Login::Token(token.to_owned()));
         }
@@ -79,7 +80,7 @@ impl Rest {
 
     /// Text a code to the account's phone. Returns the number, redacted.
     pub async fn send_mfa_sms(&self, mfa: &Mfa) -> Result<String, Error> {
-        let response = self.auth("/auth/mfa/sms/send", json!({ "ticket": mfa.ticket })).await?;
+        let response = self.auth(call!(SEND_MFA_SMS), json!({ "ticket": mfa.ticket })).await?;
         Ok(response["phone"].as_str().unwrap_or_default().to_owned())
     }
 
@@ -88,21 +89,21 @@ impl Rest {
         if let Some(id) = &mfa.login_instance_id {
             body["login_instance_id"] = id.as_str().into();
         }
-        let response = self.auth(&format!("/auth/mfa/{}", method.path()), body).await?;
+        let response = self.auth(call!(VERIFY_MFA, method = method.path()), body).await?;
         token(&response)
     }
 
     /// Trade a QR login ticket for the token, encrypted to the session's key.
     pub(crate) async fn remote_auth_login(&self, ticket: &str) -> Result<String, Error> {
-        let response = self.auth("/users/@me/remote-auth/login", json!({ "ticket": ticket })).await?;
+        let response = self.auth(call!(REMOTE_AUTH_LOGIN), json!({ "ticket": ticket })).await?;
         response["encrypted_token"]
             .as_str()
             .map(str::to_owned)
             .ok_or_else(|| Error::Protocol("no encrypted token in the QR login answer".into()))
     }
 
-    async fn auth(&self, path: &str, body: Value) -> Result<Value, Error> {
-        let (status, response) = self.send("POST", path, Some(body)).await?;
+    async fn auth(&self, call: Call, body: Value) -> Result<Value, Error> {
+        let (status, response) = self.send(call, Some(body)).await?;
         let value = serde_json::from_slice(&response).unwrap_or(Value::Null);
         match status {
             200..=299 => Ok(value),

@@ -4,6 +4,7 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 use soup::prelude::*;
 
+use crate::endpoints::{Call, call};
 use crate::{Channel, Error, Message, Snowflake, identity};
 
 /// Error code for accepting a stranger's friend request without confirming.
@@ -61,8 +62,8 @@ impl Rest {
             Page::After(id) => format!("&after={id}"),
             Page::Around(id) => format!("&around={id}"),
         };
-        let mut messages: Vec<Message> =
-            self.request("GET", &format!("/channels/{channel}/messages?limit={limit}{from}"), None).await?;
+        let call = call!(MESSAGES, channel).query(&format!("limit={limit}{from}"));
+        let mut messages: Vec<Message> = self.request(call, None).await?;
         // Discord sends newest first, whichever way the page goes.
         messages.sort_by_key(|m| m.id);
         Ok(messages)
@@ -70,7 +71,7 @@ impl Rest {
 
     /// Look up any user by id, to name a mention whose user we have not seen.
     pub async fn user(&self, id: Snowflake) -> Result<crate::User, Error> {
-        self.request("GET", &format!("/users/{id}"), None).await
+        self.request(call!(USER, user = id), None).await
     }
 
     pub async fn send_message(
@@ -96,61 +97,57 @@ impl Rest {
                 body["allowed_mentions"] = json!({ "parse": ["users", "roles", "everyone"], "replied_user": false });
             }
         }
-        self.request("POST", &format!("/channels/{channel}/messages"), Some(body)).await
+        self.request(call!(SEND_MESSAGE, channel), Some(body)).await
     }
 
     /// Mark everything in `channel` up to `message` as read, for all our clients.
     pub async fn ack(&self, channel: Snowflake, message: Snowflake) -> Result<(), Error> {
         let body = json!({ "token": null });
-        let _: serde_json::Value =
-            self.request("POST", &format!("/channels/{channel}/messages/{message}/ack"), Some(body)).await?;
+        let call = call!(ACK, channel, message);
+        let _: serde_json::Value = self.request(call, Some(body)).await?;
         Ok(())
     }
 
     /// Open (or reopen) the DM with `user`.
     pub async fn open_dm(&self, user: Snowflake) -> Result<Channel, Error> {
-        self.request("POST", "/users/@me/channels", Some(json!({ "recipients": [user] }))).await
+        self.request(call!(OPEN_DM), Some(json!({ "recipients": [user] }))).await
     }
 
     /// Send a friend request by username.
     pub async fn send_friend_request(&self, username: &str) -> Result<(), Error> {
         let body = json!({ "username": username, "discriminator": null });
-        self.request("POST", "/users/@me/relationships", Some(body)).await
+        self.request(call!(SEND_FRIEND_REQUEST), Some(body)).await
     }
 
     /// Accept `user`'s friend request. A request from a stranger fails with
     /// [`STRANGER_NOT_CONFIRMED`] until sent again with `confirm_stranger`.
     pub async fn accept_friend_request(&self, user: Snowflake, confirm_stranger: bool) -> Result<(), Error> {
         let body = if confirm_stranger { json!({ "confirm_stranger_request": true }) } else { json!({}) };
-        self.request("PUT", &format!("/users/@me/relationships/{user}"), Some(body)).await
+        self.request(call!(ACCEPT_FRIEND_REQUEST, user), Some(body)).await
     }
 
     /// End any relationship with `user`: unfriend, unblock, ignore their
     /// request or cancel ours.
     pub async fn remove_relationship(&self, user: Snowflake) -> Result<(), Error> {
-        self.request("DELETE", &format!("/users/@me/relationships/{user}"), None).await
+        self.request(call!(REMOVE_RELATIONSHIP, user), None).await
     }
 
     /// Accept a message request; the DM moves into the DM list.
     pub async fn accept_message_request(&self, channel: Snowflake) -> Result<Channel, Error> {
         // 2 is ACCEPTED, the only consent status users may set.
         let body = json!({ "consent_status": 2 });
-        self.request("PUT", &format!("/channels/{channel}/recipients/@me"), Some(body)).await
+        self.request(call!(ACCEPT_MESSAGE_REQUEST, channel), Some(body)).await
     }
 
     /// Reject a message request, which deletes the DM.
     pub async fn reject_message_request(&self, channel: Snowflake) -> Result<(), Error> {
-        let _: serde_json::Value = self.request("DELETE", &format!("/channels/{channel}/recipients/@me"), None).await?;
+        let call = call!(REJECT_MESSAGE_REQUEST, channel);
+        let _: serde_json::Value = self.request(call, None).await?;
         Ok(())
     }
 
-    async fn request<T: DeserializeOwned>(
-        &self,
-        method: &str,
-        path: &str,
-        body: Option<serde_json::Value>,
-    ) -> Result<T, Error> {
-        let (status, response) = self.send(method, path, body).await?;
+    async fn request<T: DeserializeOwned>(&self, call: Call, body: Option<serde_json::Value>) -> Result<T, Error> {
+        let (status, response) = self.send(call, body).await?;
         match status {
             // 204 No Content reads as `null`, which `()` accepts.
             200..=299 if response.is_empty() => Ok(serde_json::from_value(serde_json::Value::Null)?),
@@ -162,15 +159,11 @@ impl Rest {
     }
 
     /// The status and body of a request, retrying once on a rate limit.
-    pub(crate) async fn send(
-        &self,
-        method: &str,
-        path: &str,
-        body: Option<serde_json::Value>,
-    ) -> Result<(u32, glib::Bytes), Error> {
+    pub(crate) async fn send(&self, call: Call, body: Option<serde_json::Value>) -> Result<(u32, glib::Bytes), Error> {
         let mut retries = 0;
         loop {
-            let msg = soup::Message::new(method, &format!("{}{path}", identity::API_BASE)).expect("API URL is valid");
+            let msg = soup::Message::new(call.method(), &format!("{}{}", identity::API_BASE, call.path()))
+                .expect("API URL is valid");
             let headers = msg.request_headers().expect("request has headers");
             if let Some(token) = &self.token {
                 headers.replace("Authorization", token);
