@@ -78,6 +78,9 @@ listview.messages, listview.messages > row { background: none; padding: 0; }
 .reply-ping { font-weight: 700; color: #00A8FC; padding: 2px 8px; }
 .reply-ping:not(:checked) { color: #949BA4; }
 
+.present-bar { margin: 0 16px 6px 16px; padding: 2px 4px 2px 12px; border-radius: 8px; background: rgba(88, 101, 242, 0.85); color: white; font-size: 13px; }
+.present-bar button { color: white; font-weight: 700; }
+
 .composer { margin: 0 16px 16px 16px; padding: 10px 12px; border-radius: 10px; background: rgba(0, 0, 0, 0.22); }
 textview.composer-input, textview.composer-input text { background: none; color: #DBDEE1; }
 .composer-error { color: #F23F43; font-size: 12px; margin: 0 20px 8px 20px; }

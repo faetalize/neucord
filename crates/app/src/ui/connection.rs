@@ -105,7 +105,7 @@ impl App {
                     self.on_private_channel(channel)
                 }
                 Event::PrivateChannelDelete(id) => self.on_private_channel_delete(id),
-                Event::MessageCreate(message) => self.on_message(message),
+                Event::MessageCreate(message) => self.on_message(*message),
                 Event::MessageUpdate { id, channel_id, content, edited } => {
                     self.on_message_update(id, channel_id, content, edited)
                 }

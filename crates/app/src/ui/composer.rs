@@ -14,10 +14,12 @@ use super::App;
 #[derive(Clone)]
 pub(super) struct ReplyCtx {
     pub(super) channel: Snowflake,
+    pub(super) guild: Option<Snowflake>,
     pub(super) to: Snowflake,
     pub(super) author: String,
-    /// Our own message: there is nobody to ping.
-    pub(super) own: bool,
+    /// Set where the ping can't be toggled, as in the official client:
+    /// replies to yourself never ping, replies in DMs always do.
+    pub(super) fixed_ping: Option<bool>,
 }
 
 #[derive(Default)]
@@ -34,7 +36,14 @@ impl App {
         chat.append(&self.request_bar);
         self.reply_bar.append(&self.reply_label);
         self.reply_bar.append(&self.reply_ping);
-        self.reply_ping.connect_toggled(|button| button.set_label(if button.is_active() { "@ On" } else { "@ Off" }));
+        self.reply_ping.connect_toggled(|button| {
+            button.set_label(if button.is_active() { "@ ON" } else { "@ OFF" });
+            button.set_tooltip_text(Some(if button.is_active() {
+                "Click to disable pinging the original author."
+            } else {
+                "Click to enable pinging the original author."
+            }));
+        });
         let cancel = gtk::Button::builder()
             .icon_name("window-close-symbolic")
             .tooltip_text("Cancel reply")
@@ -117,14 +126,26 @@ impl App {
         self.composer.add_controller(keys);
     }
 
-    pub(super) fn start_reply(self: &Rc<Self>, message: &Message) {
-        let own = self.state.borrow().me() == Some(message.author.id);
-        self.reply_ping.set_active(true);
+    /// Reply to `message`. Like Discord, the reply pings unless `no_ping`
+    /// (Shift held when clicking Reply).
+    pub(super) fn start_reply(self: &Rc<Self>, message: &Message, no_ping: bool) {
+        let (own, guild) = {
+            let state = self.state.borrow();
+            let guild = state.find_channel(message.channel_id).and_then(|(guild, _)| guild.map(|g| g.id));
+            (state.me() == Some(message.author.id), guild)
+        };
+        let fixed_ping = match (own, guild) {
+            (true, _) => Some(false),
+            (false, None) => Some(true),
+            (false, Some(_)) => None,
+        };
+        self.reply_ping.set_active(!no_ping);
         self.set_reply(Some(ReplyCtx {
             channel: message.channel_id,
+            guild,
             to: message.id,
             author: message.author.display_name().to_owned(),
-            own,
+            fixed_ping,
         }));
         self.composer.grab_focus();
     }
@@ -134,7 +155,7 @@ impl App {
         if let Some(reply) = &reply {
             let name = glib::markup_escape_text(&reply.author);
             self.reply_label.set_markup(&format!("Replying to <b>{name}</b>"));
-            self.reply_ping.set_visible(!reply.own);
+            self.reply_ping.set_visible(reply.fixed_ping.is_none());
         }
         self.reply_bar.set_visible(reply.is_some());
         let previous = self.reply.replace(reply.clone());
@@ -253,7 +274,11 @@ impl App {
             return;
         }
         let replying = self.reply.borrow().clone().filter(|r| r.channel == channel);
-        let reply = replying.as_ref().map(|r| Reply { to: r.to, ping: !r.own && self.reply_ping.is_active() });
+        let reply = replying.as_ref().map(|r| Reply {
+            to: r.to,
+            guild: r.guild,
+            ping: r.fixed_ping.unwrap_or(self.reply_ping.is_active()),
+        });
         let ping = self.reply_ping.is_active();
         buffer.set_text("");
         self.set_reply(None);

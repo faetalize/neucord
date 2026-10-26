@@ -20,8 +20,8 @@ const FIRST_PAGE: u8 = 40;
 /// Messages per scrollback request, up or down (Discord's maximum): these
 /// load in the background, so bigger pages just mean fewer round trips.
 const SCROLL_PAGE: u8 = 100;
-/// Messages fetched around one we jump to.
-const JUMP_PAGE: u8 = 50;
+/// Messages fetched around one we jump to (the official client's number).
+const JUMP_PAGE: u8 = 30;
 /// How long a message we jumped to stays highlighted.
 const FLASH: std::time::Duration = std::time::Duration::from_secs(2);
 /// Start fetching more messages this many screens before reaching the end,
@@ -92,6 +92,22 @@ impl App {
                 }
             }
         });
+
+        // After a jump: say so, with the way back.
+        self.present_bar
+            .append(&gtk::Label::builder().label("You're Viewing Older Messages").xalign(0.0).hexpand(true).build());
+        let present = gtk::Button::builder().label("Jump To Present").css_classes(["flat"]).build();
+        present.connect_clicked({
+            let this = Rc::downgrade(self);
+            move |_| {
+                let Some(this) = this.upgrade() else { return };
+                if let Some(channel) = this.state.borrow().channel {
+                    this.load_newest(channel);
+                }
+            }
+        });
+        self.present_bar.append(&present);
+        chat.append(&self.present_bar);
 
         self.build_composer(&chat);
         chat.upcast()
@@ -205,6 +221,17 @@ impl App {
             }
         }
         timelines::update_replies(&store, id, |original| *original = Referenced::Deleted);
+        // Nothing left to reply to, as in the official client.
+        if self.reply.borrow().as_ref().is_some_and(|r| r.to == id) {
+            self.set_reply(None);
+        }
+    }
+
+    /// Show the "viewing older messages" bar while the open channel is detached.
+    pub(super) fn update_present_bar(&self) {
+        let channel = self.state.borrow().channel;
+        let detached = channel.and_then(|c| self.timelines.borrow().get(c).map(|t| t.detached)).unwrap_or(false);
+        self.present_bar.set_visible(detached);
     }
 
     /// The bar that stands in for a run of blocked users' messages: how many
@@ -296,6 +323,7 @@ impl App {
         // then fetch the newest page and merge it in.
         let store = self.timelines.borrow_mut().open(id).store.clone();
         self.selection.set_model(Some(&store));
+        self.update_present_bar();
         self.scroll_to_end();
 
         if rest.is_some() {
@@ -330,6 +358,7 @@ impl App {
                             timeline.complete = false;
                         }
                     }
+                    this.update_present_bar();
                     if let Some(newest) = store.n_items().checked_sub(1).and_then(|p| timelines::message_at(&store, p))
                     {
                         // READY's newest-message ids can be stale; history is not.
@@ -507,14 +536,20 @@ impl App {
                 return this.show_composer_error("That message no longer exists.");
             }
             this.learn_messages(&page);
+            // Like the official client, judge by the page's shape rather than
+            // the channel's newest id, which can be stale: a page that comes
+            // back short after the target has reached the present.
             let newest = this.state.borrow().find_channel(channel).and_then(|(_, c)| c.last_message_id);
-            let detached = page.last().zip(newest).is_some_and(|(last, newest)| last.id < newest);
+            let after = page.iter().filter(|m| m.id > id).count();
+            let at_newest = page.last().is_some_and(|last| Some(last.id) == newest);
+            let detached = after >= JUMP_PAGE as usize / 2 && !at_newest;
             let Some(store) = this.timelines.borrow_mut().get_mut(channel).map(|timeline| {
                 timelines::replace(timeline, page, detached);
                 timeline.store.clone()
             }) else {
                 return;
             };
+            this.update_present_bar();
             if let Some((position, _)) = timelines::find(&store, id) {
                 this.flash(id, position);
             }
@@ -748,22 +783,28 @@ impl App {
         }
         main.append(&body);
 
-        let reply = gtk::Button::builder()
-            .icon_name("mail-reply-sender-symbolic")
-            .tooltip_text("Reply")
-            .valign(gtk::Align::Start)
-            .css_classes(["flat", "message-action"])
-            .build();
-        reply.connect_clicked({
-            let this = Rc::downgrade(self);
-            let message = message.clone();
-            move |_| {
-                if let Some(this) = this.upgrade() {
-                    this.start_reply(&message);
+        if message.is_replyable() {
+            let reply = gtk::Button::builder()
+                .icon_name("mail-reply-sender-symbolic")
+                .tooltip_text("Reply (Shift: without pinging)")
+                .valign(gtk::Align::Start)
+                .css_classes(["flat", "message-action"])
+                .build();
+            reply.connect_clicked({
+                let this = Rc::downgrade(self);
+                let message = message.clone();
+                move |button| {
+                    let shift =
+                        button.display().default_seat().and_then(|seat| seat.keyboard()).is_some_and(|keyboard| {
+                            keyboard.modifier_state().contains(gtk::gdk::ModifierType::SHIFT_MASK)
+                        });
+                    if let Some(this) = this.upgrade() {
+                        this.start_reply(&message, shift);
+                    }
                 }
-            }
-        });
-        main.append(&reply);
+            });
+            main.append(&reply);
+        }
         row.append(&main);
     }
 
@@ -805,15 +846,16 @@ impl App {
                 let text = render::plain_text(&discord::markup::parse(&original.content), &names);
                 let text = match text.lines().find(|line| !line.trim().is_empty()) {
                     Some(line) => line.to_owned(),
-                    None if !original.attachments.is_empty() => "Click to see attachment".to_owned(),
-                    None => "Click to see message".to_owned(),
+                    // The official client's wording for messages with no text.
+                    None if !original.sticker_items.is_empty() => "Click to see sticker".to_owned(),
+                    None => "Click to see attachment".to_owned(),
                 };
                 preview.append(&snippet(&text, &["reply-snippet"]));
             }
             None => {
                 let text = match message.referenced_message {
                     Referenced::Deleted => "Original message was deleted",
-                    _ => "Click to see original message",
+                    _ => "Message could not be loaded",
                 };
                 preview.append(&snippet(text, &["reply-snippet", "missing"]));
             }

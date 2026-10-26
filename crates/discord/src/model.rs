@@ -296,11 +296,21 @@ pub struct Message {
     /// The message a reply answers, as Discord resolved it.
     #[serde(default, deserialize_with = "referenced")]
     pub referenced_message: Referenced,
+    /// Only counted, to describe a sticker-only message.
+    #[serde(default)]
+    pub sticker_items: Vec<serde::de::IgnoredAny>,
 }
 
 impl Message {
     /// Discord's message type for a reply.
     const REPLY: u8 = 19;
+
+    /// Whether the official client offers Reply on this message: ordinary
+    /// messages and replies, commands, and a few system messages people
+    /// answer (boosts, joins, …), but not, say, pins or calls.
+    pub fn is_replyable(&self) -> bool {
+        matches!(self.kind, 0 | 7 | 19 | 20 | 23 | 24 | 25 | 32..=42 | 45 | 46 | 69)
+    }
 
     /// The id of the message this one replies to.
     pub fn reply_to(&self) -> Option<Snowflake> {
@@ -450,5 +460,11 @@ mod tests {
         )
         .unwrap();
         assert!(forward.reply_to().is_none());
+        assert!(forward.is_replyable() && resolved.is_replyable());
+        let pin: Message = serde_json::from_str(
+            r#"{"id":"103","channel_id":"11","author":{"id":"5","username":"a"},"timestamp":"t","type":6}"#,
+        )
+        .unwrap();
+        assert!(!pin.is_replyable());
     }
 }
