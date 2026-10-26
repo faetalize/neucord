@@ -10,7 +10,7 @@ use std::time::Duration;
 use discord::notifications::{NotificationSettings, Place};
 use discord::read_state::ReadStates;
 use discord::settings::{GuildFolder, RailEntry};
-use discord::{Channel, Event, Gateway, Guild, Message, Ready, Rest, Snowflake, User, session};
+use discord::{Channel, Event, Gateway, Guild, Message, Ready, Rest, Resume, Snowflake, User, session};
 use gtk::prelude::*;
 use gtk::{gio, glib, pango};
 
@@ -38,6 +38,9 @@ struct State {
     /// READY arrived at least once for this token.
     ready_seen: bool,
     reconnect_attempts: u32,
+    /// Set while the last session can be resumed; kept across failed
+    /// attempts, replaced by each close.
+    resume: Option<Resume>,
     rest: Option<Rest>,
     gateway: Option<Gateway>,
     me: Option<User>,
@@ -609,9 +612,10 @@ impl App {
         if !self.state.borrow().ready_seen {
             self.show_loading("Connecting to Discord…");
         }
+        let resume = self.state.borrow().resume.clone();
         let this = self.clone();
         glib::spawn_future_local(async move {
-            match Gateway::connect(&token).await {
+            match Gateway::connect(&token, resume).await {
                 Ok((gateway, events)) => {
                     this.state.borrow_mut().gateway = Some(gateway);
                     this.run_events(events).await;
@@ -624,16 +628,18 @@ impl App {
     /// Transport-level failure or a non-fatal close: retry with backoff if
     /// this token is known good, otherwise send the user back to login.
     fn connection_lost(self: &Rc<Self>, why: &str) {
-        let (known_good, attempts, token) = {
+        let (known_good, attempts, token, resumable) = {
             let mut state = self.state.borrow_mut();
             state.gateway = None;
             state.reconnect_attempts += 1;
-            (state.persisted || state.ready_seen, state.reconnect_attempts, state.token.clone())
+            (state.persisted || state.ready_seen, state.reconnect_attempts, state.token.clone(), state.resume.is_some())
         };
         let Some(token) = token.filter(|_| known_good) else {
             return self.show_login(Some(why));
         };
-        let delay = 2u64.saturating_pow(attempts.min(6)).min(60);
+        // A resumable session is worth retrying at once: Discord only keeps
+        // it for a short while. After that, back off.
+        let delay = if resumable && attempts == 1 { 1 } else { 2u64.saturating_pow(attempts.min(6)).min(60) };
         let status = format!("Disconnected ({why}). Reconnecting in {delay}s…");
         if self.state.borrow().ready_seen {
             self.me_label.set_label(&status);
@@ -686,7 +692,17 @@ impl App {
                     self.state.borrow_mut().notifications.update(settings);
                     self.refresh_badges();
                 }
-                Event::Closed { code, reason } => {
+                Event::Resumed => {
+                    let name = {
+                        let mut state = self.state.borrow_mut();
+                        state.reconnect_attempts = 0;
+                        state.me.as_ref().map(|u| u.display_name().to_owned()).unwrap_or_default()
+                    };
+                    self.me_label.set_label(&name);
+                    // Replayed messages have already updated the open channel.
+                }
+                Event::Closed { code, reason, resume } => {
+                    self.state.borrow_mut().resume = resume;
                     if Event::is_fatal_close(code) {
                         *self.state.borrow_mut() = State::default();
                         glib::spawn_future_local(async {
@@ -748,9 +764,19 @@ impl App {
                 _ => state.first_guild(),
             }
         };
-        match open {
-            Some(id) => self.select_guild(id),
-            None => self.select_home(),
+        // After a reconnect that could not resume, stay in the open channel.
+        let keep = {
+            let state = self.state.borrow();
+            state.channel.filter(|&c| was_ready && state.find_channel(c).is_some_and(|(g, _)| g.map(|g| g.id) == open))
+        };
+        match (keep, open) {
+            (Some(channel), _) => {
+                self.state.borrow_mut().guild = open;
+                self.rebuild_rail();
+                self.select_channel(channel);
+            }
+            (None, Some(id)) => self.select_guild(id),
+            (None, None) => self.select_home(),
         }
     }
 

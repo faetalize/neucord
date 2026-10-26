@@ -16,7 +16,7 @@ pub mod read_state;
 pub mod settings;
 pub mod shape;
 
-pub use gateway::{Event, Gateway, Ready};
+pub use gateway::{Event, Gateway, Ready, Resume};
 pub use model::{Attachment, Channel, ChannelKind, Guild, Message, Snowflake, User};
 pub use rest::Rest;
 

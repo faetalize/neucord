@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 
 /// The documented API version.
 pub const API_BASE: &str = "https://discord.com/api/v10";
+pub const GATEWAY_QUERY: &str = "v=10&encoding=json";
 pub const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 
 const NAME: &str = "Neucord";

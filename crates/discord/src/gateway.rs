@@ -1,11 +1,13 @@
 //! The gateway websocket: identify, heartbeat, and turning dispatches into
 //! [`Event`]s. Runs entirely on the GLib main loop via libsoup.
 //!
-//! Not handled yet: RESUME (a dropped connection is reported as
-//! [`Event::Closed`] and the caller reconnects with a fresh IDENTIFY) and
-//! zlib transport compression (payloads come as plain JSON text frames).
+//! A dropped connection is reported as [`Event::Closed`], carrying a
+//! [`Resume`] when the session can be resumed: the caller passes it back to
+//! [`Gateway::connect`], which then sends RESUME instead of IDENTIFY and
+//! Discord replays what was missed. Not handled yet: zlib transport
+//! compression (payloads come as plain JSON text frames).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -25,6 +27,16 @@ const CAPABILITIES: u64 = 0;
 /// Close code used when we drop a connection ourselves (zombied or told to
 /// reconnect). 4000 lets the session be resumed once RESUME exists.
 const CLOSE_RECONNECT: u16 = 4000;
+
+/// What it takes to resume a session after the connection drops.
+#[derive(Clone, Debug)]
+pub struct Resume {
+    pub session_id: String,
+    /// READY's `resume_gateway_url`.
+    pub url: String,
+    /// The last sequence number we received.
+    pub seq: u64,
+}
 
 /// Everything READY gives us to start from.
 #[derive(Debug)]
@@ -60,8 +72,11 @@ pub enum Event {
     NotificationSettingsUpdate(GuildSettings),
     /// The user rearranged servers or folders (on any client).
     GuildFoldersUpdate(Vec<GuildFolder>),
-    /// The connection is gone. `code` is the websocket close code.
-    Closed { code: u16, reason: String },
+    /// A resume succeeded; everything missed has been replayed before this.
+    Resumed,
+    /// The connection is gone. `code` is the websocket close code. `resume`
+    /// is set when the session survives and can be resumed.
+    Closed { code: u16, reason: String, resume: Option<Resume> },
 }
 
 impl Event {
@@ -69,6 +84,12 @@ impl Event {
     pub fn is_fatal_close(code: u16) -> bool {
         // 4004 authentication failed, 4010-4014 invalid shard/version/intents.
         matches!(code, 4004 | 4010..=4014)
+    }
+
+    /// Close codes after which the session is gone and only IDENTIFY works:
+    /// 4007 invalid sequence, 4009 session timed out, plus the fatal ones.
+    fn ends_session(code: u16) -> bool {
+        matches!(code, 4007 | 4009) || Self::is_fatal_close(code)
     }
 }
 
@@ -87,6 +108,12 @@ struct State {
     token: String,
     /// Our user id, known from READY on; used to find our roles in GUILD_CREATE.
     me: Cell<Option<Snowflake>>,
+    /// Session id and resume URL from READY (or the resume we were given).
+    session: RefCell<Option<(String, String)>>,
+    /// Send RESUME instead of IDENTIFY on HELLO.
+    resuming: Cell<bool>,
+    /// Cleared by INVALID SESSION (not resumable).
+    resumable: Cell<bool>,
     seq: Cell<Option<u64>>,
     acked: Cell<bool>,
     events: async_channel::Sender<Event>,
@@ -106,10 +133,21 @@ impl Drop for Gateway {
 }
 
 impl Gateway {
-    pub async fn connect(token: &str) -> Result<(Gateway, async_channel::Receiver<Event>), Error> {
+    /// Connect and IDENTIFY, or with `resume` RESUME a dropped session.
+    pub async fn connect(
+        token: &str,
+        resume: Option<Resume>,
+    ) -> Result<(Gateway, async_channel::Receiver<Event>), Error> {
         let session = soup::Session::new();
         session.set_user_agent(&identity::user_agent());
-        let msg = soup::Message::new("GET", identity::GATEWAY_URL).expect("gateway URL is valid");
+        let url = match &resume {
+            Some(r) => format!("{}/?{}", r.url.trim_end_matches('/'), identity::GATEWAY_QUERY),
+            None => identity::GATEWAY_URL.to_owned(),
+        };
+        let Ok(msg) = soup::Message::new("GET", &url) else {
+            // A malformed resume URL from Discord: nothing to resume against.
+            return Err(Error::Http { status: 0, body: format!("bad gateway URL {url}") });
+        };
         let conn = session
             .websocket_connect_async_future(&msg, None, &[], glib::Priority::DEFAULT)
             .await
@@ -121,7 +159,10 @@ impl Gateway {
         let state = Rc::new(State {
             token: token.to_owned(),
             me: Cell::new(None),
-            seq: Cell::new(None),
+            resuming: Cell::new(resume.is_some()),
+            resumable: Cell::new(true),
+            seq: Cell::new(resume.as_ref().map(|r| r.seq)),
+            session: RefCell::new(resume.map(|r| (r.session_id, r.url))),
             acked: Cell::new(true),
             events: tx,
         });
@@ -141,9 +182,17 @@ impl Gateway {
         conn.connect_closed({
             let state = state.clone();
             move |conn| {
+                let code = conn.close_code();
+                let resume = match (&*state.session.borrow(), state.seq.get()) {
+                    (Some((session_id, url)), Some(seq)) if state.resumable.get() && !Event::ends_session(code) => {
+                        Some(Resume { session_id: session_id.clone(), url: url.clone(), seq })
+                    }
+                    _ => None,
+                };
                 let _ = state.events.try_send(Event::Closed {
-                    code: conn.close_code(),
+                    code,
                     reason: conn.close_data().map(String::from).unwrap_or_default(),
+                    resume,
                 });
                 state.events.close();
             }
@@ -162,6 +211,17 @@ fn send(conn: &soup::WebsocketConnection, value: Value) {
 fn heartbeat(conn: &soup::WebsocketConnection, state: &State) {
     state.acked.set(false);
     send(conn, json!({ "op": 1, "d": state.seq.get() }));
+}
+
+fn resume(conn: &soup::WebsocketConnection, state: &State) {
+    let session_id = state.session.borrow().as_ref().map(|(id, _)| id.clone());
+    send(
+        conn,
+        json!({
+            "op": 6,
+            "d": { "token": state.token, "session_id": session_id, "seq": state.seq.get() }
+        }),
+    );
 }
 
 fn identify(conn: &soup::WebsocketConnection, state: &State) {
@@ -190,16 +250,47 @@ fn handle(conn: &soup::WebsocketConnection, state: &Rc<State>, payload: Payload)
         10 => {
             let interval = payload.d["heartbeat_interval"].as_u64().unwrap_or(41_250);
             spawn_heartbeat(conn, state, Duration::from_millis(interval));
-            identify(conn, state);
+            if state.resuming.get() {
+                resume(conn, state);
+            } else {
+                identify(conn, state);
+            }
         }
-        0 => dispatch(state, payload.t.as_deref().unwrap_or(""), payload.d),
+        0 => {
+            let name = payload.t.as_deref().unwrap_or("");
+            if matches!(name, "READY" | "RESUMED") {
+                debug_drop(conn, name);
+            }
+            dispatch(state, name, payload.d)
+        }
         // Server asks for an immediate heartbeat.
         1 => heartbeat(conn, state),
         11 => state.acked.set(true),
-        // RECONNECT or INVALID SESSION: drop and let the caller reconnect.
-        7 | 9 => conn.close(CLOSE_RECONNECT, Some("reconnect requested")),
+        // RECONNECT: drop and let the caller resume.
+        7 => conn.close(CLOSE_RECONNECT, Some("reconnect requested")),
+        // INVALID SESSION: `d` says whether resuming can still work. If not,
+        // the caller has to IDENTIFY again.
+        9 => {
+            if payload.d.as_bool() != Some(true) {
+                state.resumable.set(false);
+            }
+            conn.close(CLOSE_RECONNECT, Some("session invalidated"));
+        }
         _ => {}
     }
+}
+
+/// Debug aid for testing resume: with `NEUCORD_DEBUG_DROP=<seconds>`, drop
+/// each connection that long after it is ready, as a network failure would.
+fn debug_drop(conn: &soup::WebsocketConnection, ready: &str) {
+    let Some(secs) = std::env::var("NEUCORD_DEBUG_DROP").ok().and_then(|v| v.parse::<u64>().ok()) else { return };
+    eprintln!("gateway: {ready}; dropping the connection in {secs}s (NEUCORD_DEBUG_DROP)");
+    let conn = conn.downgrade();
+    glib::timeout_add_local_once(Duration::from_secs(secs), move || {
+        if let Some(conn) = conn.upgrade() {
+            conn.close(CLOSE_RECONNECT, Some("debug drop"));
+        }
+    });
 }
 
 fn spawn_heartbeat(conn: &soup::WebsocketConnection, state: &Rc<State>, interval: Duration) {
@@ -287,6 +378,10 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 Err(e) => return eprintln!("gateway: READY without a usable user: {e}"),
             };
             state.me.set(Some(user.id));
+            state.resuming.set(false);
+            if let (Some(id), Some(url)) = (data["session_id"].as_str(), data["resume_gateway_url"].as_str()) {
+                *state.session.borrow_mut() = Some((id.to_owned(), url.to_owned()));
+            }
             let guilds = data["guilds"]
                 .as_array()
                 .map(|raw| raw.iter().filter_map(|g| guild_with_roles(g, user.id)).collect())
@@ -300,6 +395,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 guilds,
             }))
         }
+        "RESUMED" => Event::Resumed,
         "MESSAGE_ACK" => {
             let (Some(channel_id), Some(message_id)) =
                 (parse_id(&data["channel_id"]), parse_id(&data["message_id"]))
