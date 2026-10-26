@@ -37,15 +37,20 @@ pub struct Reply {
 #[derive(Clone)]
 pub struct Rest {
     session: soup::Session,
-    token: String,
+    token: Option<String>,
 }
 
 impl Rest {
     pub fn new(token: impl Into<String>) -> Self {
+        Rest { token: Some(token.into()), ..Rest::anonymous() }
+    }
+
+    /// For the login endpoints, before there is a token.
+    pub fn anonymous() -> Self {
         let session = soup::Session::new();
         session.set_user_agent(&identity::user_agent());
         session.set_timeout(30);
-        Rest { session, token: token.into() }
+        Rest { session, token: None }
     }
 
     /// Up to `limit` (max 100) messages, oldest first, from where `page` says.
@@ -145,11 +150,31 @@ impl Rest {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<T, Error> {
+        let (status, response) = self.send(method, path, body).await?;
+        match status {
+            // 204 No Content reads as `null`, which `()` accepts.
+            200..=299 if response.is_empty() => Ok(serde_json::from_value(serde_json::Value::Null)?),
+            200..=299 => Ok(serde_json::from_slice(&response)?),
+            401 => Err(Error::Unauthorized),
+            400 if serde_json::from_slice(&response).is_ok_and(|v| is_captcha(&v)) => Err(Error::Captcha),
+            _ => Err(Error::Http { status, body: String::from_utf8_lossy(&response).chars().take(300).collect() }),
+        }
+    }
+
+    /// The status and body of a request, retrying once on a rate limit.
+    pub(crate) async fn send(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<(u32, glib::Bytes), Error> {
         let mut retries = 0;
         loop {
             let msg = soup::Message::new(method, &format!("{}{path}", identity::API_BASE)).expect("API URL is valid");
             let headers = msg.request_headers().expect("request has headers");
-            headers.replace("Authorization", &self.token);
+            if let Some(token) = &self.token {
+                headers.replace("Authorization", token);
+            }
             headers.replace("X-Discord-Locale", "en-US");
             if let Some(body) = &body {
                 let bytes = glib::Bytes::from_owned(body.to_string().into_bytes());
@@ -159,31 +184,21 @@ impl Rest {
             let response =
                 self.session.send_and_read_future(&msg, glib::Priority::DEFAULT).await.map_err(Error::Transport)?;
             let status = msg.status_code();
-            match status {
-                // 204 No Content reads as `null`, which `()` accepts.
-                200..=299 if response.is_empty() => return Ok(serde_json::from_value(serde_json::Value::Null)?),
-                200..=299 => return Ok(serde_json::from_slice(&response)?),
-                401 => return Err(Error::Unauthorized),
-                400 if serde_json::from_slice::<serde_json::Value>(&response)
-                    .is_ok_and(|v| v.get("captcha_key").is_some()) =>
-                {
-                    return Err(Error::Captcha);
-                }
-                429 if retries < MAX_RATE_LIMIT_RETRIES => {
-                    retries += 1;
-                    let wait = serde_json::from_slice::<serde_json::Value>(&response)
-                        .ok()
-                        .and_then(|v| v["retry_after"].as_f64())
-                        .unwrap_or(1.0);
-                    glib::timeout_future(std::time::Duration::from_secs_f64(wait.min(10.0))).await;
-                }
-                _ => {
-                    return Err(Error::Http {
-                        status,
-                        body: String::from_utf8_lossy(&response).chars().take(300).collect(),
-                    });
-                }
+            if status != 429 || retries >= MAX_RATE_LIMIT_RETRIES {
+                return Ok((status, response));
             }
+            retries += 1;
+            let wait = serde_json::from_slice::<serde_json::Value>(&response)
+                .ok()
+                .and_then(|v| v["retry_after"].as_f64())
+                .unwrap_or(1.0);
+            glib::timeout_future(std::time::Duration::from_secs_f64(wait.min(10.0))).await;
         }
     }
+}
+
+/// Discord answers a request it wants a captcha for with a 400 whose body
+/// has `captcha_key`, whatever the endpoint.
+pub(crate) fn is_captcha(body: &serde_json::Value) -> bool {
+    body.get("captcha_key").is_some()
 }

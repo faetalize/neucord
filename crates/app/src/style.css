@@ -122,6 +122,13 @@ textview.composer-input, textview.composer-input text { background: none; color:
   background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.12);
 }
 .card-title { font-size: 22px; font-weight: 800; color: #F2F3F5; }
+.card-subtitle { font-size: 16px; font-weight: 700; color: #F2F3F5; }
+.card separator { background: rgba(255, 255, 255, 0.08); }
+.field-label { color: #B5BAC1; font-size: 12px; font-weight: 700; margin-top: 4px; }
+.inline-link { background: none; box-shadow: none; color: #00A8FC; padding: 2px 0; min-height: 0; }
+.inline-link:hover { text-decoration: underline; }
+.token-expander label { color: #949BA4; font-size: 13px; }
+.qr { background: white; border-radius: 12px; padding: 12px; }
 .hint  { color: #949BA4; font-size: 13px; }
 .error { color: #F23F43; font-size: 13px; }
 .login-button { background: #5865F2; color: white; border-radius: 8px; padding: 8px; font-weight: 600; }

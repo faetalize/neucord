@@ -1,32 +1,16 @@
-//! Logging in and out, the gateway connection (reconnects and resumes),
-//! and routing gateway events to the rest of the UI.
+//! Logging out, the gateway connection (reconnects and resumes), and
+//! routing gateway events to the rest of the UI.
 
 use std::rc::Rc;
 use std::time::Duration;
 
 use discord::{Channel, Event, Gateway, Guild, Ready, Rest, Snowflake, session};
 use gtk::glib;
-use gtk::prelude::*;
 
 use super::App;
 use super::state::{Page, State};
 
 impl App {
-    pub(super) fn login(self: &Rc<Self>) {
-        // Tokens copied from devtools often come wrapped in quotes.
-        let token = self.token_entry.text().trim().trim_matches('"').to_owned();
-        self.token_entry.set_text("");
-        if token.is_empty() {
-            return;
-        }
-        {
-            let mut state = self.state.borrow_mut();
-            state.ready_seen = false;
-            state.reconnect_attempts = 0;
-        }
-        self.connect(token, false);
-    }
-
     pub(super) fn logout(self: &Rc<Self>) {
         *self.state.borrow_mut() = State::default();
         self.show_blank();
@@ -40,6 +24,7 @@ impl App {
     }
 
     pub(super) fn connect(self: &Rc<Self>, token: String, persisted: bool) {
+        self.login.stop_qr();
         {
             let mut state = self.state.borrow_mut();
             state.rest = Some(Rest::new(token.clone()));
