@@ -11,7 +11,14 @@
 }
 .guild:hover  { border-radius: 16px; background-color: alpha(currentColor, 0.15); }
 .guild.active { border-radius: 16px; background-color: var(--accent-bg-color); color: var(--accent-fg-color); }
-.rail-pill { min-width: 4px; min-height: 8px; border-radius: 0 4px 4px 0; background-color: currentColor; }
+/* The pill grows from unread to hovered to open. */
+.rail-pill {
+  min-width: 4px; min-height: 0; border-radius: 0 4px 4px 0; opacity: 0;
+  background-color: var(--accent-bg-color); transition: min-height 200ms ease-out, opacity 200ms;
+}
+.rail-pill.unread { min-height: 8px; opacity: 1; }
+.rail-item:hover > .rail-pill { min-height: 20px; opacity: 1; }
+.rail-item > .rail-pill.active { min-height: 40px; opacity: 1; }
 .rail-separator { margin: 3px 24px; }
 /* Folders: collapsed shows a 2×2 preview on the folder's colour (per-folder
    colours come from a provider the rail regenerates). */

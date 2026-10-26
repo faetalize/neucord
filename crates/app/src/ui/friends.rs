@@ -131,6 +131,7 @@ impl App {
 
         let switcher = adw::ViewSwitcher::builder().stack(&page.stack).policy(adw::ViewSwitcherPolicy::Wide).build();
         let header = adw::HeaderBar::builder().title_widget(&switcher).build();
+        header.pack_start(&self.sidebar_toggle());
         let bar = adw::ViewSwitcherBar::builder().stack(&page.stack).build();
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.append(&page.error);

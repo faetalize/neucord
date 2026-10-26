@@ -8,6 +8,7 @@ mod embeds;
 mod friends;
 mod login;
 mod notify;
+mod panes;
 mod rail;
 mod requests;
 mod sidebar;
@@ -26,16 +27,23 @@ use crate::images::Images;
 use crate::render;
 use crate::timelines::Timelines;
 
+/// The server rail's width.
+const RAIL: f64 = 72.0;
+
 pub struct App {
     window: adw::ApplicationWindow,
-    /// Narrow windows: one pane at a time, and the login page in one column.
+    /// Narrow windows: the sidebar slides over the chat, and the login page
+    /// takes one column.
     narrow: adw::Breakpoint,
+    /// Windows too narrow for a pane on the right of the chat.
+    medium: adw::Breakpoint,
     stack: gtk::Stack,
     loading: adw::StatusPage,
     login: login::Page,
     /// The sidebar (rail and channels) beside the content.
-    split: adw::NavigationSplitView,
-    content_page: adw::NavigationPage,
+    split: adw::OverlaySplitView,
+    /// The content, with room for a pane on its right.
+    right: adw::OverlaySplitView,
     rail: gtk::Box,
     guild_name: adw::WindowTitle,
     channels: gtk::ListBox,
@@ -95,23 +103,30 @@ impl App {
             .height_request(294)
             .build();
         window.add_css_class("neucord");
-        let narrow = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
-            adw::BreakpointConditionLengthType::MaxWidth,
-            720.0,
-            adw::LengthUnit::Sp,
-        ));
+        let max_width = |sp| {
+            adw::Breakpoint::new(adw::BreakpointCondition::new_length(
+                adw::BreakpointConditionLengthType::MaxWidth,
+                sp,
+                adw::LengthUnit::Sp,
+            ))
+        };
+        // One breakpoint applies at a time, the last added that matches; so
+        // `narrow` repeats what `medium` sets.
+        let (medium, narrow) = (max_width(1000.0), max_width(720.0));
+        window.add_breakpoint(medium.clone());
         window.add_breakpoint(narrow.clone());
 
         let blank = gio::ListStore::new::<glib::BoxedAnyObject>();
         let selection = gtk::NoSelection::new(Some(blank.clone()));
         let this = Rc::new(App {
             window,
+            medium,
             narrow,
             stack: gtk::Stack::builder().transition_type(gtk::StackTransitionType::Crossfade).build(),
             loading: adw::StatusPage::builder().paintable(&adw::SpinnerPaintable::new(gtk::Widget::NONE)).build(),
             login: login::Page::new(),
-            split: adw::NavigationSplitView::builder().min_sidebar_width(312.0).max_sidebar_width(360.0).build(),
-            content_page: adw::NavigationPage::builder().title("Neucord").build(),
+            split: adw::OverlaySplitView::new(),
+            right: adw::OverlaySplitView::builder().sidebar_position(gtk::PackType::End).show_sidebar(false).build(),
             rail: gtk::Box::new(gtk::Orientation::Vertical, 0),
             guild_name: adw::WindowTitle::new("", ""),
             channels: gtk::ListBox::builder().css_classes(["navigation-sidebar"]).build(),
@@ -253,7 +268,7 @@ impl App {
                             this.state.borrow_mut().friends_tab =
                                 friends::Tab::List(discord::relationships::List::Pending);
                             this.show_friends();
-                            this.split.set_show_content(true);
+                            this.show_content();
                         }
                     }
                 })
@@ -276,7 +291,7 @@ impl App {
             let read_open = read_open.clone();
             move |_| read_open()
         });
-        self.split.connect_show_content_notify(move |_| read_open());
+        self.split.connect_show_sidebar_notify(move |_| read_open());
 
         // Mentions are drawn in the accent colour, which Pango markup can't
         // follow by itself.
@@ -301,21 +316,23 @@ impl App {
     }
 
     fn build_main(self: &Rc<Self>) -> gtk::Widget {
-        // The sidebar: server rail and channel list side by side, under the
-        // open server's name.
-        let rail_scroller = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .vscrollbar_policy(gtk::PolicyType::External)
-            .child(&self.rail)
-            .width_request(72)
+        // The sidebar: the server rail at full height, beside the channel
+        // list and its header bar. Dragging the rail's empty space moves the
+        // window, as a header bar would.
+        let rail = gtk::WindowHandle::builder()
+            .child(
+                &gtk::ScrolledWindow::builder()
+                    .hscrollbar_policy(gtk::PolicyType::Never)
+                    .vscrollbar_policy(gtk::PolicyType::External)
+                    .child(&self.rail)
+                    .build(),
+            )
+            .width_request(RAIL as i32)
             .css_classes(["rail"])
             .build();
         self.rail.set_margin_top(6);
-        let channels = gtk::ScrolledWindow::builder()
-            .hexpand(true)
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .child(&self.channels)
-            .build();
+        let channels =
+            gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(&self.channels).build();
         self.channels.connect_row_activated({
             let this = Rc::downgrade(self);
             move |_, row| {
@@ -324,10 +341,6 @@ impl App {
                 }
             }
         });
-        let panes = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        panes.append(&rail_scroller);
-        panes.append(&gtk::Separator::new(gtk::Orientation::Vertical));
-        panes.append(&channels);
 
         let menu = gio::Menu::new();
         menu.append(Some("_About Neucord"), Some("app.about"));
@@ -352,18 +365,64 @@ impl App {
                 .css_classes(["flat"])
                 .build(),
         );
-        let sidebar = adw::ToolbarView::builder().content(&panes).build();
-        sidebar.add_top_bar(&header);
-        sidebar.add_bottom_bar(&me);
-        self.split.set_sidebar(Some(&adw::NavigationPage::new(&sidebar, "Neucord")));
+        let channel_pane = adw::ToolbarView::builder().hexpand(true).content(&channels).build();
+        channel_pane.add_top_bar(&header);
+        channel_pane.add_bottom_bar(&me);
+        let sidebar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        sidebar.append(&rail);
+        sidebar.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        sidebar.append(&channel_pane);
+        self.split.set_sidebar(Some(&sidebar));
 
         self.content.add_named(&self.build_chat(), Some("chat"));
         self.content.add_named(&self.build_friends(), Some("friends"));
         self.content.add_named(&self.build_requests(), Some("requests"));
-        self.content_page.set_child(Some(&self.content));
-        self.split.set_content(Some(&self.content_page));
+        // The right pane stays empty until the member list (#10) fills it.
+        self.right.set_content(Some(&self.content));
+        self.split.set_content(Some(&self.right));
+
+        // The rail and 240 px of channels to start with.
+        panes::resizable(&self.split, RAIL + 240.0, (RAIL + 180.0, RAIL + 420.0));
+        panes::resizable(&self.right, 260.0, (200.0, 420.0));
+        self.medium.add_setter(&self.right, "collapsed", Some(&true.to_value()));
+        self.narrow.add_setter(&self.right, "collapsed", Some(&true.to_value()));
         self.narrow.add_setter(&self.split, "collapsed", Some(&true.to_value()));
+        // Dragged widths could be wider than a narrow window.
+        for property in ["min-sidebar-width", "max-sidebar-width"] {
+            self.narrow.add_setter(&self.split, property, Some(&(RAIL + 240.0).to_value()));
+        }
+
+        let toggle = gio::ActionEntry::builder("toggle-sidebar")
+            .activate({
+                let split = self.split.downgrade();
+                move |_: &adw::ApplicationWindow, _, _| {
+                    if let Some(split) = split.upgrade() {
+                        split.set_show_sidebar(!split.shows_sidebar());
+                    }
+                }
+            })
+            .build();
+        self.window.add_action_entries([toggle]);
+        if let Some(app) = self.window.application() {
+            app.set_accels_for_action("win.toggle-sidebar", &["F9"]);
+        }
         self.split.clone().upcast()
+    }
+
+    /// The button in each content header bar that shows and hides the sidebar.
+    pub(super) fn sidebar_toggle(&self) -> gtk::ToggleButton {
+        let button =
+            gtk::ToggleButton::builder().icon_name("sidebar-show-symbolic").tooltip_text("Toggle Sidebar").build();
+        self.split.bind_property("show-sidebar", &button, "active").bidirectional().sync_create().build();
+        button
+    }
+
+    /// After opening something from the sidebar: on a narrow window, put
+    /// the sidebar away so it shows.
+    pub(super) fn show_content(&self) {
+        if self.split.is_collapsed() {
+            self.split.set_show_sidebar(false);
+        }
     }
 
     fn show_loading(&self, text: &str) {
@@ -373,12 +432,12 @@ impl App {
 
     /// Whether the open channel's messages are on screen.
     pub(super) fn chat_visible(&self) -> bool {
-        self.window.is_active() && (!self.split.is_collapsed() || self.split.shows_content())
+        self.window.is_active() && !(self.split.is_collapsed() && self.split.shows_sidebar())
     }
 
-    /// Name the content pane, for the window's title and screen readers.
+    /// Title the window after what the content shows.
     pub(super) fn set_content_title(&self, title: &str) {
-        self.content_page.set_title(title);
+        self.window.set_title(Some(title));
     }
 }
 

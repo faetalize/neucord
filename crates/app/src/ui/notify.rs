@@ -76,7 +76,7 @@ impl App {
         if found {
             self.rebuild_rail();
             self.select_channel(id);
-            self.split.set_show_content(true);
+            self.show_content();
         }
     }
 }

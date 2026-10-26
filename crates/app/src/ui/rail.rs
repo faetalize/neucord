@@ -199,16 +199,21 @@ impl App {
     }
 }
 
-/// A rail button with Discord's markers: a pill at the left edge for unread
-/// messages, a mention count at the bottom right.
+/// A rail button with its markers: a pill at the left edge, which grows from
+/// unread to hovered to open (the button's `active` class), and a mention
+/// count at the bottom right.
 pub(super) fn rail_item(button: &gtk::Button, unread: bool, mentions: u32) -> gtk::Widget {
-    let overlay = gtk::Overlay::builder().child(button).build();
+    let overlay = gtk::Overlay::builder().child(button).css_classes(["rail-item"]).build();
+    let pill =
+        gtk::Box::builder().halign(gtk::Align::Start).valign(gtk::Align::Center).css_classes(["rail-pill"]).build();
     if unread {
-        let pill =
-            gtk::Box::builder().halign(gtk::Align::Start).valign(gtk::Align::Center).css_classes(["rail-pill"]).build();
-        pill.set_can_target(false);
-        overlay.add_overlay(&pill);
+        pill.add_css_class("unread");
     }
+    if button.has_css_class("active") {
+        pill.add_css_class("active");
+    }
+    pill.set_can_target(false);
+    overlay.add_overlay(&pill);
     if let Some(badge) = badge(mentions) {
         badge.set_halign(gtk::Align::End);
         badge.set_valign(gtk::Align::End);

@@ -33,9 +33,9 @@ impl RequestsPage {
 impl App {
     pub(super) fn build_requests(&self) -> gtk::Widget {
         let page = &self.requests;
-        page.root.add_top_bar(
-            &adw::HeaderBar::builder().title_widget(&adw::WindowTitle::new("Message Requests", "")).build(),
-        );
+        let header = adw::HeaderBar::builder().title_widget(&adw::WindowTitle::new("Message Requests", "")).build();
+        header.pack_start(&self.sidebar_toggle());
+        page.root.add_top_bar(&header);
         let column = gtk::Box::new(gtk::Orientation::Vertical, 12);
         column.append(&page.error);
         column.append(&page.list);

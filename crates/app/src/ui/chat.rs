@@ -105,7 +105,9 @@ impl App {
 
         self.build_composer(&chat);
         let page = adw::ToolbarView::builder().content(&chat).build();
-        page.add_top_bar(&adw::HeaderBar::builder().title_widget(&self.header).build());
+        let header = adw::HeaderBar::builder().title_widget(&self.header).build();
+        header.pack_start(&self.sidebar_toggle());
+        page.add_top_bar(&header);
         page.add_top_bar(&self.present_bar);
         page.upcast()
     }
