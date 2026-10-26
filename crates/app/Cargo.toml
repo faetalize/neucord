@@ -1,0 +1,13 @@
+[package]
+name = "neucord"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+discord = { path = "../discord" }
+gtk.workspace = true
+glib.workspace = true
+gio.workspace = true
+soup.workspace = true
+async-channel.workspace = true

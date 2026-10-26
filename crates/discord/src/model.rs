@@ -1,0 +1,273 @@
+//! The subset of Discord's data model Neucord uses so far. Unknown fields are
+//! ignored, so Discord adding fields never breaks parsing.
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// Discord IDs are 64-bit integers sent as JSON strings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Snowflake(pub u64);
+
+impl Snowflake {
+    const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
+
+    /// A snowflake for "now", used as a message nonce.
+    pub fn now() -> Self {
+        let unix_ms = (glib::real_time() / 1000) as u64;
+        Snowflake((unix_ms - Self::DISCORD_EPOCH_MS) << 22)
+    }
+}
+
+impl std::fmt::Display for Snowflake {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl Serialize for Snowflake {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Snowflake {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = <std::borrow::Cow<'de, str>>::deserialize(d)?;
+        s.parse().map(Snowflake).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct User {
+    pub id: Snowflake,
+    pub username: String,
+    #[serde(default)]
+    pub global_name: Option<String>,
+    #[serde(default)]
+    pub avatar: Option<String>,
+    #[serde(default)]
+    pub bot: bool,
+}
+
+impl User {
+    /// What Discord shows: the display name if set, else the username.
+    pub fn display_name(&self) -> &str {
+        self.global_name.as_deref().unwrap_or(&self.username)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChannelKind {
+    Text,
+    Voice,
+    Category,
+    Announcement,
+    Stage,
+    Forum,
+    Other(u8),
+}
+
+impl ChannelKind {
+    fn from_raw(raw: u8) -> Self {
+        match raw {
+            0 => Self::Text,
+            2 => Self::Voice,
+            4 => Self::Category,
+            5 => Self::Announcement,
+            13 => Self::Stage,
+            15 => Self::Forum,
+            other => Self::Other(other),
+        }
+    }
+
+    /// Channels that hold a plain message history.
+    pub fn is_text(self) -> bool {
+        matches!(self, Self::Text | Self::Announcement)
+    }
+}
+
+impl<'de> Deserialize<'de> for ChannelKind {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        u8::deserialize(d).map(Self::from_raw)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Channel {
+    pub id: Snowflake,
+    #[serde(rename = "type")]
+    pub kind: ChannelKind,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub position: Option<i32>,
+    #[serde(default)]
+    pub parent_id: Option<Snowflake>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Guild {
+    pub id: Snowflake,
+    pub name: String,
+    pub icon: Option<String>,
+    pub channels: Vec<Channel>,
+}
+
+impl Guild {
+    /// Text channels in sidebar order: uncategorised first, then each
+    /// category by position, channels by position within it. Returns
+    /// `(category name, channels)` groups.
+    pub fn sidebar(&self) -> Vec<(Option<&str>, Vec<&Channel>)> {
+        let by_position = |a: &&Channel, b: &&Channel| {
+            (a.position.unwrap_or(0), a.id).cmp(&(b.position.unwrap_or(0), b.id))
+        };
+        let text_in = |parent: Option<Snowflake>| {
+            let mut v: Vec<&Channel> = self
+                .channels
+                .iter()
+                .filter(|c| c.kind.is_text() && c.parent_id == parent)
+                .collect();
+            v.sort_by(by_position);
+            v
+        };
+
+        let mut groups = vec![(None, text_in(None))];
+        let mut categories: Vec<&Channel> = self
+            .channels
+            .iter()
+            .filter(|c| c.kind == ChannelKind::Category)
+            .collect();
+        categories.sort_by(by_position);
+        for category in categories {
+            groups.push((category.name.as_deref(), text_in(Some(category.id))));
+        }
+        groups.retain(|(_, channels)| !channels.is_empty());
+        groups
+    }
+}
+
+/// Guilds arrive in two shapes depending on the gateway capabilities: name and
+/// icon either at the top level or inside `properties`. Unavailable guilds have
+/// neither and are rejected here; they arrive later via GUILD_CREATE.
+impl<'de> Deserialize<'de> for Guild {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Properties {
+            name: String,
+            #[serde(default)]
+            icon: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct Raw {
+            id: Snowflake,
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default)]
+            icon: Option<String>,
+            #[serde(default)]
+            properties: Option<Properties>,
+            #[serde(default)]
+            channels: Vec<Channel>,
+        }
+
+        let raw = Raw::deserialize(d)?;
+        let (name, icon) = match (raw.name, raw.properties) {
+            (Some(name), _) => (name, raw.icon),
+            (None, Some(p)) => (p.name, p.icon),
+            (None, None) => return Err(serde::de::Error::custom("guild has no name (unavailable)")),
+        };
+        Ok(Guild { id: raw.id, name, icon, channels: raw.channels })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Attachment {
+    pub id: Snowflake,
+    pub filename: String,
+    pub url: String,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+}
+
+impl Attachment {
+    /// Whether this attachment is an image we can show inline.
+    pub fn is_image(&self) -> bool {
+        self.content_type.as_deref().is_some_and(|t| t.starts_with("image/"))
+            || (self.width.is_some() && self.height.is_some())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Message {
+    pub id: Snowflake,
+    pub channel_id: Snowflake,
+    #[serde(default)]
+    pub guild_id: Option<Snowflake>,
+    pub author: User,
+    #[serde(default)]
+    pub content: String,
+    /// ISO 8601.
+    pub timestamp: String,
+    /// Set once the message has been edited.
+    #[serde(default)]
+    pub edited_timestamp: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+    /// Users mentioned in `content`, resolved by Discord. Used to turn
+    /// `<@id>` into a name without a separate user cache.
+    #[serde(default)]
+    pub mentions: Vec<User>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guild_with_top_level_name() {
+        let g: Guild = serde_json::from_str(
+            r#"{"id":"1","name":"Legacy","icon":null,"channels":[
+                {"id":"10","type":4,"name":"Cat","position":0},
+                {"id":"11","type":0,"name":"b","position":1,"parent_id":"10"},
+                {"id":"12","type":0,"name":"a","position":0,"parent_id":"10"},
+                {"id":"13","type":2,"name":"voice","position":2,"parent_id":"10"},
+                {"id":"14","type":0,"name":"top","position":5}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(g.name, "Legacy");
+        let sidebar = g.sidebar();
+        let names: Vec<(Option<&str>, Vec<&str>)> = sidebar
+            .iter()
+            .map(|(cat, chans)| (*cat, chans.iter().map(|c| c.name.as_deref().unwrap()).collect()))
+            .collect();
+        assert_eq!(names, vec![(None, vec!["top"]), (Some("Cat"), vec!["a", "b"])]);
+    }
+
+    #[test]
+    fn guild_with_properties() {
+        let g: Guild = serde_json::from_str(
+            r#"{"id":"2","properties":{"name":"New","icon":"abc"},"channels":[]}"#,
+        )
+        .unwrap();
+        assert_eq!((g.name.as_str(), g.icon.as_deref()), ("New", Some("abc")));
+    }
+
+    #[test]
+    fn unavailable_guild_is_rejected() {
+        assert!(serde_json::from_str::<Guild>(r#"{"id":"3","unavailable":true}"#).is_err());
+    }
+
+    #[test]
+    fn message_parses() {
+        let m: Message = serde_json::from_str(
+            r#"{"id":"100","channel_id":"11","author":{"id":"5","username":"alice","global_name":null},
+                "content":"hi","timestamp":"2026-10-26T12:00:00.000000+00:00","attachments":[],"extra":1}"#,
+        )
+        .unwrap();
+        assert_eq!((m.id, m.author.display_name()), (Snowflake(100), "alice"));
+    }
+}

@@ -1,0 +1,81 @@
+/* Neucord. The window is transparent; surfaces with `backdrop-filter` make
+   GTK ask the compositor (ext-background-effect) to blur the desktop behind
+   them. Nothing blurs scrolling content yet: GTK 4.24 does not redraw a
+   backdrop-filter when the content behind it scrolls, leaving stale pixels. */
+
+window.neucord { background: transparent; color: #DBDEE1; font-size: 15px; }
+
+.rail    { background: rgba(20, 21, 24, 0.40); backdrop-filter: blur(24px); }
+.sidebar { background: rgba(30, 31, 34, 0.50); backdrop-filter: blur(24px); }
+.chat    { background: rgba(49, 51, 56, 0.70); backdrop-filter: blur(24px); }
+.page    { background: rgba(30, 31, 34, 0.45); backdrop-filter: blur(24px); }
+
+/* Server rail */
+.guild {
+  min-width: 48px; min-height: 48px; margin: 4px 12px; padding: 0;
+  border-radius: 24px; background: rgba(255, 255, 255, 0.08);
+  color: #F2F3F5; font-weight: 600; font-size: 14px;
+  transition: border-radius 150ms, background 150ms;
+}
+.guild:hover  { border-radius: 16px; background: rgba(88, 101, 242, 0.6); }
+.guild.active { border-radius: 16px; background: rgba(88, 101, 242, 0.9); }
+
+/* Channel sidebar */
+.guild-name { font-weight: 700; color: #F2F3F5; padding: 14px 16px; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
+.category   { color: #949BA4; font-size: 12px; font-weight: 700; margin: 14px 16px 4px 16px; }
+.channel    { padding: 5px 10px; margin: 1px 8px; border-radius: 6px; color: #949BA4; background: none; box-shadow: none; }
+.channel:hover  { background: rgba(255, 255, 255, 0.05); color: #DBDEE1; }
+.channel.active { background: rgba(255, 255, 255, 0.10); color: #F2F3F5; }
+.me { padding: 10px 14px; background: rgba(0, 0, 0, 0.20); color: #DBDEE1; }
+
+/* Chat */
+.chat-header { padding: 12px 16px; font-weight: 700; color: #F2F3F5; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
+listview.messages, listview.messages > row { background: none; }
+.message       { padding: 2px 48px 2px 16px; }
+.message.first { padding-top: 14px; }
+.message:hover { background: rgba(0, 0, 0, 0.08); }
+.avatar { min-width: 40px; min-height: 40px; border-radius: 20px; font-weight: 700; color: #1E1F22; }
+.author { font-weight: 600; }
+.time   { color: #949BA4; font-size: 12px; }
+.attachment { color: #00A8FC; }
+.empty  { color: #949BA4; }
+
+.composer { margin: 0 16px 16px 16px; padding: 10px 12px; border-radius: 10px; background: rgba(0, 0, 0, 0.22); }
+textview.composer-input, textview.composer-input text { background: none; color: #DBDEE1; }
+.composer-error { color: #F23F43; font-size: 12px; margin: 0 20px 8px 20px; }
+
+/* Login / connecting */
+.card {
+  padding: 28px; border-radius: 16px; min-width: 380px;
+  background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.12);
+}
+.card-title { font-size: 22px; font-weight: 800; color: #F2F3F5; }
+.hint  { color: #949BA4; font-size: 13px; }
+.error { color: #F23F43; font-size: 13px; }
+.login-button { background: #5865F2; color: white; border-radius: 8px; padding: 8px; font-weight: 600; }
+.login-button:hover { background: #4752C4; }
+
+/* Per-user colours (user id % 8) */
+.avatar-0 { background: #5865F2; } .author-0 { color: #8E97F8; }
+.avatar-1 { background: #EB459E; } .author-1 { color: #F27BBE; }
+.avatar-2 { background: #57F287; } .author-2 { color: #57F287; }
+.avatar-3 { background: #FEE75C; } .author-3 { color: #FEE75C; }
+.avatar-4 { background: #ED4245; } .author-4 { color: #F47B7D; }
+.avatar-5 { background: #3BA55C; } .author-5 { color: #6FCF8E; }
+.avatar-6 { background: #FAA61A; } .author-6 { color: #FAA61A; }
+.avatar-7 { background: #00A8FC; } .author-7 { color: #4DC3FF; }
+
+/* Message markup */
+.code-block { background: rgba(0, 0, 0, 0.35); border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 6px; padding: 6px 10px; margin: 2px 0; }
+.code-lang  { color: #949BA4; font-size: 11px; margin-bottom: 2px; }
+.code-body  { font-family: monospace; font-size: 14px; color: #DBDEE1; }
+.quote      { border-left: 4px solid #4e5058; padding-left: 10px; margin: 2px 0; }
+
+/* Mention autocomplete */
+.mention-popover > contents { padding: 4px; background: #232428; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; }
+.mention-list { background: transparent; }
+.mention-list row { padding: 6px 10px; border-radius: 5px; color: #DBDEE1; }
+.mention-list row:selected { background: #5865F2; color: white; }
+
+/* Inline image attachments */
+.attachment-image { border-radius: 8px; margin-top: 4px; background: rgba(0,0,0,0.2); }
