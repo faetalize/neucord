@@ -7,7 +7,7 @@ Another GTK Discord client? Daring today, are we...?
 
 ## What doesn't work yet
 
-Replies, reactions, embeds, editing or deleting your own messages, uploads,
+Reactions, embeds, editing or deleting your own messages, uploads,
 emoji and sticker pickers, threads and forums, the member list, voice and
 video. Custom emoji show as `:name:` and videos as links. Logging in only
 works with a token. Planned work is in the issue tracker.

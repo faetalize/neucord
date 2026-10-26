@@ -13,7 +13,7 @@ mod state;
 mod unread;
 mod widgets;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use discord::{Snowflake, session};
@@ -56,6 +56,16 @@ pub struct App {
     mention_list: gtk::ListBox,
     /// `@`-token start (char offset) and the candidates shown, row-aligned.
     mention: RefCell<composer::MentionCtx>,
+    /// "Replying to …" above the composer, with the ping toggle.
+    reply_bar: gtk::Box,
+    reply_label: gtk::Label,
+    reply_ping: gtk::ToggleButton,
+    /// The message the composer replies to, if any.
+    reply: RefCell<Option<composer::ReplyCtx>>,
+    /// "You're viewing older messages", while the open channel is detached.
+    present_bar: gtk::Box,
+    /// A message flashed after jumping to it.
+    highlight: Cell<Option<Snowflake>>,
     state: RefCell<state::State>,
     /// What the rail and sidebar last drew, so badge refreshes can skip
     /// rebuilding them when nothing visible changed.
@@ -128,6 +138,17 @@ impl App {
                 .build(),
             mention_list: gtk::ListBox::builder().css_classes(["mention-list"]).build(),
             mention: RefCell::default(),
+            reply_bar: gtk::Box::builder().spacing(8).visible(false).css_classes(["reply-bar"]).build(),
+            reply_label: gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(pango::EllipsizeMode::End).build(),
+            reply_ping: gtk::ToggleButton::builder()
+                .label("@ ON")
+                .active(true)
+                .tooltip_text("Click to disable pinging the original author.")
+                .css_classes(["reply-ping"])
+                .build(),
+            reply: RefCell::default(),
+            present_bar: gtk::Box::builder().spacing(8).visible(false).css_classes(["present-bar"]).build(),
+            highlight: Cell::default(),
             state: RefCell::default(),
             drawn: RefCell::default(),
             folder_css: gtk::CssProvider::new(),

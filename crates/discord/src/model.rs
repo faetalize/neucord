@@ -288,6 +288,62 @@ pub struct Message {
     pub mention_everyone: bool,
     #[serde(default)]
     pub mention_roles: Vec<Snowflake>,
+    #[serde(rename = "type", default)]
+    pub kind: u8,
+    /// What a reply (or forward, crosspost, pin notice) points at.
+    #[serde(default)]
+    pub message_reference: Option<MessageReference>,
+    /// The message a reply answers, as Discord resolved it.
+    #[serde(default, deserialize_with = "referenced")]
+    pub referenced_message: Referenced,
+    /// Only counted, to describe a sticker-only message.
+    #[serde(default)]
+    pub sticker_items: Vec<serde::de::IgnoredAny>,
+}
+
+impl Message {
+    /// Discord's message type for a reply.
+    const REPLY: u8 = 19;
+
+    /// Whether the official client offers Reply on this message: ordinary
+    /// messages and replies, commands, and a few system messages people
+    /// answer (boosts, joins, …), but not, say, pins or calls.
+    pub fn is_replyable(&self) -> bool {
+        matches!(self.kind, 0 | 7 | 19 | 20 | 23 | 24 | 25 | 32..=42 | 45 | 46 | 69)
+    }
+
+    /// The id of the message this one replies to.
+    pub fn reply_to(&self) -> Option<Snowflake> {
+        if self.kind != Self::REPLY {
+            return None;
+        }
+        self.message_reference.as_ref()?.message_id
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct MessageReference {
+    #[serde(default)]
+    pub message_id: Option<Snowflake>,
+    #[serde(default)]
+    pub channel_id: Option<Snowflake>,
+}
+
+/// `referenced_message` has three states that matter: absent when Discord
+/// did not resolve it, null when the original was deleted.
+#[derive(Clone, Debug, Default)]
+pub enum Referenced {
+    #[default]
+    Unresolved,
+    Deleted,
+    Message(Box<Message>),
+}
+
+fn referenced<'de, D: Deserializer<'de>>(d: D) -> Result<Referenced, D::Error> {
+    Ok(match Option::<Box<Message>>::deserialize(d)? {
+        Some(message) => Referenced::Message(message),
+        None => Referenced::Deleted,
+    })
 }
 
 #[cfg(test)]
@@ -377,5 +433,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!((m.id, m.author.display_name()), (Snowflake(100), "alice"));
+        assert!(m.reply_to().is_none());
+    }
+
+    #[test]
+    fn replies() {
+        let reply = |referenced: &str| -> Message {
+            serde_json::from_str(&format!(
+                r#"{{"id":"101","channel_id":"11","author":{{"id":"5","username":"a"}},"timestamp":"t","type":19,
+                    "message_reference":{{"message_id":"100","channel_id":"11"}}{referenced}}}"#
+            ))
+            .unwrap()
+        };
+        let resolved = reply(
+            r#","referenced_message":{"id":"100","channel_id":"11","author":{"id":"6","username":"b"},"timestamp":"t"}"#,
+        );
+        assert_eq!(resolved.reply_to(), Some(Snowflake(100)));
+        assert!(matches!(&resolved.referenced_message, Referenced::Message(m) if m.author.username == "b"));
+        assert!(matches!(reply(r#","referenced_message":null"#).referenced_message, Referenced::Deleted));
+        assert!(matches!(reply("").referenced_message, Referenced::Unresolved));
+
+        // A forward also carries a reference, but is not a reply.
+        let forward: Message = serde_json::from_str(
+            r#"{"id":"102","channel_id":"11","author":{"id":"5","username":"a"},"timestamp":"t","type":0,
+                "message_reference":{"type":1,"message_id":"100","channel_id":"12"}}"#,
+        )
+        .unwrap();
+        assert!(forward.reply_to().is_none());
+        assert!(forward.is_replyable() && resolved.is_replyable());
+        let pin: Message = serde_json::from_str(
+            r#"{"id":"103","channel_id":"11","author":{"id":"5","username":"a"},"timestamp":"t","type":6}"#,
+        )
+        .unwrap();
+        assert!(!pin.is_replyable());
     }
 }

@@ -65,7 +65,7 @@ pub enum Event {
     PrivateChannelUpdate(Channel),
     /// A DM or group DM was closed, or we left the group.
     PrivateChannelDelete(Snowflake),
-    MessageCreate(Message),
+    MessageCreate(Box<Message>),
     /// An edit. `content` is absent for embed-only updates, which we ignore.
     MessageUpdate {
         id: Snowflake,
@@ -504,7 +504,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
             }
         }
         "MESSAGE_CREATE" => match serde_json::from_value(data) {
-            Ok(message) => Event::MessageCreate(message),
+            Ok(message) => Event::MessageCreate(Box::new(message)),
             Err(e) => return eprintln!("gateway: bad MESSAGE_CREATE: {e}"),
         },
         // Partial: only id and channel_id are guaranteed; content is present on
