@@ -47,14 +47,16 @@ window.neucord { background: transparent; color: #DBDEE1; font-size: 15px; }
 .chat-header { padding: 12px 16px; font-weight: 700; color: #F2F3F5; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
 /* Rows carry no padding of their own, so a collapsed blocked message takes no space. */
 listview.messages, listview.messages > row { background: none; padding: 0; }
-.message       { padding: 4px 50px 4px 18px; }
+/* The right padding leaves room for the hover Reply button (28px plus the
+   row's 16px gap), so text is as wide with or without it. */
+.message       { padding: 4px 6px 4px 18px; }
 .message.first { padding-top: 16px; }
 .blocked-bar   { margin: 4px 50px 4px 74px; color: #949BA4; font-size: 13px; border-spacing: 8px; }
 .message:hover { background: rgba(0, 0, 0, 0.08); }
 .message.replying  { background: rgba(88, 101, 242, 0.10); box-shadow: inset 2px 0 #5865F2; }
 .message.highlight { background: rgba(250, 166, 26, 0.12); box-shadow: inset 2px 0 #FAA61A; transition: background 300ms; }
 /* Hover actions take their space always, so rows don't reflow on hover. */
-.message .message-action { opacity: 0; min-width: 28px; min-height: 28px; padding: 0; margin-right: -40px; }
+.message .message-action { opacity: 0; min-width: 28px; min-height: 28px; padding: 0; }
 .message:hover .message-action { opacity: 1; }
 .avatar { min-width: 40px; min-height: 40px; border-radius: 20px; font-weight: 700; color: #1E1F22; }
 .channel.dm { padding: 6px 8px; }
@@ -158,3 +160,19 @@ textview.composer-input, textview.composer-input text { background: none; color:
 
 /* Inline image attachments */
 .attachment-image { border-radius: 8px; margin-top: 4px; background: rgba(0,0,0,0.2); }
+
+/* Embeds. The colour bar is drawn, since each embed picks its own. */
+.embed { margin-top: 4px; border-radius: 4px; background: rgba(0, 0, 0, 0.22); }
+.embed-body { padding: 8px 16px 12px 12px; }
+.embed-provider { color: #B5BAC1; font-size: 12px; }
+.embed-author { color: #F2F3F5; font-size: 14px; font-weight: 600; }
+.embed-author-icon { border-radius: 12px; }
+.embed-title { color: #F2F3F5; font-weight: 600; }
+.embed-description { color: #DBDEE1; font-size: 14px; }
+.embed-field-name { color: #F2F3F5; font-size: 14px; font-weight: 600; }
+.embed-footer { color: #B5BAC1; font-size: 12px; }
+.embed-footer-icon { border-radius: 10px; }
+.embed-media { border-radius: 8px; margin-top: 4px; background: rgba(0, 0, 0, 0.2); }
+.embed-play { min-width: 48px; min-height: 48px; }
+.spoiler-cover { margin-top: 4px; padding: 24px 40px; border-radius: 8px; background: #17181B; color: #DBDEE1; font-weight: 700; }
+.spoiler-cover:hover { background: #232428; }

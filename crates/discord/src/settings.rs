@@ -1,5 +1,6 @@
-//! The account's client settings that Neucord honours. So far: server
-//! folders, which also define the order of servers in the rail.
+//! The account's client settings that Neucord honours: server folders
+//! (which also define the order of servers in the rail) and how media and
+//! embeds show.
 //!
 //! They come as JSON in READY's `user_settings` (and in USER_SETTINGS_UPDATE)
 //! while the gateway capabilities are 0. Newer clients get the same data
@@ -42,6 +43,66 @@ pub fn guild_folders(settings: &Value) -> Option<Vec<GuildFolder>> {
             })
             .collect(),
     )
+}
+
+/// The "Chat" settings for embeds and media. Discord's defaults are all on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MediaSettings {
+    /// Show embeds and link previews at all.
+    pub render_embeds: bool,
+    /// Show images and videos inside embeds.
+    pub inline_embed_media: bool,
+    /// Show image attachments inline.
+    pub inline_attachment_media: bool,
+    /// Play GIFs without hovering them.
+    pub gif_auto_play: bool,
+}
+
+impl Default for MediaSettings {
+    fn default() -> Self {
+        MediaSettings {
+            render_embeds: true,
+            inline_embed_media: true,
+            inline_attachment_media: true,
+            gif_auto_play: true,
+        }
+    }
+}
+
+/// The media settings a settings object (READY's `user_settings`, or a
+/// partial USER_SETTINGS_UPDATE) mentions; the rest are `None`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MediaPatch {
+    pub render_embeds: Option<bool>,
+    pub inline_embed_media: Option<bool>,
+    pub inline_attachment_media: Option<bool>,
+    pub gif_auto_play: Option<bool>,
+}
+
+impl MediaPatch {
+    pub fn from_settings(settings: &Value) -> Self {
+        let flag = |key: &str| settings.get(key).and_then(Value::as_bool);
+        MediaPatch {
+            render_embeds: flag("render_embeds"),
+            inline_embed_media: flag("inline_embed_media"),
+            inline_attachment_media: flag("inline_attachment_media"),
+            gif_auto_play: flag("gif_auto_play"),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl MediaSettings {
+    pub fn apply(&mut self, patch: MediaPatch) {
+        let set = |slot: &mut bool, value: Option<bool>| *slot = value.unwrap_or(*slot);
+        set(&mut self.render_embeds, patch.render_embeds);
+        set(&mut self.inline_embed_media, patch.inline_embed_media);
+        set(&mut self.inline_attachment_media, patch.inline_attachment_media);
+        set(&mut self.gif_auto_play, patch.gif_auto_play);
+    }
 }
 
 /// What the rail shows, top to bottom.
@@ -116,6 +177,16 @@ mod tests {
                 RailEntry::Guild(Snowflake(2)),
             ]
         );
+    }
+
+    #[test]
+    fn media_settings_patch() {
+        let mut media = MediaSettings::default();
+        let patch = MediaPatch::from_settings(&json!({"gif_auto_play": false, "theme": "dark"}));
+        assert!(!patch.is_empty());
+        media.apply(patch);
+        assert_eq!(media, MediaSettings { gif_auto_play: false, ..MediaSettings::default() });
+        assert!(MediaPatch::from_settings(&json!({"guild_folders": []})).is_empty());
     }
 
     #[test]

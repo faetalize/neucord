@@ -208,7 +208,12 @@ impl<'a> Parser<'a> {
             }
             // Bare URL.
             if rest.starts_with("http://") || rest.starts_with("https://") {
-                let len = url_len(rest);
+                // Inside a span, the URL ends where the span does: Discord
+                // reads `||https://a.com||` as a spoilered link.
+                let mut len = url_len(rest);
+                if let Some(end) = close.and_then(|close| rest[..len].find(close)) {
+                    len = end;
+                }
                 flush(&mut text, &mut spans);
                 let url = rest[..len].to_string();
                 spans.push(Span::Link { url: url.clone(), children: vec![Span::Text(url)] });
@@ -351,6 +356,9 @@ mod tests {
         assert_eq!(parse("__u__"), vec![Span::Styled(Style::Underline, vec![text("u")])]);
         assert_eq!(parse("~~s~~"), vec![Span::Styled(Style::Strikethrough, vec![text("s")])]);
         assert_eq!(parse("||spoiler||"), vec![Span::Styled(Style::Spoiler, vec![text("spoiler")])]);
+        let link = |url: &str| Span::Link { url: url.into(), children: vec![text(url)] };
+        assert_eq!(parse("||https://a.com||"), vec![Span::Styled(Style::Spoiler, vec![link("https://a.com")])]);
+        assert_eq!(parse("https://a.com/x||y"), vec![link("https://a.com/x||y")], "only a span's own close ends a URL");
     }
 
     #[test]

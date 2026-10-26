@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use discord::notifications::{NotificationSettings, Place};
 use discord::read_state::ReadStates;
 use discord::relationships::Relationships;
-use discord::settings::{GuildFolder, RailEntry};
+use discord::settings::{GuildFolder, MediaSettings, RailEntry};
 use discord::{Channel, Gateway, Guild, Rest, Resume, Snowflake, User};
 use gtk::glib;
 
@@ -58,6 +58,8 @@ pub(super) struct State {
     pub(super) fetched_users: std::collections::HashSet<u64>,
     pub(super) read: ReadStates,
     pub(super) notifications: NotificationSettings,
+    /// How embeds and media show.
+    pub(super) media: MediaSettings,
     /// Acks waiting to be sent: channel → newest message read.
     pub(super) pending_acks: HashMap<Snowflake, Snowflake>,
 }

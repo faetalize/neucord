@@ -13,6 +13,7 @@ use gtk::prelude::*;
 
 /// Names we can resolve while rendering, gathered from the message and the
 /// open guild. Missing ids fall back to a readable placeholder.
+#[derive(Clone)]
 pub struct Names {
     pub users: HashMap<u64, String>,
     pub channels: HashMap<u64, String>,

@@ -4,11 +4,12 @@
 use std::rc::Rc;
 
 use discord::rest::Page;
-use discord::{Message, Referenced, Snowflake, User};
+use discord::{Message, MessageEdit, Referenced, Snowflake, User};
 use gtk::prelude::*;
 use gtk::{gio, glib};
 
 use super::App;
+use super::embeds::{behind_spoiler, embed_widget, fitted_picture};
 use super::state::now_unix;
 use super::widgets::{avatar_widget, palette_index};
 use crate::render::Names;
@@ -183,28 +184,21 @@ impl App {
         adjustment.value() + adjustment.page_size() >= adjustment.upper() - 80.0
     }
 
-    pub(super) fn on_message_update(
-        &self,
-        id: Snowflake,
-        channel_id: Snowflake,
-        content: Option<String>,
-        edited: bool,
-    ) {
-        // Embed-only edits carry no content; nothing to re-render yet.
-        let Some(content) = content else { return };
-        let Some(store) = self.timelines.borrow().get(channel_id).map(|t| t.store.clone()) else { return };
+    pub(super) fn on_message_update(&self, edit: MessageEdit) {
+        let Some(store) = self.timelines.borrow().get(edit.channel_id).map(|t| t.store.clone()) else { return };
+        let (id, content) = (edit.id, edit.content.clone());
         if let Some((position, mut message)) = timelines::find(&store, id) {
-            message.content = content.clone();
-            if edited && message.edited_timestamp.is_none() {
-                message.edited_timestamp = Some(String::new());
-            }
+            edit.apply(&mut message);
             store.splice(position, 1, &[timelines::boxed(message)]);
         }
-        timelines::update_replies(&store, id, |original| {
-            if let Referenced::Message(original) = original {
-                original.content = content.clone();
-            }
-        });
+        // Replies show the start of what they answer; keep it current.
+        if let Some(content) = content {
+            timelines::update_replies(&store, id, |original| {
+                if let Referenced::Message(original) = original {
+                    original.content = content.clone();
+                }
+            });
+        }
     }
 
     pub(super) fn on_message_delete(&self, id: Snowflake, channel_id: Snowflake) {
@@ -761,15 +755,25 @@ impl App {
             header.append(&gtk::Label::builder().label(time).css_classes(["time"]).build());
             body.append(&header);
         }
+        let media = self.state.borrow().media;
         let edited = message.edited_timestamp.is_some();
-        if !message.content.is_empty() {
+        let embeds = discord::embed::visible(message, &media);
+        if discord::embed::hides_content(&message.content, &embeds, media.inline_embed_media) {
+            // A bare GIF or image link: the media below stands for it.
+        } else if !message.content.is_empty() {
             body.append(&render::render(&discord::markup::parse(&message.content), &names, edited));
         } else if edited {
             body.append(&render::render(&[], &names, edited));
         }
-        for attachment in &message.attachments {
-            if attachment.is_image() {
-                body.append(&image_attachment(attachment, &self.images));
+        for attachment in message.attachments.iter().filter(|a| !a.is_hidden()) {
+            if attachment.is_image() && media.inline_attachment_media {
+                let autoplay = media.gif_auto_play;
+                if attachment.is_spoiler() {
+                    let (attachment, images) = (attachment.clone(), self.images.clone());
+                    body.append(&behind_spoiler(move || image_attachment(&attachment, &images, autoplay)));
+                } else {
+                    body.append(&image_attachment(attachment, &self.images, autoplay));
+                }
                 continue;
             }
             let markup = format!(
@@ -780,6 +784,16 @@ impl App {
             body.append(
                 &gtk::Label::builder().use_markup(true).label(markup).xalign(0.0).css_classes(["attachment"]).build(),
             );
+        }
+        // A link in a spoiler covers all the message's embeds, as in Discord.
+        let spoilered = discord::embed::has_spoilered_link(&message.content);
+        for embed in embeds {
+            if spoilered {
+                let (names, images) = (names.clone(), self.images.clone());
+                body.append(&behind_spoiler(move || embed_widget(&embed, &names, Some(&images), &media)));
+            } else {
+                body.append(&embed_widget(&embed, &names, Some(&self.images), &media));
+            }
         }
         main.append(&body);
 
@@ -887,26 +901,14 @@ impl App {
 }
 
 /// An inline image attachment, scaled to fit a reasonable box.
-fn image_attachment(attachment: &discord::Attachment, images: &crate::images::Images) -> gtk::Widget {
-    const MAX_W: f64 = 400.0;
-    const MAX_H: f64 = 300.0;
-    let (mut w, mut h) = match (attachment.width, attachment.height) {
-        (Some(w), Some(h)) if w > 0 && h > 0 => (w as f64, h as f64),
-        _ => (MAX_W, MAX_H),
-    };
-    let scale = (MAX_W / w).min(MAX_H / h).min(1.0);
-    w *= scale;
-    h *= scale;
-    let animated = attachment.content_type.as_deref() == Some("image/gif")
-        || attachment.url.split('?').next().is_some_and(|u| u.ends_with(".gif"));
-    let picture = gtk::Picture::builder()
-        .width_request(w as i32)
-        .height_request(h as i32)
-        .halign(gtk::Align::Start)
-        .content_fit(gtk::ContentFit::Contain)
-        .overflow(gtk::Overflow::Hidden)
-        .css_classes(["attachment-image"])
-        .build();
-    images.set(&picture, &attachment.url, animated);
+fn image_attachment(attachment: &discord::Attachment, images: &crate::images::Images, autoplay: bool) -> gtk::Widget {
+    // The official client's box for a single image attachment.
+    const MAX_W: f64 = 550.0;
+    const MAX_H: f64 = 350.0;
+    let picture = fitted_picture(attachment.width, attachment.height, MAX_W, MAX_H);
+    picture.set_css_classes(&["attachment-image"]);
+    // Through the media proxy when we can, which sends it at the size shown.
+    let url = attachment.proxy_url.as_deref().unwrap_or(&attachment.url);
+    images.set_sized(&picture, url, attachment.width.zip(attachment.height), autoplay && attachment.is_animated());
     picture.upcast()
 }
