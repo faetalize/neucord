@@ -18,8 +18,12 @@ use crate::images::Images;
 use crate::render::{self, Names};
 use crate::timelines::{self, Timelines};
 
-/// Messages per history request (Discord's maximum).
-const PAGE: u8 = 100;
+/// Messages fetched when a channel opens: enough to fill the view, small so
+/// the channel appears fast. Also what a channel keeps once we leave it.
+const FIRST_PAGE: u8 = 40;
+/// Messages per scrollback request (Discord's maximum): these load in the
+/// background, so bigger pages just mean fewer round trips.
+const OLDER_PAGE: u8 = 100;
 /// Start fetching older messages this many screens before reaching the top,
 /// so they are usually in place before the user gets there.
 const PREFETCH_SCREENS: f64 = 3.0;
@@ -1177,8 +1181,9 @@ impl App {
     }
 
     fn select_channel(self: &Rc<Self>, id: Snowflake) {
-        let (title, rest) = {
+        let (title, rest, left) = {
             let mut state = self.state.borrow_mut();
+            let left = state.channel.filter(|&c| c != id);
             state.channel = Some(id);
             let title = match state.private_channels.iter().find(|c| c.id == id) {
                 Some(dm) if dm.kind == discord::ChannelKind::Dm => format!("@ {}", dm.title()),
@@ -1194,8 +1199,15 @@ impl App {
                     format!("# {name}")
                 }
             };
-            (title, state.rest.clone())
+            (title, state.rest.clone(), left)
         };
+        // The channel we left keeps only its newest messages: live events keep
+        // those current, and coming back refetches the newest page anyway.
+        if let Some(left) = left
+            && let Some(timeline) = self.timelines.borrow_mut().get_mut(left)
+        {
+            timelines::keep_newest(timeline, FIRST_PAGE as u32);
+        }
         self.rebuild_sidebar();
         self.header.set_label(&title);
         self.composer_error.set_visible(false);
@@ -1209,11 +1221,11 @@ impl App {
         let Some(rest) = rest else { return };
         let this = self.clone();
         glib::spawn_future_local(async move {
-            let result = rest.messages(id, PAGE, None).await;
+            let result = rest.messages(id, FIRST_PAGE, None).await;
             match result {
                 Ok(page) => {
                     this.learn_messages(&page);
-                    let full = page.len() == PAGE as usize;
+                    let full = page.len() == FIRST_PAGE as usize;
                     let open = this.state.borrow().channel == Some(id);
                     let at_bottom = !open || this.at_bottom();
                     let replaced = timelines::merge_newest(&store, page);
@@ -1278,7 +1290,7 @@ impl App {
         let Some(rest) = self.state.borrow().rest.clone() else { return };
         let this = self.clone();
         glib::spawn_future_local(async move {
-            let result = rest.messages(channel, PAGE, Some(before)).await;
+            let result = rest.messages(channel, OLDER_PAGE, Some(before)).await;
             let still_cached = this.timelines.borrow().get(channel).is_some_and(|t| t.store == store);
             if let Some(timeline) = this.timelines.borrow_mut().get_mut(channel) {
                 timeline.loading_older = false;
@@ -1290,7 +1302,7 @@ impl App {
                 // Only prepend if the store still starts where we asked from;
                 // a merge that replaced it would make this page a gap.
                 Ok(page) if timelines::oldest_id(&store) == Some(before) => {
-                    if page.len() < PAGE as usize
+                    if page.len() < OLDER_PAGE as usize
                         && let Some(timeline) = this.timelines.borrow_mut().get_mut(channel)
                     {
                         timeline.complete = true;

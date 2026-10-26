@@ -121,6 +121,16 @@ pub fn merge_newest(store: &gio::ListStore, page: Vec<Message>) -> bool {
     }
 }
 
+/// Drop all but the newest `keep` messages. The timeline can page back again,
+/// and an older page still in flight will no longer line up, so it is dropped.
+pub fn keep_newest(timeline: &mut Timeline, keep: u32) {
+    let n = timeline.store.n_items();
+    if n > keep {
+        timeline.store.splice(0, n - keep, &[] as &[glib::BoxedAnyObject]);
+        timeline.complete = false;
+    }
+}
+
 /// Prepend an older page (oldest first).
 pub fn prepend(store: &gio::ListStore, page: Vec<Message>) {
     let count = page.len() as u32;
@@ -189,6 +199,21 @@ mod tests {
         prepend(&store, vec![msg(3, ""), msg(4, "")]);
         assert_eq!(ids(&store), [3, 4, 5, 6]);
         assert_eq!(oldest_id(&store), Some(Snowflake(3)));
+    }
+
+    #[test]
+    fn leaving_a_channel_keeps_the_newest() {
+        let mut timelines = Timelines::default();
+        let timeline = timelines.open(Snowflake(1));
+        for id in 1..=10 {
+            timeline.store.append(&boxed(msg(id, "")));
+        }
+        timeline.complete = true;
+        keep_newest(timeline, 4);
+        assert_eq!(ids(&timeline.store), [7, 8, 9, 10]);
+        assert!(!timeline.complete, "trimmed history can be paged again");
+        keep_newest(timeline, 40);
+        assert_eq!(timeline.store.n_items(), 4, "nothing to trim");
     }
 
     #[test]
