@@ -101,11 +101,7 @@ impl App {
                 .css_classes(["guild-name"])
                 .build(),
             channels: gtk::Box::new(gtk::Orientation::Vertical, 0),
-            me_label: gtk::Label::builder()
-                .xalign(0.0)
-                .ellipsize(pango::EllipsizeMode::End)
-                .css_classes(["me"])
-                .build(),
+            me_label: gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(pango::EllipsizeMode::End).build(),
             header: gtk::Label::builder().xalign(0.0).css_classes(["chat-header"]).build(),
             content: gtk::Stack::new(),
             friends: friends::FriendsPage::new(),
@@ -296,7 +292,19 @@ impl App {
                 .child(&self.channels)
                 .build(),
         );
-        sidebar.append(&self.me_label);
+        let me = gtk::Box::builder().spacing(4).css_classes(["me"]).build();
+        me.append(&self.me_label);
+        let menu = gio::Menu::new();
+        menu.append(Some("Log out"), Some("win.logout"));
+        me.append(
+            &gtk::MenuButton::builder()
+                .icon_name("open-menu-symbolic")
+                .tooltip_text("Account")
+                .menu_model(&menu)
+                .css_classes(["flat"])
+                .build(),
+        );
+        sidebar.append(&me);
         root.append(&sidebar);
 
         self.content.add_named(&self.build_chat(), Some("chat"));

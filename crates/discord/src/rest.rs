@@ -146,6 +146,15 @@ impl Rest {
         Ok(())
     }
 
+    /// End this token's session, which also takes it off the account's
+    /// Devices list. The token stops working.
+    pub async fn logout(&self) -> Result<(), Error> {
+        // Push-notification registrations, which only the mobile clients have.
+        let body = json!({ "provider": null, "token": null, "voip_provider": null, "voip_token": null });
+        let _: serde_json::Value = self.request(call!(LOGOUT), Some(body)).await?;
+        Ok(())
+    }
+
     async fn request<T: DeserializeOwned>(&self, call: Call, body: Option<serde_json::Value>) -> Result<T, Error> {
         let (status, response) = self.send(call, body).await?;
         match status {
