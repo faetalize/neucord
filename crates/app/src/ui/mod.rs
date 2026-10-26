@@ -1,0 +1,308 @@
+//! The window and everything in it, plus the glue between the UI and the
+//! `discord` crate. All of this runs on the GTK main thread.
+
+mod chat;
+mod composer;
+mod connection;
+mod notify;
+mod rail;
+mod sidebar;
+mod state;
+mod unread;
+mod widgets;
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use discord::{Snowflake, session};
+use gtk::prelude::*;
+use gtk::{gio, glib, pango};
+
+use crate::images::Images;
+use crate::timelines::Timelines;
+
+pub struct App {
+    window: gtk::ApplicationWindow,
+    stack: gtk::Stack,
+    loading_label: gtk::Label,
+    token_entry: gtk::PasswordEntry,
+    login_error: gtk::Label,
+    rail: gtk::Box,
+    guild_name: gtk::Label,
+    channels: gtk::Box,
+    me_label: gtk::Label,
+    header: gtk::Label,
+    /// The list's model; its inner store is the open channel's timeline.
+    selection: gtk::NoSelection,
+    /// Shown when no channel is open.
+    blank: gio::ListStore,
+    timelines: RefCell<Timelines>,
+    list: gtk::ListView,
+    scroller: gtk::ScrolledWindow,
+    composer: gtk::TextView,
+    composer_error: gtk::Label,
+    images: Images,
+    /// Mention autocomplete, anchored to the composer.
+    mention_popover: gtk::Popover,
+    mention_list: gtk::ListBox,
+    /// `@`-token start (char offset) and the candidates shown, row-aligned.
+    mention: RefCell<composer::MentionCtx>,
+    state: RefCell<state::State>,
+    /// What the rail and sidebar last drew, so badge refreshes can skip
+    /// rebuilding them when nothing visible changed.
+    drawn: RefCell<(Vec<u64>, Vec<u64>)>,
+    /// Per-folder colours, regenerated with the rail.
+    folder_css: gtk::CssProvider,
+}
+
+impl App {
+    pub fn new(app: &gtk::Application) -> Rc<Self> {
+        let window = gtk::ApplicationWindow::builder()
+            .application(app)
+            .title("Neucord")
+            .default_width(1200)
+            .default_height(800)
+            // niri draws the window border; client-side chrome comes later.
+            .decorated(false)
+            .build();
+        window.add_css_class("neucord");
+
+        let blank = gio::ListStore::new::<glib::BoxedAnyObject>();
+        let selection = gtk::NoSelection::new(Some(blank.clone()));
+        let this = Rc::new(App {
+            window,
+            stack: gtk::Stack::builder().transition_type(gtk::StackTransitionType::Crossfade).build(),
+            loading_label: gtk::Label::new(None),
+            token_entry: gtk::PasswordEntry::builder().show_peek_icon(true).hexpand(true).build(),
+            login_error: gtk::Label::builder().wrap(true).xalign(0.0).visible(false).css_classes(["error"]).build(),
+            rail: gtk::Box::new(gtk::Orientation::Vertical, 0),
+            guild_name: gtk::Label::builder()
+                .xalign(0.0)
+                .ellipsize(pango::EllipsizeMode::End)
+                .css_classes(["guild-name"])
+                .build(),
+            channels: gtk::Box::new(gtk::Orientation::Vertical, 0),
+            me_label: gtk::Label::builder()
+                .xalign(0.0)
+                .ellipsize(pango::EllipsizeMode::End)
+                .css_classes(["me"])
+                .build(),
+            header: gtk::Label::builder().xalign(0.0).css_classes(["chat-header"]).build(),
+            list: gtk::ListView::new(Some(selection.clone()), None::<gtk::ListItemFactory>),
+            selection,
+            blank,
+            timelines: RefCell::default(),
+            scroller: gtk::ScrolledWindow::builder().vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build(),
+            composer: gtk::TextView::builder()
+                .wrap_mode(gtk::WrapMode::WordChar)
+                .accepts_tab(false)
+                .hexpand(true)
+                .css_classes(["composer-input"])
+                .build(),
+            composer_error: gtk::Label::builder()
+                .xalign(0.0)
+                .wrap(true)
+                .visible(false)
+                .css_classes(["composer-error"])
+                .build(),
+            images: Images::new(),
+            mention_popover: gtk::Popover::builder()
+                .autohide(false)
+                .has_arrow(false)
+                .position(gtk::PositionType::Top)
+                .css_classes(["mention-popover"])
+                .build(),
+            mention_list: gtk::ListBox::builder().css_classes(["mention-list"]).build(),
+            mention: RefCell::default(),
+            state: RefCell::default(),
+            drawn: RefCell::default(),
+            folder_css: gtk::CssProvider::new(),
+        });
+        gtk::style_context_add_provider_for_display(
+            &WidgetExt::display(&this.window),
+            &this.folder_css,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+        this.build();
+
+        // Handlers hold weak references, so something must own the App while
+        // the window is open. Released on close, which breaks the cycle.
+        let keep_alive = RefCell::new(Some(this.clone()));
+        let popover = this.mention_popover.clone();
+        this.window.connect_close_request(move |_| {
+            // A manually-parented popover must be unparented before teardown.
+            popover.unparent();
+            keep_alive.take();
+            glib::Propagation::Proceed
+        });
+        this
+    }
+
+    pub fn start(self: &Rc<Self>) {
+        self.window.present();
+        self.show_loading("Checking keyring…");
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            match session::load_token().await {
+                Ok(Some(token)) => this.connect(token, true),
+                Ok(None) => this.show_login(None),
+                Err(e) => this.show_login(Some(&e.to_string())),
+            }
+        });
+    }
+
+    fn build(self: &Rc<Self>) {
+        self.stack.add_named(&self.build_loading(), Some("loading"));
+        self.stack.add_named(&self.build_login(), Some("login"));
+        self.stack.add_named(&self.build_main(), Some("main"));
+        self.window.set_child(Some(&self.stack));
+
+        let logout = gio::ActionEntry::builder("logout")
+            .activate({
+                let this = Rc::downgrade(self);
+                move |_: &gtk::ApplicationWindow, _, _| {
+                    if let Some(this) = this.upgrade() {
+                        this.logout();
+                    }
+                }
+            })
+            .build();
+        self.window.add_action_entries([logout]);
+        if let Some(app) = self.window.application() {
+            app.set_accels_for_action("win.logout", &["<Control><Shift>l"]);
+            // Notification clicks arrive as an app action, with the channel id.
+            let open = gio::ActionEntry::builder("open-channel")
+                .parameter_type(Some(glib::VariantTy::STRING))
+                .activate({
+                    let this = Rc::downgrade(self);
+                    move |_: &gtk::Application, _, parameter| {
+                        let id = parameter.and_then(|p| p.str()).and_then(|s| s.parse().ok());
+                        if let (Some(this), Some(id)) = (this.upgrade(), id) {
+                            this.open_channel(Snowflake(id));
+                        }
+                    }
+                })
+                .build();
+            app.add_action_entries([open]);
+        }
+
+        // Coming back to the window reads the open channel.
+        self.window.connect_is_active_notify({
+            let this = Rc::downgrade(self);
+            move |window| {
+                let Some(this) = this.upgrade() else { return };
+                let channel = this.state.borrow().channel;
+                if let (true, Some(channel)) = (window.is_active(), channel) {
+                    this.mark_read(channel);
+                }
+            }
+        });
+    }
+
+    fn build_loading(&self) -> gtk::Widget {
+        let page = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(16)
+            .valign(gtk::Align::Center)
+            .halign(gtk::Align::Center)
+            .build();
+        page.append(&gtk::Spinner::builder().spinning(true).width_request(32).height_request(32).build());
+        self.loading_label.add_css_class("hint");
+        page.append(&self.loading_label);
+        wrap_page(&page)
+    }
+
+    fn build_login(self: &Rc<Self>) -> gtk::Widget {
+        let card = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(12)
+            .valign(gtk::Align::Center)
+            .halign(gtk::Align::Center)
+            .css_classes(["card"])
+            .build();
+        card.append(&gtk::Label::builder().label("Neucord").xalign(0.0).css_classes(["card-title"]).build());
+        card.append(
+            &gtk::Label::builder()
+                .label("Paste your Discord token to log in. It is kept in your desktop keyring, never in a file.")
+                .wrap(true)
+                .max_width_chars(44)
+                .xalign(0.0)
+                .css_classes(["hint"])
+                .build(),
+        );
+        card.append(&self.token_entry);
+        card.append(&self.login_error);
+        let button = gtk::Button::builder().label("Log in").css_classes(["login-button"]).build();
+        card.append(&button);
+
+        let login = {
+            let this = Rc::downgrade(self);
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.login();
+                }
+            }
+        };
+        self.token_entry.connect_activate({
+            let login = login.clone();
+            move |_| login()
+        });
+        button.connect_clicked(move |_| login());
+        wrap_page(&card)
+    }
+
+    fn build_main(self: &Rc<Self>) -> gtk::Widget {
+        let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+
+        // Server rail
+        let rail_scroller = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::External)
+            .child(&self.rail)
+            .width_request(72)
+            .css_classes(["rail"])
+            .build();
+        self.rail.set_margin_top(8);
+        root.append(&rail_scroller);
+
+        // Channel sidebar
+        let sidebar = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .width_request(240)
+            .css_classes(["sidebar"])
+            .build();
+        sidebar.append(&self.guild_name);
+        sidebar.append(
+            &gtk::ScrolledWindow::builder()
+                .vexpand(true)
+                .hscrollbar_policy(gtk::PolicyType::Never)
+                .child(&self.channels)
+                .build(),
+        );
+        sidebar.append(&self.me_label);
+        root.append(&sidebar);
+
+        root.append(&self.build_chat());
+        root.upcast()
+    }
+
+    fn show_loading(&self, text: &str) {
+        self.loading_label.set_label(text);
+        self.stack.set_visible_child_name("loading");
+    }
+
+    fn show_login(&self, error: Option<&str>) {
+        self.login_error.set_label(error.unwrap_or_default());
+        self.login_error.set_visible(error.is_some());
+        self.stack.set_visible_child_name("login");
+        self.token_entry.grab_focus();
+    }
+}
+
+fn wrap_page(child: &impl IsA<gtk::Widget>) -> gtk::Widget {
+    let page = gtk::Box::builder().css_classes(["page"]).build();
+    child.set_hexpand(true);
+    child.set_vexpand(true);
+    page.append(child);
+    page.upcast()
+}

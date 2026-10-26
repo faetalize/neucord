@@ -215,7 +215,10 @@ mod tests {
     use discord::markup::parse;
 
     fn names() -> Names {
-        Names { users: HashMap::from([(5, "alice".to_string())]), channels: HashMap::from([(9, "general".to_string())]) }
+        Names {
+            users: HashMap::from([(5, "alice".to_string())]),
+            channels: HashMap::from([(9, "general".to_string())]),
+        }
     }
 
     /// Exercises the inline markup path without needing a GTK display.
