@@ -69,7 +69,7 @@ impl Relationship {
             kind: Kind::from_raw(value["type"].as_u64()? as u8),
             nickname: value["nickname"].as_str().filter(|n| !n.is_empty()).map(String::from),
             spam: value["is_spam_request"].as_bool() == Some(true),
-            stranger: value["stranger_request"].as_bool() == Some(true),
+            stranger: value["is_stranger_request"].as_bool() == Some(true),
         })
     }
 }
@@ -263,7 +263,7 @@ mod tests {
                 {"id": "1", "type": 1, "nickname": null, "user": {"id": "1", "username": "bea"}},
                 {"id": "2", "type": 1, "nickname": "Al", "user": {"id": "2", "username": "zed"}},
                 {"id": "3", "type": 2, "user": {"id": "3", "username": "troll"}},
-                {"id": "4", "type": 3, "stranger_request": true, "user": {"id": "4", "username": "new"}},
+                {"id": "4", "type": 3, "is_stranger_request": true, "user": {"id": "4", "username": "new"}},
                 {"id": "5", "type": 3, "is_spam_request": true, "user": {"id": "5", "username": "spam"}},
                 {"id": "6", "type": 4, "user_id": "6"},
                 {"id": "7", "type": 5, "user": {"id": "7", "username": "implicit"}},
