@@ -121,9 +121,6 @@ impl App {
 
         let left = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).width_request(320).build();
         left.append(&gtk::Label::builder().label("Neucord").xalign(0.0).css_classes(["card-title"]).build());
-        left.append(&hint(
-            "Log in with your Discord account. Neucord keeps the login in your desktop keyring, never in a file.",
-        ));
 
         let password_form = gtk::Box::new(gtk::Orientation::Vertical, 6);
         password_form.append(&field_label("Email or phone number"));
@@ -496,10 +493,6 @@ impl App {
             }
         });
     }
-}
-
-fn hint(text: &str) -> gtk::Label {
-    gtk::Label::builder().label(text).wrap(true).max_width_chars(40).xalign(0.0).css_classes(["hint"]).build()
 }
 
 fn field_label(text: &str) -> gtk::Label {
