@@ -77,10 +77,10 @@ impl Rest {
         });
         if let Some(reply) = reply {
             body["message_reference"] = json!({ "message_id": reply.to, "channel_id": channel });
-            if !reply.ping {
-                // Mentions in the text still ping; only the reply itself doesn't.
-                body["allowed_mentions"] = json!({ "parse": ["users", "roles", "everyone"], "replied_user": false });
-            }
+            // `replied_user` only means something inside `allowed_mentions`, so
+            // always send both. `parse` keeps every mention in the text working,
+            // as when `allowed_mentions` is left out.
+            body["allowed_mentions"] = json!({ "parse": ["users", "roles", "everyone"], "replied_user": reply.ping });
         }
         self.request("POST", &format!("/channels/{channel}/messages"), Some(body)).await
     }
