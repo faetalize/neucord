@@ -238,10 +238,13 @@ pub struct Attachment {
 }
 
 impl Attachment {
-    /// Whether this attachment is an image we can show inline.
+    /// Whether this attachment is an image we can show inline. Videos have
+    /// dimensions too, so dimensions only decide when the type is unknown.
     pub fn is_image(&self) -> bool {
-        self.content_type.as_deref().is_some_and(|t| t.starts_with("image/"))
-            || (self.width.is_some() && self.height.is_some())
+        match self.content_type.as_deref() {
+            Some(t) => t.starts_with("image/"),
+            None => self.width.is_some() && self.height.is_some(),
+        }
     }
 }
 
@@ -328,6 +331,17 @@ mod tests {
 
         let named: Channel = serde_json::from_str(r#"{"id":"22","type":3,"name":"crew","recipients":[]}"#).unwrap();
         assert_eq!(named.title(), "crew");
+    }
+
+    #[test]
+    fn videos_are_not_images() {
+        let attachment = |extra: &str| -> Attachment {
+            serde_json::from_str(&format!(r#"{{"id":"1","filename":"f","url":"u"{extra}}}"#)).unwrap()
+        };
+        assert!(!attachment(r#","content_type":"video/quicktime","width":640,"height":480"#).is_image());
+        assert!(attachment(r#","content_type":"image/png","width":640,"height":480"#).is_image());
+        assert!(attachment(r#","width":640,"height":480"#).is_image(), "no type: dimensions decide");
+        assert!(!attachment("").is_image());
     }
 
     #[test]
