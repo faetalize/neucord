@@ -1,70 +1,40 @@
 // What Neucord depends on, read from its own source so there is no list to
-// keep: REST calls are `(method, path)` pairs in crates/discord, gateway
-// events are the event names gateway.rs matches on.
-//
-// Calls are recognised by how they are written, so a new way of writing one
-// would go unseen. Every HTTP method literal must therefore be accounted
-// for; the rest are reported, and `compare` fails on them.
+// keep: REST calls are the table in crates/discord/src/endpoints.rs, which
+// every request goes through; gateway events are the event names gateway.rs
+// matches on.
 
-import { readdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-async function rustFiles(dir) {
-  const out = [];
-  for (const entry of await readdir(dir, { withFileTypes: true })) {
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...(await rustFiles(path)));
-    else if (entry.name.endsWith(".rs")) out.push(path);
-  }
-  return out;
-}
-
-/** `/channels/{channel}/messages?limit={limit}` → `/channels/{}/messages`. */
+/** `/channels/{channel}/messages?limit={0}` → `/channels/{}/messages`. */
 export function normalizePath(path) {
   return path.split("?")[0].replace(/\{[^}]*\}/g, "{}");
 }
 
 export async function neucordUses(repo) {
   const src = join(repo, "crates", "discord", "src");
-  const rest = new Map();
-  const events = new Set();
-  const unaccounted = [];
-  for (const file of await rustFiles(src)) {
-    const code = await readFile(file, "utf8");
-    const seen = new Set();
-    const add = (method, path) => rest.set(`${method} ${normalizePath(path)}`, { method, path: normalizePath(path) });
-    const PATH = String.raw`&?(?:format!\(\s*)?"(\/[^"]*)"`;
-    // ("PUT", &format!("/users/@me/relationships/{user}")) and plain literals.
-    for (const m of code.matchAll(new RegExp(String.raw`"(GET|POST|PUT|PATCH|DELETE)"\s*,\s*` + PATH, "g"))) {
-      add(m[1], m[2]);
-      seen.add(m.index);
-    }
-    // Helpers that fix the method and take the path: `fn auth(&self, path: &str, …)`
-    // calling `self.send("POST", path, …)`, used as `self.auth("/auth/login", …)`.
-    for (const m of code.matchAll(/fn (\w+)\(&self,\s*(\w+): &str[\s\S]*?\n    \}/g)) {
-      const found = m[0].match(new RegExp(String.raw`"(GET|POST|PUT|PATCH|DELETE)"\s*,\s*${m[2]}\b`));
-      const method = found?.[1];
-      if (!method) continue;
-      seen.add(m.index + found.index);
-      for (const call of code.matchAll(new RegExp(String.raw`self\.${m[1]}\(\s*` + PATH, "g"))) add(method, call[1]);
-    }
-    for (const m of code.matchAll(/"(GET|POST|PUT|PATCH|DELETE)"/g)) {
-      // Websocket handshakes (gateway, remote auth) are GETs, not REST calls.
-      if (seen.has(m.index) || code.slice(m.index, m.index + 400).includes("websocket_connect")) continue;
-      const line = code.slice(0, m.index).split("\n").length;
-      const place = `${file.slice(repo.length + 1)}:${line}: ${code.split("\n")[line - 1].trim()}`;
-      if (!unaccounted.includes(place)) unaccounted.push(place);
-    }
-    if (file.endsWith("gateway.rs")) {
-      // Match arms: `"MESSAGE_CREATE" =>` and `"READY" | "RESUMED"`.
-      for (const m of code.matchAll(/"([A-Z][A-Z0-9_]*)"\s*(?==>|\|)/g)) events.add(m[1]);
-      for (const m of code.matchAll(/\|\s*"([A-Z][A-Z0-9_]*)"/g)) events.add(m[1]);
-    }
+  const table = await readFile(join(src, "endpoints.rs"), "utf8");
+  const rest = [];
+  const unread = [];
+  // `pub(crate) const SEND_MESSAGE: Endpoint = Endpoint::post("/channels/{channel}/messages");`
+  const ROW = /^pub\(crate\) const (\w+): Endpoint = Endpoint::(get|post|put|patch|delete)\("(\/[^"]*)"\);$/;
+  for (const line of table.split("\n").filter((line) => line.startsWith("pub(crate) const"))) {
+    const [, name, method, path] = line.match(ROW) ?? [];
+    if (name) rest.push({ name, method: method.toUpperCase(), path: normalizePath(path) });
+    else unread.push(line);
   }
+  if (rest.length === 0) unread.push("no endpoints in endpoints.rs");
+
+  const events = new Set();
+  const gateway = await readFile(join(src, "gateway.rs"), "utf8");
+  // Match arms: `"MESSAGE_CREATE" =>` and `"READY" | "RESUMED"`.
+  for (const m of gateway.matchAll(/"([A-Z][A-Z0-9_]*)"\s*(?==>|\|)/g)) events.add(m[1]);
+  for (const m of gateway.matchAll(/\|\s*"([A-Z][A-Z0-9_]*)"/g)) events.add(m[1]);
+
   return {
-    rest: [...rest.values()].sort((a, b) => `${a.path} ${a.method}`.localeCompare(`${b.path} ${b.method}`)),
+    rest: rest.sort((a, b) => `${a.path} ${a.method}`.localeCompare(`${b.path} ${b.method}`)),
     events: [...events].sort(),
-    unaccounted,
+    unread,
   };
 }
 
