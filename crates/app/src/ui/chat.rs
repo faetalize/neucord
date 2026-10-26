@@ -9,7 +9,7 @@ use gtk::prelude::*;
 use gtk::{gio, glib};
 
 use super::App;
-use super::embeds::{self, embed_widget, fitted_picture};
+use super::embeds::{self, behind_spoiler, embed_widget, fitted_picture};
 use super::state::now_unix;
 use super::widgets::{avatar_widget, palette_index};
 use crate::images::Images;
@@ -462,7 +462,7 @@ pub(super) fn fill_message_row(
     let edited = message.edited_timestamp.is_some();
     let embeds = discord::embed::visible(&message.embeds, message.embeds_suppressed(), media);
     let show_embed_media = media.inline_embed_media && images.is_some();
-    if discord::embed::hides_content(&message.content, embeds, show_embed_media) {
+    if discord::embed::hides_content(&message.content, &embeds, show_embed_media) {
         // A bare GIF or image link: the media below stands for it.
     } else if !message.content.is_empty() {
         body.append(&render::render(&discord::markup::parse(&message.content), names, edited));
@@ -472,6 +472,10 @@ pub(super) fn fill_message_row(
     let attachment_images = images.filter(|_| media.inline_attachment_media);
     for attachment in &message.attachments {
         match (attachment.is_image(), attachment_images) {
+            (true, Some(images)) if attachment.is_spoiler() => {
+                let (attachment, images, autoplay) = (attachment.clone(), images.clone(), media.gif_auto_play);
+                body.append(&behind_spoiler(move || image_attachment(&attachment, &images, autoplay)));
+            }
             (true, Some(images)) => body.append(&image_attachment(attachment, images, media.gif_auto_play)),
             _ => {
                 let markup = format!(
@@ -490,8 +494,14 @@ pub(super) fn fill_message_row(
             }
         }
     }
+    let spoilered = discord::embed::spoilered_links(&message.content);
     for embed in embeds {
-        body.append(&embed_widget(embed, names, images, media));
+        if embed.url.as_ref().is_some_and(|url| spoilered.contains(url)) {
+            let (embed, names, images, media) = (embed.clone(), names.clone(), images.cloned(), *media);
+            body.append(&behind_spoiler(move || embed_widget(&embed, &names, images.as_ref(), &media)));
+        } else {
+            body.append(&embed_widget(embed, names, images, media));
+        }
     }
     row.append(&body);
 }
@@ -500,9 +510,8 @@ pub(super) fn fill_message_row(
 pub(super) fn image_attachment(attachment: &discord::Attachment, images: &Images, autoplay: bool) -> gtk::Widget {
     let picture = fitted_picture(attachment.width, attachment.height, embeds::MAX_W, embeds::MAX_H);
     picture.set_css_classes(&["attachment-image"]);
-    let animated = attachment.content_type.as_deref() == Some("image/gif") || embeds::is_gif(&attachment.url);
     // Through the media proxy when we can, which sends it at the size shown.
     let url = attachment.proxy_url.as_deref().unwrap_or(&attachment.url);
-    images.set_sized(&picture, url, attachment.width.zip(attachment.height), autoplay && animated);
+    images.set_sized(&picture, url, attachment.width.zip(attachment.height), autoplay && attachment.is_animated());
     picture.upcast()
 }
