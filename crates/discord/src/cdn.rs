@@ -43,10 +43,7 @@ mod tests {
 
     #[test]
     fn static_avatar() {
-        assert_eq!(
-            avatar_url(5, "abcdef", 64),
-            "https://cdn.discordapp.com/avatars/5/abcdef.png?size=64"
-        );
+        assert_eq!(avatar_url(5, "abcdef", 64), "https://cdn.discordapp.com/avatars/5/abcdef.png?size=64");
     }
 
     #[test]

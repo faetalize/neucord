@@ -25,11 +25,15 @@ impl Rest {
 
     /// Up to `limit` (max 100) messages, oldest first: the newest ones, or with
     /// `before` the ones just older than that message (for scrollback).
-    pub async fn messages(&self, channel: Snowflake, limit: u8, before: Option<Snowflake>) -> Result<Vec<Message>, Error> {
+    pub async fn messages(
+        &self,
+        channel: Snowflake,
+        limit: u8,
+        before: Option<Snowflake>,
+    ) -> Result<Vec<Message>, Error> {
         let before = before.map(|id| format!("&before={id}")).unwrap_or_default();
-        let mut messages: Vec<Message> = self
-            .request("GET", &format!("/channels/{channel}/messages?limit={limit}{before}"), None)
-            .await?;
+        let mut messages: Vec<Message> =
+            self.request("GET", &format!("/channels/{channel}/messages?limit={limit}{before}"), None).await?;
         messages.reverse();
         Ok(messages)
     }
@@ -65,8 +69,7 @@ impl Rest {
     ) -> Result<T, Error> {
         let mut retries = 0;
         loop {
-            let msg = soup::Message::new(method, &format!("{}{path}", identity::API_BASE))
-                .expect("API URL is valid");
+            let msg = soup::Message::new(method, &format!("{}{path}", identity::API_BASE)).expect("API URL is valid");
             let headers = msg.request_headers().expect("request has headers");
             headers.replace("Authorization", &self.token);
             headers.replace("X-Discord-Locale", "en-US");
@@ -75,11 +78,8 @@ impl Rest {
                 msg.set_request_body_from_bytes(Some("application/json"), Some(&bytes));
             }
 
-            let response = self
-                .session
-                .send_and_read_future(&msg, glib::Priority::DEFAULT)
-                .await
-                .map_err(Error::Transport)?;
+            let response =
+                self.session.send_and_read_future(&msg, glib::Priority::DEFAULT).await.map_err(Error::Transport)?;
             let status = msg.status_code();
             match status {
                 200..=299 => return Ok(serde_json::from_slice(&response)?),

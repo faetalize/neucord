@@ -2,8 +2,8 @@
 //! `discord` crate. All of this runs on the GTK main thread.
 
 use std::cell::RefCell;
-use std::fmt::Write as _;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -120,7 +120,8 @@ impl State {
         for channel in guild.channels.iter().filter(|c| c.kind.is_text()) {
             mentions += self.read.mentions(channel.id);
             if !unread && !guild_muted && self.is_unread(channel) {
-                let place = Place { guild: Some(guild.id), guild_default: 0, channel: channel.id, parent: channel.parent_id };
+                let place =
+                    Place { guild: Some(guild.id), guild_default: 0, channel: channel.id, parent: channel.parent_id };
                 unread = !self.notifications.channel_muted(&place, now);
             }
         }
@@ -151,7 +152,9 @@ impl State {
             None => {
                 let mut dms: Vec<&Channel> = self.private_channels.iter().collect();
                 dms.sort_by_key(|c| std::cmp::Reverse(c.activity()));
-                dms.into_iter().map(|c| (Place { guild: None, guild_default: 0, channel: c.id, parent: None }, c)).collect()
+                dms.into_iter()
+                    .map(|c| (Place { guild: None, guild_default: 0, channel: c.id, parent: None }, c))
+                    .collect()
             }
         };
         for (place, channel) in channels {
@@ -247,9 +250,17 @@ impl App {
             token_entry: gtk::PasswordEntry::builder().show_peek_icon(true).hexpand(true).build(),
             login_error: gtk::Label::builder().wrap(true).xalign(0.0).visible(false).css_classes(["error"]).build(),
             rail: gtk::Box::new(gtk::Orientation::Vertical, 0),
-            guild_name: gtk::Label::builder().xalign(0.0).ellipsize(pango::EllipsizeMode::End).css_classes(["guild-name"]).build(),
+            guild_name: gtk::Label::builder()
+                .xalign(0.0)
+                .ellipsize(pango::EllipsizeMode::End)
+                .css_classes(["guild-name"])
+                .build(),
             channels: gtk::Box::new(gtk::Orientation::Vertical, 0),
-            me_label: gtk::Label::builder().xalign(0.0).ellipsize(pango::EllipsizeMode::End).css_classes(["me"]).build(),
+            me_label: gtk::Label::builder()
+                .xalign(0.0)
+                .ellipsize(pango::EllipsizeMode::End)
+                .css_classes(["me"])
+                .build(),
             header: gtk::Label::builder().xalign(0.0).css_classes(["chat-header"]).build(),
             list: gtk::ListView::new(Some(selection.clone()), None::<gtk::ListItemFactory>),
             selection,
@@ -262,9 +273,19 @@ impl App {
                 .hexpand(true)
                 .css_classes(["composer-input"])
                 .build(),
-            composer_error: gtk::Label::builder().xalign(0.0).wrap(true).visible(false).css_classes(["composer-error"]).build(),
+            composer_error: gtk::Label::builder()
+                .xalign(0.0)
+                .wrap(true)
+                .visible(false)
+                .css_classes(["composer-error"])
+                .build(),
             images: Images::new(),
-            mention_popover: gtk::Popover::builder().autohide(false).has_arrow(false).position(gtk::PositionType::Top).css_classes(["mention-popover"]).build(),
+            mention_popover: gtk::Popover::builder()
+                .autohide(false)
+                .has_arrow(false)
+                .position(gtk::PositionType::Top)
+                .css_classes(["mention-popover"])
+                .build(),
             mention_list: gtk::ListBox::builder().css_classes(["mention-list"]).build(),
             mention: RefCell::default(),
             state: RefCell::default(),
@@ -438,11 +459,8 @@ impl App {
         root.append(&sidebar);
 
         // Chat
-        let chat = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .hexpand(true)
-            .css_classes(["chat"])
-            .build();
+        let chat =
+            gtk::Box::builder().orientation(gtk::Orientation::Vertical).hexpand(true).css_classes(["chat"]).build();
         chat.append(&self.header);
 
         let factory = gtk::SignalListItemFactory::new();
@@ -845,8 +863,8 @@ impl App {
                     .map(|g| g.my_roles.clone())
                     .unwrap_or_default();
                 let is_dm = place.is_some_and(|p| p.guild.is_none());
-                let mentioned = is_dm
-                    || state.me().is_some_and(|me| state.notifications.mentions_me(&message, me, &roles));
+                let mentioned =
+                    is_dm || state.me().is_some_and(|me| state.notifications.mentions_me(&message, me, &roles));
                 state.read.on_message(channel, mentioned);
                 place.filter(|p| state.notifications.should_notify(p, mentioned, now_unix()))
             }
@@ -923,7 +941,8 @@ impl App {
         let state = self.state.borrow();
         self.drawn.borrow_mut().0 = state.rail_signature();
 
-        let home = gtk::Button::builder().label("DM").tooltip_text("Direct Messages").css_classes(["guild", "home"]).build();
+        let home =
+            gtk::Button::builder().label("DM").tooltip_text("Direct Messages").css_classes(["guild", "home"]).build();
         if state.guild.is_none() {
             home.add_css_class("active");
         }
@@ -982,7 +1001,10 @@ impl App {
                         }
                     });
                     if expanded {
-                        let group = gtk::Box::builder().orientation(gtk::Orientation::Vertical).css_classes(["folder-open"]).build();
+                        let group = gtk::Box::builder()
+                            .orientation(gtk::Orientation::Vertical)
+                            .css_classes(["folder-open"])
+                            .build();
                         group.append(&rail_item(&button, false, 0));
                         for member in &members {
                             group.append(&self.guild_item(&state, member));
@@ -1018,7 +1040,11 @@ impl App {
                     .content_fit(gtk::ContentFit::Cover)
                     .overflow(gtk::Overflow::Hidden)
                     .build();
-                self.images.set(&picture, &discord::cdn::guild_icon_url(guild.id.0, hash, 64), discord::cdn::is_animated(hash));
+                self.images.set(
+                    &picture,
+                    &discord::cdn::guild_icon_url(guild.id.0, hash, 64),
+                    discord::cdn::is_animated(hash),
+                );
                 button.set_child(Some(&picture));
             }
             None => button.set_label(&initials(&guild.name)),
@@ -1238,7 +1264,8 @@ impl App {
                             timeline.complete = false;
                         }
                     }
-                    if let Some(newest) = store.n_items().checked_sub(1).and_then(|p| timelines::message_at(&store, p)) {
+                    if let Some(newest) = store.n_items().checked_sub(1).and_then(|p| timelines::message_at(&store, p))
+                    {
                         // READY's newest-message ids can be stale; history is not.
                         this.state.borrow_mut().bump_last_message(id, newest.id);
                     }
@@ -1418,7 +1445,8 @@ impl App {
         };
         let notification = gio::Notification::new(&title);
         notification.set_body(Some(&body));
-        notification.set_default_action_and_target_value("app.open-channel", Some(&place.channel.to_string().to_variant()));
+        notification
+            .set_default_action_and_target_value("app.open-channel", Some(&place.channel.to_string().to_variant()));
         app.send_notification(Some(&notification_id(place.channel)), &notification);
     }
 
@@ -1458,11 +1486,7 @@ impl App {
             .guild
             .and_then(|id| state.guilds.iter().find(|g| g.id == id))
             .map(|guild| {
-                guild
-                    .channels
-                    .iter()
-                    .filter_map(|c| c.name.as_ref().map(|name| (c.id.0, name.clone())))
-                    .collect()
+                guild.channels.iter().filter_map(|c| c.name.as_ref().map(|name| (c.id.0, name.clone()))).collect()
             })
             .unwrap_or_default();
         Names { users, channels }
@@ -1661,7 +1685,8 @@ fn badge(count: u32) -> Option<gtk::Label> {
 fn rail_item(button: &gtk::Button, unread: bool, mentions: u32) -> gtk::Widget {
     let overlay = gtk::Overlay::builder().child(button).build();
     if unread {
-        let pill = gtk::Box::builder().halign(gtk::Align::Start).valign(gtk::Align::Center).css_classes(["rail-pill"]).build();
+        let pill =
+            gtk::Box::builder().halign(gtk::Align::Start).valign(gtk::Align::Center).css_classes(["rail-pill"]).build();
         pill.set_can_target(false);
         overlay.add_overlay(&pill);
     }
@@ -1830,7 +1855,14 @@ fn fill_message_row(
                     glib::markup_escape_text(&attachment.url),
                     glib::markup_escape_text(&attachment.filename)
                 );
-                body.append(&gtk::Label::builder().use_markup(true).label(markup).xalign(0.0).css_classes(["attachment"]).build());
+                body.append(
+                    &gtk::Label::builder()
+                        .use_markup(true)
+                        .label(markup)
+                        .xalign(0.0)
+                        .css_classes(["attachment"])
+                        .build(),
+                );
             }
         }
     }

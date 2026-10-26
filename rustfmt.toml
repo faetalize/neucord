@@ -1,0 +1,3 @@
+# Long lines read fine in this codebase; keep short constructs on one line.
+max_width = 120
+use_small_heuristics = "Max"

@@ -55,7 +55,8 @@ pub enum RailEntry {
 /// don't mention (recent joins) first, then the folders in order. Folders
 /// drop servers we are no longer in, and vanish if none are left.
 pub fn rail_layout(folders: &[GuildFolder], guilds: &[Snowflake]) -> Vec<RailEntry> {
-    let placed: std::collections::HashSet<Snowflake> = folders.iter().flat_map(|f| f.guild_ids.iter().copied()).collect();
+    let placed: std::collections::HashSet<Snowflake> =
+        folders.iter().flat_map(|f| f.guild_ids.iter().copied()).collect();
     let mut entries: Vec<RailEntry> =
         guilds.iter().filter(|g| !placed.contains(g)).map(|g| RailEntry::Guild(*g)).collect();
     for folder in folders {
@@ -63,12 +64,9 @@ pub fn rail_layout(folders: &[GuildFolder], guilds: &[Snowflake]) -> Vec<RailEnt
         match (folder.id, present.as_slice()) {
             (_, []) => {}
             (None, members) => entries.extend(members.iter().map(|g| RailEntry::Guild(*g))),
-            (Some(id), _) => entries.push(RailEntry::Folder {
-                id,
-                name: folder.name.clone(),
-                color: folder.color,
-                guilds: present,
-            }),
+            (Some(id), _) => {
+                entries.push(RailEntry::Folder { id, name: folder.name.clone(), color: folder.color, guilds: present })
+            }
         }
     }
     entries
@@ -92,7 +90,10 @@ mod tests {
         ]}))
         .unwrap();
         assert_eq!(folders[0], GuildFolder { id: None, name: None, color: None, guild_ids: ids(&[1]) });
-        assert_eq!((folders[1].id, folders[1].name.as_deref(), folders[1].color), (Some(77), Some("Friends"), Some(0x5865F2)));
+        assert_eq!(
+            (folders[1].id, folders[1].name.as_deref(), folders[1].color),
+            (Some(77), Some("Friends"), Some(0x5865F2))
+        );
         assert_eq!((folders[2].id, folders[2].name.as_deref()), (Some(78), None));
         assert!(guild_folders(&json!({"theme": "dark"})).is_none(), "update without folders");
     }
@@ -119,6 +120,9 @@ mod tests {
 
     #[test]
     fn no_folders_keeps_guild_order() {
-        assert_eq!(rail_layout(&[], &ids(&[2, 1])), vec![RailEntry::Guild(Snowflake(2)), RailEntry::Guild(Snowflake(1))]);
+        assert_eq!(
+            rail_layout(&[], &ids(&[2, 1])),
+            vec![RailEntry::Guild(Snowflake(2)), RailEntry::Guild(Snowflake(1))]
+        );
     }
 }

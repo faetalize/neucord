@@ -106,12 +106,7 @@ impl Images {
             return Some(glib::Bytes::from_owned(data));
         }
         let message = soup::Message::new("GET", url).ok()?;
-        let bytes = self
-            .0
-            .session
-            .send_and_read_future(&message, glib::Priority::DEFAULT)
-            .await
-            .ok()?;
+        let bytes = self.0.session.send_and_read_future(&message, glib::Priority::DEFAULT).await.ok()?;
         if !(200..=299).contains(&message.status_code()) || bytes.is_empty() {
             return None;
         }

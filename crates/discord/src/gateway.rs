@@ -61,13 +61,27 @@ pub enum Event {
     PrivateChannelDelete(Snowflake),
     MessageCreate(Message),
     /// An edit. `content` is absent for embed-only updates, which we ignore.
-    MessageUpdate { id: Snowflake, channel_id: Snowflake, content: Option<String>, edited: bool },
-    MessageDelete { id: Snowflake, channel_id: Snowflake },
+    MessageUpdate {
+        id: Snowflake,
+        channel_id: Snowflake,
+        content: Option<String>,
+        edited: bool,
+    },
+    MessageDelete {
+        id: Snowflake,
+        channel_id: Snowflake,
+    },
     /// One of our clients (maybe this one) marked `channel_id` read up to `message_id`.
-    MessageAck { channel_id: Snowflake, message_id: Snowflake },
+    MessageAck {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+    },
     /// Newest message ids for some of a server's channels, sent after READY
     /// because READY's can be stale.
-    ChannelUnreadUpdate { guild_id: Snowflake, channels: Vec<(Snowflake, Snowflake)> },
+    ChannelUnreadUpdate {
+        guild_id: Snowflake,
+        channels: Vec<(Snowflake, Snowflake)>,
+    },
     /// Our notification settings for one server (or DMs) changed.
     NotificationSettingsUpdate(GuildSettings),
     /// The user rearranged servers or folders (on any client).
@@ -76,7 +90,11 @@ pub enum Event {
     Resumed,
     /// The connection is gone. `code` is the websocket close code. `resume`
     /// is set when the session survives and can be resumed.
-    Closed { code: u16, reason: String, resume: Option<Resume> },
+    Closed {
+        code: u16,
+        reason: String,
+        resume: Option<Resume>,
+    },
 }
 
 impl Event {
@@ -397,8 +415,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
         }
         "RESUMED" => Event::Resumed,
         "MESSAGE_ACK" => {
-            let (Some(channel_id), Some(message_id)) =
-                (parse_id(&data["channel_id"]), parse_id(&data["message_id"]))
+            let (Some(channel_id), Some(message_id)) = (parse_id(&data["channel_id"]), parse_id(&data["message_id"]))
             else {
                 return;
             };
@@ -424,9 +441,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
             Err(e) => return eprintln!("gateway: bad USER_GUILD_SETTINGS_UPDATE: {e}"),
         },
         "CHANNEL_CREATE" => match Channel::deserialize(&data) {
-            Ok(channel) if channel.kind.is_private() && !is_hidden_dm(&data) => {
-                Event::PrivateChannelCreate(channel)
-            }
+            Ok(channel) if channel.kind.is_private() && !is_hidden_dm(&data) => Event::PrivateChannelCreate(channel),
             Ok(_) => return,
             Err(e) => return eprintln!("gateway: bad CHANNEL_CREATE: {e}"),
         },
@@ -451,9 +466,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
         // Partial: only id and channel_id are guaranteed; content is present on
         // a text edit, absent on embed-only updates.
         "MESSAGE_UPDATE" => {
-            let (Some(id), Some(channel_id)) =
-                (parse_id(&data["id"]), parse_id(&data["channel_id"]))
-            else {
+            let (Some(id), Some(channel_id)) = (parse_id(&data["id"]), parse_id(&data["channel_id"])) else {
                 return;
             };
             Event::MessageUpdate {
@@ -464,9 +477,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
             }
         }
         "MESSAGE_DELETE" => {
-            let (Some(id), Some(channel_id)) =
-                (parse_id(&data["id"]), parse_id(&data["channel_id"]))
-            else {
+            let (Some(id), Some(channel_id)) = (parse_id(&data["id"]), parse_id(&data["channel_id"])) else {
                 return;
             };
             Event::MessageDelete { id, channel_id }

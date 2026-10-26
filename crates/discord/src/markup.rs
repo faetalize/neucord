@@ -13,9 +13,15 @@ pub enum Span {
     /// Inline `code`; no nested styling.
     Code(String),
     /// A fenced or indented code block, with an optional language.
-    CodeBlock { lang: Option<String>, code: String },
+    CodeBlock {
+        lang: Option<String>,
+        code: String,
+    },
     /// `[label](url)` or a bare URL. `label` already parsed into spans.
-    Link { url: String, children: Vec<Span> },
+    Link {
+        url: String,
+        children: Vec<Span>,
+    },
     /// One `<...>` entity, resolved to display text by the UI.
     Entity(Entity),
     /// A hard line break.
@@ -39,9 +45,16 @@ pub enum Entity {
     Channel(u64),
     Role(u64),
     /// `<:name:id>` or animated `<a:name:id>`.
-    Emoji { name: String, id: u64, animated: bool },
+    Emoji {
+        name: String,
+        id: u64,
+        animated: bool,
+    },
     /// `<t:unix[:style]>`.
-    Timestamp { unix: i64, style: char },
+    Timestamp {
+        unix: i64,
+        style: char,
+    },
 }
 
 /// Parse a whole message body.
@@ -156,9 +169,10 @@ impl<'a> Parser<'a> {
         while self.pos < self.bytes.len() {
             let rest = &self.input[self.pos..];
             if let Some(close) = close
-                && rest.starts_with(close) {
-                    break;
-                }
+                && rest.starts_with(close)
+            {
+                break;
+            }
 
             if rest.starts_with('\n') {
                 flush(&mut text, &mut spans);
@@ -168,27 +182,30 @@ impl<'a> Parser<'a> {
             }
             // Inline code: run of backticks, closed by the same run.
             if rest.starts_with('`')
-                && let Some(span) = self.take_inline_code() {
-                    flush(&mut text, &mut spans);
-                    spans.push(span);
-                    continue;
-                }
+                && let Some(span) = self.take_inline_code()
+            {
+                flush(&mut text, &mut spans);
+                spans.push(span);
+                continue;
+            }
             // `<...>` entity.
             if rest.starts_with('<')
-                && let Some((entity, len)) = parse_entity(rest) {
-                    flush(&mut text, &mut spans);
-                    spans.push(Span::Entity(entity));
-                    self.pos += len;
-                    continue;
-                }
+                && let Some((entity, len)) = parse_entity(rest)
+            {
+                flush(&mut text, &mut spans);
+                spans.push(Span::Entity(entity));
+                self.pos += len;
+                continue;
+            }
             // `[label](url)` link.
             if rest.starts_with('[')
-                && let Some((span, len)) = self.take_link() {
-                    flush(&mut text, &mut spans);
-                    spans.push(span);
-                    self.pos += len;
-                    continue;
-                }
+                && let Some((span, len)) = self.take_link()
+            {
+                flush(&mut text, &mut spans);
+                spans.push(span);
+                self.pos += len;
+                continue;
+            }
             // Bare URL.
             if rest.starts_with("http://") || rest.starts_with("https://") {
                 let len = url_len(rest);
@@ -356,20 +373,14 @@ mod tests {
 
     #[test]
     fn code_block_without_lang() {
-        assert_eq!(
-            parse("```\njust text\n```"),
-            vec![Span::CodeBlock { lang: None, code: "just text".into() }]
-        );
+        assert_eq!(parse("```\njust text\n```"), vec![Span::CodeBlock { lang: None, code: "just text".into() }]);
     }
 
     #[test]
     fn quote_consumes_consecutive_lines() {
         assert_eq!(
             parse("> a\n> b\nc"),
-            vec![
-                Span::Styled(Style::Quote, vec![text("a"), Span::Break, text("b")]),
-                text("c"),
-            ]
+            vec![Span::Styled(Style::Quote, vec![text("a"), Span::Break, text("b")]), text("c"),]
         );
     }
 
@@ -387,7 +398,10 @@ mod tests {
             parse("<a:spin:43>"),
             vec![Span::Entity(Entity::Emoji { name: "spin".into(), id: 43, animated: true })]
         );
-        assert_eq!(parse("<t:1700000000:R>"), vec![Span::Entity(Entity::Timestamp { unix: 1_700_000_000, style: 'R' })]);
+        assert_eq!(
+            parse("<t:1700000000:R>"),
+            vec![Span::Entity(Entity::Timestamp { unix: 1_700_000_000, style: 'R' })]
+        );
     }
 
     #[test]

@@ -4,15 +4,15 @@
 //! Depends on GLib/GIO/libsoup (it runs on the GLib main loop) but never on
 //! GTK, so the UI can be replaced without touching this crate.
 
-mod identity;
-pub mod gateway;
-pub mod model;
-pub mod rest;
-pub mod session;
 pub mod cdn;
+pub mod gateway;
+mod identity;
 pub mod markup;
+pub mod model;
 pub mod notifications;
 pub mod read_state;
+pub mod rest;
+pub mod session;
 pub mod settings;
 pub mod shape;
 

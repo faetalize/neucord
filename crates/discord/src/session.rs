@@ -12,11 +12,7 @@ const ATTRIBUTE: &str = "account";
 const ACCOUNT: &str = "default";
 
 fn schema() -> Schema {
-    Schema::new(
-        SCHEMA_NAME,
-        SchemaFlags::NONE,
-        HashMap::from([(ATTRIBUTE, SchemaAttributeType::String)]),
-    )
+    Schema::new(SCHEMA_NAME, SchemaFlags::NONE, HashMap::from([(ATTRIBUTE, SchemaAttributeType::String)]))
 }
 
 fn attributes() -> HashMap<&'static str, &'static str> {

@@ -159,25 +159,17 @@ impl Guild {
     /// category by position, channels by position within it. Returns
     /// `(category name, channels)` groups.
     pub fn sidebar(&self) -> Vec<(Option<&str>, Vec<&Channel>)> {
-        let by_position = |a: &&Channel, b: &&Channel| {
-            (a.position.unwrap_or(0), a.id).cmp(&(b.position.unwrap_or(0), b.id))
-        };
+        let by_position =
+            |a: &&Channel, b: &&Channel| (a.position.unwrap_or(0), a.id).cmp(&(b.position.unwrap_or(0), b.id));
         let text_in = |parent: Option<Snowflake>| {
-            let mut v: Vec<&Channel> = self
-                .channels
-                .iter()
-                .filter(|c| c.kind.is_text() && c.parent_id == parent)
-                .collect();
+            let mut v: Vec<&Channel> =
+                self.channels.iter().filter(|c| c.kind.is_text() && c.parent_id == parent).collect();
             v.sort_by(by_position);
             v
         };
 
         let mut groups = vec![(None, text_in(None))];
-        let mut categories: Vec<&Channel> = self
-            .channels
-            .iter()
-            .filter(|c| c.kind == ChannelKind::Category)
-            .collect();
+        let mut categories: Vec<&Channel> = self.channels.iter().filter(|c| c.kind == ChannelKind::Category).collect();
         categories.sort_by(by_position);
         for category in categories {
             groups.push((category.name.as_deref(), text_in(Some(category.id))));
@@ -307,10 +299,8 @@ mod tests {
 
     #[test]
     fn guild_with_properties() {
-        let g: Guild = serde_json::from_str(
-            r#"{"id":"2","properties":{"name":"New","icon":"abc"},"channels":[]}"#,
-        )
-        .unwrap();
+        let g: Guild =
+            serde_json::from_str(r#"{"id":"2","properties":{"name":"New","icon":"abc"},"channels":[]}"#).unwrap();
         assert_eq!((g.name.as_str(), g.icon.as_deref()), ("New", Some("abc")));
     }
 

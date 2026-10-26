@@ -131,9 +131,7 @@ impl NotificationSettings {
     }
 
     pub fn guild_muted(&self, guild: Snowflake, now_unix: i64) -> bool {
-        self.by_guild
-            .get(&Some(guild))
-            .is_some_and(|s| mute_active(s.muted, s.mute_config.as_ref(), now_unix))
+        self.by_guild.get(&Some(guild)).is_some_and(|s| mute_active(s.muted, s.mute_config.as_ref(), now_unix))
     }
 
     /// The channel itself or its category is muted (not the server).
@@ -212,7 +210,12 @@ mod tests {
     }
 
     fn place(guild: Option<u64>, channel: u64, parent: Option<u64>) -> Place {
-        Place { guild: guild.map(Snowflake), guild_default: 0, channel: Snowflake(channel), parent: parent.map(Snowflake) }
+        Place {
+            guild: guild.map(Snowflake),
+            guild_default: 0,
+            channel: Snowflake(channel),
+            parent: parent.map(Snowflake),
+        }
     }
 
     #[test]
