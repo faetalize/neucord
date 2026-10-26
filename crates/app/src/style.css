@@ -171,3 +171,5 @@ textview.composer-input, textview.composer-input text { background: none; color:
 .embed-footer-icon { border-radius: 10px; }
 .embed-media { border-radius: 8px; margin-top: 4px; background: rgba(0, 0, 0, 0.2); }
 .embed-play { min-width: 48px; min-height: 48px; }
+.spoiler-cover { margin-top: 4px; padding: 24px 40px; border-radius: 8px; background: #17181B; color: #DBDEE1; font-weight: 700; }
+.spoiler-cover:hover { background: #232428; }

@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Deserializer};
 
+use crate::markup::{Span, Style};
 use crate::settings::MediaSettings;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -22,6 +23,8 @@ pub enum EmbedKind {
     Gifv,
     Article,
     Link,
+    /// Poll results, component previews and the like, which need their own
+    /// UI. Not shown.
     Other,
 }
 
@@ -122,6 +125,10 @@ pub struct EmbedMedia {
     pub width: Option<u32>,
     #[serde(default)]
     pub height: Option<u32>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub flags: u64,
 }
 
 /// Something to load through the media proxy and show.
@@ -130,12 +137,21 @@ pub struct Media {
     pub url: String,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// An animated image (a GIF, not a GIF link's video).
+    pub animated: bool,
 }
+
+/// Embed media and attachment flag: an animated image.
+pub(crate) const IS_ANIMATED: u64 = 1 << 5;
 
 impl EmbedMedia {
     fn proxied(&self) -> Option<Media> {
         let url = self.proxy_url.clone().filter(|u| !u.is_empty())?;
-        Some(Media { url, width: self.width, height: self.height })
+        // The flag is newer; older embeds only tell by type or extension.
+        let animated = self.flags & IS_ANIMATED != 0
+            || self.content_type.as_deref() == Some("image/gif")
+            || url.split('?').next().is_some_and(|path| path.to_ascii_lowercase().ends_with(".gif"));
+        Some(Media { url, width: self.width, height: self.height, animated })
     }
 }
 
@@ -195,13 +211,38 @@ impl Embed {
 
 /// The embeds of a message to show, given the viewer's settings and the
 /// message's flags.
-pub fn visible<'a>(embeds: &'a [Embed], suppressed: bool, settings: &MediaSettings) -> &'a [Embed] {
-    if suppressed || !settings.render_embeds { &[] } else { embeds }
+pub fn visible<'a>(embeds: &'a [Embed], suppressed: bool, settings: &MediaSettings) -> Vec<&'a Embed> {
+    if suppressed || !settings.render_embeds {
+        return Vec::new();
+    }
+    embeds.iter().filter(|e| e.kind != EmbedKind::Other).collect()
+}
+
+/// Links the message content puts inside spoilers. As in Discord, their
+/// embeds stay hidden until the reader reveals them.
+pub fn spoilered_links(content: &str) -> Vec<String> {
+    fn walk(spans: &[Span], in_spoiler: bool, out: &mut Vec<String>) {
+        for span in spans {
+            match span {
+                Span::Styled(style, children) => walk(children, in_spoiler || *style == Style::Spoiler, out),
+                Span::Link { url, children } => {
+                    if in_spoiler {
+                        out.push(url.clone());
+                    }
+                    walk(children, in_spoiler, out);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut links = Vec::new();
+    walk(&crate::markup::parse(content), false, &mut links);
+    links
 }
 
 /// Discord hides the text of a message that is nothing but the link of a
 /// bare-media embed (a pasted GIF or image link): the media says it all.
-pub fn hides_content(content: &str, embeds: &[Embed], show_media: bool) -> bool {
+pub fn hides_content(content: &str, embeds: &[&Embed], show_media: bool) -> bool {
     let content = content.trim();
     !content.is_empty() && embeds.iter().any(|e| e.url.as_deref() == Some(content) && e.is_bare_media(show_media))
 }
@@ -234,7 +275,7 @@ mod tests {
     }
 
     fn media(url: &str) -> Media {
-        Media { url: url.into(), width: None, height: None }
+        Media { url: url.into(), width: None, height: None, animated: false }
     }
 
     #[test]
@@ -252,7 +293,7 @@ mod tests {
                 still: Some(media("https://images-ext-1.discordapp.net/x.png")),
             }
         );
-        let embeds = [tenor];
+        let embeds = [&tenor];
         assert!(hides_content(" https://tenor.com/view/x ", &embeds, true));
         assert!(!hides_content("look https://tenor.com/view/x", &embeds, true));
         // Without media there's nothing to stand in for the link.
@@ -284,14 +325,34 @@ mod tests {
             "type": "article", "title": "News", "description": "Words",
             "thumbnail": {"url": "o", "proxy_url": "p", "width": 400, "height": 200}
         }));
-        let thumbnail = Some(Media { url: "p".into(), width: Some(400), height: Some(200) });
+        let thumbnail = Some(Media { url: "p".into(), width: Some(400), height: Some(200), animated: false });
         assert_eq!(article.display(true), Display::Card { media: None, thumbnail });
         assert_eq!(article.display(false), Display::Card { media: None, thumbnail: None });
     }
 
     #[test]
+    fn animation_from_flag_type_or_extension() {
+        let animated =
+            |image: serde_json::Value| match embed(json!({"type": "image", "thumbnail": image})).display(true) {
+                Display::Image(media) => media.animated,
+                other => panic!("{other:?}"),
+            };
+        assert!(animated(json!({"url": "o", "proxy_url": "p.webp", "flags": 32})));
+        assert!(animated(json!({"url": "o", "proxy_url": "p", "content_type": "image/gif"})));
+        assert!(animated(json!({"url": "o", "proxy_url": "https://x/a.GIF?width=1"})));
+        assert!(!animated(json!({"url": "o", "proxy_url": "p.png", "content_type": "image/png"})));
+    }
+
+    #[test]
+    fn spoilered_links_are_found() {
+        assert_eq!(spoilered_links("see ||https://a.com|| and https://b.com"), ["https://a.com"]);
+        assert_eq!(spoilered_links("||**[x](https://c.com)**||"), ["https://c.com"]);
+        assert!(spoilered_links("https://b.com").is_empty());
+    }
+
+    #[test]
     fn settings_and_suppression() {
-        let embeds = vec![Embed::default()];
+        let embeds = vec![Embed::default(), embed(json!({"type": "poll_result"}))];
         let on = MediaSettings::default();
         let off = MediaSettings { render_embeds: false, ..on };
         assert_eq!(visible(&embeds, false, &on).len(), 1);

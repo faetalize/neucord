@@ -255,9 +255,26 @@ pub struct Attachment {
     pub width: Option<u32>,
     #[serde(default)]
     pub height: Option<u32>,
+    #[serde(default)]
+    pub flags: u64,
 }
 
 impl Attachment {
+    const IS_SPOILER: u64 = 1 << 3;
+
+    /// Hidden until the reader reveals it. Older uploads mark it only in the
+    /// file name.
+    pub fn is_spoiler(&self) -> bool {
+        self.flags & Self::IS_SPOILER != 0 || self.filename.starts_with("SPOILER_")
+    }
+
+    /// An animated image (GIF, animated WebP or PNG).
+    pub fn is_animated(&self) -> bool {
+        self.flags & crate::embed::IS_ANIMATED != 0
+            || self.content_type.as_deref() == Some("image/gif")
+            || self.url.split('?').next().is_some_and(|path| path.to_ascii_lowercase().ends_with(".gif"))
+    }
+
     /// Whether this attachment is an image we can show inline. Videos have
     /// dimensions too, so dimensions only decide when the type is unknown.
     pub fn is_image(&self) -> bool {
@@ -469,6 +486,9 @@ mod tests {
         assert!(attachment(r#","content_type":"image/png","width":640,"height":480"#).is_image());
         assert!(attachment(r#","width":640,"height":480"#).is_image(), "no type: dimensions decide");
         assert!(!attachment("").is_image());
+        assert!(attachment(r#","flags":8"#).is_spoiler());
+        assert!(!attachment("").is_spoiler());
+        assert!(attachment(r#","flags":32"#).is_animated());
     }
 
     #[test]

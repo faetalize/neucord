@@ -54,14 +54,9 @@ pub(super) fn fitted_picture(width: Option<u32>, height: Option<u32>, max_w: f64
         .build()
 }
 
-/// Whether a URL (ignoring its query) names a GIF.
-pub(super) fn is_gif(url: &str) -> bool {
-    url.split('?').next().is_some_and(|path| path.to_ascii_lowercase().ends_with(".gif"))
-}
-
 fn image(media: &Media, images: &Images, autoplay: bool, max_w: f64, max_h: f64) -> gtk::Picture {
     let picture = fitted_picture(media.width, media.height, max_w, max_h);
-    images.set_sized(&picture, &media.url, media.width.zip(media.height), autoplay && is_gif(&media.url));
+    images.set_sized(&picture, &media.url, media.width.zip(media.height), autoplay && media.animated);
     picture
 }
 
@@ -162,6 +157,25 @@ fn video(video: &Media, still: Option<&Media>, images: &Images) -> gtk::Widget {
         }
     });
     frame.upcast()
+}
+
+/// A cover that shows what `reveal` builds only once clicked, so spoilered
+/// media isn't even fetched before then.
+pub(super) fn behind_spoiler(reveal: impl Fn() -> gtk::Widget + 'static) -> gtk::Widget {
+    let holder = gtk::Box::builder().halign(gtk::Align::Start).build();
+    let cover =
+        gtk::Button::builder().label("Spoiler").tooltip_text("Show spoiler").css_classes(["spoiler-cover"]).build();
+    cover.connect_clicked({
+        let holder = holder.downgrade();
+        move |cover| {
+            if let Some(holder) = holder.upgrade() {
+                holder.remove(cover);
+                holder.append(&reveal());
+            }
+        }
+    });
+    holder.append(&cover);
+    holder.upcast()
 }
 
 /// A card: colour bar, then provider, author, title, description, fields,
