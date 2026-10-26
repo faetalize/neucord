@@ -46,14 +46,14 @@ impl Endpoint {
         Endpoint { method: "DELETE", path }
     }
 
-    /// The call with every `{name}` in the path filled in; a parameter
-    /// missing or left over is a bug, so it panics.
+    /// The call with every `{name}` in the path filled in, escaped; a
+    /// parameter missing or left over is a bug, so it panics.
     pub(crate) fn call(self, params: &[(&str, &dyn Display)]) -> Call {
         let mut path = self.path.to_owned();
         for (name, value) in params {
             let param = format!("{{{name}}}");
             assert!(path.contains(&param), "{} has no {param}", self.path);
-            path = path.replace(&param, &value.to_string());
+            path = path.replace(&param, &glib::uri_escape_string(value.to_string(), None::<&str>, false));
         }
         assert!(!path.contains('{'), "{} needs more parameters", self.path);
         Call { method: self.method, path }
@@ -93,6 +93,13 @@ mod tests {
         let call = ACK.call(&[("message", &2), ("channel", &1)]);
         assert_eq!((call.method(), call.path()), ("POST", "/channels/1/messages/2/ack"));
         assert_eq!(MESSAGES.call(&[("channel", &1)]).query("limit=50").path(), "/channels/1/messages?limit=50");
+    }
+
+    #[test]
+    fn escapes_values() {
+        // Reactions put emoji in the path: unicode, or `name:id` for custom ones.
+        assert_eq!(USER.call(&[("user", &"🔥")]).path(), "/users/%F0%9F%94%A5");
+        assert_eq!(USER.call(&[("user", &"blob:12/3")]).path(), "/users/blob%3A12%2F3");
     }
 
     #[test]
