@@ -1,0 +1,16 @@
+{
+  "name": "discord-watch",
+  "private": true,
+  "type": "module",
+  "description": "Snapshot what the official Discord client sends and expects, to notice changes that affect Neucord.",
+  "license": "GPL-3.0-or-later",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "acorn": "^8.14.0"
+  },
+  "devDependencies": {
+    "prettier": "^3.4.0"
+  }
+}

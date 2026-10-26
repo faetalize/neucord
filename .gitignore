@@ -1,2 +1,3 @@
 /target
 *.log
+/tools/discord-watch/node_modules
