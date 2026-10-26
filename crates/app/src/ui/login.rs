@@ -3,6 +3,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
 use discord::auth::{Login, Mfa, MfaMethod};
 use discord::remote_auth::{Event, RemoteAuth};
@@ -33,6 +34,8 @@ pub(super) struct Page {
     remote: RefCell<Option<RemoteAuth>>,
     /// Counts QR sessions, so events from a replaced one are dropped.
     session: Cell<u64>,
+    /// QR sessions that failed in a row, for backing off.
+    failures: Cell<u32>,
     mfa: RefCell<Option<(Mfa, MfaMethod)>>,
 }
 
@@ -79,6 +82,7 @@ impl Page {
                 .build(),
             remote: RefCell::default(),
             session: Cell::new(0),
+            failures: Cell::new(0),
             mfa: RefCell::default(),
         }
     }
@@ -179,7 +183,7 @@ impl App {
             .build();
         failed.append(&page.qr_error);
         let retry =
-            gtk::Button::builder().label("Try again").halign(gtk::Align::Center).css_classes(["inline-link"]).build();
+            gtk::Button::builder().label("Try now").halign(gtk::Align::Center).css_classes(["inline-link"]).build();
         failed.append(&retry);
         page.qr.add_named(&failed, Some("failed"));
         right.append(&page.qr);
@@ -430,6 +434,7 @@ impl App {
         let page = &self.login;
         match event {
             Event::Code(url) => {
+                page.failures.set(0);
                 page.qr_code.replace(QrCode::encode_text(&url, QrCodeEcc::Medium).ok());
                 page.qr_area.queue_draw();
                 page.qr.set_visible_child_name("code");
@@ -472,10 +477,24 @@ impl App {
         scanned.append(&other);
     }
 
-    fn qr_failed(&self, error: &Error) {
+    /// Show why, and try again by itself after a while, as Discord's client
+    /// does: 1.5 s, doubling up to 30 s.
+    fn qr_failed(self: &Rc<Self>, error: &Error) {
         self.login.stop_qr();
-        self.login.qr_error.set_label(&format!("QR login failed: {error}"));
+        let session = self.login.session.get();
+        let failures = self.login.failures.get() + 1;
+        self.login.failures.set(failures);
+        let delay = (Duration::from_millis(1500) * 2u32.pow(failures.min(6) - 1)).min(Duration::from_secs(30));
+        self.login.qr_error.set_label(&format!("QR login failed: {error}. Trying again in {}s.", delay.as_secs_f64()));
         self.login.qr.set_visible_child_name("failed");
+        let this = Rc::downgrade(self);
+        glib::timeout_add_local_once(delay, move || {
+            if let Some(this) =
+                this.upgrade().filter(|this| this.login.session.get() == session && this.on_login_page())
+            {
+                this.start_qr();
+            }
+        });
     }
 }
 

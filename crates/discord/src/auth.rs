@@ -84,7 +84,10 @@ impl Rest {
     }
 
     pub async fn verify_mfa(&self, mfa: &Mfa, method: MfaMethod, code: &str) -> Result<String, Error> {
-        let body = json!({ "ticket": mfa.ticket, "login_instance_id": mfa.login_instance_id, "code": code });
+        let mut body = json!({ "ticket": mfa.ticket, "code": code });
+        if let Some(id) = &mfa.login_instance_id {
+            body["login_instance_id"] = id.as_str().into();
+        }
         let response = self.auth(&format!("/auth/mfa/{}", method.path()), body).await?;
         token(&response)
     }
