@@ -2,12 +2,6 @@
 
 Another GTK + Rust Discord client? Daring today, are we...?
 
-Neucord talks to Discord directly and draws everything with native GTK 4
-widgets. There is no web view underneath, so it behaves like a Linux app:
-notifications go through your desktop's notification service, your token
-lives in the system keyring, and the window blurs what's behind it on
-compositors that support it.
-
 > [!WARNING]
 > Neucord is a third-party client. Use it at your own risk.
 
