@@ -9,7 +9,7 @@ use gtk::glib;
 use gtk::prelude::*;
 
 use super::App;
-use super::state::State;
+use super::state::{Page, State};
 
 impl App {
     pub(super) fn login(self: &Rc<Self>) {
@@ -101,7 +101,9 @@ impl App {
             match event {
                 Event::Ready(ready) => self.on_ready(*ready),
                 Event::GuildCreate(guild) => self.on_guild(guild),
-                Event::PrivateChannelCreate(channel) => self.on_private_channel(channel),
+                Event::PrivateChannelCreate(channel) | Event::PrivateChannelUpdate(channel) => {
+                    self.on_private_channel(channel)
+                }
                 Event::PrivateChannelDelete(id) => self.on_private_channel_delete(id),
                 Event::MessageCreate(message) => self.on_message(message),
                 Event::MessageUpdate { id, channel_id, content, edited } => {
@@ -121,6 +123,36 @@ impl App {
                         }
                     }
                     self.refresh_badges();
+                }
+                Event::RelationshipAdd { relationship, notify } => {
+                    self.learn_users(std::iter::once(&relationship.user));
+                    let blocked = relationship.kind == discord::relationships::Kind::Blocked;
+                    let request = notify
+                        .then_some(&relationship)
+                        .filter(|r| r.kind == discord::relationships::Kind::Incoming && !r.spam);
+                    if let Some(request) = request {
+                        self.notify_friend_request(request);
+                    } else {
+                        self.withdraw_friend_request(relationship.user.id);
+                    }
+                    let was_blocked = self.state.borrow().relationships.is_blocked(relationship.user.id);
+                    self.state.borrow_mut().relationships.add(relationship);
+                    self.relationships_changed(blocked != was_blocked);
+                }
+                Event::RelationshipUpdate { user_id, nickname } => {
+                    self.state.borrow_mut().relationships.update(user_id, nickname);
+                    self.relationships_changed(false);
+                }
+                Event::RelationshipRemove(user_id) => {
+                    self.withdraw_friend_request(user_id);
+                    let was_blocked = self.state.borrow().relationships.is_blocked(user_id);
+                    self.state.borrow_mut().relationships.remove(user_id);
+                    self.relationships_changed(was_blocked);
+                }
+                Event::PresenceUpdate { user_id, presence } => {
+                    if self.state.borrow_mut().relationships.set_presence(user_id, presence) {
+                        self.queue_friends_refresh();
+                    }
                 }
                 Event::GuildFoldersUpdate(folders) => {
                     self.state.borrow_mut().guild_folders = folders;
@@ -160,8 +192,19 @@ impl App {
     }
 
     pub(super) fn on_ready(self: &Rc<Self>, ready: Ready) {
-        let Ready { user, guilds, private_channels, read_states, notification_settings, guild_folders } = ready;
+        let Ready { user, guilds, private_channels, relationships, read_states, notification_settings, guild_folders } =
+            ready;
         self.learn_users(private_channels.iter().flat_map(|c| &c.recipients));
+        self.learn_users(
+            [
+                discord::relationships::List::All,
+                discord::relationships::List::Pending,
+                discord::relationships::List::Blocked,
+            ]
+            .into_iter()
+            .flat_map(|list| relationships.list(list))
+            .map(|r| &r.user),
+        );
         let (store, was_ready) = {
             let mut state = self.state.borrow_mut();
             let was_ready = state.ready_seen;
@@ -169,6 +212,7 @@ impl App {
             state.reconnect_attempts = 0;
             state.guilds = guilds;
             state.private_channels = private_channels;
+            state.relationships = relationships;
             state.read = read_states;
             state.guild_folders = guild_folders;
             state.notifications = notification_settings;
@@ -189,6 +233,14 @@ impl App {
         let me = self.state.borrow().me.as_ref().map(|u| u.display_name().to_owned()).unwrap_or_default();
         self.me_label.set_label(&me);
         self.stack.set_visible_child_name("main");
+
+        // Stay on a Home page across reconnects.
+        let page = self.state.borrow().page.filter(|_| was_ready);
+        match page {
+            Some(Page::Friends) => return self.show_friends(),
+            Some(Page::MessageRequests) => return self.show_requests(),
+            None => {}
+        }
 
         // Keep the open guild (or Home) across reconnects; on first connect
         // open the first guild, or Home if there are none.
@@ -216,28 +268,65 @@ impl App {
         }
     }
 
-    pub(super) fn on_private_channel(self: &Rc<Self>, channel: Channel) {
+    /// A DM was created or changed (a message request accepted, a group
+    /// renamed). Also applies the channel a REST call returned.
+    pub(super) fn on_private_channel(self: &Rc<Self>, mut channel: Channel) {
         self.learn_users(channel.recipients.iter());
-        {
+        let (home, open) = {
             let mut state = self.state.borrow_mut();
+            if let Some(old) = state.private_channels.iter().find(|c| c.id == channel.id) {
+                // Updates may leave out recipients, and can't know of newer messages.
+                if channel.recipients.is_empty() {
+                    channel.recipients = old.recipients.clone();
+                }
+                channel.last_message_id = channel.last_message_id.max(old.last_message_id);
+            }
             state.private_channels.retain(|c| c.id != channel.id);
+            let open = state.channel == Some(channel.id);
             state.private_channels.push(channel);
-        }
-        if self.state.borrow().guild.is_none() {
-            self.rebuild_sidebar();
-        }
+            (state.guild.is_none(), open)
+        };
+        self.refresh_home(home, open);
     }
 
     pub(super) fn on_private_channel_delete(self: &Rc<Self>, id: Snowflake) {
-        let (home, was_open) = {
+        let (home, was_open, was_request, requests_left) = {
             let mut state = self.state.borrow_mut();
+            let was_request = state.private_channels.iter().any(|c| c.id == id && c.is_request());
             state.private_channels.retain(|c| c.id != id);
-            (state.guild.is_none(), state.channel == Some(id))
+            (state.guild.is_none(), state.channel == Some(id), was_request, !state.requests().is_empty())
         };
-        if was_open {
+        if was_open && was_request && requests_left {
+            self.show_requests();
+        } else if was_open {
             self.select_home();
-        } else if home {
+        } else {
+            self.refresh_home(home, false);
+        }
+    }
+
+    /// Redraw what shows DMs: the sidebar and requests page on Home, and the
+    /// request bar if the changed DM is open.
+    fn refresh_home(self: &Rc<Self>, home: bool, open: bool) {
+        if open {
+            self.update_request_bar();
+        }
+        if home {
             self.rebuild_sidebar();
+        }
+        if self.state.borrow().page == Some(Page::MessageRequests) {
+            self.rebuild_requests();
+        }
+        self.refresh_badges();
+    }
+
+    /// After a relationship changed: badges, the friends page, and, if
+    /// someone was blocked or unblocked, the messages on screen.
+    fn relationships_changed(self: &Rc<Self>, blocks_changed: bool) {
+        self.refresh_badges();
+        self.queue_friends_refresh();
+        if blocks_changed {
+            self.refresh_rows();
         }
     }
 

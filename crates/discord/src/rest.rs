@@ -4,7 +4,7 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 use soup::prelude::*;
 
-use crate::{Error, Message, Snowflake, identity};
+use crate::{Channel, Error, Message, Snowflake, identity};
 
 /// One HTTP 429 retry is enough for interactive use; further limits surface as errors.
 const MAX_RATE_LIMIT_RETRIES: u32 = 1;
@@ -61,6 +61,41 @@ impl Rest {
         Ok(())
     }
 
+    /// Open (or reopen) the DM with `user`.
+    pub async fn open_dm(&self, user: Snowflake) -> Result<Channel, Error> {
+        self.request("POST", "/users/@me/channels", Some(json!({ "recipients": [user] }))).await
+    }
+
+    /// Send a friend request by username.
+    pub async fn send_friend_request(&self, username: &str) -> Result<(), Error> {
+        let body = json!({ "username": username, "discriminator": null });
+        self.request("POST", "/users/@me/relationships", Some(body)).await
+    }
+
+    /// Accept `user`'s friend request.
+    pub async fn accept_friend_request(&self, user: Snowflake) -> Result<(), Error> {
+        self.request("PUT", &format!("/users/@me/relationships/{user}"), Some(json!({}))).await
+    }
+
+    /// End any relationship with `user`: unfriend, unblock, ignore their
+    /// request or cancel ours.
+    pub async fn remove_relationship(&self, user: Snowflake) -> Result<(), Error> {
+        self.request("DELETE", &format!("/users/@me/relationships/{user}"), None).await
+    }
+
+    /// Accept a message request; the DM moves into the DM list.
+    pub async fn accept_message_request(&self, channel: Snowflake) -> Result<Channel, Error> {
+        // 2 is ACCEPTED, the only consent status users may set.
+        let body = json!({ "consent_status": 2 });
+        self.request("PUT", &format!("/channels/{channel}/recipients/@me"), Some(body)).await
+    }
+
+    /// Reject a message request, which deletes the DM.
+    pub async fn reject_message_request(&self, channel: Snowflake) -> Result<(), Error> {
+        let _: serde_json::Value = self.request("DELETE", &format!("/channels/{channel}/recipients/@me"), None).await?;
+        Ok(())
+    }
+
     async fn request<T: DeserializeOwned>(
         &self,
         method: &str,
@@ -82,8 +117,15 @@ impl Rest {
                 self.session.send_and_read_future(&msg, glib::Priority::DEFAULT).await.map_err(Error::Transport)?;
             let status = msg.status_code();
             match status {
+                // 204 No Content reads as `null`, which `()` accepts.
+                200..=299 if response.is_empty() => return Ok(serde_json::from_value(serde_json::Value::Null)?),
                 200..=299 => return Ok(serde_json::from_slice(&response)?),
                 401 => return Err(Error::Unauthorized),
+                400 if serde_json::from_slice::<serde_json::Value>(&response)
+                    .is_ok_and(|v| v.get("captcha_key").is_some()) =>
+                {
+                    return Err(Error::Captcha);
+                }
                 429 if retries < MAX_RATE_LIMIT_RETRIES => {
                     retries += 1;
                     let wait = serde_json::from_slice::<serde_json::Value>(&response)

@@ -41,6 +41,21 @@ impl App {
         app.send_notification(Some(&notification_id(place.channel)), &notification);
     }
 
+    pub(super) fn notify_friend_request(&self, request: &discord::relationships::Relationship) {
+        let Some(app) = self.window.application() else { return };
+        let notification = gio::Notification::new(request.user.display_name());
+        notification.set_body(Some("Sent you a friend request"));
+        notification.set_default_action("app.open-friends");
+        app.send_notification(Some(&friend_request_id(request.user.id)), &notification);
+    }
+
+    /// The request was answered, here or elsewhere.
+    pub(super) fn withdraw_friend_request(&self, user: Snowflake) {
+        if let Some(app) = self.window.application() {
+            app.withdraw_notification(&friend_request_id(user));
+        }
+    }
+
     pub(super) fn withdraw_notification(&self, channel: Snowflake) {
         if let Some(app) = self.window.application() {
             app.withdraw_notification(&notification_id(channel));
@@ -68,4 +83,8 @@ impl App {
 /// One notification per channel: a newer message replaces the older one.
 pub(super) fn notification_id(channel: Snowflake) -> String {
     format!("channel-{channel}")
+}
+
+pub(super) fn friend_request_id(user: Snowflake) -> String {
+    format!("friend-request-{user}")
 }

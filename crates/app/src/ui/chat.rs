@@ -37,18 +37,38 @@ impl App {
         factory.connect_setup(|_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
             item.set_activatable(false);
-            item.set_child(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 16)));
+            // A bar for collapsed blocked messages, then the message itself.
+            let cell = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            cell.append(&gtk::Box::builder().visible(false).css_classes(["blocked-bar"]).build());
+            cell.append(&gtk::Box::new(gtk::Orientation::Horizontal, 16));
+            item.set_child(Some(&cell));
         });
         factory.connect_bind({
             let this = Rc::downgrade(self);
             move |_, item| {
                 let Some(this) = this.upgrade() else { return };
                 let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
-                let row = item.child().and_downcast::<gtk::Box>().expect("row box");
+                let cell = item.child().expect("cell");
+                let bar = cell.first_child().and_downcast::<gtk::Box>().expect("blocked bar");
+                let row = bar.next_sibling().and_downcast::<gtk::Box>().expect("row box");
                 let Some(message) = item.item().and_downcast::<glib::BoxedAnyObject>() else { return };
                 let message = message.borrow::<Message>().clone();
                 let messages = this.messages();
-                let previous = item.position().checked_sub(1).and_then(|p| timelines::message_at(&messages, p));
+                let position = item.position();
+                let (run, revealed) = {
+                    let state = this.state.borrow();
+                    let run = timelines::run_at(&messages, position, |m| state.relationships.is_blocked(m.author.id));
+                    (run, run.is_some_and(|r| state.revealed_blocked.contains(&r.first)))
+                };
+                match run {
+                    Some(run) if run.start == position => this.fill_blocked_bar(&bar, &messages, run, revealed),
+                    _ => bar.set_visible(false),
+                }
+                row.set_visible(run.is_none() || revealed);
+                if !row.is_visible() {
+                    return;
+                }
+                let previous = position.checked_sub(1).and_then(|p| timelines::message_at(&messages, p));
                 let names = this.message_names(&message);
                 fill_message_row(&row, &message, previous.as_ref(), &names, Some(&this.images));
             }
@@ -80,6 +100,9 @@ impl App {
             let mut state = self.state.borrow_mut();
             state.bump_last_message(channel, message.id);
             let own = state.me() == Some(message.author.id);
+            // No notifications for message requests (as in Discord) or from blocked users.
+            let quiet = state.find_channel(channel).is_some_and(|(_, c)| c.is_request())
+                || state.relationships.is_blocked(message.author.id);
             if own || viewing {
                 // Discord marks what we send as read; what we watch arrive, we ack.
                 state.read.ack(channel, message.id);
@@ -95,7 +118,7 @@ impl App {
                 let mentioned =
                     is_dm || state.me().is_some_and(|me| state.notifications.mentions_me(&message, me, &roles));
                 state.read.on_message(channel, mentioned);
-                place.filter(|p| state.notifications.should_notify(p, mentioned, now_unix()))
+                place.filter(|p| !quiet && state.notifications.should_notify(p, mentioned, now_unix()))
             }
         };
         if viewing && self.state.borrow().me() != Some(message.author.id) {
@@ -117,7 +140,11 @@ impl App {
         if open {
             self.resolve_mentions(&message.content);
         }
+        let blocked = self.state.borrow().relationships.is_blocked(message.author.id);
         store.append(&timelines::boxed(message));
+        if blocked {
+            self.rebind_blocked_run(&store, store.n_items() - 1);
+        }
         if at_bottom {
             self.scroll_to_end();
         }
@@ -153,8 +180,50 @@ impl App {
             store.remove(position);
             // The message after it may now group with the one before.
             if position < store.n_items() {
-                store.items_changed(position, 1, 1);
+                timelines::rebind(&store, position, 1);
             }
+            // A collapsed run it belonged to now counts one less.
+            if let Some(before) = position.checked_sub(1) {
+                self.rebind_blocked_run(&store, before);
+            }
+        }
+    }
+
+    /// The bar that stands in for a run of blocked users' messages: how many
+    /// there are, and a button to show or hide them.
+    fn fill_blocked_bar(self: &Rc<Self>, bar: &gtk::Box, store: &gio::ListStore, run: timelines::Run, revealed: bool) {
+        while let Some(child) = bar.first_child() {
+            bar.remove(&child);
+        }
+        let count = if run.len == 1 { "1 blocked message".to_owned() } else { format!("{} blocked messages", run.len) };
+        bar.append(&gtk::Label::builder().label(count).xalign(0.0).build());
+        let button =
+            gtk::Button::builder().label(if revealed { "Hide" } else { "Show" }).css_classes(["link-button"]).build();
+        let this = Rc::downgrade(self);
+        let store = store.downgrade();
+        button.connect_clicked(move |_| {
+            let (Some(this), Some(store)) = (this.upgrade(), store.upgrade()) else { return };
+            {
+                let mut state = this.state.borrow_mut();
+                if !state.revealed_blocked.remove(&run.first) {
+                    state.revealed_blocked.insert(run.first);
+                }
+            }
+            timelines::rebind(&store, run.start, run.len);
+        });
+        bar.append(&button);
+        bar.set_visible(true);
+    }
+
+    /// Re-bind the first row of the blocked run at `position`, if any, so its
+    /// bar shows the current count.
+    fn rebind_blocked_run(&self, store: &gio::ListStore, position: u32) {
+        let run = {
+            let state = self.state.borrow();
+            timelines::run_at(store, position, |m| state.relationships.is_blocked(m.author.id))
+        };
+        if let Some(run) = run {
+            timelines::rebind(store, run.start, 1);
         }
     }
 
@@ -172,6 +241,7 @@ impl App {
             let mut state = self.state.borrow_mut();
             let left = state.channel.filter(|&c| c != id);
             state.channel = Some(id);
+            state.page = None;
             let title = match state.private_channels.iter().find(|c| c.id == id) {
                 Some(dm) if dm.kind == discord::ChannelKind::Dm => format!("@ {}", dm.title()),
                 Some(group) => group.title(),
@@ -195,9 +265,11 @@ impl App {
         {
             timelines::keep_newest(timeline, FIRST_PAGE as u32);
         }
+        self.content.set_visible_child_name("chat");
         self.rebuild_sidebar();
         self.header.set_label(&title);
         self.composer_error.set_visible(false);
+        self.update_request_bar();
 
         // Show what we have at once (instant for a recently viewed channel),
         // then fetch the newest page and merge it in.
@@ -380,10 +452,7 @@ impl App {
     /// Re-bind visible rows so newly resolved names appear.
     pub(super) fn refresh_rows(&self) {
         let messages = self.messages();
-        let n = messages.n_items();
-        if n > 0 {
-            messages.items_changed(0, n, n);
-        }
+        timelines::rebind(&messages, 0, messages.n_items());
     }
 
     pub(super) fn scroll_to_end(&self) {

@@ -4,8 +4,10 @@
 mod chat;
 mod composer;
 mod connection;
+mod friends;
 mod notify;
 mod rail;
+mod requests;
 mod sidebar;
 mod state;
 mod unread;
@@ -32,6 +34,10 @@ pub struct App {
     channels: gtk::Box,
     me_label: gtk::Label,
     header: gtk::Label,
+    /// The open channel's chat, or one of Home's pages.
+    content: gtk::Stack,
+    friends: friends::FriendsPage,
+    requests: requests::RequestsPage,
     /// The list's model; its inner store is the open channel's timeline.
     selection: gtk::NoSelection,
     /// Shown when no channel is open.
@@ -40,6 +46,9 @@ pub struct App {
     list: gtk::ListView,
     scroller: gtk::ScrolledWindow,
     composer: gtk::TextView,
+    composer_box: gtk::Box,
+    /// Accept or ignore, in place of the composer while a message request is open.
+    request_bar: gtk::Box,
     composer_error: gtk::Label,
     images: Images,
     /// Mention autocomplete, anchored to the composer.
@@ -88,6 +97,9 @@ impl App {
                 .css_classes(["me"])
                 .build(),
             header: gtk::Label::builder().xalign(0.0).css_classes(["chat-header"]).build(),
+            content: gtk::Stack::new(),
+            friends: friends::FriendsPage::new(),
+            requests: requests::RequestsPage::new(),
             list: gtk::ListView::new(Some(selection.clone()), None::<gtk::ListItemFactory>),
             selection,
             blank,
@@ -99,6 +111,8 @@ impl App {
                 .hexpand(true)
                 .css_classes(["composer-input"])
                 .build(),
+            composer_box: gtk::Box::builder().css_classes(["composer"]).build(),
+            request_bar: gtk::Box::builder().spacing(8).visible(false).css_classes(["composer", "request-bar"]).build(),
             composer_error: gtk::Label::builder()
                 .xalign(0.0)
                 .wrap(true)
@@ -183,7 +197,21 @@ impl App {
                     }
                 })
                 .build();
-            app.add_action_entries([open]);
+            // Friend request notifications open the friends page.
+            let friends = gio::ActionEntry::builder("open-friends")
+                .activate({
+                    let this = Rc::downgrade(self);
+                    move |_: &gtk::Application, _, _| {
+                        if let Some(this) = this.upgrade() {
+                            this.window.present();
+                            this.state.borrow_mut().friends_tab =
+                                friends::Tab::List(discord::relationships::List::Pending);
+                            this.show_friends();
+                        }
+                    }
+                })
+                .build();
+            app.add_action_entries([open, friends]);
         }
 
         // Coming back to the window reads the open channel.
@@ -282,7 +310,10 @@ impl App {
         sidebar.append(&self.me_label);
         root.append(&sidebar);
 
-        root.append(&self.build_chat());
+        self.content.add_named(&self.build_chat(), Some("chat"));
+        self.content.add_named(&self.build_friends(), Some("friends"));
+        self.content.add_named(&self.build_requests(), Some("requests"));
+        root.append(&self.content);
         root.upcast()
     }
 

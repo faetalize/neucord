@@ -85,6 +85,40 @@ pub fn find(store: &gio::ListStore, id: Snowflake) -> Option<(u32, Message)> {
     })
 }
 
+/// Make the list re-bind `len` rows from `start`, so they redraw from current
+/// state. `items_changed` alone is not enough: the list view keeps rows whose
+/// item is the same object, so each message gets a fresh box. One at a time,
+/// so the view's scroll anchor never falls inside a replaced range.
+pub fn rebind(store: &gio::ListStore, start: u32, len: u32) {
+    for position in start..(start + len).min(store.n_items()) {
+        if let Some(message) = message_at(store, position) {
+            store.splice(position, 1, &[boxed(message)]);
+        }
+    }
+}
+
+/// Consecutive messages matching `pred` (say, from blocked users), which the
+/// list collapses into one bar.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Run {
+    pub start: u32,
+    pub len: u32,
+    /// The first message's id, which names the run while messages around it come and go.
+    pub first: Snowflake,
+}
+
+/// The run of messages matching `pred` that includes `position`, if any.
+pub fn run_at(store: &gio::ListStore, position: u32, pred: impl Fn(&Message) -> bool) -> Option<Run> {
+    let matches =
+        |p: u32| store.item(p).and_downcast::<glib::BoxedAnyObject>().is_some_and(|o| pred(&o.borrow::<Message>()));
+    if !matches(position) {
+        return None;
+    }
+    let start = (0..position).rev().take_while(|&p| matches(p)).last().unwrap_or(position);
+    let end = (position + 1..store.n_items()).take_while(|&p| matches(p)).last().unwrap_or(position);
+    Some(Run { start, len: end - start + 1, first: id_at(store, start)? })
+}
+
 pub fn oldest_id(store: &gio::ListStore) -> Option<Snowflake> {
     id_at(store, 0)
 }
@@ -139,7 +173,7 @@ pub fn prepend(store: &gio::ListStore, page: Vec<Message>) {
     // The previous first message now has one before it: re-bind it so its
     // header groups with the page's last message when it should.
     if count > 0 && store.n_items() > count {
-        store.items_changed(count, 1, 1);
+        rebind(store, count, 1);
     }
 }
 
@@ -153,6 +187,27 @@ mod tests {
             "content": content, "timestamp": "2026-10-26T00:00:00+00:00"
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn runs_of_matching_messages() {
+        let store = store_with(&[1, 2, 3, 4, 5, 6]);
+        let middle = |m: &Message| (2..=4).contains(&m.id.0);
+        assert_eq!(run_at(&store, 0, middle), None);
+        let run = Run { start: 1, len: 3, first: Snowflake(2) };
+        assert_eq!([1, 2, 3].map(|p| run_at(&store, p, middle)), [Some(run); 3]);
+        assert_eq!(run_at(&store, 5, |m| m.id.0 >= 5), Some(Run { start: 4, len: 2, first: Snowflake(5) }));
+        assert_eq!(run_at(&store, 0, |_| true).map(|r| r.len), Some(6));
+    }
+
+    #[test]
+    fn rebind_swaps_in_fresh_objects() {
+        let store = store_with(&[1, 2, 3]);
+        let before: Vec<_> = (0..3).map(|p| store.item(p).unwrap()).collect();
+        rebind(&store, 1, 5);
+        assert_eq!(ids(&store), [1, 2, 3], "same messages, same order; the range is clamped");
+        assert_eq!(store.item(0).unwrap(), before[0]);
+        assert!(store.item(1).unwrap() != before[1] && store.item(2).unwrap() != before[2]);
     }
 
     fn ids(store: &gio::ListStore) -> Vec<u64> {

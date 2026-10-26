@@ -17,6 +17,7 @@ use soup::prelude::*;
 
 use crate::notifications::{GuildSettings, NotificationSettings};
 use crate::read_state::ReadStates;
+use crate::relationships::{Presence, Relationship, Relationships};
 use crate::settings::{self, GuildFolder};
 use crate::{Channel, Error, Guild, Message, Snowflake, User, identity};
 
@@ -43,8 +44,10 @@ pub struct Resume {
 pub struct Ready {
     pub user: User,
     pub guilds: Vec<Guild>,
-    /// DMs and group DMs, in no particular order.
+    /// DMs and group DMs, message requests included, in no particular order.
     pub private_channels: Vec<Channel>,
+    /// Friends, requests and blocks, with friends' presences.
+    pub relationships: Relationships,
     pub read_states: ReadStates,
     pub notification_settings: NotificationSettings,
     /// Server folders and order; empty if the user never arranged servers.
@@ -55,8 +58,11 @@ pub struct Ready {
 pub enum Event {
     Ready(Box<Ready>),
     GuildCreate(Guild),
-    /// A DM or group DM was opened (or reopened). Guild channels are not reported yet.
+    /// A DM or group DM was opened (or reopened), or a message request
+    /// arrived. Guild channels are not reported yet.
     PrivateChannelCreate(Channel),
+    /// A DM changed, for instance a message request was accepted.
+    PrivateChannelUpdate(Channel),
     /// A DM or group DM was closed, or we left the group.
     PrivateChannelDelete(Snowflake),
     MessageCreate(Message),
@@ -81,6 +87,23 @@ pub enum Event {
     ChannelUnreadUpdate {
         guild_id: Snowflake,
         channels: Vec<(Snowflake, Snowflake)>,
+    },
+    /// A new relationship, or one whose type changed (a request accepted).
+    /// `notify` is Discord's hint that this deserves a notification.
+    RelationshipAdd {
+        relationship: Relationship,
+        notify: bool,
+    },
+    /// We changed a friend's nickname.
+    RelationshipUpdate {
+        user_id: Snowflake,
+        nickname: Option<String>,
+    },
+    /// Unfriended, unblocked, or a request withdrawn or ignored.
+    RelationshipRemove(Snowflake),
+    PresenceUpdate {
+        user_id: Snowflake,
+        presence: Presence,
     },
     /// Our notification settings for one server (or DMs) changed.
     NotificationSettingsUpdate(GuildSettings),
@@ -354,12 +377,7 @@ fn guild_with_roles(value: &Value, me: Snowflake) -> Option<Guild> {
     Some(guild)
 }
 
-/// Message requests and spam DMs, which Discord keeps out of the DM list.
-fn is_hidden_dm(channel: &Value) -> bool {
-    channel["is_message_request"].as_bool() == Some(true) || channel["is_spam"].as_bool() == Some(true)
-}
-
-/// READY's DMs, minus hidden ones. Recipients come either inline as `recipients` (the classic
+/// READY's DMs, message requests included. Recipients come either inline as `recipients` (the classic
 /// shape) or as `recipient_ids` pointing into READY's top-level `users`.
 fn private_channels(ready: &Value) -> Vec<Channel> {
     let users: std::collections::HashMap<&str, &Value> = ready["users"]
@@ -368,7 +386,6 @@ fn private_channels(ready: &Value) -> Vec<Channel> {
         .unwrap_or_default();
     let Some(raw) = ready["private_channels"].as_array() else { return Vec::new() };
     raw.iter()
-        .filter(|value| !is_hidden_dm(value))
         .filter_map(|value| {
             let mut channel = Channel::deserialize(value).ok()?;
             if channel.recipients.is_empty()
@@ -406,6 +423,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 .unwrap_or_default();
             Event::Ready(Box::new(Ready {
                 private_channels: private_channels(&data),
+                relationships: Relationships::from_ready(&data),
                 read_states: ReadStates::from_ready(&data["read_state"]),
                 notification_settings: NotificationSettings::from_ready(&data["user_guild_settings"]),
                 guild_folders: settings::guild_folders(&data["user_settings"]).unwrap_or_default(),
@@ -441,9 +459,35 @@ fn dispatch(state: &State, name: &str, data: Value) {
             Err(e) => return eprintln!("gateway: bad USER_GUILD_SETTINGS_UPDATE: {e}"),
         },
         "CHANNEL_CREATE" => match Channel::deserialize(&data) {
-            Ok(channel) if channel.kind.is_private() && !is_hidden_dm(&data) => Event::PrivateChannelCreate(channel),
+            Ok(channel) if channel.kind.is_private() => Event::PrivateChannelCreate(channel),
             Ok(_) => return,
             Err(e) => return eprintln!("gateway: bad CHANNEL_CREATE: {e}"),
+        },
+        "CHANNEL_UPDATE" => match Channel::deserialize(&data) {
+            Ok(channel) if channel.kind.is_private() => Event::PrivateChannelUpdate(channel),
+            Ok(_) => return,
+            Err(e) => return eprintln!("gateway: bad CHANNEL_UPDATE: {e}"),
+        },
+        "RELATIONSHIP_ADD" => match Relationship::from_value(&data, &Default::default()) {
+            Some(relationship) => {
+                Event::RelationshipAdd { relationship, notify: data["should_notify"].as_bool() == Some(true) }
+            }
+            None => return eprintln!("gateway: bad RELATIONSHIP_ADD"),
+        },
+        // Partial: no user, and never a type change (those come as RELATIONSHIP_ADD).
+        "RELATIONSHIP_UPDATE" => {
+            let Some(user_id) = parse_id(&data["id"]) else { return };
+            let nickname = data["nickname"].as_str().filter(|n| !n.is_empty()).map(String::from);
+            Event::RelationshipUpdate { user_id, nickname }
+        }
+        "RELATIONSHIP_REMOVE" => match parse_id(&data["id"]) {
+            Some(id) => Event::RelationshipRemove(id),
+            None => return,
+        },
+        // Friends' presences, and per-server ones; only `user.id` is certain.
+        "PRESENCE_UPDATE" => match parse_id(&data["user"]["id"]) {
+            Some(user_id) => Event::PresenceUpdate { user_id, presence: Presence::from_value(&data) },
+            None => return,
         },
         "CHANNEL_DELETE" => {
             let is_private = data["guild_id"].is_null();
@@ -500,8 +544,10 @@ mod tests {
             {"id": "5", "type": 1, "is_spam": true, "recipients": []}
         ]});
         let dms = private_channels(&ready);
-        assert_eq!(dms.len(), 1);
+        assert_eq!(dms.len(), 3, "message requests are kept, guild channels are not");
         assert_eq!(dms[0].title(), "alice");
+        assert!(!dms[0].is_request());
+        assert!(dms[1].message_request && dms[2].spam);
     }
 
     #[test]

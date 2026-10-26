@@ -167,7 +167,13 @@ impl App {
         match first_channel {
             Some(channel) => self.select_channel(channel),
             None => {
-                self.state.borrow_mut().channel = None;
+                {
+                    let mut state = self.state.borrow_mut();
+                    state.channel = None;
+                    state.page = None;
+                }
+                self.content.set_visible_child_name("chat");
+                self.update_request_bar();
                 self.show_blank();
                 self.header.set_label("No text channels you can see here");
                 self.rebuild_sidebar();
@@ -175,22 +181,19 @@ impl App {
         }
     }
 
-    /// Open Home: the DM list, with the most recent DM selected.
+    /// Open Home: the most recent DM, or the friends page if there are none.
     pub(super) fn select_home(self: &Rc<Self>) {
         let latest = {
             let mut state = self.state.borrow_mut();
             state.guild = None;
-            state.private_channels.iter().max_by_key(|c| c.activity()).map(|c| c.id)
+            state.dms().max_by_key(|c| c.activity()).map(|c| c.id)
         };
-        self.rebuild_rail();
         match latest {
-            Some(channel) => self.select_channel(channel),
-            None => {
-                self.state.borrow_mut().channel = None;
-                self.show_blank();
-                self.header.set_label("No direct messages yet");
-                self.rebuild_sidebar();
+            Some(channel) => {
+                self.rebuild_rail();
+                self.select_channel(channel);
             }
+            None => self.show_friends(),
         }
     }
 }
