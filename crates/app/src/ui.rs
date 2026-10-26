@@ -2,12 +2,14 @@
 //! `discord` crate. All of this runs on the GTK main thread.
 
 use std::cell::RefCell;
+use std::fmt::Write as _;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
 use discord::notifications::{NotificationSettings, Place};
 use discord::read_state::ReadStates;
+use discord::settings::{GuildFolder, RailEntry};
 use discord::{Channel, Event, Gateway, Guild, Message, Ready, Rest, Snowflake, User, session};
 use gtk::prelude::*;
 use gtk::{gio, glib, pango};
@@ -42,6 +44,10 @@ struct State {
     guilds: Vec<Guild>,
     /// DMs and group DMs.
     private_channels: Vec<Channel>,
+    /// The user's server folders, which also order the rail.
+    guild_folders: Vec<GuildFolder>,
+    /// Folders the user expanded in the rail (by folder id).
+    open_folders: std::collections::HashSet<u64>,
     /// The open guild; `None` is Home, the DM list.
     guild: Option<Snowflake>,
     channel: Option<Snowflake>,
@@ -58,6 +64,19 @@ struct State {
 }
 
 impl State {
+    fn rail_layout(&self) -> Vec<RailEntry> {
+        let ids: Vec<Snowflake> = self.guilds.iter().map(|g| g.id).collect();
+        discord::settings::rail_layout(&self.guild_folders, &ids)
+    }
+
+    /// The first server in rail order, opened on first connect.
+    fn first_guild(&self) -> Option<Snowflake> {
+        self.rail_layout().into_iter().find_map(|entry| match entry {
+            RailEntry::Guild(id) => Some(id),
+            RailEntry::Folder { guilds, .. } => guilds.first().copied(),
+        })
+    }
+
     fn me(&self) -> Option<Snowflake> {
         self.me.as_ref().map(|u| u.id)
     }
@@ -189,6 +208,8 @@ pub struct App {
     /// What the rail and sidebar last drew, so badge refreshes can skip
     /// rebuilding them when nothing visible changed.
     drawn: RefCell<(Vec<u64>, Vec<u64>)>,
+    /// Per-folder colours, regenerated with the rail.
+    folder_css: gtk::CssProvider,
 }
 
 #[derive(Default)]
@@ -241,7 +262,13 @@ impl App {
             mention: RefCell::default(),
             state: RefCell::default(),
             drawn: RefCell::default(),
+            folder_css: gtk::CssProvider::new(),
         });
+        gtk::style_context_add_provider_for_display(
+            &WidgetExt::display(&this.window),
+            &this.folder_css,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
         this.build();
 
         // Handlers hold weak references, so something must own the App while
@@ -651,6 +678,10 @@ impl App {
                     }
                     self.refresh_badges();
                 }
+                Event::GuildFoldersUpdate(folders) => {
+                    self.state.borrow_mut().guild_folders = folders;
+                    self.rebuild_rail();
+                }
                 Event::NotificationSettingsUpdate(settings) => {
                     self.state.borrow_mut().notifications.update(settings);
                     self.refresh_badges();
@@ -677,7 +708,7 @@ impl App {
     // ---- gateway events ---------------------------------------------------
 
     fn on_ready(self: &Rc<Self>, ready: Ready) {
-        let Ready { user, guilds, private_channels, read_states, notification_settings } = ready;
+        let Ready { user, guilds, private_channels, read_states, notification_settings, guild_folders } = ready;
         self.learn_users(private_channels.iter().flat_map(|c| &c.recipients));
         let (store, was_ready) = {
             let mut state = self.state.borrow_mut();
@@ -687,6 +718,7 @@ impl App {
             state.guilds = guilds;
             state.private_channels = private_channels;
             state.read = read_states;
+            state.guild_folders = guild_folders;
             state.notifications = notification_settings;
             let store = (!state.persisted).then(|| (state.token.clone(), user.username.clone()));
             state.persisted = true;
@@ -713,7 +745,7 @@ impl App {
             match state.guild {
                 Some(id) if state.guilds.iter().any(|g| g.id == id) => Some(id),
                 None if was_ready => None,
-                _ => state.guilds.first().map(|g| g.id),
+                _ => state.first_guild(),
             }
         };
         match open {
@@ -876,39 +908,113 @@ impl App {
         self.rail.append(&rail_item(&home, false, state.home_badge()));
         self.rail.append(&gtk::Separator::builder().css_classes(["rail-separator"]).build());
 
-        for guild in &state.guilds {
-            let button = gtk::Button::builder()
-                .tooltip_text(&guild.name)
-                .css_classes(["guild"])
-                // Clip the icon to the button's rounded corners.
-                .overflow(gtk::Overflow::Hidden)
-                .build();
-            match guild.icon.as_deref() {
-                Some(hash) => {
-                    let picture = gtk::Picture::builder()
-                        .width_request(48)
-                        .height_request(48)
-                        .content_fit(gtk::ContentFit::Cover)
+        let mut folder_css = String::new();
+        let guild = |id: Snowflake| state.guilds.iter().find(|g| g.id == id);
+        for entry in state.rail_layout() {
+            match entry {
+                RailEntry::Guild(id) => {
+                    if let Some(guild) = guild(id) {
+                        self.rail.append(&self.guild_item(&state, guild));
+                    }
+                }
+                RailEntry::Folder { id, name, color, guilds } => {
+                    let members: Vec<&Guild> = guilds.iter().filter_map(|g| guild(*g)).collect();
+                    let class = format!("folder-{id}");
+                    if let Some(color) = color {
+                        let (r, g, b) = ((color >> 16) & 0xff, (color >> 8) & 0xff, color & 0xff);
+                        let _ = writeln!(
+                            folder_css,
+                            ".folder.{class}:not(.expanded) {{ background: rgba({r}, {g}, {b}, 0.35); }}\n\
+                             .folder.{class} image {{ color: rgb({r}, {g}, {b}); }}"
+                        );
+                    }
+                    let expanded = state.open_folders.contains(&id);
+                    let button = gtk::Button::builder()
+                        .tooltip_text(name.as_deref().unwrap_or("Folder"))
+                        .css_classes(["guild", "folder", &class])
                         .overflow(gtk::Overflow::Hidden)
                         .build();
-                    self.images.set(&picture, &discord::cdn::guild_icon_url(guild.id.0, hash, 64), discord::cdn::is_animated(hash));
-                    button.set_child(Some(&picture));
+                    if expanded {
+                        button.add_css_class("expanded");
+                        button.set_child(Some(&gtk::Image::from_icon_name("folder-symbolic")));
+                    } else {
+                        button.set_child(Some(&folder_preview(&members, &self.images)));
+                        if members.iter().any(|g| state.guild == Some(g.id)) {
+                            button.add_css_class("active");
+                        }
+                    }
+                    button.connect_clicked({
+                        let this = Rc::downgrade(self);
+                        move |_| {
+                            if let Some(this) = this.upgrade() {
+                                this.toggle_folder(id);
+                            }
+                        }
+                    });
+                    if expanded {
+                        let group = gtk::Box::builder().orientation(gtk::Orientation::Vertical).css_classes(["folder-open"]).build();
+                        group.append(&rail_item(&button, false, 0));
+                        for member in &members {
+                            group.append(&self.guild_item(&state, member));
+                        }
+                        self.rail.append(&group);
+                    } else {
+                        // A collapsed folder carries its servers' markers.
+                        let (unread, mentions) = members.iter().fold((false, 0), |(unread, mentions), g| {
+                            let (u, m) = state.guild_badge(g);
+                            (unread || u, mentions + m)
+                        });
+                        self.rail.append(&rail_item(&button, unread, mentions));
+                    }
                 }
-                None => button.set_label(&initials(&guild.name)),
             }
-            if state.guild == Some(guild.id) {
-                button.add_css_class("active");
-            }
-            let id = guild.id;
-            let this = Rc::downgrade(self);
-            button.connect_clicked(move |_| {
-                if let Some(this) = this.upgrade() {
-                    this.select_guild(id);
-                }
-            });
-            let (unread, mentions) = state.guild_badge(guild);
-            self.rail.append(&rail_item(&button, unread, mentions));
         }
+        self.folder_css.load_from_string(&folder_css);
+    }
+
+    /// One server's rail button with its unread pill and mention count.
+    fn guild_item(self: &Rc<Self>, state: &State, guild: &Guild) -> gtk::Widget {
+        let button = gtk::Button::builder()
+            .tooltip_text(&guild.name)
+            .css_classes(["guild"])
+            // Clip the icon to the button's rounded corners.
+            .overflow(gtk::Overflow::Hidden)
+            .build();
+        match guild.icon.as_deref() {
+            Some(hash) => {
+                let picture = gtk::Picture::builder()
+                    .width_request(48)
+                    .height_request(48)
+                    .content_fit(gtk::ContentFit::Cover)
+                    .overflow(gtk::Overflow::Hidden)
+                    .build();
+                self.images.set(&picture, &discord::cdn::guild_icon_url(guild.id.0, hash, 64), discord::cdn::is_animated(hash));
+                button.set_child(Some(&picture));
+            }
+            None => button.set_label(&initials(&guild.name)),
+        }
+        if state.guild == Some(guild.id) {
+            button.add_css_class("active");
+        }
+        let id = guild.id;
+        let this = Rc::downgrade(self);
+        button.connect_clicked(move |_| {
+            if let Some(this) = this.upgrade() {
+                this.select_guild(id);
+            }
+        });
+        let (unread, mentions) = state.guild_badge(guild);
+        rail_item(&button, unread, mentions)
+    }
+
+    fn toggle_folder(self: &Rc<Self>, id: u64) {
+        {
+            let mut state = self.state.borrow_mut();
+            if !state.open_folders.remove(&id) {
+                state.open_folders.insert(id);
+            }
+        }
+        self.rebuild_rail();
     }
 
     fn select_guild(self: &Rc<Self>, id: Snowflake) {
@@ -1529,6 +1635,42 @@ fn rail_item(button: &gtk::Button, unread: bool, mentions: u32) -> gtk::Widget {
         overlay.add_overlay(&badge);
     }
     overlay.upcast()
+}
+
+/// A collapsed folder's face: its first four servers' icons in a 2×2 grid.
+fn folder_preview(guilds: &[&Guild], images: &Images) -> gtk::Widget {
+    const MINI: i32 = 18;
+    let grid = gtk::Grid::builder()
+        .row_spacing(4)
+        .column_spacing(4)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .build();
+    for (i, guild) in guilds.iter().take(4).enumerate() {
+        let mini: gtk::Widget = match guild.icon.as_deref() {
+            Some(hash) => {
+                let picture = gtk::Picture::builder()
+                    .width_request(MINI)
+                    .height_request(MINI)
+                    .content_fit(gtk::ContentFit::Cover)
+                    .overflow(gtk::Overflow::Hidden)
+                    .css_classes(["mini-icon"])
+                    .build();
+                // Static frame only: four animations in one button is noise.
+                images.set(&picture, &discord::cdn::guild_icon_still_url(guild.id.0, hash, 32), false);
+                picture.upcast()
+            }
+            None => gtk::Label::builder()
+                .label(initials(&guild.name).chars().next().map(String::from).unwrap_or_default())
+                .width_request(MINI)
+                .height_request(MINI)
+                .css_classes(["mini-icon"])
+                .build()
+                .upcast(),
+        };
+        grid.attach(&mini, (i % 2) as i32, (i / 2) as i32, 1, 1);
+    }
+    grid.upcast()
 }
 
 fn wrap_page(child: &impl IsA<gtk::Widget>) -> gtk::Widget {

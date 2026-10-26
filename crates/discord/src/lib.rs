@@ -13,6 +13,7 @@ pub mod cdn;
 pub mod markup;
 pub mod notifications;
 pub mod read_state;
+pub mod settings;
 pub mod shape;
 
 pub use gateway::{Event, Gateway, Ready};

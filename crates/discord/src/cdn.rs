@@ -23,6 +23,11 @@ pub fn guild_icon_url(guild_id: u64, hash: &str, size: u16) -> String {
     format!("{CDN}/icons/{guild_id}/{hash}.{}?size={size}", ext(hash))
 }
 
+/// A guild icon as a still PNG, even for animated icons (their first frame).
+pub fn guild_icon_still_url(guild_id: u64, hash: &str, size: u16) -> String {
+    format!("{CDN}/icons/{guild_id}/{hash}.png?size={size}")
+}
+
 pub fn group_dm_icon_url(channel_id: u64, hash: &str, size: u16) -> String {
     format!("{CDN}/channel-icons/{channel_id}/{hash}.png?size={size}")
 }
@@ -54,6 +59,7 @@ mod tests {
     #[test]
     fn icon_and_emoji() {
         assert_eq!(guild_icon_url(9, "ic", 48), "https://cdn.discordapp.com/icons/9/ic.png?size=48");
+        assert_eq!(guild_icon_still_url(9, "a_ic", 32), "https://cdn.discordapp.com/icons/9/a_ic.png?size=32");
         assert_eq!(emoji_url(42, true, 48), "https://cdn.discordapp.com/emojis/42.gif?size=48");
     }
 }

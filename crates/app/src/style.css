@@ -24,6 +24,13 @@ window.neucord { background: transparent; color: #DBDEE1; font-size: 15px; }
   min-width: 16px; min-height: 16px; padding: 0 4px; border-radius: 8px;
   background: #F23F43; color: white; font-size: 11px; font-weight: 700;
 }
+/* Folders: collapsed shows a 2×2 preview on the folder colour (per-folder
+   colours come from a provider the rail regenerates). */
+.folder:not(.expanded) { background: rgba(88, 101, 242, 0.35); }
+.folder image { color: #8E97F8; -gtk-icon-size: 22px; }
+.folder-open { margin: 0 8px; padding-bottom: 4px; border-radius: 16px; background: rgba(255, 255, 255, 0.05); }
+.folder-open .guild { margin-left: 4px; margin-right: 4px; }
+.mini-icon { border-radius: 6px; background: rgba(255, 255, 255, 0.12); font-size: 10px; }
 .rail-separator { margin: 4px 24px; min-height: 2px; background: rgba(255, 255, 255, 0.08); }
 
 /* Channel sidebar */

@@ -15,6 +15,7 @@ use soup::prelude::*;
 
 use crate::notifications::{GuildSettings, NotificationSettings};
 use crate::read_state::ReadStates;
+use crate::settings::{self, GuildFolder};
 use crate::{Channel, Error, Guild, Message, Snowflake, User, identity};
 
 /// Gateway capability bits. 0 asks for the classic payload shapes, which the
@@ -34,6 +35,8 @@ pub struct Ready {
     pub private_channels: Vec<Channel>,
     pub read_states: ReadStates,
     pub notification_settings: NotificationSettings,
+    /// Server folders and order; empty if the user never arranged servers.
+    pub guild_folders: Vec<GuildFolder>,
 }
 
 #[derive(Debug)]
@@ -55,6 +58,8 @@ pub enum Event {
     ChannelUnreadUpdate { guild_id: Snowflake, channels: Vec<(Snowflake, Snowflake)> },
     /// Our notification settings for one server (or DMs) changed.
     NotificationSettingsUpdate(GuildSettings),
+    /// The user rearranged servers or folders (on any client).
+    GuildFoldersUpdate(Vec<GuildFolder>),
     /// The connection is gone. `code` is the websocket close code.
     Closed { code: u16, reason: String },
 }
@@ -290,6 +295,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 private_channels: private_channels(&data),
                 read_states: ReadStates::from_ready(&data["read_state"]),
                 notification_settings: NotificationSettings::from_ready(&data["user_guild_settings"]),
+                guild_folders: settings::guild_folders(&data["user_settings"]).unwrap_or_default(),
                 user,
                 guilds,
             }))
@@ -312,6 +318,11 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 .collect();
             Event::ChannelUnreadUpdate { guild_id, channels }
         }
+        // Partial: only the settings that changed.
+        "USER_SETTINGS_UPDATE" => match settings::guild_folders(&data) {
+            Some(folders) => Event::GuildFoldersUpdate(folders),
+            None => return,
+        },
         "USER_GUILD_SETTINGS_UPDATE" => match GuildSettings::deserialize(&data) {
             Ok(settings) => Event::NotificationSettingsUpdate(settings),
             Err(e) => return eprintln!("gateway: bad USER_GUILD_SETTINGS_UPDATE: {e}"),
