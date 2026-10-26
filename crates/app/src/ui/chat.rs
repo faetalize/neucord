@@ -77,6 +77,7 @@ impl App {
         self.list.set_factory(Some(&factory));
         self.list.add_css_class("messages");
         self.scroller.set_child(Some(&self.list));
+        self.scroller.add_css_class("messages");
 
         // Fetch older messages well before the top is reached, and after a
         // jump, newer ones well before the bottom.
@@ -120,7 +121,8 @@ impl App {
         page.add_bottom_bar(&composer);
 
         // The list scrolls under the bars, and pads its ends to their height
-        // so its first and last messages can come out from under them.
+        // so its first and last messages can come out from under them. The
+        // scrollbar keeps out from under them altogether.
         let padding = gtk::CssProvider::new();
         gtk::style_context_add_provider_for_display(
             &WidgetExt::display(&page),
@@ -128,10 +130,10 @@ impl App {
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
         let pad = move |page: &adw::ToolbarView| {
+            let (top, bottom) = (page.top_bar_height(), page.bottom_bar_height());
             padding.load_from_string(&format!(
-                "listview.messages {{ padding-top: {}px; padding-bottom: {}px; }}",
-                page.top_bar_height(),
-                page.bottom_bar_height()
+                "listview.messages {{ padding-top: {top}px; padding-bottom: {bottom}px; }}\n\
+                 scrolledwindow.messages > scrollbar.vertical {{ margin-top: {top}px; margin-bottom: {bottom}px; }}"
             ));
         };
         page.connect_top_bar_height_notify(pad.clone());
@@ -790,7 +792,7 @@ impl App {
             row.append(&self.reply_preview(message, to, messages));
         }
 
-        let main = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+        let main = gtk::Box::builder().spacing(16).css_classes(["message-main"]).build();
         let gutter = gtk::Box::builder().width_request(40).valign(gtk::Align::Start).build();
         if !grouped {
             gutter.append(&avatar_widget(&message.author, 40, Some(&self.images)));
@@ -801,7 +803,13 @@ impl App {
         let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).hexpand(true).build();
         if !grouped {
             let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            header.append(&gtk::Label::builder().label(message.author.display_name()).css_classes(["heading"]).build());
+            header.append(
+                &gtk::Label::builder()
+                    .label(message.author.display_name())
+                    .ellipsize(gtk::pango::EllipsizeMode::End)
+                    .css_classes(["heading"])
+                    .build(),
+            );
             let time = parse_time(&message.timestamp).map(|t| format_time(&t)).unwrap_or_default();
             header.append(&gtk::Label::builder().label(time).css_classes(["caption", "dimmed"]).build());
             body.append(&header);
@@ -850,6 +858,7 @@ impl App {
             let reply = gtk::Button::builder()
                 .icon_name("mail-reply-sender-symbolic")
                 .tooltip_text("Reply (Shift: without pinging)")
+                .halign(gtk::Align::End)
                 .valign(gtk::Align::Start)
                 .css_classes(["flat", "message-action"])
                 .build();
@@ -866,9 +875,14 @@ impl App {
                     }
                 }
             });
-            main.append(&reply);
+            // Over the row, not in it: as part of the layout it would make
+            // every one-line message as tall as the button.
+            let overlay = gtk::Overlay::builder().child(&main).build();
+            overlay.add_overlay(&reply);
+            row.append(&overlay);
+        } else {
+            row.append(&main);
         }
-        row.append(&main);
     }
 
     /// The line above a reply: who it answers and the start of what they said.
@@ -951,10 +965,11 @@ fn image_attachment(attachment: &discord::Attachment, images: &crate::images::Im
     // The official client's box for a single image attachment.
     const MAX_W: f64 = 550.0;
     const MAX_H: f64 = 350.0;
-    let picture = fitted_picture(attachment.width, attachment.height, MAX_W, MAX_H);
-    picture.set_css_classes(&["attachment-image"]);
+    let fitted = fitted_picture(attachment.width, attachment.height, MAX_W, MAX_H);
+    fitted.picture.set_css_classes(&["attachment-image"]);
     // Through the media proxy when we can, which sends it at the size shown.
     let url = attachment.proxy_url.as_deref().unwrap_or(&attachment.url);
-    images.set_sized(&picture, url, attachment.width.zip(attachment.height), autoplay && attachment.is_animated());
-    picture.upcast()
+    let original = attachment.width.zip(attachment.height);
+    images.set_sized(&fitted.picture, url, fitted.size, original, autoplay && attachment.is_animated());
+    fitted.frame.upcast()
 }

@@ -43,10 +43,11 @@
 /* Messages. Rows carry no padding of their own, so a collapsed blocked
    message takes no space. */
 listview.messages, listview.messages > row { background: none; padding: 0; }
-/* The right padding leaves room for the hover Reply button (28px plus the
-   row's 16px gap), so text is as wide with or without it. */
-.message       { padding: 3px 6px 3px 18px; }
-.message.first { padding-top: 15px; }
+.message       { padding: 2px 6px 2px 18px; }
+/* Room for the hover Reply button, which floats over the row's top right
+   corner, so text is as wide with or without it. */
+.message-main  { margin-right: 44px; }
+.message.first { padding-top: 14px; }
 .message:hover { background-color: alpha(currentColor, 0.04); }
 .message.replying  { background-color: alpha(var(--accent-bg-color), 0.12); box-shadow: inset 2px 0 var(--accent-bg-color); }
 .message.highlight { background-color: alpha(var(--warning-bg-color), 0.15); box-shadow: inset 2px 0 var(--warning-bg-color); transition: background-color 300ms; }

@@ -107,10 +107,16 @@ impl Images {
     }
 
     /// Like [`set`](Self::set), but asks Discord's media proxy for the image
-    /// at the size `picture` is shown (its size request), never above
-    /// `original`. Other URLs load as they are.
-    pub fn set_sized(&self, picture: &gtk::Picture, url: &str, original: Option<(u32, u32)>, animated: bool) {
-        let shown = (picture.width_request(), picture.height_request());
+    /// at the size it is `shown` at most, never above `original`. Other URLs
+    /// load as they are.
+    pub fn set_sized(
+        &self,
+        picture: &gtk::Picture,
+        url: &str,
+        shown: (i32, i32),
+        original: Option<(u32, u32)>,
+        animated: bool,
+    ) {
         let (width, height) = request_size(shown, self.0.scale.get(), original);
         self.set(picture, &discord::cdn::proxy_sized(url, width, height), animated);
     }

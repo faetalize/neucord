@@ -2,6 +2,7 @@
 //! the rail and sidebar draw from: unread markers, mention counts, order.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 use discord::notifications::{NotificationSettings, Place};
 use discord::read_state::ReadStates;
@@ -146,6 +147,24 @@ impl State {
     }
 
     /// Everything the rail shows that can change without the guild list changing.
+    /// What the rail is built from: its servers and folders, in order, with
+    /// their names and icons. Markers aside, it changes rarely.
+    pub(super) fn rail_shape(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for guild in &self.guilds {
+            (guild.id, &guild.name, &guild.icon).hash(&mut hasher);
+        }
+        for entry in self.rail_layout() {
+            match entry {
+                RailEntry::Guild(id) => id.hash(&mut hasher),
+                RailEntry::Folder { id, name, color, guilds } => {
+                    (id, name, color, guilds, self.open_folders.contains(&id)).hash(&mut hasher)
+                }
+            }
+        }
+        hasher.finish()
+    }
+
     pub(super) fn rail_signature(&self) -> Vec<u64> {
         let mut sig = vec![self.guild.map_or(0, |g| g.0), self.home_badge() as u64];
         for guild in &self.guilds {

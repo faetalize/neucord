@@ -8,9 +8,16 @@ use crate::images::Images;
 /// A mention count, or nothing for zero.
 pub(super) fn badge(count: u32) -> Option<gtk::Label> {
     (count > 0).then(|| {
-        let text = if count > 99 { "99+".to_owned() } else { count.to_string() };
-        gtk::Label::builder().label(text).valign(gtk::Align::Center).css_classes(["badge"]).build()
+        let label = gtk::Label::builder().valign(gtk::Align::Center).css_classes(["badge"]).build();
+        set_badge(&label, count);
+        label
     })
+}
+
+/// Show `count` on a badge, hiding it at zero.
+pub(super) fn set_badge(label: &gtk::Label, count: u32) {
+    label.set_label(&if count > 99 { "99+".to_owned() } else { count.to_string() });
+    label.set_visible(count > 0);
 }
 
 pub(super) fn initials(name: &str) -> String {

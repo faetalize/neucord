@@ -7,6 +7,7 @@ mod connection;
 mod embeds;
 mod friends;
 mod login;
+mod media_frame;
 mod notify;
 mod panes;
 mod rail;
@@ -89,6 +90,9 @@ pub struct App {
     /// What the rail and sidebar last drew, so badge refreshes can skip
     /// rebuilding them when nothing visible changed.
     drawn: RefCell<(Vec<u64>, Vec<u64>)>,
+    /// The rail's buttons, and the shape they were built for.
+    rail_items: RefCell<Vec<rail::RailItem>>,
+    rail_shape: RefCell<u64>,
     /// Per-folder colours, regenerated with the rail.
     folder_css: gtk::CssProvider,
 }
@@ -192,6 +196,8 @@ impl App {
             highlight: Cell::default(),
             state: RefCell::default(),
             drawn: RefCell::default(),
+            rail_items: RefCell::default(),
+            rail_shape: RefCell::new(0),
             folder_css: gtk::CssProvider::new(),
         });
         gtk::style_context_add_provider_for_display(

@@ -6,6 +6,7 @@ use discord::settings::MediaSettings;
 use gtk::prelude::*;
 use gtk::{glib, pango};
 
+use super::media_frame::MediaFrame;
 use crate::images::Images;
 use crate::render::{self, Names};
 
@@ -59,8 +60,16 @@ fn gallery(media: &[Media], images: &Images, autoplay: bool) -> gtk::Widget {
     grid.upcast()
 }
 
-/// A picture sized to fit `max_w`×`max_h`, keeping the aspect ratio.
-pub(super) fn fitted_picture(width: Option<u32>, height: Option<u32>, max_w: f64, max_h: f64) -> gtk::Picture {
+/// A picture at most `size`, the media fitted into a box, that shrinks with
+/// the room it gets and keeps its aspect ratio.
+pub(super) struct Fitted {
+    /// What to put in the layout.
+    pub(super) frame: MediaFrame,
+    pub(super) picture: gtk::Picture,
+    pub(super) size: (i32, i32),
+}
+
+pub(super) fn fitted_picture(width: Option<u32>, height: Option<u32>, max_w: f64, max_h: f64) -> Fitted {
     let (mut w, mut h) = match (width, height) {
         (Some(w), Some(h)) if w > 0 && h > 0 => (w as f64, h as f64),
         _ => (max_w, max_h),
@@ -68,21 +77,26 @@ pub(super) fn fitted_picture(width: Option<u32>, height: Option<u32>, max_w: f64
     let scale = (max_w / w).min(max_h / h).min(1.0);
     w *= scale;
     h *= scale;
+    let size = ((w as i32).max(1), (h as i32).max(1));
+    let picture = shrinking_picture();
+    Fitted { frame: MediaFrame::new(size, &picture), picture, size }
+}
+
+/// A picture that fills what it is given.
+fn shrinking_picture() -> gtk::Picture {
     gtk::Picture::builder()
-        .width_request(w as i32)
-        .height_request(h as i32)
-        .halign(gtk::Align::Start)
-        .valign(gtk::Align::Start)
+        .can_shrink(true)
         .content_fit(gtk::ContentFit::Contain)
         .overflow(gtk::Overflow::Hidden)
         .css_classes(["embed-media"])
         .build()
 }
 
-fn image(media: &Media, images: &Images, autoplay: bool, max_w: f64, max_h: f64) -> gtk::Picture {
-    let picture = fitted_picture(Some(media.width), Some(media.height), max_w, max_h);
-    images.set_sized(&picture, &media.url, Some((media.width, media.height)), autoplay && media.animated);
-    picture
+fn image(media: &Media, images: &Images, autoplay: bool, max_w: f64, max_h: f64) -> MediaFrame {
+    let fitted = fitted_picture(Some(media.width), Some(media.height), max_w, max_h);
+    let animated = autoplay && media.animated;
+    images.set_sized(&fitted.picture, &media.url, fitted.size, Some((media.width, media.height)), animated);
+    fitted.frame
 }
 
 /// A still that opens its video page in the browser (YouTube and the like,
@@ -113,7 +127,7 @@ fn page_video(still: &Media, page: Option<&str>, images: &Images) -> gtk::Widget
 fn gifv(video: &Media, still: &Media, images: &Images, autoplay: bool) -> gtk::Widget {
     let frame = gtk::Overlay::builder().halign(gtk::Align::Start).build();
     frame.set_child(Some(&image(still, images, false, MAX_W, MAX_H)));
-    let player = fitted_picture(Some(video.width), Some(video.height), MAX_W, MAX_H);
+    let player = shrinking_picture();
     frame.add_overlay(&player);
 
     if autoplay {
@@ -162,8 +176,8 @@ fn load_gifv(player: &gtk::Picture, images: &Images, url: &str, hover: Option<gt
 fn video(video: &Media, still: &Media, images: &Images) -> gtk::Widget {
     let frame = gtk::Overlay::builder().halign(gtk::Align::Start).build();
     let poster = fitted_picture(Some(video.width), Some(video.height), MAX_W, MAX_H);
-    images.set_sized(&poster, &still.url, Some((still.width, still.height)), false);
-    frame.set_child(Some(&poster));
+    images.set_sized(&poster.picture, &still.url, poster.size, Some((still.width, still.height)), false);
+    frame.set_child(Some(&poster.frame));
     let play = gtk::Button::builder()
         .icon_name("media-playback-start-symbolic")
         .tooltip_text("Play")
@@ -175,7 +189,6 @@ fn video(video: &Media, still: &Media, images: &Images) -> gtk::Widget {
     play.connect_clicked({
         let frame = frame.downgrade();
         let (images, url) = (images.clone(), video.url.clone());
-        let (w, h) = (poster.width_request(), poster.height_request());
         move |button| {
             button.set_sensitive(false);
             let (frame, button, images, url) = (frame.clone(), button.downgrade(), images.clone(), url.clone());
@@ -183,11 +196,11 @@ fn video(video: &Media, still: &Media, images: &Images) -> gtk::Widget {
                 let path = images.file(&url).await;
                 let (Some(frame), Some(button)) = (frame.upgrade(), button.upgrade()) else { return };
                 let Some(path) = path else { return button.set_sensitive(true) };
+                // Over the poster, which keeps the frame's size.
                 frame.remove_overlay(&button);
-                let player = gtk::Video::builder().autoplay(true).width_request(w).height_request(h).build();
-                player.add_css_class("embed-media");
+                let player = gtk::Video::builder().autoplay(true).css_classes(["embed-media"]).build();
                 player.set_filename(Some(&path));
-                frame.set_child(Some(&player));
+                frame.add_overlay(&player);
             });
         }
     });
@@ -315,7 +328,7 @@ fn icon_picture(images: &Images, url: &str, size: i32, class: &str) -> gtk::Pict
         .overflow(gtk::Overflow::Hidden)
         .css_classes([class])
         .build();
-    images.set_sized(&picture, url, None, false);
+    images.set_sized(&picture, url, (size, size), None, false);
     picture
 }
 

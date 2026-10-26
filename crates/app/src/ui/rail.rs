@@ -9,28 +9,52 @@ use discord::{Guild, Snowflake};
 use gtk::prelude::*;
 
 use super::App;
-use super::state::State;
-use super::widgets::{badge, initials};
+use super::widgets::{initials, set_badge};
 use crate::images::Images;
 
+/// What a rail button stands for, to work out its markers.
+pub(super) enum Mark {
+    Home,
+    Guild(Snowflake),
+    /// A collapsed folder, carrying its servers' markers.
+    Folder(Vec<Snowflake>),
+}
+
+/// A rail button and its markers, kept so they can change in place: a
+/// rebuilt button would show its new state without animating to it.
+pub(super) struct RailItem {
+    mark: Mark,
+    button: gtk::Button,
+    pill: gtk::Box,
+    badge: gtk::Label,
+}
+
 impl App {
+    /// Bring the rail up to date: rebuild it if servers, folders or their
+    /// looks changed, else only move its markers.
     pub(super) fn rebuild_rail(self: &Rc<Self>) {
+        let shape = self.state.borrow().rail_shape();
+        if *self.rail_shape.borrow() != shape {
+            self.build_rail();
+            *self.rail_shape.borrow_mut() = shape;
+        }
+        self.mark_rail();
+    }
+
+    fn build_rail(self: &Rc<Self>) {
         for column in [&self.home, &self.rail] {
             while let Some(child) = column.first_child() {
                 column.remove(&child);
             }
         }
+        let mut items = Vec::new();
         let state = self.state.borrow();
-        self.drawn.borrow_mut().0 = state.rail_signature();
 
         let home = gtk::Button::builder()
             .icon_name("user-home-symbolic")
             .tooltip_text("Direct Messages")
             .css_classes(["guild", "home"])
             .build();
-        if state.guild.is_none() {
-            home.add_css_class("active");
-        }
         home.connect_clicked({
             let this = Rc::downgrade(self);
             move |_| {
@@ -39,7 +63,7 @@ impl App {
                 }
             }
         });
-        self.home.append(&rail_item(&home, false, state.home_badge()));
+        self.home.append(&rail_item(&home, Mark::Home, &mut items));
         self.home.append(&gtk::Separator::builder().css_classes(["rail-separator"]).build());
 
         let mut folder_css = String::new();
@@ -48,7 +72,7 @@ impl App {
             match entry {
                 RailEntry::Guild(id) => {
                     if let Some(guild) = guild(id) {
-                        self.rail.append(&self.guild_item(&state, guild));
+                        self.rail.append(&self.guild_item(guild, &mut items));
                     }
                 }
                 RailEntry::Folder { id, name, color, guilds } => {
@@ -68,15 +92,6 @@ impl App {
                         .css_classes(["guild", "folder", &class])
                         .overflow(gtk::Overflow::Hidden)
                         .build();
-                    if expanded {
-                        button.add_css_class("expanded");
-                        button.set_child(Some(&gtk::Image::from_icon_name("folder-symbolic")));
-                    } else {
-                        button.set_child(Some(&folder_preview(&members, &self.images)));
-                        if members.iter().any(|g| state.guild == Some(g.id)) {
-                            button.add_css_class("active");
-                        }
-                    }
                     button.connect_clicked({
                         let this = Rc::downgrade(self);
                         move |_| {
@@ -86,31 +101,64 @@ impl App {
                         }
                     });
                     if expanded {
+                        button.add_css_class("expanded");
+                        button.set_child(Some(&gtk::Image::from_icon_name("folder-symbolic")));
                         let group = gtk::Box::builder()
                             .orientation(gtk::Orientation::Vertical)
                             .css_classes(["folder-open"])
                             .build();
-                        group.append(&rail_item(&button, false, 0));
+                        group.append(&rail_item(&button, Mark::Folder(Vec::new()), &mut items));
                         for member in &members {
-                            group.append(&self.guild_item(&state, member));
+                            group.append(&self.guild_item(member, &mut items));
                         }
                         self.rail.append(&group);
                     } else {
-                        // A collapsed folder carries its servers' markers.
-                        let (unread, mentions) = members.iter().fold((false, 0), |(unread, mentions), g| {
-                            let (u, m) = state.guild_badge(g);
-                            (unread || u, mentions + m)
-                        });
-                        self.rail.append(&rail_item(&button, unread, mentions));
+                        button.set_child(Some(&folder_preview(&members, &self.images)));
+                        let ids = members.iter().map(|g| g.id).collect();
+                        self.rail.append(&rail_item(&button, Mark::Folder(ids), &mut items));
                     }
                 }
             }
         }
         self.folder_css.load_from_string(&folder_css);
+        *self.rail_items.borrow_mut() = items;
     }
 
-    /// One server's rail button with its unread pill and mention count.
-    pub(super) fn guild_item(self: &Rc<Self>, state: &State, guild: &Guild) -> gtk::Widget {
+    /// Set every rail button's markers from state: open, unread, mentions.
+    fn mark_rail(&self) {
+        let state = self.state.borrow();
+        self.drawn.borrow_mut().0 = state.rail_signature();
+        let badge = |id: &Snowflake| state.guilds.iter().find(|g| g.id == *id).map(|g| state.guild_badge(g));
+        for item in self.rail_items.borrow().iter() {
+            let (active, unread, mentions) = match &item.mark {
+                Mark::Home => (state.guild.is_none(), false, state.home_badge()),
+                Mark::Guild(id) => {
+                    let (unread, mentions) = badge(id).unwrap_or_default();
+                    (state.guild == Some(*id), unread, mentions)
+                }
+                Mark::Folder(ids) => ids.iter().fold((false, false, 0), |(active, unread, mentions), id| {
+                    let (u, m) = badge(id).unwrap_or_default();
+                    (active || state.guild == Some(*id), unread || u, mentions + m)
+                }),
+            };
+            for widget in [item.button.upcast_ref::<gtk::Widget>(), item.pill.upcast_ref()] {
+                if active {
+                    widget.add_css_class("active");
+                } else {
+                    widget.remove_css_class("active");
+                }
+            }
+            if unread {
+                item.pill.add_css_class("unread");
+            } else {
+                item.pill.remove_css_class("unread");
+            }
+            set_badge(&item.badge, mentions);
+        }
+    }
+
+    /// One server's rail button.
+    fn guild_item(self: &Rc<Self>, guild: &Guild, items: &mut Vec<RailItem>) -> gtk::Widget {
         let button = gtk::Button::builder()
             .tooltip_text(&guild.name)
             .css_classes(["guild"])
@@ -134,9 +182,6 @@ impl App {
             }
             None => button.set_label(&initials(&guild.name)),
         }
-        if state.guild == Some(guild.id) {
-            button.add_css_class("active");
-        }
         let id = guild.id;
         let this = Rc::downgrade(self);
         button.connect_clicked(move |_| {
@@ -144,8 +189,7 @@ impl App {
                 this.select_guild(id);
             }
         });
-        let (unread, mentions) = state.guild_badge(guild);
-        rail_item(&button, unread, mentions)
+        rail_item(&button, Mark::Guild(id), items)
     }
 
     pub(super) fn toggle_folder(self: &Rc<Self>, id: u64) {
@@ -205,27 +249,23 @@ impl App {
 }
 
 /// A rail button with its markers: a pill at the left edge, which grows from
-/// unread to hovered to open (the button's `active` class), and a mention
-/// count at the bottom right.
-pub(super) fn rail_item(button: &gtk::Button, unread: bool, mentions: u32) -> gtk::Widget {
+/// unread to hovered to open, and a mention count at the bottom right.
+fn rail_item(button: &gtk::Button, mark: Mark, items: &mut Vec<RailItem>) -> gtk::Widget {
     let overlay = gtk::Overlay::builder().child(button).css_classes(["rail-item"]).build();
     let pill =
         gtk::Box::builder().halign(gtk::Align::Start).valign(gtk::Align::Center).css_classes(["rail-pill"]).build();
-    if unread {
-        pill.add_css_class("unread");
-    }
-    if button.has_css_class("active") {
-        pill.add_css_class("active");
-    }
     pill.set_can_target(false);
     overlay.add_overlay(&pill);
-    if let Some(badge) = badge(mentions) {
-        badge.set_halign(gtk::Align::End);
-        badge.set_valign(gtk::Align::End);
-        badge.set_margin_end(8);
-        badge.set_can_target(false);
-        overlay.add_overlay(&badge);
-    }
+    let badge = gtk::Label::builder()
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::End)
+        .margin_end(8)
+        .visible(false)
+        .css_classes(["badge"])
+        .build();
+    badge.set_can_target(false);
+    overlay.add_overlay(&badge);
+    items.push(RailItem { mark, button: button.clone(), pill, badge });
     overlay.upcast()
 }
 
