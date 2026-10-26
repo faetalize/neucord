@@ -36,6 +36,10 @@ impl<'de> Deserialize<'de> for Snowflake {
     }
 }
 
+fn null_is_false<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(Option::<bool>::deserialize(d)?.unwrap_or(false))
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct User {
     pub id: Snowflake,
@@ -123,6 +127,12 @@ pub struct Channel {
     /// deleted message; it only ever needs to be roughly right.
     #[serde(default)]
     pub last_message_id: Option<Snowflake>,
+    /// A DM from someone we share no friendship with, waiting to be accepted.
+    #[serde(default, rename = "is_message_request", deserialize_with = "null_is_false")]
+    pub message_request: bool,
+    /// A message request Discord filed as spam.
+    #[serde(default, rename = "is_spam", deserialize_with = "null_is_false")]
+    pub spam: bool,
 }
 
 impl Channel {
@@ -134,6 +144,11 @@ impl Channel {
         }
         let names: Vec<&str> = self.recipients.iter().map(User::display_name).collect();
         if names.is_empty() { "Unnamed".to_owned() } else { names.join(", ") }
+    }
+
+    /// A message request or spam: kept out of the DM list until accepted.
+    pub fn is_request(&self) -> bool {
+        self.message_request || self.spam
     }
 
     /// Sort key for the DM list: most recent activity first.
@@ -331,6 +346,16 @@ mod tests {
 
         let named: Channel = serde_json::from_str(r#"{"id":"22","type":3,"name":"crew","recipients":[]}"#).unwrap();
         assert_eq!(named.title(), "crew");
+        assert!(!named.is_request());
+    }
+
+    #[test]
+    fn message_request_flags() {
+        let dm =
+            |flags: &str| -> Channel { serde_json::from_str(&format!(r#"{{"id":"1","type":1{flags}}}"#)).unwrap() };
+        assert!(dm(r#","is_message_request":true,"is_spam":false"#).is_request());
+        assert!(dm(r#","is_message_request":false,"is_spam":true"#).is_request());
+        assert!(!dm(r#","is_message_request":null,"is_spam":null"#).is_request());
     }
 
     #[test]

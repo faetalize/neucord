@@ -1,13 +1,23 @@
 //! Everything the UI knows about the session, and the derived views of it
 //! the rail and sidebar draw from: unread markers, mention counts, order.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use discord::notifications::{NotificationSettings, Place};
 use discord::read_state::ReadStates;
+use discord::relationships::Relationships;
 use discord::settings::{GuildFolder, RailEntry};
 use discord::{Channel, Gateway, Guild, Rest, Resume, Snowflake, User};
 use gtk::glib;
+
+use super::friends::Tab;
+
+/// What Home shows in place of a channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Page {
+    Friends,
+    MessageRequests,
+}
 
 #[derive(Default)]
 pub(super) struct State {
@@ -24,8 +34,9 @@ pub(super) struct State {
     pub(super) gateway: Option<Gateway>,
     pub(super) me: Option<User>,
     pub(super) guilds: Vec<Guild>,
-    /// DMs and group DMs.
+    /// DMs and group DMs, message requests included.
     pub(super) private_channels: Vec<Channel>,
+    pub(super) relationships: Relationships,
     /// The user's server folders, which also order the rail.
     pub(super) guild_folders: Vec<GuildFolder>,
     /// Folders the user expanded in the rail (by folder id).
@@ -33,6 +44,12 @@ pub(super) struct State {
     /// The open guild; `None` is Home, the DM list.
     pub(super) guild: Option<Snowflake>,
     pub(super) channel: Option<Snowflake>,
+    /// Set while Home shows one of its pages; then no channel is open.
+    pub(super) page: Option<Page>,
+    pub(super) friends_tab: Tab,
+    /// Runs of blocked users' messages the user chose to see, by the run's
+    /// first message.
+    pub(super) revealed_blocked: HashSet<Snowflake>,
     /// Display names by user id, accumulated from every user we see plus lazy
     /// `GET /users/{id}` lookups, so mentions resolve even for people no longer
     /// in the server.
@@ -57,6 +74,29 @@ impl State {
             RailEntry::Guild(id) => Some(id),
             RailEntry::Folder { guilds, .. } => guilds.first().copied(),
         })
+    }
+
+    /// The DM list: private channels that are not message requests.
+    pub(super) fn dms(&self) -> impl Iterator<Item = &Channel> {
+        self.private_channels.iter().filter(|c| !c.is_request())
+    }
+
+    /// Message requests and spam, newest first.
+    pub(super) fn requests(&self) -> Vec<&Channel> {
+        let mut requests: Vec<&Channel> = self.private_channels.iter().filter(|c| c.is_request()).collect();
+        requests.sort_by_key(|c| std::cmp::Reverse(c.activity()));
+        requests
+    }
+
+    /// Message requests not filed as spam: what the requests badge counts.
+    pub(super) fn waiting_requests(&self) -> u32 {
+        self.private_channels.iter().filter(|c| c.message_request && !c.spam).count() as u32
+    }
+
+    /// The open channel, if it is a message request.
+    pub(super) fn open_request(&self) -> Option<&Channel> {
+        let id = self.channel?;
+        self.private_channels.iter().find(|c| c.id == id && c.is_request())
     }
 
     pub(super) fn me(&self) -> Option<Snowflake> {
@@ -125,7 +165,11 @@ impl State {
                 .map(|c| (Place { guild: Some(guild.id), guild_default: 0, channel: c.id, parent: c.parent_id }, c))
                 .collect(),
             None => {
-                let mut dms: Vec<&Channel> = self.private_channels.iter().collect();
+                let page = self.page.map_or(0, |p| p as u64 + 1);
+                let (requests, waiting) = (self.requests().len(), self.waiting_requests());
+                sig.extend([page, self.relationships.incoming() as u64, requests as u64, waiting as u64]);
+                sig.push(self.open_request().is_some() as u64);
+                let mut dms: Vec<&Channel> = self.dms().collect();
                 dms.sort_by_key(|c| std::cmp::Reverse(c.activity()));
                 dms.into_iter()
                     .map(|c| (Place { guild: None, guild_default: 0, channel: c.id, parent: None }, c))
@@ -143,9 +187,10 @@ impl State {
         sig
     }
 
-    /// Home's badge: every DM message counts as a mention.
+    /// Home's badge: every DM message counts as a mention, and so does a
+    /// friend request.
     pub(super) fn home_badge(&self) -> u32 {
-        self.private_channels.iter().map(|c| self.read.mentions(c.id)).sum()
+        self.dms().map(|c| self.read.mentions(c.id)).sum::<u32>() + self.relationships.incoming()
     }
 
     /// Record a new newest message for a channel wherever it lives.

@@ -19,9 +19,9 @@ impl App {
     /// The message box under the list, with its mention popup and keys.
     pub(super) fn build_composer(self: &Rc<Self>, chat: &gtk::Box) {
         chat.append(&self.composer_error);
-        let composer_box = gtk::Box::builder().css_classes(["composer"]).build();
-        composer_box.append(&self.composer);
-        chat.append(&composer_box);
+        chat.append(&self.request_bar);
+        self.composer_box.append(&self.composer);
+        chat.append(&self.composer_box);
 
         // Mention autocomplete popup, anchored to the composer.
         self.mention_popover.set_child(Some(&self.mention_list));

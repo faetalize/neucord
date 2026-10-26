@@ -45,9 +45,11 @@ window.neucord { background: transparent; color: #DBDEE1; font-size: 15px; }
 
 /* Chat */
 .chat-header { padding: 12px 16px; font-weight: 700; color: #F2F3F5; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
-listview.messages, listview.messages > row { background: none; }
-.message       { padding: 2px 48px 2px 16px; }
-.message.first { padding-top: 14px; }
+/* Rows carry no padding of their own, so a collapsed blocked message takes no space. */
+listview.messages, listview.messages > row { background: none; padding: 0; }
+.message       { padding: 4px 50px 4px 18px; }
+.message.first { padding-top: 16px; }
+.blocked-bar   { margin: 4px 50px 4px 74px; color: #949BA4; font-size: 13px; border-spacing: 8px; }
 .message:hover { background: rgba(0, 0, 0, 0.08); }
 .avatar { min-width: 40px; min-height: 40px; border-radius: 20px; font-weight: 700; color: #1E1F22; }
 .channel.dm { padding: 6px 8px; }
@@ -60,6 +62,37 @@ listview.messages, listview.messages > row { background: none; }
 .composer { margin: 0 16px 16px 16px; padding: 10px 12px; border-radius: 10px; background: rgba(0, 0, 0, 0.22); }
 textview.composer-input, textview.composer-input text { background: none; color: #DBDEE1; }
 .composer-error { color: #F23F43; font-size: 12px; margin: 0 20px 8px 20px; }
+
+/* Friends and message requests */
+.friends-header { padding-top: 8px; padding-bottom: 8px; }
+.friends-title  { margin-right: 8px; }
+.friends-tab, .row-action {
+  padding: 2px 10px; border-radius: 6px; color: #B5BAC1; background: none; border: none; box-shadow: none;
+  font-weight: 500;
+}
+.friends-tab:hover, .row-action:hover { background: rgba(255, 255, 255, 0.06); color: #DBDEE1; }
+.friends-tab:checked { background: rgba(255, 255, 255, 0.10); color: #F2F3F5; }
+.friends-tab.add { background: #248046; color: white; }
+.friends-tab.add:checked { background: none; color: #2DC770; }
+.row-action { background: rgba(255, 255, 255, 0.06); }
+.row-action.primary { background: #5865F2; color: white; }
+.row-action.primary:hover { background: #4752C4; }
+.friends-list { padding: 0 16px 16px 16px; }
+.friends-list > .category { margin-left: 8px; }
+.friends-empty, .section-hint { margin: 4px 8px 8px 8px; }
+.friend { padding: 8px; border-top: 1px solid rgba(255, 255, 255, 0.06); }
+.friend .channel.dm { margin: 0; }
+.add-friend { padding: 20px 24px; }
+.add-friend-row { margin-top: 8px; padding: 8px 8px 8px 12px; border-radius: 10px; background: rgba(0, 0, 0, 0.22); }
+.success { color: #2DC770; font-size: 13px; }
+.presence { min-width: 10px; min-height: 10px; border-radius: 7px; border: 2px solid #2B2D31; }
+.presence.online  { background: #23A55A; }
+.presence.idle    { background: #F0B232; }
+.presence.dnd     { background: #F23F43; }
+.presence.offline { background: #80848E; }
+.request-bar { color: #DBDEE1; }
+.link-button { padding: 0 4px; min-height: 0; background: none; border: none; box-shadow: none; color: #00A8FC; }
+.link-button:hover { text-decoration: underline; }
 
 /* Login / connecting */
 .card {

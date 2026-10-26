@@ -8,7 +8,7 @@ use gtk::pango;
 use gtk::prelude::*;
 
 use super::App;
-use super::state::now_unix;
+use super::state::{Page, now_unix};
 use super::widgets::{PALETTE_SIZE, avatar_widget, badge, initials, palette_index};
 use crate::images::Images;
 
@@ -21,7 +21,18 @@ impl App {
         self.drawn.borrow_mut().1 = state.sidebar_signature();
         let Some(id) = state.guild else {
             self.guild_name.set_label("Direct Messages");
-            let mut dms: Vec<&Channel> = state.private_channels.iter().collect();
+            self.append_home_entry(
+                "Friends",
+                state.page == Some(Page::Friends),
+                state.relationships.incoming(),
+                App::show_friends,
+            );
+            let requests = state.requests().len();
+            let in_requests = state.page == Some(Page::MessageRequests) || state.open_request().is_some();
+            if requests > 0 || in_requests {
+                self.append_home_entry("Message Requests", in_requests, state.waiting_requests(), App::show_requests);
+            }
+            let mut dms: Vec<&Channel> = state.dms().collect();
             dms.sort_by_key(|c| std::cmp::Reverse(c.activity()));
             for dm in dms {
                 let row = dm_row(dm, &self.images);
@@ -103,6 +114,28 @@ impl App {
                 self.channels.append(&button);
             }
         }
+    }
+}
+
+impl App {
+    /// One of the entries above the DM list that open a Home page.
+    fn append_home_entry(self: &Rc<Self>, label: &str, active: bool, count: u32, open: fn(&Rc<App>)) {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        row.append(&gtk::Label::builder().label(label).xalign(0.0).hexpand(true).build());
+        if let Some(badge) = badge(count) {
+            row.append(&badge);
+        }
+        let button = gtk::Button::builder().child(&row).css_classes(["channel", "home-entry"]).build();
+        if active {
+            button.add_css_class("active");
+        }
+        let this = Rc::downgrade(self);
+        button.connect_clicked(move |_| {
+            if let Some(this) = this.upgrade() {
+                open(&this);
+            }
+        });
+        self.channels.append(&button);
     }
 }
 
