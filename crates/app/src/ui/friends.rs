@@ -5,14 +5,14 @@ use std::cell::Cell;
 use std::future::Future;
 use std::rc::Rc;
 
+use adw::prelude::*;
 use discord::relationships::{Kind, List, Relationship, Status};
 use discord::{ChannelKind, Rest, Snowflake};
-use gtk::prelude::*;
-use gtk::{glib, pango};
+use gtk::glib;
 
 use super::App;
 use super::state::Page;
-use super::widgets::{avatar_widget, badge, palette_index};
+use super::widgets::avatar_widget;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Tab {
@@ -29,23 +29,25 @@ impl Default for Tab {
 /// What a row's button does with the row's user.
 type Action = fn(&Rc<App>, Snowflake);
 
-const TABS: [(Tab, &str); 5] = [
-    (Tab::List(List::Online), "Online"),
-    (Tab::List(List::All), "All"),
-    (Tab::List(List::Pending), "Pending"),
-    (Tab::List(List::Blocked), "Blocked"),
-    (Tab::Add, "Add Friend"),
+const TABS: [(Tab, &str, &str, &str); 5] = [
+    (Tab::List(List::Online), "online", "Online", "user-available-symbolic"),
+    (Tab::List(List::All), "all", "All", "system-users-symbolic"),
+    (Tab::List(List::Pending), "pending", "Pending", "user-status-pending-symbolic"),
+    (Tab::List(List::Blocked), "blocked", "Blocked", "action-unavailable-symbolic"),
+    (Tab::Add, "add", "Add Friend", "contact-new-symbolic"),
 ];
+
+fn tab_name(tab: Tab) -> &'static str {
+    TABS.iter().find(|t| t.0 == tab).map_or("online", |t| t.1)
+}
 
 /// The page's widgets. Its rows are rebuilt from state whenever it is shown
 /// and something on it changed.
 pub(super) struct FriendsPage {
-    pub(super) root: gtk::Box,
-    tabs: Vec<(Tab, gtk::ToggleButton)>,
-    /// "list" or "add".
-    stack: gtk::Stack,
-    heading: gtk::Label,
-    list: gtk::Box,
+    pub(super) root: adw::BreakpointBin,
+    stack: adw::ViewStack,
+    /// Each list tab's heading and rows.
+    lists: Vec<(List, gtk::Label, gtk::ListBox)>,
     error: gtk::Label,
     entry: gtk::Entry,
     send: gtk::Button,
@@ -56,35 +58,27 @@ pub(super) struct FriendsPage {
 
 impl FriendsPage {
     pub(super) fn new() -> Self {
-        let tabs = TABS
+        let lists = TABS
             .iter()
-            .map(|&(tab, label)| {
-                let button = gtk::ToggleButton::builder().label(label).css_classes(["friends-tab"]).build();
-                if tab == Tab::Add {
-                    button.add_css_class("add");
-                }
-                (tab, button)
+            .filter_map(|&(tab, ..)| match tab {
+                Tab::List(list) => Some(list),
+                Tab::Add => None,
             })
-            .collect::<Vec<_>>();
-        for (_, button) in &tabs[1..] {
-            button.set_group(Some(&tabs[0].1));
-        }
+            .map(|list| {
+                let heading = label_builder().css_classes(["heading"]).build();
+                (list, heading, gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).build())
+            })
+            .collect();
         FriendsPage {
-            root: gtk::Box::builder()
-                .orientation(gtk::Orientation::Vertical)
-                .hexpand(true)
-                .css_classes(["chat"])
-                .build(),
-            tabs,
-            stack: gtk::Stack::new(),
-            heading: gtk::Label::builder().xalign(0.0).css_classes(["category"]).build(),
-            list: gtk::Box::new(gtk::Orientation::Vertical, 0),
-            error: label_builder().visible(false).css_classes(["composer-error"]).build(),
+            root: adw::BreakpointBin::builder().width_request(300).height_request(200).build(),
+            stack: adw::ViewStack::new(),
+            lists,
+            error: label_builder().visible(false).css_classes(["error"]).build(),
             entry: gtk::Entry::builder().placeholder_text("Username").hexpand(true).build(),
             send: gtk::Button::builder()
-                .label("Send Friend Request")
+                .label("Send Request")
                 .sensitive(false)
-                .css_classes(["login-button"])
+                .css_classes(["suggested-action"])
                 .build(),
             add_status: label_builder().visible(false).build(),
             queued: Cell::new(false),
@@ -96,51 +90,74 @@ fn label_builder() -> gtk::builders::LabelBuilder {
     gtk::Label::builder().xalign(0.0).wrap(true)
 }
 
+/// A page's content at a readable width, scrolling if it runs long.
+pub(super) fn clamped(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
+    let clamp = adw::Clamp::builder()
+        .maximum_size(720)
+        .child(child)
+        .margin_top(18)
+        .margin_bottom(18)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    gtk::ScrolledWindow::builder().vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).child(&clamp).build()
+}
+
 impl App {
     pub(super) fn build_friends(self: &Rc<Self>) -> gtk::Widget {
         let page = &self.friends;
-        let header = gtk::Box::builder().spacing(8).css_classes(["chat-header", "friends-header"]).build();
-        header.append(&gtk::Label::builder().label("Friends").css_classes(["friends-title"]).build());
-        for &(tab, ref button) in &page.tabs {
-            header.append(button);
+        for &(tab, name, title, icon) in &TABS {
+            let child = match tab {
+                Tab::Add => self.build_add_friend(),
+                Tab::List(list) => {
+                    let (_, heading, rows) = page.lists.iter().find(|l| l.0 == list).expect("a list per tab");
+                    let column = gtk::Box::new(gtk::Orientation::Vertical, 12);
+                    column.append(heading);
+                    column.append(rows);
+                    clamped(&column).upcast()
+                }
+            };
+            page.stack.add_titled_with_icon(&child, Some(name), title, icon);
+        }
+        page.stack.connect_visible_child_name_notify({
             let this = Rc::downgrade(self);
-            button.connect_toggled(move |button| {
-                if let Some(this) = this.upgrade()
-                    && button.is_active()
-                {
+            move |stack| {
+                let tab = stack.visible_child_name().and_then(|name| TABS.iter().find(|t| t.1 == name)).map(|t| t.0);
+                if let (Some(this), Some(tab)) = (this.upgrade(), tab) {
                     this.select_friends_tab(tab);
                 }
-            });
-        }
-        page.root.append(&header);
+            }
+        });
 
-        let list_page =
-            gtk::Box::builder().orientation(gtk::Orientation::Vertical).css_classes(["friends-list"]).build();
-        list_page.append(&page.heading);
-        list_page.append(&page.list);
-        page.stack.add_named(
-            &gtk::ScrolledWindow::builder()
-                .vexpand(true)
-                .hscrollbar_policy(gtk::PolicyType::Never)
-                .child(&list_page)
-                .build(),
-            Some("list"),
-        );
-        page.stack.add_named(&self.build_add_friend(), Some("add"));
-        page.root.append(&page.error);
-        page.root.append(&page.stack);
+        let switcher = adw::ViewSwitcher::builder().stack(&page.stack).policy(adw::ViewSwitcherPolicy::Wide).build();
+        let header = adw::HeaderBar::builder().title_widget(&switcher).build();
+        let bar = adw::ViewSwitcherBar::builder().stack(&page.stack).build();
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        content.append(&page.error);
+        content.append(&page.stack);
+        let view = adw::ToolbarView::builder().content(&content).build();
+        view.add_top_bar(&header);
+        view.add_bottom_bar(&bar);
+
+        // Too narrow for the tabs in the header: move them to the bottom.
+        let narrow = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
+            adw::BreakpointConditionLengthType::MaxWidth,
+            800.0,
+            adw::LengthUnit::Sp,
+        ));
+        narrow.add_setter(&header, "title-widget", Some(&adw::WindowTitle::new("Friends", "").to_value()));
+        narrow.add_setter(&bar, "reveal", Some(&true.to_value()));
+        page.root.add_breakpoint(narrow);
+        page.root.set_child(Some(&view));
         page.root.clone().upcast()
     }
 
     fn build_add_friend(self: &Rc<Self>) -> gtk::Widget {
         let page = &self.friends;
-        let column =
-            gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).css_classes(["add-friend"]).build();
-        column.append(&label_builder().label("Add Friend").css_classes(["card-title"]).build());
-        column.append(
-            &label_builder().label("You can add friends with their Discord username.").css_classes(["hint"]).build(),
-        );
-        let row = gtk::Box::builder().spacing(8).css_classes(["add-friend-row"]).build();
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        column.append(&label_builder().label("Add Friend").css_classes(["title-2"]).build());
+        column.append(&label_builder().label("You can add friends with their Discord username.").build());
+        let row = gtk::Box::builder().spacing(6).build();
         row.append(&page.entry);
         row.append(&page.send);
         column.append(&row);
@@ -163,7 +180,7 @@ impl App {
             move |_| send()
         });
         page.send.connect_clicked(move |_| send());
-        column.upcast()
+        clamped(&column).upcast()
     }
 
     /// Open Home's friends page.
@@ -176,6 +193,7 @@ impl App {
         }
         self.friends.error.set_visible(false);
         self.content.set_visible_child(&self.friends.root);
+        self.set_content_title("Friends");
         self.rebuild_rail();
         self.rebuild_sidebar();
         self.rebuild_friends();
@@ -215,71 +233,41 @@ impl App {
             let state = self.state.borrow();
             (state.friends_tab, state.relationships.incoming())
         };
-        for (t, button) in &page.tabs {
-            // Activating a tab re-enters `select_friends_tab`, which finds no
-            // change; so state must not be borrowed here.
-            button.set_active(*t == tab);
-            if *t == Tab::List(List::Pending) {
-                let child = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-                child.append(&gtk::Label::new(Some("Pending")));
-                if let Some(badge) = badge(incoming) {
-                    child.append(&badge);
-                }
-                button.set_child(Some(&child));
-            }
-        }
+        let pending = page.stack.page(&page.stack.child_by_name("pending").expect("pending tab"));
+        pending.set_badge_number(incoming);
+        pending.set_needs_attention(incoming > 0);
+        // Showing a tab re-enters `select_friends_tab`, which finds no
+        // change; so state must not be borrowed here.
+        page.stack.set_visible_child_name(tab_name(tab));
+        let Tab::List(list) = tab else { return };
         let state = self.state.borrow();
-        let list = match tab {
-            Tab::Add => {
-                page.stack.set_visible_child_name("add");
-                return;
-            }
-            Tab::List(list) => list,
-        };
-        page.stack.set_visible_child_name("list");
-        while let Some(child) = page.list.first_child() {
-            page.list.remove(&child);
-        }
+        let Some((_, heading, rows)) = page.lists.iter().find(|l| l.0 == list) else { return };
+        rows.remove_all();
         let people = state.relationships.list(list);
-        let (heading, empty) = match list {
-            List::Online => ("ONLINE", "None of your friends are online."),
-            List::All => ("ALL FRIENDS", "No friends yet. Add someone with their username."),
-            List::Pending => ("PENDING", "No pending friend requests."),
-            List::Blocked => ("BLOCKED", "You haven't blocked anyone."),
+        let (title, empty) = match list {
+            List::Online => ("Online", "None of your friends are online."),
+            List::All => ("All Friends", "No friends yet. Add someone with their username."),
+            List::Pending => ("Pending", "No pending friend requests."),
+            List::Blocked => ("Blocked", "You haven't blocked anyone."),
         };
-        page.heading.set_label(&format!("{heading} — {}", people.len()));
+        heading.set_label(&format!("{title} — {}", people.len()));
+        heading.set_visible(!people.is_empty());
+        rows.set_css_classes(if people.is_empty() { &[] } else { &["boxed-list"] });
         if people.is_empty() {
-            page.list.append(&label_builder().label(empty).css_classes(["hint", "friends-empty"]).build());
+            rows.append(
+                &gtk::ListBoxRow::builder()
+                    .activatable(false)
+                    .child(&label_builder().label(empty).css_classes(["dimmed"]).build())
+                    .build(),
+            );
         }
         for relationship in people {
-            page.list.append(&self.friend_row(relationship, state.relationships.presence(relationship.user.id).status));
+            rows.append(&self.friend_row(relationship, state.relationships.presence(relationship.user.id).status));
         }
     }
 
     fn friend_row(self: &Rc<Self>, relationship: &Relationship, status: Status) -> gtk::Widget {
         let user = &relationship.user;
-        let row = gtk::Box::builder().spacing(12).css_classes(["friend"]).build();
-
-        let avatar = gtk::Overlay::builder()
-            .child(&avatar_widget(user, palette_index(user), 32, Some(&self.images)))
-            .valign(gtk::Align::Center)
-            .build();
-        if relationship.kind == Kind::Friend {
-            avatar.add_overlay(&presence_dot(status));
-        }
-        row.append(&avatar);
-
-        let text = gtk::Box::builder().orientation(gtk::Orientation::Vertical).hexpand(true).build();
-        let name = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        name.append(&gtk::Label::builder().label(relationship.name()).css_classes(["author"]).build());
-        name.append(
-            &gtk::Label::builder()
-                .label(&user.username)
-                .ellipsize(pango::EllipsizeMode::End)
-                .css_classes(["time"])
-                .build(),
-        );
-        text.append(&name);
         let detail = match (relationship.kind, relationship.spam) {
             (Kind::Friend, _) => {
                 let presence = self.state.borrow().relationships.presence(user.id);
@@ -291,15 +279,22 @@ impl App {
             (Kind::Blocked, _) => "Blocked".to_owned(),
             (Kind::Other(_), _) => String::new(),
         };
-        text.append(
-            &gtk::Label::builder()
-                .label(detail)
-                .xalign(0.0)
-                .ellipsize(pango::EllipsizeMode::End)
-                .css_classes(["hint"])
-                .build(),
-        );
-        row.append(&text);
+        let subtitle = if detail.is_empty() { user.username.clone() } else { format!("{} · {detail}", user.username) };
+        let row = adw::ActionRow::builder()
+            .title(relationship.name())
+            .subtitle(subtitle)
+            .use_markup(false)
+            .subtitle_lines(1)
+            .build();
+
+        let avatar = gtk::Overlay::builder()
+            .child(&avatar_widget(user, 32, Some(&self.images)))
+            .valign(gtk::Align::Center)
+            .build();
+        if relationship.kind == Kind::Friend {
+            avatar.add_overlay(&presence_dot(status));
+        }
+        row.add_prefix(&avatar);
 
         let id = user.id;
         let actions: &[(&str, Action)] = match relationship.kind {
@@ -310,10 +305,9 @@ impl App {
             Kind::Other(_) => &[],
         };
         for &(label, action) in actions {
-            let button =
-                gtk::Button::builder().label(label).valign(gtk::Align::Center).css_classes(["row-action"]).build();
-            if matches!(label, "Accept" | "Message") {
-                button.add_css_class("primary");
+            let button = gtk::Button::builder().label(label).valign(gtk::Align::Center).build();
+            if label == "Accept" {
+                button.add_css_class("suggested-action");
             }
             let this = Rc::downgrade(self);
             button.connect_clicked(move |_| {
@@ -321,7 +315,7 @@ impl App {
                     action(&this, id);
                 }
             });
-            row.append(&button);
+            row.add_suffix(&button);
         }
         row.upcast()
     }
@@ -354,17 +348,15 @@ impl App {
 
     fn confirm_remove_friend(self: &Rc<Self>, user: Snowflake) {
         let Some(name) = self.state.borrow().relationships.get(user).map(|r| r.name().to_owned()) else { return };
-        let dialog = gtk::AlertDialog::builder()
-            .modal(true)
-            .message(format!("Remove {name}?"))
-            .detail("They will no longer be your friend. You can send them a new request later.")
-            .buttons(["Cancel", "Remove Friend"])
-            .cancel_button(0)
-            .default_button(0)
-            .build();
+        let dialog = confirm(
+            &format!("Remove {name}?"),
+            "They will no longer be your friend. You can send them a new request later.",
+            "_Remove Friend",
+            adw::ResponseAppearance::Destructive,
+        );
         let this = self.clone();
         glib::spawn_future_local(async move {
-            if matches!(dialog.choose_future(Some(&this.window)).await, Ok(1)) {
+            if dialog.choose_future(Some(&this.window)).await == "confirm" {
                 this.remove_relationship(user);
             }
         });
@@ -399,15 +391,13 @@ impl App {
     }
 
     async fn confirm_stranger(&self, relationship: &Relationship) -> bool {
-        let dialog = gtk::AlertDialog::builder()
-            .modal(true)
-            .message(format!("Accept a request from {}?", relationship.name()))
-            .detail("You don't share any servers or friends with them. Only accept if you know who they are.")
-            .buttons(["Cancel", "Accept"])
-            .cancel_button(0)
-            .default_button(0)
-            .build();
-        matches!(dialog.choose_future(Some(&self.window)).await, Ok(1))
+        let dialog = confirm(
+            &format!("Accept a request from {}?", relationship.name()),
+            "You don't share any servers or friends with them. Only accept if you know who they are.",
+            "_Accept",
+            adw::ResponseAppearance::Suggested,
+        );
+        dialog.choose_future(Some(&self.window)).await == "confirm"
     }
 
     /// Unfriend, unblock, or ignore or cancel a request.
@@ -465,6 +455,16 @@ impl App {
             page.add_status.set_visible(true);
         });
     }
+}
+
+/// A dialog asking to go ahead with `verb`, answering "confirm" or "cancel".
+pub(super) fn confirm(heading: &str, body: &str, verb: &str, appearance: adw::ResponseAppearance) -> adw::AlertDialog {
+    let dialog = adw::AlertDialog::new(Some(heading), Some(body));
+    dialog.add_responses(&[("cancel", "_Cancel"), ("confirm", verb)]);
+    dialog.set_response_appearance("confirm", appearance);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    dialog
 }
 
 /// The coloured dot at the corner of an avatar.

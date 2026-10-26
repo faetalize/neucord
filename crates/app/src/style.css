@@ -1,178 +1,99 @@
-/* Neucord. The window is transparent; surfaces with `backdrop-filter` make
-   GTK ask the compositor (ext-background-effect) to blur the desktop behind
-   them. Nothing blurs scrolling content yet: GTK 4.24 does not redraw a
-   backdrop-filter when the content behind it scrolls, leaving stale pixels. */
-
-window.neucord { background: transparent; color: #DBDEE1; font-size: 15px; }
-
-.rail    { background: rgba(20, 21, 24, 0.40); backdrop-filter: blur(24px); }
-.sidebar { background: rgba(30, 31, 34, 0.50); backdrop-filter: blur(24px); }
-.chat    { background: rgba(49, 51, 56, 0.70); backdrop-filter: blur(24px); }
-.page    { background: rgba(30, 31, 34, 0.45); backdrop-filter: blur(24px); }
+/* Neucord. libadwaita draws nearly everything; this sheet only shapes what
+   it has no widget for, in its colours, so dark mode, the accent colour and
+   the user's gtk.css apply here too. */
 
 /* Server rail */
+.rail { background-color: var(--sidebar-shade-color); }
 .guild {
-  min-width: 48px; min-height: 48px; margin: 4px 12px; padding: 0;
-  border-radius: 24px; background: rgba(255, 255, 255, 0.08);
-  color: #F2F3F5; font-weight: 600; font-size: 14px;
-  transition: border-radius 150ms, background 150ms;
+  min-width: 48px; min-height: 48px; margin: 3px 12px; padding: 0;
+  border-radius: 24px; background-color: alpha(currentColor, 0.1); font-weight: bold;
+  transition: border-radius 150ms, background-color 150ms;
 }
-.guild:hover  { border-radius: 16px; background: rgba(88, 101, 242, 0.6); }
-.guild.active { border-radius: 16px; background: rgba(88, 101, 242, 0.9); }
-.rail-pill { min-width: 4px; min-height: 8px; border-radius: 0 4px 4px 0; background: #F2F3F5; }
+.guild:hover  { border-radius: 16px; background-color: alpha(currentColor, 0.15); }
+.guild.active { border-radius: 16px; background-color: var(--accent-bg-color); color: var(--accent-fg-color); }
+.rail-pill { min-width: 4px; min-height: 8px; border-radius: 0 4px 4px 0; background-color: currentColor; }
+.rail-separator { margin: 3px 24px; }
+/* Folders: collapsed shows a 2×2 preview on the folder's colour (per-folder
+   colours come from a provider the rail regenerates). */
+.folder:not(.expanded) { background-color: alpha(var(--accent-bg-color), 0.35); }
+.folder image { -gtk-icon-size: 22px; }
+.folder-open { margin: 0 8px; padding-bottom: 3px; border-radius: 16px; background-color: alpha(currentColor, 0.06); }
+.folder-open .guild { margin-left: 4px; margin-right: 4px; }
+.mini-icon { border-radius: 6px; background-color: alpha(currentColor, 0.15); font-size: 10px; }
+
 .badge {
   min-width: 16px; min-height: 16px; padding: 0 4px; border-radius: 8px;
-  background: #F23F43; color: white; font-size: 11px; font-weight: 700;
+  background-color: var(--accent-bg-color); color: var(--accent-fg-color); font-size: 11px; font-weight: bold;
 }
-/* Folders: collapsed shows a 2×2 preview on the folder colour (per-folder
-   colours come from a provider the rail regenerates). */
-.folder:not(.expanded) { background: rgba(88, 101, 242, 0.35); }
-.folder image { color: #8E97F8; -gtk-icon-size: 22px; }
-.folder-open { margin: 0 8px; padding-bottom: 4px; border-radius: 16px; background: rgba(255, 255, 255, 0.05); }
-.folder-open .guild { margin-left: 4px; margin-right: 4px; }
-.mini-icon { border-radius: 6px; background: rgba(255, 255, 255, 0.12); font-size: 10px; }
-.rail-separator { margin: 4px 24px; min-height: 2px; background: rgba(255, 255, 255, 0.08); }
 
-/* Channel sidebar */
-.guild-name { font-weight: 700; color: #F2F3F5; padding: 14px 16px; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
-.category   { color: #949BA4; font-size: 12px; font-weight: 700; margin: 14px 16px 4px 16px; }
-.channel    { padding: 5px 10px; margin: 1px 8px; border-radius: 6px; color: #949BA4; background: none; box-shadow: none; }
-.channel:hover  { background: rgba(255, 255, 255, 0.05); color: #DBDEE1; }
-.channel.active { background: rgba(255, 255, 255, 0.10); color: #F2F3F5; }
-.channel.unread { color: #F2F3F5; font-weight: 700; }
-.channel.muted  { opacity: 0.45; }
-.me { padding: 10px 14px; background: rgba(0, 0, 0, 0.20); color: #DBDEE1; }
+/* Channel list */
+.category { margin-top: 12px; font-size: 0.82em; font-weight: bold; }
+.navigation-sidebar > row.unread { font-weight: bold; }
+.navigation-sidebar > row.muted { opacity: var(--dim-opacity); }
+.me { padding: 9px 14px; }
 
-/* Chat */
-.chat-header { padding: 12px 16px; font-weight: 700; color: #F2F3F5; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
-/* Rows carry no padding of their own, so a collapsed blocked message takes no space. */
+/* Messages. Rows carry no padding of their own, so a collapsed blocked
+   message takes no space. */
 listview.messages, listview.messages > row { background: none; padding: 0; }
 /* The right padding leaves room for the hover Reply button (28px plus the
    row's 16px gap), so text is as wide with or without it. */
-.message       { padding: 4px 6px 4px 18px; }
-.message.first { padding-top: 16px; }
-.blocked-bar   { margin: 4px 50px 4px 74px; color: #949BA4; font-size: 13px; border-spacing: 8px; }
-.message:hover { background: rgba(0, 0, 0, 0.08); }
-.message.replying  { background: rgba(88, 101, 242, 0.10); box-shadow: inset 2px 0 #5865F2; }
-.message.highlight { background: rgba(250, 166, 26, 0.12); box-shadow: inset 2px 0 #FAA61A; transition: background 300ms; }
+.message       { padding: 3px 6px 3px 18px; }
+.message.first { padding-top: 15px; }
+.message:hover { background-color: alpha(currentColor, 0.04); }
+.message.replying  { background-color: alpha(var(--accent-bg-color), 0.12); box-shadow: inset 2px 0 var(--accent-bg-color); }
+.message.highlight { background-color: alpha(var(--warning-bg-color), 0.15); box-shadow: inset 2px 0 var(--warning-bg-color); transition: background-color 300ms; }
+.blocked-bar { margin: 3px 50px 3px 74px; opacity: var(--dim-opacity); font-size: 0.9em; border-spacing: 8px; }
 /* Hover actions take their space always, so rows don't reflow on hover. */
 .message .message-action { opacity: 0; min-width: 28px; min-height: 28px; padding: 0; }
 .message:hover .message-action { opacity: 1; }
-.avatar { min-width: 40px; min-height: 40px; border-radius: 20px; font-weight: 700; color: #1E1F22; }
-.channel.dm { padding: 6px 8px; }
-.channel.dm .avatar { min-width: 32px; min-height: 32px; border-radius: 16px; font-size: 13px; }
-.author { font-weight: 600; }
-.time   { color: #949BA4; font-size: 12px; }
-.attachment { color: #00A8FC; }
-.empty  { color: #949BA4; }
+picture.avatar { border-radius: 9999px; }
+.attachment-image, .embed-media { border-radius: 8px; margin-top: 4px; background-color: alpha(currentColor, 0.06); }
 
 /* Replies: a spine from the avatar up to the original, as in Discord. */
-.reply-preview { color: #B5BAC1; font-size: 13px; }
-.reply-preview .avatar { min-width: 16px; min-height: 16px; border-radius: 8px; font-size: 9px; }
-.reply-preview .author { font-weight: 600; }
+.reply-preview { font-size: 0.9em; }
 .reply-spine {
   min-width: 34px; min-height: 8px; margin: 0 0 0 18px; border-top-left-radius: 6px;
-  border-left: 2px solid #4E5058; border-top: 2px solid #4E5058;
+  border-left: 2px solid alpha(currentColor, 0.25); border-top: 2px solid alpha(currentColor, 0.25);
 }
-.reply-snippet.missing { font-style: italic; color: #949BA4; }
-.reply-bar { margin: 0 16px; padding: 4px 4px 4px 12px; border-radius: 10px 10px 0 0; background: rgba(0, 0, 0, 0.30); color: #B5BAC1; font-size: 13px; }
-.reply-bar + .composer { margin-top: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
-.reply-ping { font-weight: 700; color: #00A8FC; padding: 2px 8px; }
-.reply-ping:not(:checked) { color: #949BA4; }
+.reply-snippet { opacity: 0.8; }
+.reply-snippet.missing { font-style: italic; opacity: var(--dim-opacity); }
 
-.present-bar { margin: 0 16px 6px 16px; padding: 2px 4px 2px 12px; border-radius: 8px; background: rgba(88, 101, 242, 0.85); color: white; font-size: 13px; }
-.present-bar button { color: white; font-weight: 700; }
+/* Composer, with the reply bar joined to its top. */
+.composer { margin: 0 12px 12px 12px; padding: 9px 12px; border-radius: 12px; background-color: alpha(currentColor, 0.06); }
+textview.composer-input, textview.composer-input text { background: none; }
+.reply-bar { margin: 0 12px; padding: 3px 3px 3px 12px; border-radius: 12px 12px 0 0; background-color: alpha(currentColor, 0.1); font-size: 0.9em; }
+.reply-bar + .composer { border-top-left-radius: 0; border-top-right-radius: 0; }
+.reply-ping { font-weight: bold; padding: 2px 8px; }
+.reply-ping:checked { background: none; color: var(--accent-color); }
+.composer-error { margin: 0 18px 6px 18px; font-size: 0.9em; }
 
-.composer { margin: 0 16px 16px 16px; padding: 10px 12px; border-radius: 10px; background: rgba(0, 0, 0, 0.22); }
-textview.composer-input, textview.composer-input text { background: none; color: #DBDEE1; }
-.composer-error { color: #F23F43; font-size: 12px; margin: 0 20px 8px 20px; }
-
-/* Friends and message requests */
-.friends-header { padding-top: 8px; padding-bottom: 8px; }
-.friends-title  { margin-right: 8px; }
-.friends-tab, .row-action {
-  padding: 2px 10px; border-radius: 6px; color: #B5BAC1; background: none; border: none; box-shadow: none;
-  font-weight: 500;
+/* Presence, on avatars in a boxed list: a ring the colour of the row behind
+   it. Cards are translucent, so the ring is the card over the window. */
+.presence {
+  min-width: 10px; min-height: 10px; border-radius: 5px;
+  box-shadow: 0 0 0 2px var(--card-bg-color), 0 0 0 2px var(--window-bg-color);
 }
-.friends-tab:hover, .row-action:hover { background: rgba(255, 255, 255, 0.06); color: #DBDEE1; }
-.friends-tab:checked { background: rgba(255, 255, 255, 0.10); color: #F2F3F5; }
-.friends-tab.add { background: #248046; color: white; }
-.friends-tab.add:checked { background: none; color: #2DC770; }
-.row-action { background: rgba(255, 255, 255, 0.06); }
-.row-action.primary { background: #5865F2; color: white; }
-.row-action.primary:hover { background: #4752C4; }
-.friends-list { padding: 0 16px 16px 16px; }
-.friends-list > .category { margin-left: 8px; }
-.friends-empty, .section-hint { margin: 4px 8px 8px 8px; }
-.friend { padding: 8px; border-top: 1px solid rgba(255, 255, 255, 0.06); }
-.friend .channel.dm { margin: 0; }
-.add-friend { padding: 20px 24px; }
-.add-friend-row { margin-top: 8px; padding: 8px 8px 8px 12px; border-radius: 10px; background: rgba(0, 0, 0, 0.22); }
-.success { color: #2DC770; font-size: 13px; }
-.presence { min-width: 10px; min-height: 10px; border-radius: 7px; border: 2px solid #2B2D31; }
-.presence.online  { background: #23A55A; }
-.presence.idle    { background: #F0B232; }
-.presence.dnd     { background: #F23F43; }
-.presence.offline { background: #80848E; }
-.request-bar { color: #DBDEE1; }
-.link-button { padding: 0 4px; min-height: 0; background: none; border: none; box-shadow: none; color: #00A8FC; }
-.link-button:hover { text-decoration: underline; }
+.presence.online  { background-color: var(--success-color); }
+.presence.idle    { background-color: var(--warning-color); }
+.presence.dnd     { background-color: var(--error-color); }
+.presence.offline { background-color: alpha(currentColor, 0.5); }
 
-/* Login / connecting */
-.card {
-  padding: 28px; border-radius: 16px; min-width: 380px;
-  background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.12);
-}
-.card-title { font-size: 22px; font-weight: 800; color: #F2F3F5; }
-.card-subtitle { font-size: 16px; font-weight: 700; color: #F2F3F5; }
-.card separator { background: rgba(255, 255, 255, 0.08); }
-.field-label { color: #B5BAC1; font-size: 12px; font-weight: 700; margin-top: 4px; }
-.inline-link { background: none; box-shadow: none; color: #00A8FC; padding: 2px 0; min-height: 0; }
-.inline-link:hover { text-decoration: underline; }
-.token-expander label { color: #949BA4; font-size: 13px; }
-.qr { background: white; border-radius: 12px; padding: 12px; }
-.hint  { color: #949BA4; font-size: 13px; }
-.error { color: #F23F43; font-size: 13px; }
-.login-button { background: #5865F2; color: white; border-radius: 8px; padding: 8px; font-weight: 600; }
-.login-button:hover { background: #4752C4; }
-
-/* Per-user colours (user id % 8) */
-.avatar-0 { background: #5865F2; } .author-0 { color: #8E97F8; }
-.avatar-1 { background: #EB459E; } .author-1 { color: #F27BBE; }
-.avatar-2 { background: #57F287; } .author-2 { color: #57F287; }
-.avatar-3 { background: #FEE75C; } .author-3 { color: #FEE75C; }
-.avatar-4 { background: #ED4245; } .author-4 { color: #F47B7D; }
-.avatar-5 { background: #3BA55C; } .author-5 { color: #6FCF8E; }
-.avatar-6 { background: #FAA61A; } .author-6 { color: #FAA61A; }
-.avatar-7 { background: #00A8FC; } .author-7 { color: #4DC3FF; }
+/* The phone reads the code best dark on white, whatever the theme. */
+.qr { background-color: white; border-radius: 12px; padding: 12px; }
 
 /* Message markup */
-.code-block { background: rgba(0, 0, 0, 0.35); border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 6px; padding: 6px 10px; margin: 2px 0; }
-.code-lang  { color: #949BA4; font-size: 11px; margin-bottom: 2px; }
-.code-body  { font-family: monospace; font-size: 14px; color: #DBDEE1; }
-.quote      { border-left: 4px solid #4e5058; padding-left: 10px; margin: 2px 0; }
-
-/* Mention autocomplete */
-.mention-popover > contents { padding: 4px; background: #232428; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; }
-.mention-list { background: transparent; }
-.mention-list row { padding: 6px 10px; border-radius: 5px; color: #DBDEE1; }
-.mention-list row:selected { background: #5865F2; color: white; }
-
-/* Inline image attachments */
-.attachment-image { border-radius: 8px; margin-top: 4px; background: rgba(0,0,0,0.2); }
+.code-block { background-color: alpha(currentColor, 0.06); border-radius: 6px; padding: 6px 10px; margin: 2px 0; }
+.code-lang  { font-size: 0.8em; opacity: var(--dim-opacity); margin-bottom: 2px; }
+.code-body  { font-family: var(--monospace-font-family); font-size: var(--monospace-font-size); }
+.quote      { border-left: 4px solid alpha(currentColor, 0.25); padding-left: 10px; margin: 2px 0; }
 
 /* Embeds. The colour bar is drawn, since each embed picks its own. */
-.embed { margin-top: 4px; border-radius: 4px; background: rgba(0, 0, 0, 0.22); }
+.embed { margin-top: 4px; border-radius: 6px; background-color: alpha(currentColor, 0.06); }
 .embed-body { padding: 8px 16px 12px 12px; }
-.embed-provider { color: #B5BAC1; font-size: 12px; }
-.embed-author { color: #F2F3F5; font-size: 14px; font-weight: 600; }
+.embed-provider, .embed-footer { font-size: 0.8em; opacity: var(--dim-opacity); }
+.embed-author, .embed-title, .embed-field-name { font-weight: bold; }
+.embed-description, .embed-field-name { font-size: 0.95em; }
 .embed-author-icon { border-radius: 12px; }
-.embed-title { color: #F2F3F5; font-weight: 600; }
-.embed-description { color: #DBDEE1; font-size: 14px; }
-.embed-field-name { color: #F2F3F5; font-size: 14px; font-weight: 600; }
-.embed-footer { color: #B5BAC1; font-size: 12px; }
 .embed-footer-icon { border-radius: 10px; }
-.embed-media { border-radius: 8px; margin-top: 4px; background: rgba(0, 0, 0, 0.2); }
 .embed-play { min-width: 48px; min-height: 48px; }
-.spoiler-cover { margin-top: 4px; padding: 24px 40px; border-radius: 8px; background: #17181B; color: #DBDEE1; font-weight: 700; }
-.spoiler-cover:hover { background: #232428; }
+.spoiler-cover { margin-top: 4px; padding: 24px 40px; border-radius: 8px; font-weight: bold; }

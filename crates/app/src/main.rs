@@ -1,17 +1,17 @@
-//! Neucord: a native GTK 4 Discord client.
+//! Neucord: a native GTK 4 and libadwaita Discord client.
 
 mod images;
 mod render;
 mod timelines;
 mod ui;
 
-use gtk::prelude::*;
+use adw::prelude::*;
 use gtk::{gdk, gio};
 
 const APP_ID: &str = "dev.faetalize.neucord";
 
 fn main() -> glib::ExitCode {
-    let app = gtk::Application::new(Some(APP_ID), gio::ApplicationFlags::default());
+    let app = adw::Application::new(Some(APP_ID), gio::ApplicationFlags::default());
 
     app.connect_startup(|app| {
         let provider = gtk::CssProvider::new();
@@ -22,8 +22,20 @@ fn main() -> glib::ExitCode {
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
 
-        let quit = gio::ActionEntry::builder("quit").activate(|app: &gtk::Application, _, _| app.quit()).build();
-        app.add_action_entries([quit]);
+        let quit = gio::ActionEntry::builder("quit").activate(|app: &adw::Application, _, _| app.quit()).build();
+        let about = gio::ActionEntry::builder("about")
+            .activate(|app: &adw::Application, _, _| {
+                let dialog = adw::AboutDialog::builder()
+                    .application_name("Neucord")
+                    .version(env!("CARGO_PKG_VERSION"))
+                    .license_type(gtk::License::Gpl30)
+                    .website("https://github.com/faetalize/neucord")
+                    .issue_url("https://github.com/faetalize/neucord/issues")
+                    .build();
+                dialog.present(app.active_window().as_ref());
+            })
+            .build();
+        app.add_action_entries([quit, about]);
         app.set_accels_for_action("app.quit", &["<Control>q"]);
     });
 

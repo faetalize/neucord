@@ -18,23 +18,31 @@ mod widgets;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use adw::prelude::*;
 use discord::{Snowflake, session};
-use gtk::prelude::*;
 use gtk::{gio, glib, pango};
 
 use crate::images::Images;
+use crate::render;
 use crate::timelines::Timelines;
 
 pub struct App {
-    window: gtk::ApplicationWindow,
+    window: adw::ApplicationWindow,
+    /// Narrow windows: one pane at a time, and the login page in one column.
+    narrow: adw::Breakpoint,
     stack: gtk::Stack,
-    loading_label: gtk::Label,
+    loading: adw::StatusPage,
     login: login::Page,
+    /// The sidebar (rail and channels) beside the content.
+    split: adw::NavigationSplitView,
+    content_page: adw::NavigationPage,
     rail: gtk::Box,
-    guild_name: gtk::Label,
-    channels: gtk::Box,
+    guild_name: adw::WindowTitle,
+    channels: gtk::ListBox,
+    /// What each row of `channels` opens, by row index.
+    targets: RefCell<Vec<Option<sidebar::Target>>>,
     me_label: gtk::Label,
-    header: gtk::Label,
+    header: adw::WindowTitle,
     /// The open channel's chat, or one of Home's pages.
     content: gtk::Stack,
     friends: friends::FriendsPage,
@@ -64,7 +72,7 @@ pub struct App {
     /// The message the composer replies to, if any.
     reply: RefCell<Option<composer::ReplyCtx>>,
     /// "You're viewing older messages", while the open channel is detached.
-    present_bar: gtk::Box,
+    present_bar: adw::Banner,
     /// A message flashed after jumping to it.
     highlight: Cell<Option<Snowflake>>,
     state: RefCell<state::State>,
@@ -76,37 +84,44 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(app: &gtk::Application) -> Rc<Self> {
-        let window = gtk::ApplicationWindow::builder()
+    pub fn new(app: &adw::Application) -> Rc<Self> {
+        let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("Neucord")
             .default_width(1200)
             .default_height(800)
-            // niri draws the window border; client-side chrome comes later.
-            .decorated(false)
+            // The smallest size GNOME asks apps to fit, so breakpoints can apply.
+            .width_request(360)
+            .height_request(294)
             .build();
         window.add_css_class("neucord");
+        let narrow = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
+            adw::BreakpointConditionLengthType::MaxWidth,
+            720.0,
+            adw::LengthUnit::Sp,
+        ));
+        window.add_breakpoint(narrow.clone());
 
         let blank = gio::ListStore::new::<glib::BoxedAnyObject>();
         let selection = gtk::NoSelection::new(Some(blank.clone()));
         let this = Rc::new(App {
             window,
+            narrow,
             stack: gtk::Stack::builder().transition_type(gtk::StackTransitionType::Crossfade).build(),
-            loading_label: gtk::Label::new(None),
+            loading: adw::StatusPage::builder().paintable(&adw::SpinnerPaintable::new(gtk::Widget::NONE)).build(),
             login: login::Page::new(),
+            split: adw::NavigationSplitView::builder().min_sidebar_width(312.0).max_sidebar_width(360.0).build(),
+            content_page: adw::NavigationPage::builder().title("Neucord").build(),
             rail: gtk::Box::new(gtk::Orientation::Vertical, 0),
-            guild_name: gtk::Label::builder()
-                .xalign(0.0)
-                .ellipsize(pango::EllipsizeMode::End)
-                .css_classes(["guild-name"])
-                .build(),
-            channels: gtk::Box::new(gtk::Orientation::Vertical, 0),
+            guild_name: adw::WindowTitle::new("", ""),
+            channels: gtk::ListBox::builder().css_classes(["navigation-sidebar"]).build(),
+            targets: RefCell::default(),
             me_label: gtk::Label::builder()
                 .xalign(0.0)
                 .ellipsize(pango::EllipsizeMode::End)
-                .css_classes(["me"])
+                .css_classes(["me", "dimmed"])
                 .build(),
-            header: gtk::Label::builder().xalign(0.0).css_classes(["chat-header"]).build(),
+            header: adw::WindowTitle::new("", ""),
             content: gtk::Stack::new(),
             friends: friends::FriendsPage::new(),
             requests: requests::RequestsPage::new(),
@@ -127,16 +142,15 @@ impl App {
                 .xalign(0.0)
                 .wrap(true)
                 .visible(false)
-                .css_classes(["composer-error"])
+                .css_classes(["composer-error", "error"])
                 .build(),
             images: Images::new(),
             mention_popover: gtk::Popover::builder()
                 .autohide(false)
                 .has_arrow(false)
                 .position(gtk::PositionType::Top)
-                .css_classes(["mention-popover"])
                 .build(),
-            mention_list: gtk::ListBox::builder().css_classes(["mention-list"]).build(),
+            mention_list: gtk::ListBox::builder().css_classes(["navigation-sidebar"]).build(),
             mention: RefCell::default(),
             reply_bar: gtk::Box::builder().spacing(8).visible(false).css_classes(["reply-bar"]).build(),
             reply_label: gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(pango::EllipsizeMode::End).build(),
@@ -144,10 +158,13 @@ impl App {
                 .label("@ ON")
                 .active(true)
                 .tooltip_text("Click to disable pinging the original author.")
-                .css_classes(["reply-ping"])
+                .css_classes(["reply-ping", "flat"])
                 .build(),
             reply: RefCell::default(),
-            present_bar: gtk::Box::builder().spacing(8).visible(false).css_classes(["present-bar"]).build(),
+            present_bar: adw::Banner::builder()
+                .title("You're viewing older messages")
+                .button_label("Jump to Present")
+                .build(),
             highlight: Cell::default(),
             state: RefCell::default(),
             drawn: RefCell::default(),
@@ -197,12 +214,12 @@ impl App {
         self.stack.add_named(&self.build_loading(), Some("loading"));
         self.stack.add_named(&self.build_login(), Some("login"));
         self.stack.add_named(&self.build_main(), Some("main"));
-        self.window.set_child(Some(&self.stack));
+        self.window.set_content(Some(&self.stack));
 
         let logout = gio::ActionEntry::builder("logout")
             .activate({
                 let this = Rc::downgrade(self);
-                move |_: &gtk::ApplicationWindow, _, _| {
+                move |_: &adw::ApplicationWindow, _, _| {
                     if let Some(this) = this.upgrade() {
                         this.logout();
                     }
@@ -235,6 +252,7 @@ impl App {
                             this.state.borrow_mut().friends_tab =
                                 friends::Tab::List(discord::relationships::List::Pending);
                             this.show_friends();
+                            this.split.set_show_content(true);
                         }
                     }
                 })
@@ -242,36 +260,48 @@ impl App {
             app.add_action_entries([open, friends]);
         }
 
-        // Coming back to the window reads the open channel.
-        self.window.connect_is_active_notify({
+        // Coming back to the open channel reads it.
+        let read_open = {
             let this = Rc::downgrade(self);
-            move |window| {
+            move || {
                 let Some(this) = this.upgrade() else { return };
                 let channel = this.state.borrow().channel;
-                if let (true, Some(channel)) = (window.is_active(), channel) {
+                if let (true, Some(channel)) = (this.chat_visible(), channel) {
                     this.mark_read(channel);
                 }
             }
+        };
+        self.window.connect_is_active_notify({
+            let read_open = read_open.clone();
+            move |_| read_open()
         });
+        self.split.connect_show_content_notify(move |_| read_open());
+
+        // Mentions are drawn in the accent colour, which Pango markup can't
+        // follow by itself.
+        let accent = {
+            let this = Rc::downgrade(self);
+            move |style: &adw::StyleManager| {
+                let foreground = style.accent_color().to_standalone_rgba(style.is_dark());
+                render::set_accent(&style.accent_color_rgba(), &foreground);
+                if let Some(this) = this.upgrade() {
+                    this.refresh_rows();
+                }
+            }
+        };
+        let style = adw::StyleManager::default();
+        accent(&style);
+        style.connect_accent_color_rgba_notify(accent.clone());
+        style.connect_dark_notify(accent);
     }
 
     fn build_loading(&self) -> gtk::Widget {
-        let page = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(16)
-            .valign(gtk::Align::Center)
-            .halign(gtk::Align::Center)
-            .build();
-        page.append(&gtk::Spinner::builder().spinning(true).width_request(32).height_request(32).build());
-        self.loading_label.add_css_class("hint");
-        page.append(&self.loading_label);
-        wrap_page(&page)
+        bare_page(&self.loading)
     }
 
     fn build_main(self: &Rc<Self>) -> gtk::Widget {
-        let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-
-        // Server rail
+        // The sidebar: server rail and channel list side by side, under the
+        // open server's name.
         let rail_scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vscrollbar_policy(gtk::PolicyType::External)
@@ -279,43 +309,70 @@ impl App {
             .width_request(72)
             .css_classes(["rail"])
             .build();
-        self.rail.set_margin_top(8);
-        root.append(&rail_scroller);
-
-        // Channel sidebar
-        let sidebar = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .width_request(240)
-            .css_classes(["sidebar"])
+        self.rail.set_margin_top(6);
+        let channels = gtk::ScrolledWindow::builder()
+            .hexpand(true)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .child(&self.channels)
             .build();
-        sidebar.append(&self.guild_name);
-        sidebar.append(
-            &gtk::ScrolledWindow::builder()
-                .vexpand(true)
-                .hscrollbar_policy(gtk::PolicyType::Never)
-                .child(&self.channels)
+        self.channels.connect_row_activated({
+            let this = Rc::downgrade(self);
+            move |_, row| {
+                if let Some(this) = this.upgrade() {
+                    this.activate_sidebar_row(row.index());
+                }
+            }
+        });
+        let panes = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        panes.append(&rail_scroller);
+        panes.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        panes.append(&channels);
+
+        let menu = gio::Menu::new();
+        menu.append(Some("_Log Out"), Some("win.logout"));
+        menu.append(Some("_About Neucord"), Some("app.about"));
+        let header = adw::HeaderBar::builder().title_widget(&self.guild_name).build();
+        header.pack_end(
+            &gtk::MenuButton::builder()
+                .icon_name("open-menu-symbolic")
+                .tooltip_text("Main Menu")
+                .primary(true)
+                .menu_model(&menu)
                 .build(),
         );
-        sidebar.append(&self.me_label);
-        root.append(&sidebar);
+        let sidebar = adw::ToolbarView::builder().content(&panes).build();
+        sidebar.add_top_bar(&header);
+        sidebar.add_bottom_bar(&self.me_label);
+        self.split.set_sidebar(Some(&adw::NavigationPage::new(&sidebar, "Neucord")));
 
         self.content.add_named(&self.build_chat(), Some("chat"));
         self.content.add_named(&self.build_friends(), Some("friends"));
         self.content.add_named(&self.build_requests(), Some("requests"));
-        root.append(&self.content);
-        root.upcast()
+        self.content_page.set_child(Some(&self.content));
+        self.split.set_content(Some(&self.content_page));
+        self.narrow.add_setter(&self.split, "collapsed", Some(&true.to_value()));
+        self.split.clone().upcast()
     }
 
     fn show_loading(&self, text: &str) {
-        self.loading_label.set_label(text);
+        self.loading.set_title(text);
         self.stack.set_visible_child_name("loading");
+    }
+
+    /// Whether the open channel's messages are on screen.
+    pub(super) fn chat_visible(&self) -> bool {
+        self.window.is_active() && (!self.split.is_collapsed() || self.split.shows_content())
+    }
+
+    /// Name the content pane, for the window's title and screen readers.
+    pub(super) fn set_content_title(&self, title: &str) {
+        self.content_page.set_title(title);
     }
 }
 
-fn wrap_page(child: &impl IsA<gtk::Widget>) -> gtk::Widget {
-    let page = gtk::Box::builder().css_classes(["page"]).build();
-    child.set_hexpand(true);
-    child.set_vexpand(true);
-    page.append(child);
+/// A page with nothing but window controls above it.
+fn bare_page(child: &impl IsA<gtk::Widget>) -> gtk::Widget {
+    let page = adw::ToolbarView::builder().content(child).build();
+    page.add_top_bar(&adw::HeaderBar::builder().show_title(false).build());
     page.upcast()
 }

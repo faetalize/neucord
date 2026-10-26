@@ -5,16 +5,17 @@
 
 use std::rc::Rc;
 
+use adw::prelude::*;
 use discord::Snowflake;
 use gtk::glib;
-use gtk::prelude::*;
 
 use super::App;
-use super::sidebar::dm_row;
+use super::friends::clamped;
+use super::sidebar::dm_icon;
 use super::state::Page;
 
 pub(super) struct RequestsPage {
-    pub(super) root: gtk::Box,
+    pub(super) root: adw::ToolbarView,
     list: gtk::Box,
     error: gtk::Label,
 }
@@ -22,13 +23,9 @@ pub(super) struct RequestsPage {
 impl RequestsPage {
     pub(super) fn new() -> Self {
         RequestsPage {
-            root: gtk::Box::builder()
-                .orientation(gtk::Orientation::Vertical)
-                .hexpand(true)
-                .css_classes(["chat"])
-                .build(),
-            list: gtk::Box::builder().orientation(gtk::Orientation::Vertical).css_classes(["friends-list"]).build(),
-            error: gtk::Label::builder().xalign(0.0).wrap(true).visible(false).css_classes(["composer-error"]).build(),
+            root: adw::ToolbarView::new(),
+            list: gtk::Box::new(gtk::Orientation::Vertical, 12),
+            error: gtk::Label::builder().xalign(0.0).wrap(true).visible(false).css_classes(["error"]).build(),
         }
     }
 }
@@ -36,16 +33,13 @@ impl RequestsPage {
 impl App {
     pub(super) fn build_requests(&self) -> gtk::Widget {
         let page = &self.requests;
-        page.root
-            .append(&gtk::Label::builder().label("Message Requests").xalign(0.0).css_classes(["chat-header"]).build());
-        page.root.append(&page.error);
-        page.root.append(
-            &gtk::ScrolledWindow::builder()
-                .vexpand(true)
-                .hscrollbar_policy(gtk::PolicyType::Never)
-                .child(&page.list)
-                .build(),
+        page.root.add_top_bar(
+            &adw::HeaderBar::builder().title_widget(&adw::WindowTitle::new("Message Requests", "")).build(),
         );
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        column.append(&page.error);
+        column.append(&page.list);
+        page.root.set_content(Some(&clamped(&column)));
         page.root.clone().upcast()
     }
 
@@ -58,6 +52,7 @@ impl App {
         }
         self.requests.error.set_visible(false);
         self.content.set_visible_child(&self.requests.root);
+        self.set_content_title("Message Requests");
         self.rebuild_rail();
         self.rebuild_sidebar();
         self.rebuild_requests();
@@ -76,36 +71,42 @@ impl App {
                     .label("No message requests. When someone you don't know messages you, it shows up here.")
                     .xalign(0.0)
                     .wrap(true)
-                    .css_classes(["hint", "friends-empty"])
+                    .css_classes(["dimmed"])
                     .build(),
             );
         }
         let sections = [
-            ("REQUESTS", requests, "Their messages arrive here until you accept."),
-            ("SPAM", spam, "Discord filed these as likely spam."),
+            ("Requests", requests, "Their messages arrive here until you accept."),
+            ("Spam", spam, "Discord filed these as likely spam."),
         ];
         for (heading, channels, hint) in sections {
             if channels.is_empty() {
                 continue;
             }
-            list.append(
+            let section = gtk::Box::new(gtk::Orientation::Vertical, 6);
+            section.append(
                 &gtk::Label::builder()
                     .label(format!("{heading} — {}", channels.len()))
                     .xalign(0.0)
-                    .css_classes(["category"])
+                    .css_classes(["heading"])
                     .build(),
             );
-            list.append(&gtk::Label::builder().label(hint).xalign(0.0).css_classes(["hint", "section-hint"]).build());
+            section.append(&gtk::Label::builder().label(hint).xalign(0.0).wrap(true).css_classes(["dimmed"]).build());
+            let rows = gtk::ListBox::builder()
+                .selection_mode(gtk::SelectionMode::None)
+                .margin_top(6)
+                .css_classes(["boxed-list"])
+                .build();
             for channel in channels {
-                let row = gtk::Box::builder().spacing(8).css_classes(["friend"]).build();
-                let open = gtk::Button::builder()
-                    .child(&dm_row(channel, &self.images))
-                    .hexpand(true)
+                let row = adw::ActionRow::builder()
+                    .title(channel.title())
+                    .use_markup(false)
+                    .activatable(true)
                     .tooltip_text("Read the messages")
-                    .css_classes(["channel", "dm"])
                     .build();
+                row.add_prefix(&dm_icon(channel, &self.images));
                 let id = channel.id;
-                open.connect_clicked({
+                row.connect_activated({
                     let this = Rc::downgrade(self);
                     move |_| {
                         if let Some(this) = this.upgrade() {
@@ -113,10 +114,13 @@ impl App {
                         }
                     }
                 });
-                row.append(&open);
-                self.append_request_actions(&row, id);
-                list.append(&row);
+                for button in self.request_actions(id) {
+                    row.add_suffix(&button);
+                }
+                rows.append(&row);
             }
+            section.append(&rows);
+            list.append(&section);
         }
     }
 
@@ -136,15 +140,17 @@ impl App {
             format!("{title} wants to message you. Accept to reply.")
         };
         bar.append(&gtk::Label::builder().label(text).xalign(0.0).wrap(true).hexpand(true).build());
-        self.append_request_actions(bar, id);
+        for button in self.request_actions(id) {
+            bar.append(&button);
+        }
     }
 
-    fn append_request_actions(self: &Rc<Self>, row: &gtk::Box, channel: Snowflake) {
-        for (label, accept) in [("Accept", true), ("Ignore", false)] {
-            let button =
-                gtk::Button::builder().label(label).valign(gtk::Align::Center).css_classes(["row-action"]).build();
+    /// Accept and Ignore buttons for a request.
+    fn request_actions(self: &Rc<Self>, channel: Snowflake) -> [gtk::Button; 2] {
+        [("Accept", true), ("Ignore", false)].map(|(label, accept)| {
+            let button = gtk::Button::builder().label(label).valign(gtk::Align::Center).build();
             if accept {
-                button.add_css_class("primary");
+                button.add_css_class("suggested-action");
             }
             let this = Rc::downgrade(self);
             button.connect_clicked(move |button| {
@@ -153,8 +159,8 @@ impl App {
                     this.answer_request(channel, accept);
                 }
             });
-            row.append(&button);
-        }
+            button
+        })
     }
 
     /// Accept or ignore a message request. The result is applied at once;

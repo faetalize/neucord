@@ -5,25 +5,25 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
+use adw::prelude::*;
 use discord::auth::{Login, Mfa, MfaMethod};
 use discord::remote_auth::{Event, RemoteAuth};
 use discord::{Error, Rest, User};
 use gtk::glib;
-use gtk::prelude::*;
 use qrcodegen::{QrCode, QrCodeEcc};
 
-use super::{App, widgets, wrap_page};
+use super::{App, bare_page, widgets};
 
 pub(super) struct Page {
     /// "password" or "mfa".
     form: gtk::Stack,
-    email: gtk::Entry,
-    password: gtk::PasswordEntry,
+    email: adw::EntryRow,
+    password: adw::PasswordEntryRow,
     mfa_hint: gtk::Label,
-    mfa_code: gtk::Entry,
+    mfa_code: adw::EntryRow,
     /// Switches to the account's other two-factor methods, and back out.
     mfa_others: gtk::Box,
-    token: gtk::PasswordEntry,
+    token: adw::PasswordEntryRow,
     error: gtk::Label,
     /// "waiting", "code", "scanned" or "failed".
     qr: gtk::Stack,
@@ -41,23 +41,17 @@ pub(super) struct Page {
 
 impl Page {
     pub(super) fn new() -> Self {
-        let entry = || gtk::Entry::builder().hexpand(true).build();
         Page {
             form: gtk::Stack::builder()
                 .transition_type(gtk::StackTransitionType::Crossfade)
                 .vhomogeneous(false)
                 .build(),
-            email: entry(),
-            password: gtk::PasswordEntry::builder().show_peek_icon(true).hexpand(true).build(),
-            mfa_hint: gtk::Label::builder().wrap(true).max_width_chars(40).xalign(0.0).css_classes(["hint"]).build(),
-            mfa_code: entry(),
+            email: adw::EntryRow::builder().title("Email or Phone Number").build(),
+            password: adw::PasswordEntryRow::builder().title("Password").build(),
+            mfa_hint: gtk::Label::builder().wrap(true).max_width_chars(40).xalign(0.0).build(),
+            mfa_code: adw::EntryRow::builder().title("Code").build(),
             mfa_others: gtk::Box::new(gtk::Orientation::Vertical, 0),
-            token: gtk::PasswordEntry::builder()
-                .show_peek_icon(true)
-                .hexpand(true)
-                .placeholder_text("Token")
-                .margin_top(8)
-                .build(),
+            token: adw::PasswordEntryRow::builder().title("Token").build(),
             error: gtk::Label::builder()
                 .wrap(true)
                 .max_width_chars(40)
@@ -112,50 +106,44 @@ impl Page {
 impl App {
     pub(super) fn build_login(self: &Rc<Self>) -> gtk::Widget {
         let page = &self.login;
-        let card = gtk::Box::builder()
-            .spacing(32)
-            .valign(gtk::Align::Center)
-            .halign(gtk::Align::Center)
-            .css_classes(["card"])
+        let columns = gtk::Box::builder().spacing(36).valign(gtk::Align::Center).halign(gtk::Align::Center).build();
+
+        let left = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(18).width_request(300).build();
+        left.append(&gtk::Label::builder().label("Neucord").xalign(0.0).css_classes(["title-1"]).build());
+
+        let password_form = gtk::Box::new(gtk::Orientation::Vertical, 18);
+        password_form.append(&boxed_list(&[page.email.upcast_ref(), page.password.upcast_ref()]));
+        let log_in = gtk::Button::builder()
+            .label("_Log In")
+            .use_underline(true)
+            .css_classes(["suggested-action", "pill"])
             .build();
-
-        let left = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).width_request(320).build();
-        left.append(&gtk::Label::builder().label("Neucord").xalign(0.0).css_classes(["card-title"]).build());
-
-        let password_form = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        password_form.append(&field_label("Email or phone number"));
-        password_form.append(&page.email);
-        password_form.append(&field_label("Password"));
-        password_form.append(&page.password);
-        let log_in = gtk::Button::builder().label("Log in").margin_top(8).css_classes(["login-button"]).build();
         password_form.append(&log_in);
         page.form.add_named(&password_form, Some("password"));
 
-        let mfa_form = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        mfa_form.append(
-            &gtk::Label::builder().label("Two-factor login").xalign(0.0).css_classes(["card-subtitle"]).build(),
-        );
+        let mfa_form = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        mfa_form.append(&gtk::Label::builder().label("Two-Factor Login").xalign(0.0).css_classes(["title-4"]).build());
         mfa_form.append(&page.mfa_hint);
-        mfa_form.append(&page.mfa_code);
-        let verify = gtk::Button::builder().label("Log in").margin_top(8).css_classes(["login-button"]).build();
+        mfa_form.append(&boxed_list(&[page.mfa_code.upcast_ref()]));
+        let verify = gtk::Button::builder()
+            .label("_Log In")
+            .use_underline(true)
+            .margin_top(6)
+            .css_classes(["suggested-action", "pill"])
+            .build();
         mfa_form.append(&verify);
         mfa_form.append(&page.mfa_others);
         page.form.add_named(&mfa_form, Some("mfa"));
 
         left.append(&page.form);
         left.append(&page.error);
-        let token_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        token_box.append(&page.token);
-        left.append(
-            &gtk::Expander::builder()
-                .label("Log in with a token")
-                .child(&token_box)
-                .css_classes(["token-expander"])
-                .build(),
-        );
-        card.append(&left);
+        let token_box = boxed_list(&[page.token.upcast_ref()]);
+        token_box.set_margin_top(12);
+        left.append(&gtk::Expander::builder().label("Log in with a token").child(&token_box).build());
+        columns.append(&left);
 
-        card.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        let separator = gtk::Separator::new(gtk::Orientation::Vertical);
+        columns.append(&separator);
 
         let right = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -163,10 +151,7 @@ impl App {
             .valign(gtk::Align::Center)
             .width_request(240)
             .build();
-        page.qr.add_named(
-            &gtk::Spinner::builder().spinning(true).width_request(32).height_request(32).build(),
-            Some("waiting"),
-        );
+        page.qr.add_named(&adw::Spinner::builder().width_request(32).height_request(32).build(), Some("waiting"));
         let code =
             gtk::Box::builder().halign(gtk::Align::Center).valign(gtk::Align::Center).css_classes(["qr"]).build();
         code.append(&page.qr_area);
@@ -179,22 +164,30 @@ impl App {
             .halign(gtk::Align::Center)
             .build();
         failed.append(&page.qr_error);
-        let retry =
-            gtk::Button::builder().label("Try now").halign(gtk::Align::Center).css_classes(["inline-link"]).build();
+        let retry = link_button("Try now");
+        retry.set_halign(gtk::Align::Center);
         failed.append(&retry);
         page.qr.add_named(&failed, Some("failed"));
         right.append(&page.qr);
-        right.append(&gtk::Label::builder().label("Log in with a QR code").css_classes(["card-subtitle"]).build());
+        right.append(&gtk::Label::builder().label("Log In With a QR Code").css_classes(["title-4"]).build());
         right.append(
             &gtk::Label::builder()
                 .label("Scan it with the Discord app on your phone.")
                 .wrap(true)
                 .max_width_chars(28)
                 .justify(gtk::Justification::Center)
-                .css_classes(["hint"])
+                .css_classes(["dimmed"])
                 .build(),
         );
-        card.append(&right);
+        columns.append(&right);
+
+        // One column on narrow windows, the QR code below the form.
+        self.narrow.add_setter(&columns, "orientation", Some(&gtk::Orientation::Vertical.to_value()));
+        self.narrow.add_setter(&separator, "visible", Some(&false.to_value()));
+        let scroller = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .child(&adw::Clamp::builder().child(&columns).margin_top(24).margin_bottom(24).build())
+            .build();
 
         let qr_code = page.qr_code.clone();
         page.qr_area.set_draw_func(move |_, cr, width, height| {
@@ -223,29 +216,29 @@ impl App {
             }
         };
         let password_login = on(App::password_login);
-        page.email.connect_activate({
+        page.email.connect_entry_activated({
             let page = page.password.clone();
             move |_| {
                 page.grab_focus();
             }
         });
-        page.password.connect_activate({
+        page.password.connect_entry_activated({
             let f = password_login.clone();
             move |_| f()
         });
         log_in.connect_clicked(move |_| password_login());
         let verify_mfa = on(App::verify_mfa);
-        page.mfa_code.connect_activate({
+        page.mfa_code.connect_entry_activated({
             let f = verify_mfa.clone();
             move |_| f()
         });
         verify.connect_clicked(move |_| verify_mfa());
         let token_login = on(App::token_login);
-        page.token.connect_activate(move |_| token_login());
+        page.token.connect_entry_activated(move |_| token_login());
         let start_qr = on(App::start_qr);
         retry.connect_clicked(move |_| start_qr());
 
-        wrap_page(&card)
+        bare_page(&scroller)
     }
 
     pub(super) fn show_login(self: &Rc<Self>, error: Option<&str>) {
@@ -452,7 +445,7 @@ impl App {
         while let Some(child) = scanned.first_child() {
             scanned.remove(&child);
         }
-        let avatar = widgets::avatar_widget(user, widgets::palette_index(user), 40, Some(&self.images));
+        let avatar = widgets::avatar_widget(user, 40, Some(&self.images));
         avatar.set_halign(gtk::Align::Center);
         scanned.append(&avatar);
         scanned.append(
@@ -495,10 +488,14 @@ impl App {
     }
 }
 
-fn field_label(text: &str) -> gtk::Label {
-    gtk::Label::builder().label(text).xalign(0.0).css_classes(["field-label"]).build()
+fn boxed_list(rows: &[&gtk::Widget]) -> gtk::ListBox {
+    let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).build();
+    for row in rows {
+        list.append(*row);
+    }
+    list
 }
 
 fn link_button(label: &str) -> gtk::Button {
-    gtk::Button::builder().label(label).halign(gtk::Align::Start).css_classes(["inline-link"]).build()
+    gtk::Button::builder().label(label).halign(gtk::Align::Start).css_classes(["link"]).build()
 }
