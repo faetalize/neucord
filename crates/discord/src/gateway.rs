@@ -15,11 +15,12 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use soup::prelude::*;
 
+use crate::embed::Embed;
 use crate::notifications::{GuildSettings, NotificationSettings};
 use crate::read_state::ReadStates;
 use crate::relationships::{Presence, Relationship, Relationships};
-use crate::settings::{self, GuildFolder};
-use crate::{Channel, Error, Guild, Message, Snowflake, User, identity};
+use crate::settings::{self, GuildFolder, MediaPatch, MediaSettings};
+use crate::{Channel, Error, Guild, Message, MessageEdit, Snowflake, User, identity};
 
 /// Gateway capability bits. 0 asks for the classic payload shapes, which the
 /// model parses directly; the guild parser also accepts the newer shape.
@@ -52,6 +53,7 @@ pub struct Ready {
     pub notification_settings: NotificationSettings,
     /// Server folders and order; empty if the user never arranged servers.
     pub guild_folders: Vec<GuildFolder>,
+    pub media_settings: MediaSettings,
 }
 
 #[derive(Debug)]
@@ -66,13 +68,8 @@ pub enum Event {
     /// A DM or group DM was closed, or we left the group.
     PrivateChannelDelete(Snowflake),
     MessageCreate(Box<Message>),
-    /// An edit. `content` is absent for embed-only updates, which we ignore.
-    MessageUpdate {
-        id: Snowflake,
-        channel_id: Snowflake,
-        content: Option<String>,
-        edited: bool,
-    },
+    /// An edit, or link previews arriving for a message.
+    MessageUpdate(MessageEdit),
     MessageDelete {
         id: Snowflake,
         channel_id: Snowflake,
@@ -109,6 +106,8 @@ pub enum Event {
     NotificationSettingsUpdate(GuildSettings),
     /// The user rearranged servers or folders (on any client).
     GuildFoldersUpdate(Vec<GuildFolder>),
+    /// The user changed how embeds and media show.
+    MediaSettingsUpdate(MediaPatch),
     /// A resume succeeded; everything missed has been replayed before this.
     Resumed,
     /// The connection is gone. `code` is the websocket close code. `resume`
@@ -427,6 +426,11 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 read_states: ReadStates::from_ready(&data["read_state"]),
                 notification_settings: NotificationSettings::from_ready(&data["user_guild_settings"]),
                 guild_folders: settings::guild_folders(&data["user_settings"]).unwrap_or_default(),
+                media_settings: {
+                    let mut media = MediaSettings::default();
+                    media.apply(MediaPatch::from_settings(&data["user_settings"]));
+                    media
+                },
                 user,
                 guilds,
             }))
@@ -450,10 +454,16 @@ fn dispatch(state: &State, name: &str, data: Value) {
             Event::ChannelUnreadUpdate { guild_id, channels }
         }
         // Partial: only the settings that changed.
-        "USER_SETTINGS_UPDATE" => match settings::guild_folders(&data) {
-            Some(folders) => Event::GuildFoldersUpdate(folders),
-            None => return,
-        },
+        "USER_SETTINGS_UPDATE" => {
+            let media = MediaPatch::from_settings(&data);
+            if !media.is_empty() {
+                let _ = state.events.try_send(Event::MediaSettingsUpdate(media));
+            }
+            match settings::guild_folders(&data) {
+                Some(folders) => Event::GuildFoldersUpdate(folders),
+                None => return,
+            }
+        }
         "USER_GUILD_SETTINGS_UPDATE" => match GuildSettings::deserialize(&data) {
             Ok(settings) => Event::NotificationSettingsUpdate(settings),
             Err(e) => return eprintln!("gateway: bad USER_GUILD_SETTINGS_UPDATE: {e}"),
@@ -507,18 +517,19 @@ fn dispatch(state: &State, name: &str, data: Value) {
             Ok(message) => Event::MessageCreate(Box::new(message)),
             Err(e) => return eprintln!("gateway: bad MESSAGE_CREATE: {e}"),
         },
-        // Partial: only id and channel_id are guaranteed; content is present on
-        // a text edit, absent on embed-only updates.
+        // Partial: only id and channel_id are guaranteed.
         "MESSAGE_UPDATE" => {
             let (Some(id), Some(channel_id)) = (parse_id(&data["id"]), parse_id(&data["channel_id"])) else {
                 return;
             };
-            Event::MessageUpdate {
+            Event::MessageUpdate(MessageEdit {
                 id,
                 channel_id,
                 content: data["content"].as_str().map(String::from),
                 edited: !data["edited_timestamp"].is_null(),
-            }
+                embeds: data.get("embeds").and_then(|e| Vec::<Embed>::deserialize(e).ok()),
+                flags: data["flags"].as_u64(),
+            })
         }
         "MESSAGE_DELETE" => {
             let (Some(id), Some(channel_id)) = (parse_id(&data["id"]), parse_id(&data["channel_id"])) else {

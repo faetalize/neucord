@@ -3,8 +3,10 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::embed::Embed;
+
 /// Discord IDs are 64-bit integers sent as JSON strings.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Snowflake(pub u64);
 
 impl Snowflake {
@@ -244,6 +246,9 @@ pub struct Attachment {
     pub id: Snowflake,
     pub filename: String,
     pub url: String,
+    /// The same file through the media proxy, which can resize it.
+    #[serde(default)]
+    pub proxy_url: Option<String>,
     #[serde(default)]
     pub content_type: Option<String>,
     #[serde(default)]
@@ -299,9 +304,20 @@ pub struct Message {
     /// Only counted, to describe a sticker-only message.
     #[serde(default)]
     pub sticker_items: Vec<serde::de::IgnoredAny>,
+    #[serde(default)]
+    pub embeds: Vec<Embed>,
+    #[serde(default)]
+    pub flags: u64,
 }
 
 impl Message {
+    const SUPPRESS_EMBEDS: u64 = 1 << 2;
+
+    /// The author (or a moderator) removed the embeds.
+    pub fn embeds_suppressed(&self) -> bool {
+        self.flags & Self::SUPPRESS_EMBEDS != 0
+    }
+
     /// Discord's message type for a reply.
     const REPLY: u8 = 19;
 
@@ -344,6 +360,36 @@ fn referenced<'de, D: Deserializer<'de>>(d: D) -> Result<Referenced, D::Error> {
         Some(message) => Referenced::Message(message),
         None => Referenced::Deleted,
     })
+}
+
+/// A MESSAGE_UPDATE. Only the id and channel are always there: a text edit
+/// carries the content, while link previews arrive after the message as an
+/// update with only `embeds`.
+#[derive(Clone, Debug, Default)]
+pub struct MessageEdit {
+    pub id: Snowflake,
+    pub channel_id: Snowflake,
+    pub content: Option<String>,
+    pub edited: bool,
+    pub embeds: Option<Vec<Embed>>,
+    pub flags: Option<u64>,
+}
+
+impl MessageEdit {
+    pub fn apply(self, message: &mut Message) {
+        if let Some(content) = self.content {
+            message.content = content;
+        }
+        if self.edited && message.edited_timestamp.is_none() {
+            message.edited_timestamp = Some(String::new());
+        }
+        if let Some(embeds) = self.embeds {
+            message.embeds = embeds;
+        }
+        if let Some(flags) = self.flags {
+            message.flags = flags;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -466,5 +512,20 @@ mod tests {
         )
         .unwrap();
         assert!(!pin.is_replyable());
+    }
+
+    #[test]
+    fn link_preview_arrives_as_an_update() {
+        let mut m: Message = serde_json::from_str(
+            r#"{"id":"100","channel_id":"11","author":{"id":"5","username":"a"},"content":"https://e.com",
+                "timestamp":"t","flags":0}"#,
+        )
+        .unwrap();
+        assert!(m.embeds.is_empty() && !m.embeds_suppressed());
+        let embeds = vec![serde_json::from_str(r#"{"type":"link","url":"https://e.com"}"#).unwrap()];
+        MessageEdit { embeds: Some(embeds), ..Default::default() }.apply(&mut m);
+        assert_eq!((m.embeds.len(), m.content.as_str(), m.edited_timestamp.is_some()), (1, "https://e.com", false));
+        MessageEdit { flags: Some(4), ..Default::default() }.apply(&mut m);
+        assert!(m.embeds_suppressed());
     }
 }
