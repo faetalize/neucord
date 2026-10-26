@@ -19,6 +19,7 @@ pub(crate) const REMOVE_RELATIONSHIP: Endpoint = Endpoint::delete("/users/@me/re
 pub(crate) const ACCEPT_MESSAGE_REQUEST: Endpoint = Endpoint::put("/channels/{channel}/recipients/@me");
 pub(crate) const REJECT_MESSAGE_REQUEST: Endpoint = Endpoint::delete("/channels/{channel}/recipients/@me");
 pub(crate) const LOGIN: Endpoint = Endpoint::post("/auth/login");
+pub(crate) const LOGOUT: Endpoint = Endpoint::post("/auth/logout");
 pub(crate) const SEND_MFA_SMS: Endpoint = Endpoint::post("/auth/mfa/sms/send");
 pub(crate) const VERIFY_MFA: Endpoint = Endpoint::post("/auth/mfa/{method}");
 pub(crate) const REMOTE_AUTH_LOGIN: Endpoint = Endpoint::post("/users/@me/remote-auth/login");
