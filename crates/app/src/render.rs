@@ -18,13 +18,6 @@ pub struct Names {
     pub channels: HashMap<u64, String>,
 }
 
-impl Names {
-    /// Used when the App is gone (window closing): mentions fall back to ids.
-    pub fn empty() -> Self {
-        Names { users: HashMap::new(), channels: HashMap::new() }
-    }
-}
-
 const MENTION_BG: &str = "#3c4270";
 const MENTION_FG: &str = "#c9cdfb";
 const CODE_BG: &str = "#1e1f22";

@@ -2,6 +2,7 @@
 
 mod images;
 mod render;
+mod timelines;
 mod ui;
 
 use gtk::prelude::*;

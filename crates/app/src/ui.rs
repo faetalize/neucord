@@ -14,9 +14,13 @@ use gtk::{gio, glib, pango};
 
 use crate::images::Images;
 use crate::render::{self, Names};
+use crate::timelines::{self, Timelines};
 
-/// Messages fetched when a channel opens.
-const HISTORY: u8 = 50;
+/// Messages per history request (Discord's maximum).
+const PAGE: u8 = 100;
+/// Start fetching older messages this many screens before reaching the top,
+/// so they are usually in place before the user gets there.
+const PREFETCH_SCREENS: f64 = 3.0;
 /// Consecutive messages by one author within this window share a header.
 const GROUP_WINDOW_SECS: i64 = 7 * 60;
 /// Avatar/name colour classes in style.css.
@@ -166,7 +170,11 @@ pub struct App {
     channels: gtk::Box,
     me_label: gtk::Label,
     header: gtk::Label,
-    messages: gio::ListStore,
+    /// The list's model; its inner store is the open channel's timeline.
+    selection: gtk::NoSelection,
+    /// Shown when no channel is open.
+    blank: gio::ListStore,
+    timelines: RefCell<Timelines>,
     list: gtk::ListView,
     scroller: gtk::ScrolledWindow,
     composer: gtk::TextView,
@@ -202,7 +210,8 @@ impl App {
             .build();
         window.add_css_class("neucord");
 
-        let messages = gio::ListStore::new::<glib::BoxedAnyObject>();
+        let blank = gio::ListStore::new::<glib::BoxedAnyObject>();
+        let selection = gtk::NoSelection::new(Some(blank.clone()));
         let this = Rc::new(App {
             window,
             stack: gtk::Stack::builder().transition_type(gtk::StackTransitionType::Crossfade).build(),
@@ -214,8 +223,10 @@ impl App {
             channels: gtk::Box::new(gtk::Orientation::Vertical, 0),
             me_label: gtk::Label::builder().xalign(0.0).ellipsize(pango::EllipsizeMode::End).css_classes(["me"]).build(),
             header: gtk::Label::builder().xalign(0.0).css_classes(["chat-header"]).build(),
-            list: gtk::ListView::new(Some(gtk::NoSelection::new(Some(messages.clone()))), None::<gtk::ListItemFactory>),
-            messages,
+            list: gtk::ListView::new(Some(selection.clone()), None::<gtk::ListItemFactory>),
+            selection,
+            blank,
+            timelines: RefCell::default(),
             scroller: gtk::ScrolledWindow::builder().vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build(),
             composer: gtk::TextView::builder()
                 .wrap_mode(gtk::WrapMode::WordChar)
@@ -407,25 +418,33 @@ impl App {
             item.set_child(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 16)));
         });
         factory.connect_bind({
-            let messages = self.messages.clone();
             let this = Rc::downgrade(self);
             move |_, item| {
+                let Some(this) = this.upgrade() else { return };
                 let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
                 let row = item.child().and_downcast::<gtk::Box>().expect("row box");
-                let position = item.position();
-                let message = boxed_message(&messages, position).expect("bound item exists");
-                let previous = position.checked_sub(1).and_then(|p| boxed_message(&messages, p));
-                let (names, images) = match this.upgrade() {
-                    Some(this) => (this.message_names(&message), Some(this.images.clone())),
-                    None => (Names::empty(), None),
-                };
-                fill_message_row(&row, &message, previous.as_ref(), &names, images.as_ref());
+                let Some(message) = item.item().and_downcast::<glib::BoxedAnyObject>() else { return };
+                let message = message.borrow::<Message>().clone();
+                let messages = this.messages();
+                let previous = item.position().checked_sub(1).and_then(|p| timelines::message_at(&messages, p));
+                let names = this.message_names(&message);
+                fill_message_row(&row, &message, previous.as_ref(), &names, Some(&this.images));
             }
         });
         self.list.set_factory(Some(&factory));
         self.list.add_css_class("messages");
         self.scroller.set_child(Some(&self.list));
         chat.append(&self.scroller);
+
+        // Scrollback: fetch older messages well before the top is reached.
+        self.scroller.vadjustment().connect_value_changed({
+            let this = Rc::downgrade(self);
+            move |_| {
+                if let Some(this) = this.upgrade() {
+                    this.maybe_load_older();
+                }
+            }
+        });
 
         chat.append(&self.composer_error);
         let composer_box = gtk::Box::builder().css_classes(["composer"]).build();
@@ -542,7 +561,8 @@ impl App {
 
     fn logout(self: &Rc<Self>) {
         *self.state.borrow_mut() = State::default();
-        self.messages.remove_all();
+        self.show_blank();
+        self.timelines.borrow_mut().clear();
         glib::spawn_future_local(async {
             if let Err(e) = session::clear_token().await {
                 eprintln!("logout: {e}");
@@ -776,53 +796,60 @@ impl App {
             self.send_notification(&message, &place);
         }
         self.refresh_badges();
-        if self.state.borrow().channel != Some(channel) {
+
+        // Keep every cached timeline current, not only the open one.
+        let Some(store) = self.timelines.borrow().get(channel).map(|t| t.store.clone()) else { return };
+        // A history fetch may have raced this event and already added it.
+        if timelines::find(&store, message.id).is_some() {
             return;
         }
-        let adjustment = self.scroller.vadjustment();
-        let at_bottom = adjustment.value() + adjustment.page_size() >= adjustment.upper() - 80.0;
-        self.resolve_mentions(&message.content);
-        self.messages.append(&glib::BoxedAnyObject::new(message));
+        let open = self.state.borrow().channel == Some(channel);
+        let at_bottom = open && self.at_bottom();
+        if open {
+            self.resolve_mentions(&message.content);
+        }
+        store.append(&timelines::boxed(message));
         if at_bottom {
             self.scroll_to_end();
         }
     }
 
+    fn at_bottom(&self) -> bool {
+        let adjustment = self.scroller.vadjustment();
+        adjustment.value() + adjustment.page_size() >= adjustment.upper() - 80.0
+    }
+
     fn on_message_update(&self, id: Snowflake, channel_id: Snowflake, content: Option<String>, edited: bool) {
         // Embed-only edits carry no content; nothing to re-render yet.
         let Some(content) = content else { return };
-        if self.state.borrow().channel != Some(channel_id) {
-            return;
-        }
-        if let Some((position, mut message)) = self.find_message(id) {
+        let Some(store) = self.timelines.borrow().get(channel_id).map(|t| t.store.clone()) else { return };
+        if let Some((position, mut message)) = timelines::find(&store, id) {
             message.content = content;
             if edited && message.edited_timestamp.is_none() {
                 message.edited_timestamp = Some(String::new());
             }
-            self.messages.splice(position, 1, &[glib::BoxedAnyObject::new(message)]);
+            store.splice(position, 1, &[timelines::boxed(message)]);
         }
     }
 
     fn on_message_delete(&self, id: Snowflake, channel_id: Snowflake) {
-        if self.state.borrow().channel != Some(channel_id) {
-            return;
-        }
-        if let Some((position, _)) = self.find_message(id) {
-            self.messages.remove(position);
+        let Some(store) = self.timelines.borrow().get(channel_id).map(|t| t.store.clone()) else { return };
+        if let Some((position, _)) = timelines::find(&store, id) {
+            store.remove(position);
+            // The message after it may now group with the one before.
+            if position < store.n_items() {
+                store.items_changed(position, 1, 1);
+            }
         }
     }
 
-    fn newest_loaded(&self) -> Option<Snowflake> {
-        let last = self.messages.n_items().checked_sub(1)?;
-        boxed_message(&self.messages, last).map(|m| m.id)
+    /// The open channel's store (or the blank one).
+    fn messages(&self) -> gio::ListStore {
+        self.selection.model().and_downcast().unwrap_or_else(|| self.blank.clone())
     }
 
-    /// Find a loaded message by id: its store position and a clone.
-    fn find_message(&self, id: Snowflake) -> Option<(u32, Message)> {
-        (0..self.messages.n_items()).find_map(|position| {
-            let message = boxed_message(&self.messages, position)?;
-            (message.id == id).then_some((position, message))
-        })
+    fn show_blank(&self) {
+        self.selection.set_model(Some(&self.blank));
     }
 
     // ---- navigation -------------------------------------------------------
@@ -897,7 +924,7 @@ impl App {
             Some(channel) => self.select_channel(channel),
             None => {
                 self.state.borrow_mut().channel = None;
-                self.messages.remove_all();
+                self.show_blank();
                 self.header.set_label("No text channels you can see here");
                 self.rebuild_sidebar();
             }
@@ -916,7 +943,7 @@ impl App {
             Some(channel) => self.select_channel(channel),
             None => {
                 self.state.borrow_mut().channel = None;
-                self.messages.remove_all();
+                self.show_blank();
                 self.header.set_label("No direct messages yet");
                 self.rebuild_sidebar();
             }
@@ -1038,33 +1065,123 @@ impl App {
         self.rebuild_sidebar();
         self.header.set_label(&title);
         self.composer_error.set_visible(false);
-        self.messages.remove_all();
+
+        // Show what we have at once (instant for a recently viewed channel),
+        // then fetch the newest page and merge it in.
+        let store = self.timelines.borrow_mut().open(id).store.clone();
+        self.selection.set_model(Some(&store));
+        self.scroll_to_end();
 
         let Some(rest) = rest else { return };
         let this = self.clone();
         glib::spawn_future_local(async move {
-            let result = rest.messages(id, HISTORY).await;
-            // The user may have switched channels while this was loading.
-            if this.state.borrow().channel != Some(id) {
+            let result = rest.messages(id, PAGE, None).await;
+            match result {
+                Ok(page) => {
+                    this.learn_messages(&page);
+                    let full = page.len() == PAGE as usize;
+                    let open = this.state.borrow().channel == Some(id);
+                    let at_bottom = !open || this.at_bottom();
+                    let replaced = timelines::merge_newest(&store, page);
+                    if let Some(timeline) = this.timelines.borrow_mut().get_mut(id) {
+                        // A short page is the whole channel; a replaced store
+                        // lost its scrollback and can page again.
+                        if !full {
+                            timeline.complete = true;
+                        } else if replaced {
+                            timeline.complete = false;
+                        }
+                    }
+                    if let Some(newest) = store.n_items().checked_sub(1).and_then(|p| timelines::message_at(&store, p)) {
+                        // READY's newest-message ids can be stale; history is not.
+                        this.state.borrow_mut().bump_last_message(id, newest.id);
+                    }
+                    // The user may have switched channels while this was loading.
+                    if open && this.state.borrow().channel == Some(id) {
+                        if at_bottom {
+                            this.scroll_to_end();
+                        }
+                        this.mark_read(id);
+                        this.load_older_if_short();
+                    }
+                }
+                Err(e) => {
+                    if this.state.borrow().channel == Some(id) {
+                        this.show_composer_error(&format!("Could not load messages: {e}"));
+                    }
+                }
+            }
+        });
+    }
+
+    /// Learn names from a batch of messages and look up unknown mentions.
+    fn learn_messages(self: &Rc<Self>, messages: &[Message]) {
+        self.learn_users(messages.iter().flat_map(|m| std::iter::once(&m.author).chain(&m.mentions)));
+        for message in messages {
+            self.resolve_mentions(&message.content);
+        }
+    }
+
+    /// Fetch the page before the oldest loaded message when the user is within
+    /// a few screens of the top. One request per channel at a time.
+    fn maybe_load_older(self: &Rc<Self>) {
+        let adjustment = self.scroller.vadjustment();
+        if adjustment.value() > adjustment.page_size() * PREFETCH_SCREENS {
+            return;
+        }
+        let Some(channel) = self.state.borrow().channel else { return };
+        let (store, before) = {
+            let mut timelines = self.timelines.borrow_mut();
+            let Some(timeline) = timelines.get_mut(channel) else { return };
+            if timeline.complete || timeline.loading_older {
+                return;
+            }
+            // Nothing loaded yet: the newest page is still on its way.
+            let Some(before) = timelines::oldest_id(&timeline.store) else { return };
+            timeline.loading_older = true;
+            (timeline.store.clone(), before)
+        };
+        let Some(rest) = self.state.borrow().rest.clone() else { return };
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            let result = rest.messages(channel, PAGE, Some(before)).await;
+            let still_cached = this.timelines.borrow().get(channel).is_some_and(|t| t.store == store);
+            if let Some(timeline) = this.timelines.borrow_mut().get_mut(channel) {
+                timeline.loading_older = false;
+            }
+            if !still_cached {
                 return;
             }
             match result {
-                Ok(history) => {
-                    this.learn_users(history.iter().flat_map(|m| std::iter::once(&m.author).chain(&m.mentions)));
-                    for message in &history {
-                        this.resolve_mentions(&message.content);
+                // Only prepend if the store still starts where we asked from;
+                // a merge that replaced it would make this page a gap.
+                Ok(page) if timelines::oldest_id(&store) == Some(before) => {
+                    if page.len() < PAGE as usize
+                        && let Some(timeline) = this.timelines.borrow_mut().get_mut(channel)
+                    {
+                        timeline.complete = true;
                     }
-                    let objects: Vec<glib::BoxedAnyObject> =
-                        history.into_iter().map(glib::BoxedAnyObject::new).collect();
-                    this.messages.splice(0, this.messages.n_items(), &objects);
-                    this.scroll_to_end();
-                    // READY's newest-message ids can be stale; history is not.
-                    if let Some(newest) = this.newest_loaded() {
-                        this.state.borrow_mut().bump_last_message(id, newest);
-                    }
-                    this.mark_read(id);
+                    this.learn_messages(&page);
+                    timelines::prepend(&store, page);
+                    this.load_older_if_short();
                 }
-                Err(e) => this.show_composer_error(&format!("Could not load messages: {e}")),
+                Ok(_) => {}
+                Err(e) => {
+                    if this.state.borrow().channel == Some(channel) {
+                        this.show_composer_error(&format!("Could not load older messages: {e}"));
+                    }
+                }
+            }
+        });
+    }
+
+    /// After layout, page again if the loaded messages still don't reach far
+    /// enough up (a short page, or a tall window).
+    fn load_older_if_short(self: &Rc<Self>) {
+        let this = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            if let Some(this) = this.upgrade() {
+                this.maybe_load_older();
             }
         });
     }
@@ -1245,15 +1362,16 @@ impl App {
 
     /// Re-bind visible rows so newly resolved names appear.
     fn refresh_rows(&self) {
-        let n = self.messages.n_items();
+        let messages = self.messages();
+        let n = messages.n_items();
         if n > 0 {
-            self.messages.items_changed(0, n, n);
+            messages.items_changed(0, n, n);
         }
     }
 
     fn scroll_to_end(&self) {
         let list = self.list.downgrade();
-        let messages = self.messages.clone();
+        let messages = self.messages();
         // After layout, so the new rows have sizes.
         glib::idle_add_local_once(move || {
             if let (Some(list), Some(last)) = (list.upgrade(), messages.n_items().checked_sub(1)) {
@@ -1449,13 +1567,6 @@ fn collect_user_mentions(span: &discord::markup::Span) -> Vec<u64> {
         }
         _ => Vec::new(),
     }
-}
-
-fn boxed_message(store: &gio::ListStore, position: u32) -> Option<Message> {
-    store
-        .item(position)
-        .and_downcast::<glib::BoxedAnyObject>()
-        .map(|object| object.borrow::<Message>().clone())
 }
 
 fn initials(name: &str) -> String {

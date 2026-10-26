@@ -11,3 +11,6 @@ glib.workspace = true
 gio.workspace = true
 soup.workspace = true
 async-channel.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
