@@ -21,6 +21,8 @@ names so two builds differ only where Discord changed something:
 
 What Neucord uses is read from `crates/discord`: `(method, path)` pairs and
 the event names `gateway.rs` matches on. Only `watch.json` is kept by hand.
+Calls are recognised by how they are written, so an HTTP method the tool
+cannot tie to a path fails the job rather than going unwatched.
 
 Snapshots live on the `discord-snapshots` branch, one commit per build, so
 its history is the history of the client. An issue links the full diff.

@@ -49,6 +49,12 @@ switch (command) {
   case "compare": {
     const [old, cur] = await Promise.all(args.slice(0, 2).map(async (f) => JSON.parse(await readFile(f, "utf8"))));
     const uses = await neucordUses(values.repo);
+    if (uses.unaccounted.length > 0) {
+      log("HTTP methods used in a way discord-watch does not recognise, so their calls go unwatched:");
+      for (const place of uses.unaccounted) log(`  ${place}`);
+      log("Teach uses.mjs the new form.");
+      process.exit(1);
+    }
     for (const { method, path } of unmatched(cur, uses)) log(`no client endpoint matches ${method} ${path}`);
     const result = compare(old, cur, uses);
     if (values.report) await writeFile(values.report, report(old, cur, result));

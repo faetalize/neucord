@@ -42,6 +42,8 @@ if [[ -f $old ]]; then
   affects=$(node -p 'JSON.parse(process.argv[1]).affects' "$counts")
   echo "$channel build $build: $counts"
 else
+  # Nothing to compare yet, but still check that every call is recognised.
+  cli compare "$work/new.json" "$work/new.json" --repo "$repo" >/dev/null
   echo "$channel build $build: first snapshot, nothing to compare"
 fi
 
