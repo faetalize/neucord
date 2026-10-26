@@ -19,6 +19,7 @@ window.neucord { background: transparent; color: #DBDEE1; font-size: 15px; }
 }
 .guild:hover  { border-radius: 16px; background: rgba(88, 101, 242, 0.6); }
 .guild.active { border-radius: 16px; background: rgba(88, 101, 242, 0.9); }
+.rail-separator { margin: 4px 24px; min-height: 2px; background: rgba(255, 255, 255, 0.08); }
 
 /* Channel sidebar */
 .guild-name { font-weight: 700; color: #F2F3F5; padding: 14px 16px; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
@@ -35,6 +36,8 @@ listview.messages, listview.messages > row { background: none; }
 .message.first { padding-top: 14px; }
 .message:hover { background: rgba(0, 0, 0, 0.08); }
 .avatar { min-width: 40px; min-height: 40px; border-radius: 20px; font-weight: 700; color: #1E1F22; }
+.channel.dm { padding: 6px 8px; }
+.channel.dm .avatar { min-width: 32px; min-height: 32px; border-radius: 16px; font-size: 13px; }
 .author { font-weight: 600; }
 .time   { color: #949BA4; font-size: 12px; }
 .attachment { color: #00A8FC; }

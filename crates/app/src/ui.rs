@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
-use discord::{Event, Gateway, Guild, Message, Rest, Snowflake, User, session};
+use discord::{Channel, Event, Gateway, Guild, Message, Rest, Snowflake, User, session};
 use gtk::prelude::*;
 use gtk::{gio, glib, pango};
 
@@ -32,6 +32,9 @@ struct State {
     gateway: Option<Gateway>,
     me: Option<User>,
     guilds: Vec<Guild>,
+    /// DMs and group DMs.
+    private_channels: Vec<Channel>,
+    /// The open guild; `None` is Home, the DM list.
     guild: Option<Snowflake>,
     channel: Option<Snowflake>,
     /// Display names by user id, accumulated from every user we see plus lazy
@@ -465,8 +468,10 @@ impl App {
     async fn run_events(self: &Rc<Self>, events: async_channel::Receiver<Event>) {
         while let Ok(event) = events.recv().await {
             match event {
-                Event::Ready { user, guilds } => self.on_ready(user, guilds),
+                Event::Ready { user, guilds, private_channels } => self.on_ready(user, guilds, private_channels),
                 Event::GuildCreate(guild) => self.on_guild(guild),
+                Event::PrivateChannelCreate(channel) => self.on_private_channel(channel),
+                Event::PrivateChannelDelete(id) => self.on_private_channel_delete(id),
                 Event::MessageCreate(message) => self.on_message(message),
                 Event::MessageUpdate { id, channel_id, content, edited } => {
                     self.on_message_update(id, channel_id, content, edited)
@@ -493,17 +498,20 @@ impl App {
 
     // ---- gateway events ---------------------------------------------------
 
-    fn on_ready(self: &Rc<Self>, user: User, guilds: Vec<Guild>) {
-        let store = {
+    fn on_ready(self: &Rc<Self>, user: User, guilds: Vec<Guild>, private_channels: Vec<Channel>) {
+        self.learn_users(private_channels.iter().flat_map(|c| &c.recipients));
+        let (store, was_ready) = {
             let mut state = self.state.borrow_mut();
+            let was_ready = state.ready_seen;
             state.ready_seen = true;
             state.reconnect_attempts = 0;
             state.guilds = guilds;
+            state.private_channels = private_channels;
             let store = (!state.persisted).then(|| (state.token.clone(), user.username.clone()));
             state.persisted = true;
             state.users.insert(user.id.0, user.display_name().to_string());
             state.me = Some(user);
-            store
+            (store, was_ready)
         };
         if let Some((Some(token), username)) = store {
             glib::spawn_future_local(async move {
@@ -517,15 +525,44 @@ impl App {
         self.me_label.set_label(&me);
         self.stack.set_visible_child_name("main");
 
-        // Keep the open guild across reconnects; otherwise open the first.
-        let keep = {
+        // Keep the open guild (or Home) across reconnects; on first connect
+        // open the first guild, or Home if there are none.
+        let open = {
             let state = self.state.borrow();
-            state.guild.filter(|id| state.guilds.iter().any(|g| g.id == *id))
+            match state.guild {
+                Some(id) if state.guilds.iter().any(|g| g.id == id) => Some(id),
+                None if was_ready => None,
+                _ => state.guilds.first().map(|g| g.id),
+            }
         };
-        self.rebuild_rail();
-        match keep.or_else(|| self.state.borrow().guilds.first().map(|g| g.id)) {
+        match open {
             Some(id) => self.select_guild(id),
-            None => self.header.set_label("You are not in any servers yet"),
+            None => self.select_home(),
+        }
+    }
+
+    fn on_private_channel(self: &Rc<Self>, channel: Channel) {
+        self.learn_users(channel.recipients.iter());
+        {
+            let mut state = self.state.borrow_mut();
+            state.private_channels.retain(|c| c.id != channel.id);
+            state.private_channels.push(channel);
+        }
+        if self.state.borrow().guild.is_none() {
+            self.rebuild_sidebar();
+        }
+    }
+
+    fn on_private_channel_delete(self: &Rc<Self>, id: Snowflake) {
+        let (home, was_open) = {
+            let mut state = self.state.borrow_mut();
+            state.private_channels.retain(|c| c.id != id);
+            (state.guild.is_none(), state.channel == Some(id))
+        };
+        if was_open {
+            self.select_home();
+        } else if home {
+            self.rebuild_sidebar();
         }
     }
 
@@ -547,6 +584,21 @@ impl App {
 
     fn on_message(self: &Rc<Self>, message: Message) {
         self.learn_users(std::iter::once(&message.author).chain(&message.mentions));
+        // A DM with new activity moves to the top of the list.
+        let reorder = {
+            let mut state = self.state.borrow_mut();
+            let home = state.guild.is_none();
+            match state.private_channels.iter_mut().find(|c| c.id == message.channel_id) {
+                Some(dm) => {
+                    dm.last_message_id = Some(message.id);
+                    home
+                }
+                None => false,
+            }
+        };
+        if reorder {
+            self.rebuild_sidebar();
+        }
         if self.state.borrow().channel != Some(message.channel_id) {
             return;
         }
@@ -598,6 +650,22 @@ impl App {
             self.rail.remove(&child);
         }
         let state = self.state.borrow();
+
+        let home = gtk::Button::builder().label("DM").tooltip_text("Direct Messages").css_classes(["guild", "home"]).build();
+        if state.guild.is_none() {
+            home.add_css_class("active");
+        }
+        home.connect_clicked({
+            let this = Rc::downgrade(self);
+            move |_| {
+                if let Some(this) = this.upgrade() {
+                    this.select_home();
+                }
+            }
+        });
+        self.rail.append(&home);
+        self.rail.append(&gtk::Separator::builder().css_classes(["rail-separator"]).build());
+
         for guild in &state.guilds {
             let button = gtk::Button::builder()
                 .tooltip_text(&guild.name)
@@ -652,12 +720,51 @@ impl App {
         }
     }
 
+    /// Open Home: the DM list, with the most recent DM selected.
+    fn select_home(self: &Rc<Self>) {
+        let latest = {
+            let mut state = self.state.borrow_mut();
+            state.guild = None;
+            state.private_channels.iter().max_by_key(|c| c.activity()).map(|c| c.id)
+        };
+        self.rebuild_rail();
+        match latest {
+            Some(channel) => self.select_channel(channel),
+            None => {
+                self.state.borrow_mut().channel = None;
+                self.messages.remove_all();
+                self.header.set_label("No direct messages yet");
+                self.rebuild_sidebar();
+            }
+        }
+    }
+
     fn rebuild_sidebar(self: &Rc<Self>) {
         while let Some(child) = self.channels.first_child() {
             self.channels.remove(&child);
         }
         let state = self.state.borrow();
-        let Some(guild) = state.guild.and_then(|id| state.guilds.iter().find(|g| g.id == id)) else {
+        let Some(id) = state.guild else {
+            self.guild_name.set_label("Direct Messages");
+            let mut dms: Vec<&Channel> = state.private_channels.iter().collect();
+            dms.sort_by_key(|c| std::cmp::Reverse(c.activity()));
+            for dm in dms {
+                let button = gtk::Button::builder().child(&dm_row(dm, &self.images)).css_classes(["channel", "dm"]).build();
+                if state.channel == Some(dm.id) {
+                    button.add_css_class("active");
+                }
+                let id = dm.id;
+                let this = Rc::downgrade(self);
+                button.connect_clicked(move |_| {
+                    if let Some(this) = this.upgrade() {
+                        this.select_channel(id);
+                    }
+                });
+                self.channels.append(&button);
+            }
+            return;
+        };
+        let Some(guild) = state.guilds.iter().find(|g| g.id == id) else {
             return;
         };
         self.guild_name.set_label(&guild.name);
@@ -695,20 +802,27 @@ impl App {
     }
 
     fn select_channel(self: &Rc<Self>, id: Snowflake) {
-        let (name, rest) = {
+        let (title, rest) = {
             let mut state = self.state.borrow_mut();
             state.channel = Some(id);
-            let name = state
-                .guilds
-                .iter()
-                .flat_map(|g| &g.channels)
-                .find(|c| c.id == id)
-                .and_then(|c| c.name.clone())
-                .unwrap_or_default();
-            (name, state.rest.clone())
+            let title = match state.private_channels.iter().find(|c| c.id == id) {
+                Some(dm) if dm.kind == discord::ChannelKind::Dm => format!("@ {}", dm.title()),
+                Some(group) => group.title(),
+                None => {
+                    let name = state
+                        .guilds
+                        .iter()
+                        .flat_map(|g| &g.channels)
+                        .find(|c| c.id == id)
+                        .and_then(|c| c.name.clone())
+                        .unwrap_or_default();
+                    format!("# {name}")
+                }
+            };
+            (title, state.rest.clone())
         };
         self.rebuild_sidebar();
-        self.header.set_label(&format!("# {name}"));
+        self.header.set_label(&title);
         self.composer_error.set_visible(false);
         self.messages.remove_all();
 
@@ -1023,7 +1137,7 @@ fn fill_message_row(
 
     let gutter = gtk::Box::builder().width_request(40).valign(gtk::Align::Start).build();
     if !grouped {
-        gutter.append(&avatar_widget(&message.author, colour, images));
+        gutter.append(&avatar_widget(&message.author, colour, 40, images));
     }
     row.append(&gutter);
 
@@ -1062,14 +1176,14 @@ fn fill_message_row(
     row.append(&body);
 }
 
-/// A round avatar Picture (with the coloured initial behind it while it loads),
-/// or just the initial when the user has no avatar.
-fn avatar_widget(user: &User, colour: u64, images: Option<&Images>) -> gtk::Widget {
+/// A round avatar Picture of `size` px (with the coloured initial behind it
+/// while it loads), or just the initial when the user has no avatar.
+fn avatar_widget(user: &User, colour: u64, size: i32, images: Option<&Images>) -> gtk::Widget {
     let initial = user.display_name().chars().next().unwrap_or('?').to_uppercase().to_string();
     let fallback = gtk::Label::builder()
         .label(initial)
-        .width_request(40)
-        .height_request(40)
+        .width_request(size)
+        .height_request(size)
         .css_classes(["avatar", &format!("avatar-{colour}")])
         .build();
     let (Some(hash), Some(images)) = (user.avatar.as_deref(), images) else {
@@ -1078,8 +1192,8 @@ fn avatar_widget(user: &User, colour: u64, images: Option<&Images>) -> gtk::Widg
     // Overlay the picture on the coloured initial so there is no blank gap.
     let overlay = gtk::Overlay::builder().child(&fallback).build();
     let picture = gtk::Picture::builder()
-        .width_request(40)
-        .height_request(40)
+        .width_request(size)
+        .height_request(size)
         .content_fit(gtk::ContentFit::Cover)
         .overflow(gtk::Overflow::Hidden)
         .css_classes(["avatar"])
@@ -1087,6 +1201,44 @@ fn avatar_widget(user: &User, colour: u64, images: Option<&Images>) -> gtk::Widg
     images.set(&picture, &discord::cdn::avatar_url(user.id.0, hash, 64), discord::cdn::is_animated(hash));
     overlay.add_overlay(&picture);
     overlay.upcast()
+}
+
+/// A DM list entry: the other person's avatar (or the group's icon) and the title.
+fn dm_row(channel: &Channel, images: &Images) -> gtk::Widget {
+    const SIZE: i32 = 32;
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let icon: gtk::Widget = match (channel.kind, channel.recipients.first(), channel.icon.as_deref()) {
+        (discord::ChannelKind::GroupDm, _, Some(hash)) => {
+            let picture = gtk::Picture::builder()
+                .width_request(SIZE)
+                .height_request(SIZE)
+                .content_fit(gtk::ContentFit::Cover)
+                .overflow(gtk::Overflow::Hidden)
+                .css_classes(["avatar", "small"])
+                .build();
+            images.set(&picture, &discord::cdn::group_dm_icon_url(channel.id.0, hash, 64), false);
+            picture.upcast()
+        }
+        (discord::ChannelKind::Dm, Some(user), _) => avatar_widget(user, palette_index(user), SIZE, Some(images)),
+        _ => gtk::Label::builder()
+            .label(initials(&channel.title()))
+            .width_request(SIZE)
+            .height_request(SIZE)
+            .css_classes(["avatar", "small", &format!("avatar-{}", channel.id.0 % PALETTE_SIZE)])
+            .build()
+            .upcast(),
+    };
+    icon.set_valign(gtk::Align::Center);
+    row.append(&icon);
+    row.append(
+        &gtk::Label::builder()
+            .label(channel.title())
+            .xalign(0.0)
+            .hexpand(true)
+            .ellipsize(pango::EllipsizeMode::End)
+            .build(),
+    );
+    row.upcast()
 }
 
 /// An inline image attachment, scaled to fit a reasonable box.

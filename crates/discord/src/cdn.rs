@@ -23,6 +23,10 @@ pub fn guild_icon_url(guild_id: u64, hash: &str, size: u16) -> String {
     format!("{CDN}/icons/{guild_id}/{hash}.{}?size={size}", ext(hash))
 }
 
+pub fn group_dm_icon_url(channel_id: u64, hash: &str, size: u16) -> String {
+    format!("{CDN}/channel-icons/{channel_id}/{hash}.png?size={size}")
+}
+
 pub fn emoji_url(emoji_id: u64, animated: bool, size: u16) -> String {
     let ext = if animated { "gif" } else { "png" };
     format!("{CDN}/emojis/{emoji_id}.{ext}?size={size}")

@@ -58,7 +58,11 @@ impl User {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChannelKind {
     Text,
+    /// A one-to-one direct message.
+    Dm,
     Voice,
+    /// A group DM, with up to ten people.
+    GroupDm,
     Category,
     Announcement,
     Stage,
@@ -70,7 +74,9 @@ impl ChannelKind {
     fn from_raw(raw: u8) -> Self {
         match raw {
             0 => Self::Text,
+            1 => Self::Dm,
             2 => Self::Voice,
+            3 => Self::GroupDm,
             4 => Self::Category,
             5 => Self::Announcement,
             13 => Self::Stage,
@@ -81,7 +87,12 @@ impl ChannelKind {
 
     /// Channels that hold a plain message history.
     pub fn is_text(self) -> bool {
-        matches!(self, Self::Text | Self::Announcement)
+        matches!(self, Self::Text | Self::Announcement | Self::Dm | Self::GroupDm)
+    }
+
+    /// DMs and group DMs: channels outside any guild.
+    pub fn is_private(self) -> bool {
+        matches!(self, Self::Dm | Self::GroupDm)
     }
 }
 
@@ -102,6 +113,33 @@ pub struct Channel {
     pub position: Option<i32>,
     #[serde(default)]
     pub parent_id: Option<Snowflake>,
+    /// The other people in a DM or group DM (never includes us).
+    #[serde(default)]
+    pub recipients: Vec<User>,
+    /// Group DM icon hash.
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// Newest message, used to sort DMs by recent activity. May point at a
+    /// deleted message; it only ever needs to be roughly right.
+    #[serde(default)]
+    pub last_message_id: Option<Snowflake>,
+}
+
+impl Channel {
+    /// What the sidebar and header call this channel: its name if it has one,
+    /// else (DMs, unnamed group DMs) the recipients' names.
+    pub fn title(&self) -> String {
+        if let Some(name) = self.name.as_deref().filter(|n| !n.is_empty()) {
+            return name.to_owned();
+        }
+        let names: Vec<&str> = self.recipients.iter().map(User::display_name).collect();
+        if names.is_empty() { "Unnamed".to_owned() } else { names.join(", ") }
+    }
+
+    /// Sort key for the DM list: most recent activity first.
+    pub fn activity(&self) -> Snowflake {
+        self.last_message_id.unwrap_or(self.id)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -259,6 +297,27 @@ mod tests {
     #[test]
     fn unavailable_guild_is_rejected() {
         assert!(serde_json::from_str::<Guild>(r#"{"id":"3","unavailable":true}"#).is_err());
+    }
+
+    #[test]
+    fn dm_titles() {
+        let dm: Channel = serde_json::from_str(
+            r#"{"id":"20","type":1,"last_message_id":"30",
+                "recipients":[{"id":"5","username":"alice","global_name":"Alice"}]}"#,
+        )
+        .unwrap();
+        assert_eq!((dm.kind, dm.title(), dm.activity()), (ChannelKind::Dm, "Alice".into(), Snowflake(30)));
+        assert!(dm.kind.is_private() && dm.kind.is_text());
+
+        let group: Channel = serde_json::from_str(
+            r#"{"id":"21","type":3,"name":null,"recipients":[
+                {"id":"5","username":"a"},{"id":"6","username":"b"}]}"#,
+        )
+        .unwrap();
+        assert_eq!((group.title(), group.activity()), ("a, b".into(), Snowflake(21)));
+
+        let named: Channel = serde_json::from_str(r#"{"id":"22","type":3,"name":"crew","recipients":[]}"#).unwrap();
+        assert_eq!(named.title(), "crew");
     }
 
     #[test]

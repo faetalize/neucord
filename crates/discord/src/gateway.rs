@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use soup::prelude::*;
 
-use crate::{Error, Guild, Message, Snowflake, User, identity};
+use crate::{Channel, Error, Guild, Message, Snowflake, User, identity};
 
 /// Gateway capability bits. 0 asks for the classic payload shapes, which the
 /// model parses directly; the guild parser also accepts the newer shape.
@@ -25,8 +25,13 @@ const CLOSE_RECONNECT: u16 = 4000;
 
 #[derive(Debug)]
 pub enum Event {
-    Ready { user: User, guilds: Vec<Guild> },
+    /// `private_channels` are the DMs and group DMs, in no particular order.
+    Ready { user: User, guilds: Vec<Guild>, private_channels: Vec<Channel> },
     GuildCreate(Guild),
+    /// A DM or group DM was opened (or reopened). Guild channels are not reported yet.
+    PrivateChannelCreate(Channel),
+    /// A DM or group DM was closed, or we left the group.
+    PrivateChannelDelete(Snowflake),
     MessageCreate(Message),
     /// An edit. `content` is absent for embed-only updates, which we ignore.
     MessageUpdate { id: Snowflake, channel_id: Snowflake, content: Option<String>, edited: bool },
@@ -199,6 +204,37 @@ fn parse_id(value: &Value) -> Option<Snowflake> {
     value.as_str()?.parse().ok().map(Snowflake)
 }
 
+/// Message requests and spam DMs, which Discord keeps out of the DM list.
+fn is_hidden_dm(channel: &Value) -> bool {
+    channel["is_message_request"].as_bool() == Some(true) || channel["is_spam"].as_bool() == Some(true)
+}
+
+/// READY's DMs, minus hidden ones. Recipients come either inline as `recipients` (the classic
+/// shape) or as `recipient_ids` pointing into READY's top-level `users`.
+fn private_channels(ready: &Value) -> Vec<Channel> {
+    let users: std::collections::HashMap<&str, &Value> = ready["users"]
+        .as_array()
+        .map(|users| users.iter().filter_map(|u| Some((u["id"].as_str()?, u))).collect())
+        .unwrap_or_default();
+    let Some(raw) = ready["private_channels"].as_array() else { return Vec::new() };
+    raw.iter()
+        .filter(|value| !is_hidden_dm(value))
+        .filter_map(|value| {
+            let mut channel = Channel::deserialize(value).ok()?;
+            if channel.recipients.is_empty()
+                && let Some(ids) = value["recipient_ids"].as_array()
+            {
+                channel.recipients = ids
+                    .iter()
+                    .filter_map(|id| users.get(id.as_str()?))
+                    .filter_map(|user| User::deserialize(*user).ok())
+                    .collect();
+            }
+            channel.kind.is_private().then_some(channel)
+        })
+        .collect()
+}
+
 fn dispatch(state: &State, name: &str, data: Value) {
     if crate::shape::enabled() {
         eprintln!("gateway {name}: {}", crate::shape::describe(&data));
@@ -213,7 +249,22 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 .as_array()
                 .map(|raw| raw.iter().filter_map(|g| Guild::deserialize(g).ok()).collect())
                 .unwrap_or_default();
-            Event::Ready { user, guilds }
+            let private_channels = private_channels(&data);
+            Event::Ready { user, guilds, private_channels }
+        }
+        "CHANNEL_CREATE" => match Channel::deserialize(&data) {
+            Ok(channel) if channel.kind.is_private() && !is_hidden_dm(&data) => {
+                Event::PrivateChannelCreate(channel)
+            }
+            Ok(_) => return,
+            Err(e) => return eprintln!("gateway: bad CHANNEL_CREATE: {e}"),
+        },
+        "CHANNEL_DELETE" => {
+            let is_private = data["guild_id"].is_null();
+            match parse_id(&data["id"]) {
+                Some(id) if is_private => Event::PrivateChannelDelete(id),
+                _ => return,
+            }
         }
         "GUILD_CREATE" => match Guild::deserialize(&data) {
             Ok(guild) => Event::GuildCreate(guild),
@@ -249,4 +300,32 @@ fn dispatch(state: &State, name: &str, data: Value) {
         _ => return,
     };
     let _ = state.events.try_send(event);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ready_dms_inline_recipients() {
+        let ready = json!({"private_channels": [
+            {"id": "1", "type": 1, "recipients": [{"id": "5", "username": "alice"}]},
+            {"id": "2", "type": 0},
+            {"id": "4", "type": 1, "is_message_request": true, "recipients": []},
+            {"id": "5", "type": 1, "is_spam": true, "recipients": []}
+        ]});
+        let dms = private_channels(&ready);
+        assert_eq!(dms.len(), 1);
+        assert_eq!(dms[0].title(), "alice");
+    }
+
+    #[test]
+    fn ready_dms_recipient_ids() {
+        let ready = json!({
+            "users": [{"id": "5", "username": "a"}, {"id": "6", "username": "b"}],
+            "private_channels": [{"id": "3", "type": 3, "recipient_ids": ["5", "6", "7"]}]
+        });
+        let dms = private_channels(&ready);
+        assert_eq!(dms[0].title(), "a, b");
+    }
 }
