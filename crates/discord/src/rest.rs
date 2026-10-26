@@ -47,6 +47,14 @@ impl Rest {
         self.request("POST", &format!("/channels/{channel}/messages"), Some(body)).await
     }
 
+    /// Mark everything in `channel` up to `message` as read, for all our clients.
+    pub async fn ack(&self, channel: Snowflake, message: Snowflake) -> Result<(), Error> {
+        let body = json!({ "token": null });
+        let _: serde_json::Value =
+            self.request("POST", &format!("/channels/{channel}/messages/{message}/ack"), Some(body)).await?;
+        Ok(())
+    }
+
     async fn request<T: DeserializeOwned>(
         &self,
         method: &str,

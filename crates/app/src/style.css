@@ -19,6 +19,11 @@ window.neucord { background: transparent; color: #DBDEE1; font-size: 15px; }
 }
 .guild:hover  { border-radius: 16px; background: rgba(88, 101, 242, 0.6); }
 .guild.active { border-radius: 16px; background: rgba(88, 101, 242, 0.9); }
+.rail-pill { min-width: 4px; min-height: 8px; border-radius: 0 4px 4px 0; background: #F2F3F5; }
+.badge {
+  min-width: 16px; min-height: 16px; padding: 0 4px; border-radius: 8px;
+  background: #F23F43; color: white; font-size: 11px; font-weight: 700;
+}
 .rail-separator { margin: 4px 24px; min-height: 2px; background: rgba(255, 255, 255, 0.08); }
 
 /* Channel sidebar */
@@ -27,6 +32,8 @@ window.neucord { background: transparent; color: #DBDEE1; font-size: 15px; }
 .channel    { padding: 5px 10px; margin: 1px 8px; border-radius: 6px; color: #949BA4; background: none; box-shadow: none; }
 .channel:hover  { background: rgba(255, 255, 255, 0.05); color: #DBDEE1; }
 .channel.active { background: rgba(255, 255, 255, 0.10); color: #F2F3F5; }
+.channel.unread { color: #F2F3F5; font-weight: 700; }
+.channel.muted  { opacity: 0.45; }
 .me { padding: 10px 14px; background: rgba(0, 0, 0, 0.20); color: #DBDEE1; }
 
 /* Chat */

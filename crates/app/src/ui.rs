@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
-use discord::{Channel, Event, Gateway, Guild, Message, Rest, Snowflake, User, session};
+use discord::notifications::{NotificationSettings, Place};
+use discord::read_state::ReadStates;
+use discord::{Channel, Event, Gateway, Guild, Message, Ready, Rest, Snowflake, User, session};
 use gtk::prelude::*;
 use gtk::{gio, glib, pango};
 
@@ -19,6 +21,8 @@ const HISTORY: u8 = 50;
 const GROUP_WINDOW_SECS: i64 = 7 * 60;
 /// Avatar/name colour classes in style.css.
 const PALETTE_SIZE: u64 = 8;
+/// Acks for a channel within this window are sent as one request.
+const ACK_DELAY: Duration = Duration::from_millis(1500);
 
 #[derive(Default)]
 struct State {
@@ -43,6 +47,112 @@ struct State {
     users: HashMap<u64, String>,
     /// User ids we have already tried to fetch, to avoid repeat requests.
     fetched_users: std::collections::HashSet<u64>,
+    read: ReadStates,
+    notifications: NotificationSettings,
+    /// Acks waiting to be sent: channel → newest message read.
+    pending_acks: HashMap<Snowflake, Snowflake>,
+}
+
+impl State {
+    fn me(&self) -> Option<Snowflake> {
+        self.me.as_ref().map(|u| u.id)
+    }
+
+    /// The guild a channel belongs to and the channel itself; `None` guild for DMs.
+    fn find_channel(&self, id: Snowflake) -> Option<(Option<&Guild>, &Channel)> {
+        if let Some(dm) = self.private_channels.iter().find(|c| c.id == id) {
+            return Some((None, dm));
+        }
+        self.guilds.iter().find_map(|g| g.channels.iter().find(|c| c.id == id).map(|c| (Some(g), c)))
+    }
+
+    fn place(&self, id: Snowflake) -> Option<Place> {
+        let (guild, channel) = self.find_channel(id)?;
+        Some(Place {
+            guild: guild.map(|g| g.id),
+            guild_default: guild.map_or(0, |g| g.default_message_notifications),
+            channel: channel.id,
+            parent: channel.parent_id,
+        })
+    }
+
+    fn is_unread(&self, channel: &Channel) -> bool {
+        self.read.is_unread(channel.id, channel.last_message_id)
+    }
+
+    /// Unread dot and mention count for a server's rail icon. Muted channels
+    /// (and a muted server) add mentions but no dot, as in Discord.
+    fn guild_badge(&self, guild: &Guild) -> (bool, u32) {
+        let now = now_unix();
+        let guild_muted = self.notifications.guild_muted(guild.id, now);
+        let mut unread = false;
+        let mut mentions = 0;
+        for channel in guild.channels.iter().filter(|c| c.kind.is_text()) {
+            mentions += self.read.mentions(channel.id);
+            if !unread && !guild_muted && self.is_unread(channel) {
+                let place = Place { guild: Some(guild.id), guild_default: 0, channel: channel.id, parent: channel.parent_id };
+                unread = !self.notifications.channel_muted(&place, now);
+            }
+        }
+        (unread, mentions)
+    }
+
+    /// Everything the rail shows that can change without the guild list changing.
+    fn rail_signature(&self) -> Vec<u64> {
+        let mut sig = vec![self.guild.map_or(0, |g| g.0), self.home_badge() as u64];
+        for guild in &self.guilds {
+            let (unread, mentions) = self.guild_badge(guild);
+            sig.extend([guild.id.0, unread as u64, mentions as u64]);
+        }
+        sig
+    }
+
+    /// The same for the sidebar: the open place, selection, order and markers.
+    fn sidebar_signature(&self) -> Vec<u64> {
+        let now = now_unix();
+        let mut sig = vec![self.guild.map_or(0, |g| g.0), self.channel.map_or(0, |c| c.0)];
+        let channels: Vec<(Place, &Channel)> = match self.guild.and_then(|id| self.guilds.iter().find(|g| g.id == id)) {
+            Some(guild) => guild
+                .channels
+                .iter()
+                .filter(|c| c.kind.is_text())
+                .map(|c| (Place { guild: Some(guild.id), guild_default: 0, channel: c.id, parent: c.parent_id }, c))
+                .collect(),
+            None => {
+                let mut dms: Vec<&Channel> = self.private_channels.iter().collect();
+                dms.sort_by_key(|c| std::cmp::Reverse(c.activity()));
+                dms.into_iter().map(|c| (Place { guild: None, guild_default: 0, channel: c.id, parent: None }, c)).collect()
+            }
+        };
+        for (place, channel) in channels {
+            sig.extend([
+                channel.id.0,
+                self.is_unread(channel) as u64,
+                self.notifications.channel_muted(&place, now) as u64,
+                self.read.mentions(channel.id) as u64,
+            ]);
+        }
+        sig
+    }
+
+    /// Home's badge: every DM message counts as a mention.
+    fn home_badge(&self) -> u32 {
+        self.private_channels.iter().map(|c| self.read.mentions(c.id)).sum()
+    }
+
+    /// Record a new newest message for a channel wherever it lives.
+    fn bump_last_message(&mut self, channel: Snowflake, message: Snowflake) {
+        let slot = self
+            .private_channels
+            .iter_mut()
+            .chain(self.guilds.iter_mut().flat_map(|g| g.channels.iter_mut()))
+            .find(|c| c.id == channel);
+        if let Some(c) = slot
+            && c.last_message_id.is_none_or(|last| message > last)
+        {
+            c.last_message_id = Some(message);
+        }
+    }
 }
 
 pub struct App {
@@ -68,6 +178,9 @@ pub struct App {
     /// `@`-token start (char offset) and the candidates shown, row-aligned.
     mention: RefCell<MentionCtx>,
     state: RefCell<State>,
+    /// What the rail and sidebar last drew, so badge refreshes can skip
+    /// rebuilding them when nothing visible changed.
+    drawn: RefCell<(Vec<u64>, Vec<u64>)>,
 }
 
 #[derive(Default)]
@@ -116,6 +229,7 @@ impl App {
             mention_list: gtk::ListBox::builder().css_classes(["mention-list"]).build(),
             mention: RefCell::default(),
             state: RefCell::default(),
+            drawn: RefCell::default(),
         });
         this.build();
 
@@ -166,7 +280,33 @@ impl App {
         self.window.add_action_entries([logout]);
         if let Some(app) = self.window.application() {
             app.set_accels_for_action("win.logout", &["<Control><Shift>l"]);
+            // Notification clicks arrive as an app action, with the channel id.
+            let open = gio::ActionEntry::builder("open-channel")
+                .parameter_type(Some(glib::VariantTy::STRING))
+                .activate({
+                    let this = Rc::downgrade(self);
+                    move |_: &gtk::Application, _, parameter| {
+                        let id = parameter.and_then(|p| p.str()).and_then(|s| s.parse().ok());
+                        if let (Some(this), Some(id)) = (this.upgrade(), id) {
+                            this.open_channel(Snowflake(id));
+                        }
+                    }
+                })
+                .build();
+            app.add_action_entries([open]);
         }
+
+        // Coming back to the window reads the open channel.
+        self.window.connect_is_active_notify({
+            let this = Rc::downgrade(self);
+            move |window| {
+                let Some(this) = this.upgrade() else { return };
+                let channel = this.state.borrow().channel;
+                if let (true, Some(channel)) = (window.is_active(), channel) {
+                    this.mark_read(channel);
+                }
+            }
+        });
     }
 
     fn build_loading(&self) -> gtk::Widget {
@@ -468,7 +608,7 @@ impl App {
     async fn run_events(self: &Rc<Self>, events: async_channel::Receiver<Event>) {
         while let Ok(event) = events.recv().await {
             match event {
-                Event::Ready { user, guilds, private_channels } => self.on_ready(user, guilds, private_channels),
+                Event::Ready(ready) => self.on_ready(*ready),
                 Event::GuildCreate(guild) => self.on_guild(guild),
                 Event::PrivateChannelCreate(channel) => self.on_private_channel(channel),
                 Event::PrivateChannelDelete(id) => self.on_private_channel_delete(id),
@@ -477,6 +617,24 @@ impl App {
                     self.on_message_update(id, channel_id, content, edited)
                 }
                 Event::MessageDelete { id, channel_id } => self.on_message_delete(id, channel_id),
+                Event::MessageAck { channel_id, message_id } => {
+                    self.state.borrow_mut().read.ack(channel_id, message_id);
+                    self.withdraw_notification(channel_id);
+                    self.refresh_badges();
+                }
+                Event::ChannelUnreadUpdate { channels, .. } => {
+                    {
+                        let mut state = self.state.borrow_mut();
+                        for (channel, last) in channels {
+                            state.bump_last_message(channel, last);
+                        }
+                    }
+                    self.refresh_badges();
+                }
+                Event::NotificationSettingsUpdate(settings) => {
+                    self.state.borrow_mut().notifications.update(settings);
+                    self.refresh_badges();
+                }
                 Event::Closed { code, reason } => {
                     if Event::is_fatal_close(code) {
                         *self.state.borrow_mut() = State::default();
@@ -498,7 +656,8 @@ impl App {
 
     // ---- gateway events ---------------------------------------------------
 
-    fn on_ready(self: &Rc<Self>, user: User, guilds: Vec<Guild>, private_channels: Vec<Channel>) {
+    fn on_ready(self: &Rc<Self>, ready: Ready) {
+        let Ready { user, guilds, private_channels, read_states, notification_settings } = ready;
         self.learn_users(private_channels.iter().flat_map(|c| &c.recipients));
         let (store, was_ready) = {
             let mut state = self.state.borrow_mut();
@@ -507,6 +666,8 @@ impl App {
             state.reconnect_attempts = 0;
             state.guilds = guilds;
             state.private_channels = private_channels;
+            state.read = read_states;
+            state.notifications = notification_settings;
             let store = (!state.persisted).then(|| (state.token.clone(), user.username.clone()));
             state.persisted = true;
             state.users.insert(user.id.0, user.display_name().to_string());
@@ -584,22 +745,38 @@ impl App {
 
     fn on_message(self: &Rc<Self>, message: Message) {
         self.learn_users(std::iter::once(&message.author).chain(&message.mentions));
-        // A DM with new activity moves to the top of the list.
-        let reorder = {
+        let channel = message.channel_id;
+        let viewing = self.state.borrow().channel == Some(channel) && self.window.is_active();
+        let notify = {
             let mut state = self.state.borrow_mut();
-            let home = state.guild.is_none();
-            match state.private_channels.iter_mut().find(|c| c.id == message.channel_id) {
-                Some(dm) => {
-                    dm.last_message_id = Some(message.id);
-                    home
-                }
-                None => false,
+            state.bump_last_message(channel, message.id);
+            let own = state.me() == Some(message.author.id);
+            if own || viewing {
+                // Discord marks what we send as read; what we watch arrive, we ack.
+                state.read.ack(channel, message.id);
+                None
+            } else {
+                let place = state.place(channel);
+                let roles = message
+                    .guild_id
+                    .and_then(|g| state.guilds.iter().find(|guild| guild.id == g))
+                    .map(|g| g.my_roles.clone())
+                    .unwrap_or_default();
+                let is_dm = place.is_some_and(|p| p.guild.is_none());
+                let mentioned = is_dm
+                    || state.me().is_some_and(|me| state.notifications.mentions_me(&message, me, &roles));
+                state.read.on_message(channel, mentioned);
+                place.filter(|p| state.notifications.should_notify(p, mentioned, now_unix()))
             }
         };
-        if reorder {
-            self.rebuild_sidebar();
+        if viewing && self.state.borrow().me() != Some(message.author.id) {
+            self.queue_ack(channel, message.id);
         }
-        if self.state.borrow().channel != Some(message.channel_id) {
+        if let Some(place) = notify {
+            self.send_notification(&message, &place);
+        }
+        self.refresh_badges();
+        if self.state.borrow().channel != Some(channel) {
             return;
         }
         let adjustment = self.scroller.vadjustment();
@@ -635,6 +812,11 @@ impl App {
         }
     }
 
+    fn newest_loaded(&self) -> Option<Snowflake> {
+        let last = self.messages.n_items().checked_sub(1)?;
+        boxed_message(&self.messages, last).map(|m| m.id)
+    }
+
     /// Find a loaded message by id: its store position and a clone.
     fn find_message(&self, id: Snowflake) -> Option<(u32, Message)> {
         (0..self.messages.n_items()).find_map(|position| {
@@ -650,6 +832,7 @@ impl App {
             self.rail.remove(&child);
         }
         let state = self.state.borrow();
+        self.drawn.borrow_mut().0 = state.rail_signature();
 
         let home = gtk::Button::builder().label("DM").tooltip_text("Direct Messages").css_classes(["guild", "home"]).build();
         if state.guild.is_none() {
@@ -663,7 +846,7 @@ impl App {
                 }
             }
         });
-        self.rail.append(&home);
+        self.rail.append(&rail_item(&home, false, state.home_badge()));
         self.rail.append(&gtk::Separator::builder().css_classes(["rail-separator"]).build());
 
         for guild in &state.guilds {
@@ -694,7 +877,8 @@ impl App {
                     this.select_guild(id);
                 }
             });
-            self.rail.append(&button);
+            let (unread, mentions) = state.guild_badge(guild);
+            self.rail.append(&rail_item(&button, unread, mentions));
         }
     }
 
@@ -744,14 +928,26 @@ impl App {
             self.channels.remove(&child);
         }
         let state = self.state.borrow();
+        self.drawn.borrow_mut().1 = state.sidebar_signature();
         let Some(id) = state.guild else {
             self.guild_name.set_label("Direct Messages");
             let mut dms: Vec<&Channel> = state.private_channels.iter().collect();
             dms.sort_by_key(|c| std::cmp::Reverse(c.activity()));
             for dm in dms {
-                let button = gtk::Button::builder().child(&dm_row(dm, &self.images)).css_classes(["channel", "dm"]).build();
+                let row = dm_row(dm, &self.images);
+                if let Some(badge) = badge(state.read.mentions(dm.id)) {
+                    row.append(&badge);
+                }
+                let button = gtk::Button::builder().child(&row).css_classes(["channel", "dm"]).build();
                 if state.channel == Some(dm.id) {
                     button.add_css_class("active");
+                }
+                if state.is_unread(dm) {
+                    button.add_css_class("unread");
+                }
+                let place = Place { guild: None, guild_default: 0, channel: dm.id, parent: None };
+                if state.notifications.channel_muted(&place, now_unix()) {
+                    button.add_css_class("muted");
                 }
                 let id = dm.id;
                 let this = Rc::downgrade(self);
@@ -780,14 +976,32 @@ impl App {
                 );
             }
             for channel in channels {
-                let label = gtk::Label::builder()
-                    .label(format!("# {}", channel.name.as_deref().unwrap_or("unnamed")))
-                    .xalign(0.0)
-                    .ellipsize(pango::EllipsizeMode::End)
-                    .build();
-                let button = gtk::Button::builder().child(&label).css_classes(["channel"]).build();
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                row.append(
+                    &gtk::Label::builder()
+                        .label(format!("# {}", channel.name.as_deref().unwrap_or("unnamed")))
+                        .xalign(0.0)
+                        .hexpand(true)
+                        .ellipsize(pango::EllipsizeMode::End)
+                        .build(),
+                );
+                if let Some(badge) = badge(state.read.mentions(channel.id)) {
+                    row.append(&badge);
+                }
+                let button = gtk::Button::builder().child(&row).css_classes(["channel"]).build();
                 if state.channel == Some(channel.id) {
                     button.add_css_class("active");
+                }
+                let place = Place {
+                    guild: Some(guild.id),
+                    guild_default: guild.default_message_notifications,
+                    channel: channel.id,
+                    parent: channel.parent_id,
+                };
+                if state.notifications.channel_muted(&place, now_unix()) {
+                    button.add_css_class("muted");
+                } else if state.is_unread(channel) {
+                    button.add_css_class("unread");
                 }
                 let id = channel.id;
                 let this = Rc::downgrade(self);
@@ -844,10 +1058,128 @@ impl App {
                         history.into_iter().map(glib::BoxedAnyObject::new).collect();
                     this.messages.splice(0, this.messages.n_items(), &objects);
                     this.scroll_to_end();
+                    // READY's newest-message ids can be stale; history is not.
+                    if let Some(newest) = this.newest_loaded() {
+                        this.state.borrow_mut().bump_last_message(id, newest);
+                    }
+                    this.mark_read(id);
                 }
                 Err(e) => this.show_composer_error(&format!("Could not load messages: {e}")),
             }
         });
+    }
+
+    /// We are looking at `channel`: if it has anything unread, ack its newest
+    /// message here and on Discord.
+    fn mark_read(self: &Rc<Self>, channel: Snowflake) {
+        let newest = {
+            let mut state = self.state.borrow_mut();
+            let Some((_, c)) = state.find_channel(channel) else { return };
+            let Some(last) = c.last_message_id else { return };
+            let pending = state.is_unread(c) || state.read.mentions(channel) > 0;
+            if !pending {
+                return;
+            }
+            state.read.ack(channel, last);
+            last
+        };
+        self.withdraw_notification(channel);
+        self.queue_ack(channel, newest);
+        self.refresh_badges();
+    }
+
+    /// Send an ack after a short delay, folding rapid acks for one channel
+    /// (a busy channel we are watching) into a single request.
+    fn queue_ack(self: &Rc<Self>, channel: Snowflake, message: Snowflake) {
+        let first = self.state.borrow_mut().pending_acks.insert(channel, message).is_none();
+        if !first {
+            return;
+        }
+        let this = Rc::downgrade(self);
+        glib::timeout_add_local_once(ACK_DELAY, move || {
+            let Some(this) = this.upgrade() else { return };
+            let (message, rest) = {
+                let mut state = this.state.borrow_mut();
+                (state.pending_acks.remove(&channel), state.rest.clone())
+            };
+            let (Some(message), Some(rest)) = (message, rest) else { return };
+            glib::spawn_future_local(async move {
+                if let Err(e) = rest.ack(channel, message).await {
+                    eprintln!("ack {channel}: {e}");
+                }
+            });
+        });
+    }
+
+    /// Redraw rail and sidebar if their unread dots, badges, mutes or DM
+    /// order changed. Called on every message, so it skips no-op rebuilds.
+    fn refresh_badges(self: &Rc<Self>) {
+        let (rail, sidebar) = {
+            let state = self.state.borrow();
+            (state.rail_signature(), state.sidebar_signature())
+        };
+        let (rail_changed, sidebar_changed) = {
+            let drawn = self.drawn.borrow();
+            (drawn.0 != rail, drawn.1 != sidebar)
+        };
+        if rail_changed {
+            self.rebuild_rail();
+        }
+        if sidebar_changed {
+            self.rebuild_sidebar();
+        }
+    }
+
+    fn send_notification(&self, message: &Message, place: &Place) {
+        let Some(app) = self.window.application() else { return };
+        let (title, body) = {
+            let state = self.state.borrow();
+            let author = message.author.display_name();
+            let title = match state.find_channel(message.channel_id) {
+                Some((Some(guild), channel)) => {
+                    format!("{author} (#{}, {})", channel.name.as_deref().unwrap_or("unnamed"), guild.name)
+                }
+                Some((None, dm)) if dm.kind == discord::ChannelKind::GroupDm => format!("{author} ({})", dm.title()),
+                _ => author.to_owned(),
+            };
+            drop(state);
+            let names = self.message_names(message);
+            let mut body = render::plain_text(&discord::markup::parse(&message.content), &names);
+            if body.is_empty() && !message.attachments.is_empty() {
+                body = "Sent an attachment".into();
+            }
+            if body.chars().count() > 200 {
+                body = body.chars().take(200).chain(std::iter::once('…')).collect();
+            }
+            (title, body)
+        };
+        let notification = gio::Notification::new(&title);
+        notification.set_body(Some(&body));
+        notification.set_default_action_and_target_value("app.open-channel", Some(&place.channel.to_string().to_variant()));
+        app.send_notification(Some(&notification_id(place.channel)), &notification);
+    }
+
+    fn withdraw_notification(&self, channel: Snowflake) {
+        if let Some(app) = self.window.application() {
+            app.withdraw_notification(&notification_id(channel));
+        }
+    }
+
+    /// Jump to any channel, DM or server (from a notification click).
+    fn open_channel(self: &Rc<Self>, id: Snowflake) {
+        let found = {
+            let mut state = self.state.borrow_mut();
+            let guild = state.find_channel(id).map(|(guild, _)| guild.map(|g| g.id));
+            if let Some(guild) = guild {
+                state.guild = guild;
+            }
+            guild.is_some()
+        };
+        self.window.present();
+        if found {
+            self.rebuild_rail();
+            self.select_channel(id);
+        }
     }
 
     /// Resolve the mentions a message can contain: the user cache (plus this
@@ -1043,6 +1375,42 @@ impl App {
 
 // ---- helpers --------------------------------------------------------------
 
+fn now_unix() -> i64 {
+    glib::real_time() / 1_000_000
+}
+
+/// One notification per channel: a newer message replaces the older one.
+fn notification_id(channel: Snowflake) -> String {
+    format!("channel-{channel}")
+}
+
+/// A red mention count, or nothing for zero.
+fn badge(count: u32) -> Option<gtk::Label> {
+    (count > 0).then(|| {
+        let text = if count > 99 { "99+".to_owned() } else { count.to_string() };
+        gtk::Label::builder().label(text).valign(gtk::Align::Center).css_classes(["badge"]).build()
+    })
+}
+
+/// A rail button with Discord's markers: a pill at the left edge for unread
+/// messages, a mention count at the bottom right.
+fn rail_item(button: &gtk::Button, unread: bool, mentions: u32) -> gtk::Widget {
+    let overlay = gtk::Overlay::builder().child(button).build();
+    if unread {
+        let pill = gtk::Box::builder().halign(gtk::Align::Start).valign(gtk::Align::Center).css_classes(["rail-pill"]).build();
+        pill.set_can_target(false);
+        overlay.add_overlay(&pill);
+    }
+    if let Some(badge) = badge(mentions) {
+        badge.set_halign(gtk::Align::End);
+        badge.set_valign(gtk::Align::End);
+        badge.set_margin_end(8);
+        badge.set_can_target(false);
+        overlay.add_overlay(&badge);
+    }
+    overlay.upcast()
+}
+
 fn wrap_page(child: &impl IsA<gtk::Widget>) -> gtk::Widget {
     let page = gtk::Box::builder().css_classes(["page"]).build();
     child.set_hexpand(true);
@@ -1204,7 +1572,7 @@ fn avatar_widget(user: &User, colour: u64, size: i32, images: Option<&Images>) -
 }
 
 /// A DM list entry: the other person's avatar (or the group's icon) and the title.
-fn dm_row(channel: &Channel, images: &Images) -> gtk::Widget {
+fn dm_row(channel: &Channel, images: &Images) -> gtk::Box {
     const SIZE: i32 = 32;
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     let icon: gtk::Widget = match (channel.kind, channel.recipients.first(), channel.icon.as_deref()) {
@@ -1238,7 +1606,7 @@ fn dm_row(channel: &Channel, images: &Images) -> gtk::Widget {
             .ellipsize(pango::EllipsizeMode::End)
             .build(),
     );
-    row.upcast()
+    row
 }
 
 /// An inline image attachment, scaled to fit a reasonable box.

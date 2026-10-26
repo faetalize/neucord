@@ -148,6 +148,10 @@ pub struct Guild {
     pub name: String,
     pub icon: Option<String>,
     pub channels: Vec<Channel>,
+    /// Notification level for members who never changed it: 0 all, 1 mentions.
+    pub default_message_notifications: u8,
+    /// Our roles here, for role mentions. Filled in by the gateway.
+    pub my_roles: Vec<Snowflake>,
 }
 
 impl Guild {
@@ -193,6 +197,8 @@ impl<'de> Deserialize<'de> for Guild {
             name: String,
             #[serde(default)]
             icon: Option<String>,
+            #[serde(default)]
+            default_message_notifications: Option<u8>,
         }
         #[derive(Deserialize)]
         struct Raw {
@@ -205,15 +211,24 @@ impl<'de> Deserialize<'de> for Guild {
             properties: Option<Properties>,
             #[serde(default)]
             channels: Vec<Channel>,
+            #[serde(default)]
+            default_message_notifications: Option<u8>,
         }
 
         let raw = Raw::deserialize(d)?;
-        let (name, icon) = match (raw.name, raw.properties) {
-            (Some(name), _) => (name, raw.icon),
-            (None, Some(p)) => (p.name, p.icon),
+        let (name, icon, default) = match (raw.name, raw.properties) {
+            (Some(name), _) => (name, raw.icon, raw.default_message_notifications),
+            (None, Some(p)) => (p.name, p.icon, p.default_message_notifications),
             (None, None) => return Err(serde::de::Error::custom("guild has no name (unavailable)")),
         };
-        Ok(Guild { id: raw.id, name, icon, channels: raw.channels })
+        Ok(Guild {
+            id: raw.id,
+            name,
+            icon,
+            channels: raw.channels,
+            default_message_notifications: default.unwrap_or(0),
+            my_roles: Vec::new(),
+        })
     }
 }
 
@@ -258,6 +273,11 @@ pub struct Message {
     /// `<@id>` into a name without a separate user cache.
     #[serde(default)]
     pub mentions: Vec<User>,
+    /// `@everyone` or `@here`.
+    #[serde(default)]
+    pub mention_everyone: bool,
+    #[serde(default)]
+    pub mention_roles: Vec<Snowflake>,
 }
 
 #[cfg(test)]

@@ -156,26 +156,43 @@ fn tags(style: Style) -> (&'static str, &'static str) {
     }
 }
 
-fn entity_markup(entity: &Entity, names: &Names) -> String {
-    let pill = |text: String| {
-        format!(
-            "<span background=\"{MENTION_BG}\" foreground=\"{MENTION_FG}\">\u{a0}{}\u{a0}</span>",
-            escape(&text)
-        )
-    };
+/// What an entity reads as: `@name`, `#channel`, `:emoji:`, a date.
+fn entity_text(entity: &Entity, names: &Names) -> String {
     match entity {
-        Entity::User(id) => {
-            let name = names.users.get(id).cloned().unwrap_or_else(|| "unknown-user".into());
-            pill(format!("@{name}"))
-        }
-        Entity::Channel(id) => {
-            let name = names.channels.get(id).cloned().unwrap_or_else(|| "unknown-channel".into());
-            pill(format!("#{name}"))
-        }
-        Entity::Role(_) => pill("@role".into()),
-        Entity::Emoji { name, .. } => escape(&format!(":{name}:")),
-        Entity::Timestamp { unix, style } => pill(format_timestamp(*unix, *style)),
+        Entity::User(id) => format!("@{}", names.users.get(id).map_or("unknown-user", String::as_str)),
+        Entity::Channel(id) => format!("#{}", names.channels.get(id).map_or("unknown-channel", String::as_str)),
+        Entity::Role(_) => "@role".into(),
+        Entity::Emoji { name, .. } => format!(":{name}:"),
+        Entity::Timestamp { unix, style } => format_timestamp(*unix, *style),
     }
+}
+
+fn entity_markup(entity: &Entity, names: &Names) -> String {
+    let text = escape(&entity_text(entity, names));
+    match entity {
+        // Emoji read as plain text until they render as images.
+        Entity::Emoji { .. } => text,
+        _ => format!("<span background=\"{MENTION_BG}\" foreground=\"{MENTION_FG}\">\u{a0}{text}\u{a0}</span>"),
+    }
+}
+
+/// A message as plain text, for desktop notifications. Spoilers stay hidden.
+pub fn plain_text(spans: &[Span], names: &Names) -> String {
+    fn walk(spans: &[Span], names: &Names, out: &mut String) {
+        for span in spans {
+            match span {
+                Span::Text(text) | Span::Code(text) => out.push_str(text),
+                Span::CodeBlock { code, .. } => out.push_str(code),
+                Span::Styled(Style::Spoiler, _) => out.push_str("▒▒▒▒"),
+                Span::Styled(_, children) | Span::Link { children, .. } => walk(children, names, out),
+                Span::Entity(entity) => out.push_str(&entity_text(entity, names)),
+                Span::Break => out.push('\n'),
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(spans, names, &mut out);
+    out.trim().to_owned()
 }
 
 fn format_timestamp(unix: i64, style: char) -> String {
@@ -246,6 +263,14 @@ mod tests {
             inline("[x](https://e.com)"),
             "<a href=\"https://e.com\">x</a>"
         );
+    }
+
+    #[test]
+    fn plain_text_for_notifications() {
+        let names = Names { users: [(5, "alice".into())].into(), channels: HashMap::new() };
+        let text = |s: &str| plain_text(&discord::markup::parse(s), &names);
+        assert_eq!(text("**hey** <@5>, look: ||secret||"), "hey @alice, look: ▒▒▒▒");
+        assert_eq!(text("<:blob:42>"), ":blob:");
     }
 
     #[test]

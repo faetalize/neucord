@@ -13,6 +13,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use soup::prelude::*;
 
+use crate::notifications::{GuildSettings, NotificationSettings};
+use crate::read_state::ReadStates;
 use crate::{Channel, Error, Guild, Message, Snowflake, User, identity};
 
 /// Gateway capability bits. 0 asks for the classic payload shapes, which the
@@ -23,10 +25,20 @@ const CAPABILITIES: u64 = 0;
 /// reconnect). 4000 lets the session be resumed once RESUME exists.
 const CLOSE_RECONNECT: u16 = 4000;
 
+/// Everything READY gives us to start from.
+#[derive(Debug)]
+pub struct Ready {
+    pub user: User,
+    pub guilds: Vec<Guild>,
+    /// DMs and group DMs, in no particular order.
+    pub private_channels: Vec<Channel>,
+    pub read_states: ReadStates,
+    pub notification_settings: NotificationSettings,
+}
+
 #[derive(Debug)]
 pub enum Event {
-    /// `private_channels` are the DMs and group DMs, in no particular order.
-    Ready { user: User, guilds: Vec<Guild>, private_channels: Vec<Channel> },
+    Ready(Box<Ready>),
     GuildCreate(Guild),
     /// A DM or group DM was opened (or reopened). Guild channels are not reported yet.
     PrivateChannelCreate(Channel),
@@ -36,6 +48,13 @@ pub enum Event {
     /// An edit. `content` is absent for embed-only updates, which we ignore.
     MessageUpdate { id: Snowflake, channel_id: Snowflake, content: Option<String>, edited: bool },
     MessageDelete { id: Snowflake, channel_id: Snowflake },
+    /// One of our clients (maybe this one) marked `channel_id` read up to `message_id`.
+    MessageAck { channel_id: Snowflake, message_id: Snowflake },
+    /// Newest message ids for some of a server's channels, sent after READY
+    /// because READY's can be stale.
+    ChannelUnreadUpdate { guild_id: Snowflake, channels: Vec<(Snowflake, Snowflake)> },
+    /// Our notification settings for one server (or DMs) changed.
+    NotificationSettingsUpdate(GuildSettings),
     /// The connection is gone. `code` is the websocket close code.
     Closed { code: u16, reason: String },
 }
@@ -61,6 +80,8 @@ struct Payload {
 
 struct State {
     token: String,
+    /// Our user id, known from READY on; used to find our roles in GUILD_CREATE.
+    me: Cell<Option<Snowflake>>,
     seq: Cell<Option<u64>>,
     acked: Cell<bool>,
     events: async_channel::Sender<Event>,
@@ -94,6 +115,7 @@ impl Gateway {
         let (tx, rx) = async_channel::unbounded();
         let state = Rc::new(State {
             token: token.to_owned(),
+            me: Cell::new(None),
             seq: Cell::new(None),
             acked: Cell::new(true),
             events: tx,
@@ -204,6 +226,20 @@ fn parse_id(value: &Value) -> Option<Snowflake> {
     value.as_str()?.parse().ok().map(Snowflake)
 }
 
+/// A guild with `my_roles` taken from our own entry in its `members`.
+fn guild_with_roles(value: &Value, me: Snowflake) -> Option<Guild> {
+    let mut guild = Guild::deserialize(value).ok()?;
+    let mine = value["members"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|m| parse_id(&m["user"]["id"]) == Some(me) || parse_id(&m["user_id"]) == Some(me));
+    if let Some(member) = mine {
+        guild.my_roles = member["roles"].as_array().into_iter().flatten().filter_map(parse_id).collect();
+    }
+    Some(guild)
+}
+
 /// Message requests and spam DMs, which Discord keeps out of the DM list.
 fn is_hidden_dm(channel: &Value) -> bool {
     channel["is_message_request"].as_bool() == Some(true) || channel["is_spam"].as_bool() == Some(true)
@@ -241,17 +277,45 @@ fn dispatch(state: &State, name: &str, data: Value) {
     }
     let event = match name {
         "READY" => {
-            let user = match serde_json::from_value(data["user"].clone()) {
+            let user: User = match serde_json::from_value(data["user"].clone()) {
                 Ok(user) => user,
                 Err(e) => return eprintln!("gateway: READY without a usable user: {e}"),
             };
+            state.me.set(Some(user.id));
             let guilds = data["guilds"]
                 .as_array()
-                .map(|raw| raw.iter().filter_map(|g| Guild::deserialize(g).ok()).collect())
+                .map(|raw| raw.iter().filter_map(|g| guild_with_roles(g, user.id)).collect())
                 .unwrap_or_default();
-            let private_channels = private_channels(&data);
-            Event::Ready { user, guilds, private_channels }
+            Event::Ready(Box::new(Ready {
+                private_channels: private_channels(&data),
+                read_states: ReadStates::from_ready(&data["read_state"]),
+                notification_settings: NotificationSettings::from_ready(&data["user_guild_settings"]),
+                user,
+                guilds,
+            }))
         }
+        "MESSAGE_ACK" => {
+            let (Some(channel_id), Some(message_id)) =
+                (parse_id(&data["channel_id"]), parse_id(&data["message_id"]))
+            else {
+                return;
+            };
+            Event::MessageAck { channel_id, message_id }
+        }
+        "CHANNEL_UNREAD_UPDATE" => {
+            let Some(guild_id) = parse_id(&data["guild_id"]) else { return };
+            let channels = data["channel_unread_updates"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|c| Some((parse_id(&c["id"])?, parse_id(&c["last_message_id"])?)))
+                .collect();
+            Event::ChannelUnreadUpdate { guild_id, channels }
+        }
+        "USER_GUILD_SETTINGS_UPDATE" => match GuildSettings::deserialize(&data) {
+            Ok(settings) => Event::NotificationSettingsUpdate(settings),
+            Err(e) => return eprintln!("gateway: bad USER_GUILD_SETTINGS_UPDATE: {e}"),
+        },
         "CHANNEL_CREATE" => match Channel::deserialize(&data) {
             Ok(channel) if channel.kind.is_private() && !is_hidden_dm(&data) => {
                 Event::PrivateChannelCreate(channel)
@@ -266,10 +330,13 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 _ => return,
             }
         }
-        "GUILD_CREATE" => match Guild::deserialize(&data) {
-            Ok(guild) => Event::GuildCreate(guild),
-            Err(_) => return,
-        },
+        "GUILD_CREATE" => {
+            let Some(me) = state.me.get() else { return };
+            match guild_with_roles(&data, me) {
+                Some(guild) => Event::GuildCreate(guild),
+                None => return,
+            }
+        }
         "MESSAGE_CREATE" => match serde_json::from_value(data) {
             Ok(message) => Event::MessageCreate(message),
             Err(e) => return eprintln!("gateway: bad MESSAGE_CREATE: {e}"),
@@ -317,6 +384,17 @@ mod tests {
         let dms = private_channels(&ready);
         assert_eq!(dms.len(), 1);
         assert_eq!(dms[0].title(), "alice");
+    }
+
+    #[test]
+    fn guild_roles_from_own_member() {
+        let raw = json!({"id": "1", "name": "G", "default_message_notifications": 1, "members": [
+            {"user": {"id": "8"}, "roles": ["70"]},
+            {"user": {"id": "5"}, "roles": ["40", "41"]}
+        ]});
+        let guild = guild_with_roles(&raw, Snowflake(5)).unwrap();
+        assert_eq!(guild.my_roles, vec![Snowflake(40), Snowflake(41)]);
+        assert_eq!(guild.default_message_notifications, 1);
     }
 
     #[test]

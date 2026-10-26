@@ -11,9 +11,11 @@ pub mod rest;
 pub mod session;
 pub mod cdn;
 pub mod markup;
+pub mod notifications;
+pub mod read_state;
 pub mod shape;
 
-pub use gateway::{Event, Gateway};
+pub use gateway::{Event, Gateway, Ready};
 pub use model::{Attachment, Channel, ChannelKind, Guild, Message, Snowflake, User};
 pub use rest::Rest;
 
