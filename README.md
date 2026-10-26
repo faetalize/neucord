@@ -55,8 +55,9 @@ impersonating the official client.
 Link previews and GIFs load through Discord's media proxy, never from the
 site they link to, so those sites don't see your IP address.
 
-Your token is stored in the system keyring. Images and embedded videos are
-cached in `~/.cache/neucord/images/`.
+Your token is stored in the system keyring. Images are cached in
+`~/.cache/neucord/images/`, and embedded videos you play in
+`~/.cache/neucord/videos/` (up to 256 MiB).
 
 ## Contributing
 
