@@ -1,6 +1,6 @@
 # Neucord
 
-Another GTK + Rust Discord client? Daring today, are we...?
+Another GTK Discord client? Daring today, are we...?
 
 > [!WARNING]
 > Neucord is a third-party client. Use it at your own risk.
