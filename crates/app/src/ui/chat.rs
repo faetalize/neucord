@@ -835,7 +835,14 @@ impl App {
         match original {
             Some(original) => {
                 let colour = palette_index(&original.author);
-                preview.append(&avatar_widget(&original.author, colour, 16, Some(&self.images)));
+                // As in Discord, a blocked author keeps their name but not
+                // their avatar or words.
+                let blocked = self.state.borrow().relationships.is_blocked(original.author.id);
+                if blocked {
+                    preview.append(&gtk::Image::from_icon_name("mail-reply-sender-symbolic"));
+                } else {
+                    preview.append(&avatar_widget(&original.author, colour, 16, Some(&self.images)));
+                }
                 // Discord marks replies that pinged the author with an @.
                 let pinged = message.mentions.iter().any(|u| u.id == original.author.id);
                 let name = format!("{}{}", if pinged { "@" } else { "" }, original.author.display_name());
@@ -845,6 +852,7 @@ impl App {
                 let names = self.message_names(original);
                 let text = render::plain_text(&discord::markup::parse(&original.content), &names);
                 let text = match text.lines().find(|line| !line.trim().is_empty()) {
+                    _ if blocked => "Blocked message".to_owned(),
                     Some(line) => line.to_owned(),
                     // The official client's wording for messages with no text.
                     None if !original.sticker_items.is_empty() => "Click to see sticker".to_owned(),

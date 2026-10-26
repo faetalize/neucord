@@ -129,6 +129,10 @@ impl App {
     /// Reply to `message`. Like Discord, the reply pings unless `no_ping`
     /// (Shift held when clicking Reply).
     pub(super) fn start_reply(self: &Rc<Self>, message: &Message, no_ping: bool) {
+        // A message request has no message box to reply from.
+        if !self.composer_box.is_visible() {
+            return;
+        }
         let (own, guild) = {
             let state = self.state.borrow();
             let guild = state.find_channel(message.channel_id).and_then(|(guild, _)| guild.map(|g| g.id));
