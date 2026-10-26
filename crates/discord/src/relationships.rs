@@ -45,6 +45,9 @@ pub struct Relationship {
     pub nickname: Option<String>,
     /// Discord thinks this incoming request is spam.
     pub spam: bool,
+    /// An incoming request from someone we share no server or friend with.
+    /// Accepting needs an explicit confirmation.
+    pub stranger: bool,
 }
 
 impl Relationship {
@@ -66,6 +69,7 @@ impl Relationship {
             kind: Kind::from_raw(value["type"].as_u64()? as u8),
             nickname: value["nickname"].as_str().filter(|n| !n.is_empty()).map(String::from),
             spam: value["is_spam_request"].as_bool() == Some(true),
+            stranger: value["stranger_request"].as_bool() == Some(true),
         })
     }
 }
@@ -259,7 +263,7 @@ mod tests {
                 {"id": "1", "type": 1, "nickname": null, "user": {"id": "1", "username": "bea"}},
                 {"id": "2", "type": 1, "nickname": "Al", "user": {"id": "2", "username": "zed"}},
                 {"id": "3", "type": 2, "user": {"id": "3", "username": "troll"}},
-                {"id": "4", "type": 3, "user": {"id": "4", "username": "new"}},
+                {"id": "4", "type": 3, "stranger_request": true, "user": {"id": "4", "username": "new"}},
                 {"id": "5", "type": 3, "is_spam_request": true, "user": {"id": "5", "username": "spam"}},
                 {"id": "6", "type": 4, "user_id": "6"},
                 {"id": "7", "type": 5, "user": {"id": "7", "username": "implicit"}},
@@ -286,6 +290,7 @@ mod tests {
         assert_eq!(names(r.list(List::Blocked)), ["troll"]);
         assert_eq!(r.incoming(), 1, "spam requests don't count");
         assert!(r.is_blocked(Snowflake(3)) && !r.is_blocked(Snowflake(1)));
+        assert!(r.get(Snowflake(4)).unwrap().stranger && !r.get(Snowflake(5)).unwrap().stranger);
         assert_eq!(r.presence(Snowflake(99)), Presence::default(), "strangers' presences aren't kept");
     }
 

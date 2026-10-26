@@ -6,6 +6,9 @@ use soup::prelude::*;
 
 use crate::{Channel, Error, Message, Snowflake, identity};
 
+/// Error code for accepting a stranger's friend request without confirming.
+pub const STRANGER_NOT_CONFIRMED: u64 = 80013;
+
 /// One HTTP 429 retry is enough for interactive use; further limits surface as errors.
 const MAX_RATE_LIMIT_RETRIES: u32 = 1;
 
@@ -72,9 +75,11 @@ impl Rest {
         self.request("POST", "/users/@me/relationships", Some(body)).await
     }
 
-    /// Accept `user`'s friend request.
-    pub async fn accept_friend_request(&self, user: Snowflake) -> Result<(), Error> {
-        self.request("PUT", &format!("/users/@me/relationships/{user}"), Some(json!({}))).await
+    /// Accept `user`'s friend request. A request from a stranger fails with
+    /// [`STRANGER_NOT_CONFIRMED`] until sent again with `confirm_stranger`.
+    pub async fn accept_friend_request(&self, user: Snowflake, confirm_stranger: bool) -> Result<(), Error> {
+        let body = if confirm_stranger { json!({ "confirm_stranger_request": true }) } else { json!({}) };
+        self.request("PUT", &format!("/users/@me/relationships/{user}"), Some(body)).await
     }
 
     /// End any relationship with `user`: unfriend, unblock, ignore their

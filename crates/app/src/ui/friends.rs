@@ -370,8 +370,44 @@ impl App {
         });
     }
 
+    /// Accept a friend request. Discord wants requests from strangers
+    /// confirmed, as the official client does with a dialog: up front when the
+    /// request is known to be one, else once Discord answers that it is.
     fn accept_friend(self: &Rc<Self>, user: Snowflake) {
-        self.friend_action(move |rest| async move { rest.accept_friend_request(user).await });
+        let Some(relationship) = self.state.borrow().relationships.get(user).cloned() else { return };
+        let Some(rest) = self.state.borrow().rest.clone() else { return };
+        self.friends.error.set_visible(false);
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            let mut confirmed = relationship.stranger && this.confirm_stranger(&relationship).await;
+            if relationship.stranger && !confirmed {
+                return;
+            }
+            loop {
+                match rest.accept_friend_request(user, confirmed).await {
+                    Err(e) if !confirmed && e.code() == Some(discord::rest::STRANGER_NOT_CONFIRMED) => {
+                        if !this.confirm_stranger(&relationship).await {
+                            return;
+                        }
+                        confirmed = true;
+                    }
+                    Err(e) => return this.show_friends_error(&e.to_string()),
+                    Ok(()) => return,
+                }
+            }
+        });
+    }
+
+    async fn confirm_stranger(&self, relationship: &Relationship) -> bool {
+        let dialog = gtk::AlertDialog::builder()
+            .modal(true)
+            .message(format!("Accept a request from {}?", relationship.name()))
+            .detail("You don't share any servers or friends with them. Only accept if you know who they are.")
+            .buttons(["Cancel", "Accept"])
+            .cancel_button(0)
+            .default_button(0)
+            .build();
+        matches!(dialog.choose_future(Some(&self.window)).await, Ok(1))
     }
 
     /// Unfriend, unblock, or ignore or cancel a request.
