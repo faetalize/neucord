@@ -12,6 +12,26 @@ pub const STRANGER_NOT_CONFIRMED: u64 = 80013;
 /// One HTTP 429 retry is enough for interactive use; further limits surface as errors.
 const MAX_RATE_LIMIT_RETRIES: u32 = 1;
 
+/// Which messages of a channel to fetch.
+#[derive(Clone, Copy, Debug)]
+pub enum Page {
+    Newest,
+    /// Older than this message, for scrollback.
+    Before(Snowflake),
+    /// Newer than this message, for scrolling down from a jump.
+    After(Snowflake),
+    /// Centred on this message, to jump to it.
+    Around(Snowflake),
+}
+
+/// Send a message as a reply.
+#[derive(Clone, Copy, Debug)]
+pub struct Reply {
+    pub to: Snowflake,
+    /// Ping the author of the message replied to.
+    pub ping: bool,
+}
+
 #[derive(Clone)]
 pub struct Rest {
     session: soup::Session,
@@ -26,18 +46,18 @@ impl Rest {
         Rest { session, token: token.into() }
     }
 
-    /// Up to `limit` (max 100) messages, oldest first: the newest ones, or with
-    /// `before` the ones just older than that message (for scrollback).
-    pub async fn messages(
-        &self,
-        channel: Snowflake,
-        limit: u8,
-        before: Option<Snowflake>,
-    ) -> Result<Vec<Message>, Error> {
-        let before = before.map(|id| format!("&before={id}")).unwrap_or_default();
+    /// Up to `limit` (max 100) messages, oldest first, from where `page` says.
+    pub async fn messages(&self, channel: Snowflake, limit: u8, page: Page) -> Result<Vec<Message>, Error> {
+        let from = match page {
+            Page::Newest => String::new(),
+            Page::Before(id) => format!("&before={id}"),
+            Page::After(id) => format!("&after={id}"),
+            Page::Around(id) => format!("&around={id}"),
+        };
         let mut messages: Vec<Message> =
-            self.request("GET", &format!("/channels/{channel}/messages?limit={limit}{before}"), None).await?;
-        messages.reverse();
+            self.request("GET", &format!("/channels/{channel}/messages?limit={limit}{from}"), None).await?;
+        // Discord sends newest first, whichever way the page goes.
+        messages.sort_by_key(|m| m.id);
         Ok(messages)
     }
 
@@ -46,13 +66,25 @@ impl Rest {
         self.request("GET", &format!("/users/{id}"), None).await
     }
 
-    pub async fn send_message(&self, channel: Snowflake, content: &str) -> Result<Message, Error> {
-        let body = json!({
+    pub async fn send_message(
+        &self,
+        channel: Snowflake,
+        content: &str,
+        reply: Option<Reply>,
+    ) -> Result<Message, Error> {
+        let mut body = json!({
             "content": content,
             "nonce": Snowflake::now().to_string(),
             "tts": false,
             "flags": 0,
         });
+        if let Some(reply) = reply {
+            body["message_reference"] = json!({ "message_id": reply.to, "channel_id": channel });
+            if !reply.ping {
+                // Mentions in the text still ping; only the reply itself doesn't.
+                body["allowed_mentions"] = json!({ "parse": ["users", "roles", "everyone"], "replied_user": false });
+            }
+        }
         self.request("POST", &format!("/channels/{channel}/messages"), Some(body)).await
     }
 
