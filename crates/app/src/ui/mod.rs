@@ -143,12 +143,7 @@ impl App {
             guild_name: widgets::Title::new(""),
             channels: gtk::ListBox::builder().css_classes(["navigation-sidebar"]).build(),
             targets: RefCell::default(),
-            me_label: gtk::Label::builder()
-                .xalign(0.0)
-                .hexpand(true)
-                .ellipsize(pango::EllipsizeMode::End)
-                .css_classes(["dimmed"])
-                .build(),
+            me_label: gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(pango::EllipsizeMode::End).build(),
             header: widgets::Title::new(""),
             content: gtk::Stack::new(),
             friends: friends::FriendsPage::new(),
@@ -162,10 +157,15 @@ impl App {
                 .wrap_mode(gtk::WrapMode::WordChar)
                 .accepts_tab(false)
                 .hexpand(true)
+                .valign(gtk::Align::Center)
                 .css_classes(["composer-input"])
                 .build(),
-            composer_box: gtk::Box::builder().css_classes(["composer"]).build(),
-            request_bar: gtk::Box::builder().spacing(8).visible(false).css_classes(["composer", "request-bar"]).build(),
+            composer_box: gtk::Box::builder().css_classes(["composer", "card-row"]).build(),
+            request_bar: gtk::Box::builder()
+                .spacing(8)
+                .visible(false)
+                .css_classes(["composer", "card-row", "request-bar"])
+                .build(),
             composer_error: gtk::Label::builder()
                 .xalign(0.0)
                 .wrap(true)
@@ -341,11 +341,15 @@ impl App {
                 .hscrollbar_policy(gtk::PolicyType::Never)
                 .vscrollbar_policy(gtk::PolicyType::External)
                 .child(&self.rail)
+                .css_classes(["under-account"])
                 .build(),
         );
         let rail = gtk::WindowHandle::builder().child(&column).width_request(RAIL as i32).css_classes(["rail"]).build();
-        let channels =
-            gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).child(&self.channels).build();
+        let channels = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .child(&self.channels)
+            .css_classes(["under-account"])
+            .build();
         self.channels.connect_row_activated({
             let this = Rc::downgrade(self);
             move |_, row| {
@@ -366,25 +370,14 @@ impl App {
                 .menu_model(&menu)
                 .build(),
         );
-        let me = gtk::Box::builder().spacing(4).css_classes(["me"]).build();
-        me.append(&self.me_label);
-        let account = gio::Menu::new();
-        account.append(Some("_Log Out"), Some("win.logout"));
-        me.append(
-            &gtk::MenuButton::builder()
-                .icon_name("view-more-symbolic")
-                .tooltip_text("Account")
-                .menu_model(&account)
-                .css_classes(["flat"])
-                .build(),
-        );
         let channel_pane = adw::ToolbarView::builder().hexpand(true).content(&channels).build();
         channel_pane.add_top_bar(&header);
-        channel_pane.add_bottom_bar(&me);
-        let sidebar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        sidebar.append(&rail);
-        sidebar.append(&gtk::Separator::new(gtk::Orientation::Vertical));
-        sidebar.append(&channel_pane);
+        let panes = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        panes.append(&rail);
+        panes.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        panes.append(&channel_pane);
+        let sidebar = gtk::Overlay::builder().child(&panes).build();
+        sidebar.add_overlay(&self.build_account_panel());
         self.split.set_sidebar(Some(&sidebar));
 
         self.content.add_named(&self.build_chat(), Some("chat"));
@@ -420,6 +413,43 @@ impl App {
             app.set_accels_for_action("win.toggle-sidebar", &["F9"]);
         }
         self.split.clone().upcast()
+    }
+
+    /// Who is logged in, with the account menu: a card floating over the
+    /// bottom of the rail and channel list, which scroll on beneath it, the
+    /// same size and in the same place as the composer beside it.
+    fn build_account_panel(&self) -> gtk::Widget {
+        let row = gtk::Box::builder().spacing(4).css_classes(["card-row"]).build();
+        row.append(&self.me_label);
+        let menu = gio::Menu::new();
+        menu.append(Some("_Log Out"), Some("win.logout"));
+        row.append(
+            &gtk::MenuButton::builder()
+                .icon_name("view-more-symbolic")
+                .tooltip_text("Account")
+                .menu_model(&menu)
+                .css_classes(["flat"])
+                .build(),
+        );
+        let panel = gtk::Box::builder().valign(gtk::Align::End).css_classes(["account-panel", "floating-card"]).build();
+        panel.append(&row);
+
+        // The lists under it end with room to scroll their last entries out
+        // from under it, and their scrollbars stop above it.
+        let room = gtk::CssProvider::new();
+        gtk::style_context_add_provider_for_display(
+            &WidgetExt::display(&self.window),
+            &room,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+        panel.connect_map(move |panel| {
+            let (_, height, _, _) = panel.measure(gtk::Orientation::Vertical, -1);
+            room.load_from_string(&format!(
+                "scrolledwindow.under-account > viewport > *, \
+                 scrolledwindow.under-account > scrollbar.vertical {{ margin-bottom: {height}px; }}"
+            ));
+        });
+        panel.upcast()
     }
 
     /// The button in each content header bar that shows and hides the sidebar.

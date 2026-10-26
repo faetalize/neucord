@@ -104,7 +104,7 @@ impl App {
 
         let composer = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
-            .css_classes(["composer-area", "floating"])
+            .css_classes(["composer-area", "floating-card", "floating"])
             .build();
         self.build_composer(&composer);
         let page = adw::ToolbarView::builder()
