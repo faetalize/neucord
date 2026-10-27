@@ -14,6 +14,7 @@ mod identity;
 pub mod markup;
 pub mod model;
 pub mod notifications;
+pub mod poll;
 pub mod read_state;
 pub mod relationships;
 pub mod remote_auth;

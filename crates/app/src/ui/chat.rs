@@ -10,10 +10,10 @@ use gtk::prelude::*;
 use gtk::{gio, glib};
 
 use super::App;
-use super::attachments;
 use super::embeds::{behind_spoiler, embed_widget};
 use super::state::now_unix;
 use super::widgets::avatar_widget;
+use super::{attachments, polls};
 use crate::render::{Context, Names, Spoilers};
 use crate::rich_text::RichText;
 use crate::{render, timelines};
@@ -818,6 +818,9 @@ impl App {
         let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).hexpand(true).build();
         if let Kind::System(system) = &kind {
             body.append(&self.system_line(message, system));
+            if let Some(outcome) = discord::poll::outcome(message) {
+                body.append(&polls::outcome(&outcome, &self.images));
+            }
         } else if !grouped {
             let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             header.append(
@@ -898,8 +901,14 @@ impl App {
         } else if edited {
             body.append(&render::render(&[], &cx, edited));
         }
+        if let Some(poll) = &message.poll {
+            body.append(&polls::poll(poll, &self.images));
+        }
         let voice = message.is_voice_message();
-        for attachment in message.attachments.iter().filter(|a| !a.is_hidden()) {
+        // A poll's attachments are its answers' images, which the official
+        // client shows with them, not under it.
+        let attached = message.attachments.iter().filter(|a| !a.is_hidden() && message.poll.is_none());
+        for attachment in attached {
             body.append(&attachments::attachment(attachment, voice, &self.images, &media));
         }
         for sticker in &message.sticker_items {

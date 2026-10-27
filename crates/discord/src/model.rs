@@ -394,6 +394,8 @@ pub struct Message {
     pub embeds: Vec<Embed>,
     #[serde(default)]
     pub flags: u64,
+    #[serde(default)]
+    pub poll: Option<crate::poll::Poll>,
     /// For a call's system message: who joined it, and when it ended.
     #[serde(default)]
     pub call: Option<Call>,

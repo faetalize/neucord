@@ -13,6 +13,7 @@ mod login;
 mod media_frame;
 mod notify;
 mod panes;
+mod polls;
 mod rail;
 mod requests;
 mod sidebar;
