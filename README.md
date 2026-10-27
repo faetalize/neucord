@@ -9,11 +9,12 @@ Another GTK Discord client? Daring today, are we...?
 
 Reactions, editing or deleting your own messages, uploads, emoji and
 sticker pickers, threads and forums, the member list, voice and video.
-Custom emoji show as `:name:` and video attachments as links. Two-factor
-with security keys. Steps Discord sometimes requires, such as verifying a
-phone number, accepting new terms or changing your password: Neucord waits
-while you take them in the official app or at discord.com. Planned work is in
-the issue tracker.
+Polls and bots' buttons show but can't be used, Lottie stickers show only
+their name, and `ansi` code blocks lose their colours. Two-factor with
+security keys. Steps Discord sometimes requires, such as verifying a phone
+number, accepting new terms or changing your password: Neucord waits while
+you take them in the official app or at discord.com. Planned work is in the
+issue tracker.
 
 ## Requirements
 
