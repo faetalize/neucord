@@ -320,8 +320,8 @@ fn range_rects(layout: &pango::Layout, range: &Range<u32>) -> Vec<(i32, i32, i32
                 // the ones that touch, so the cover has no seams.
                 let mut pieces: Vec<(i32, i32)> = Vec::new();
                 let ranges = line.x_ranges(range.start.max(start) as i32, range.end.min(end) as i32);
-                for pair in ranges.chunks_exact(2) {
-                    let (x0, x1) = (pair[0] / pango::SCALE, pair[1] / pango::SCALE);
+                for [x0, x1] in ranges.as_chunks::<2>().0 {
+                    let (x0, x1) = (x0 / pango::SCALE, x1 / pango::SCALE);
                     match pieces.last_mut() {
                         Some(last) if x0 <= last.1 + 1 => last.1 = last.1.max(x1),
                         _ => pieces.push((x0, x1)),
