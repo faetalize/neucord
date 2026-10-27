@@ -359,17 +359,7 @@ impl App {
             }
         });
 
-        let menu = gio::Menu::new();
-        menu.append(Some("_About Neucord"), Some("app.about"));
         let header = self.guild_name.header_bar(&[]);
-        header.pack_end(
-            &gtk::MenuButton::builder()
-                .icon_name("open-menu-symbolic")
-                .tooltip_text("Main Menu")
-                .primary(true)
-                .menu_model(&menu)
-                .build(),
-        );
         let channel_pane = adw::ToolbarView::builder().hexpand(true).content(&channels).build();
         channel_pane.add_top_bar(&header);
         let panes = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -415,18 +405,21 @@ impl App {
         self.split.clone().upcast()
     }
 
-    /// Who is logged in, with the account menu: a card floating over the
+    /// Who is logged in, with the app's menu: a card floating over the
     /// bottom of the rail and channel list, which scroll on beneath it, the
     /// same size and in the same place as the composer beside it.
     fn build_account_panel(&self) -> gtk::Widget {
         let row = gtk::Box::builder().spacing(4).css_classes(["card-row"]).build();
         row.append(&self.me_label);
+        // The app's menu too, as Discord's settings live here.
         let menu = gio::Menu::new();
+        menu.append(Some("_About Neucord"), Some("app.about"));
         menu.append(Some("_Log Out"), Some("win.logout"));
         row.append(
             &gtk::MenuButton::builder()
                 .icon_name("view-more-symbolic")
                 .tooltip_text("Account")
+                .primary(true)
                 .menu_model(&menu)
                 .css_classes(["flat"])
                 .build(),
