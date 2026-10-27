@@ -1,8 +1,8 @@
 // Distil a build into what a third-party client depends on: REST endpoint
-// paths, the fields each REST call sends, the gateway events the client
-// handles and the payload fields it reads, and the enums named in
-// watch.json. Minified names are dropped, so snapshots of two builds differ
-// only where Discord changed something.
+// paths, the fields each REST call sends, the headers added to every
+// request, the gateway events the client handles and the payload fields it
+// reads, and the enums named in watch.json. Minified names are dropped, so
+// snapshots of two builds differ only where Discord changed something.
 
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -11,6 +11,7 @@ import { parse, walk, isFunction, keyName, modulesOf } from "./js.mjs";
 const WATCH = JSON.parse(await readFile(new URL("./watch.json", import.meta.url), "utf8"));
 const METHODS = { get: "GET", post: "POST", put: "PUT", patch: "PATCH", del: "DELETE", delete: "DELETE" };
 const CONSTANT = /^[A-Z][A-Z0-9_]*$/;
+const HEADER = /^[A-Za-z][A-Za-z0-9-]*$/;
 
 /** An endpoint value as a path template: parameters become `{0}`, `{1}`;
  * anything else computed becomes `{?}`. Null if it is not a path. */
@@ -142,6 +143,7 @@ export async function snapshot(dir) {
   const endpointTables = [];
   const calls = new Map();
   const gateway = new Map();
+  const headers = new Set();
   const enums = new Map(Object.keys(WATCH.enums).map((name) => [name, new Set()]));
   let modules = 0;
   let unparsed = 0;
@@ -169,6 +171,22 @@ export async function snapshot(dir) {
             if (path) paths[name] = path;
           }
           if (Object.keys(paths).length >= node.properties.length * 0.7) endpointTables.push(paths);
+        }
+        // The HTTP layer's hook, which sets headers on every API request:
+        // prepareRequest(e) { …; e.set("X-Super-Properties", n); … }
+        if (node.type === "Property" && keyName(node) === "prepareRequest" && isFunction(node.value)) {
+          walk(node.value.body, (n) => {
+            const name = n.type === "CallExpression" ? n.arguments[0] : null;
+            if (
+              n.callee?.type === "MemberExpression" &&
+              !n.callee.computed &&
+              n.callee.property.name === "set" &&
+              name?.type === "Literal" &&
+              HEADER.test(name.value)
+            ) {
+              headers.add(name.value);
+            }
+          });
         }
         if (node.type === "CallExpression") {
           const callee = node.callee;
@@ -231,6 +249,7 @@ export async function snapshot(dir) {
     endpoints,
     calls: Object.fromEntries([...calls].map(([k, v]) => [k, [...v].sort().map((s) => JSON.parse(s))])),
     gateway: Object.fromEntries([...gateway].map(([k, v]) => [k, [...v].sort()])),
+    headers: [...headers].sort(),
     enums: Object.fromEntries([...enums].map(([k, v]) => [k, [...v].sort().map((s) => JSON.parse(s))])),
   });
 }

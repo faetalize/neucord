@@ -14,6 +14,9 @@ names so two builds differ only where Discord changed something:
 
 - REST endpoint paths, and for every request the client makes, the body,
   query and header fields it sends.
+- The headers its HTTP layer adds to every request, by name. Neucord sends
+  `X-Super-Properties` because login needs it (#47); a new header there may
+  be the next one Discord insists on.
 - Gateway events the client registers handlers for, with the payload fields
   those handlers read. Handlers often pass the payload on whole, so a missing
   field proves nothing.
