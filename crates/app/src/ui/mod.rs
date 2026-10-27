@@ -1,6 +1,7 @@
 //! The window and everything in it, plus the glue between the UI and the
 //! `discord` crate. All of this runs on the GTK main thread.
 
+mod captcha;
 mod chat;
 mod composer;
 mod connection;

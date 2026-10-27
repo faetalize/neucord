@@ -1,7 +1,7 @@
 //! Logging in with a password, and the two-factor step that may follow.
 //!
-//! Discord answers a suspicious login with a captcha instead, which needs a
-//! browser to solve; that surfaces as [`Error::Captcha`].
+//! Discord answers a suspicious login with a captcha instead; see
+//! [`Rest::solving_captchas`].
 
 use serde::Deserialize;
 use serde_json::{Value, json};

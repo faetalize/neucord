@@ -41,7 +41,7 @@ impl App {
         self.login.stop_qr();
         {
             let mut state = self.state.borrow_mut();
-            state.rest = Some(Rest::new(token.clone()));
+            state.rest = Some(Rest::new(token.clone()).solving_captchas(super::captcha::solver(&self.window)));
             state.token = Some(token.clone());
             state.persisted = persisted;
             state.gateway = None;

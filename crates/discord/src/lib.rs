@@ -25,7 +25,7 @@ pub use gateway::{Event, Gateway, Ready, Resume};
 pub use model::{
     Attachment, Channel, ChannelKind, Guild, Message, MessageEdit, MessageReference, Referenced, Snowflake, User,
 };
-pub use rest::Rest;
+pub use rest::{Captcha, CaptchaSolver, Rest};
 
 /// Errors surfaced to the UI. Never contains the token.
 #[derive(Debug)]
@@ -46,7 +46,8 @@ pub enum Error {
     Crypto(openssl::error::ErrorStack),
     /// The secret service (keyring) failed.
     Keyring(glib::Error),
-    /// Discord wants a captcha solved first, which Neucord cannot do yet.
+    /// Discord wanted a captcha solved first, and it wasn't: there was no
+    /// [`rest::CaptchaSolver`], or the user closed it.
     Captcha,
 }
 
@@ -67,7 +68,7 @@ impl std::fmt::Display for Error {
             Error::Rejected(why) => f.write_str(why),
             Error::Crypto(e) => write!(f, "encryption error: {e}"),
             Error::Keyring(e) => write!(f, "keyring error: {e}"),
-            Error::Captcha => write!(f, "Discord asked for a captcha, which Neucord can't show yet"),
+            Error::Captcha => write!(f, "Discord asked for a captcha, and it wasn't solved"),
         }
     }
 }

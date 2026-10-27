@@ -1,7 +1,11 @@
 //! Discord's HTTP API over libsoup, on the GLib main loop.
 
+use std::future::Future;
+use std::pin::Pin;
+use std::rc::Rc;
+
 use serde::de::DeserializeOwned;
-use serde_json::json;
+use serde_json::{Value, json};
 use soup::prelude::*;
 
 use crate::endpoints::{Call, call};
@@ -12,6 +16,10 @@ pub const STRANGER_NOT_CONFIRMED: u64 = 80013;
 
 /// One HTTP 429 retry is enough for interactive use; further limits surface as errors.
 const MAX_RATE_LIMIT_RETRIES: u32 = 1;
+
+/// Captchas shown for one request before giving up, in case Discord keeps
+/// turning the answers down.
+const MAX_CAPTCHAS: u32 = 3;
 
 /// Which messages of a channel to fetch.
 #[derive(Clone, Copy, Debug)]
@@ -35,10 +43,49 @@ pub struct Reply {
     pub ping: bool,
 }
 
+/// A captcha Discord wants solved before it carries out a request.
+#[derive(Clone, Debug)]
+pub struct Captcha {
+    /// `hcaptcha` in practice; the official client also knows `recaptcha`,
+    /// `recaptcha_enterprise` and `turnstile`.
+    pub service: String,
+    pub sitekey: String,
+    /// Enterprise challenges fail unless the widget is given this.
+    pub rqdata: Option<String>,
+    /// Run the widget invisibly; it shows a challenge only if it wants one.
+    pub invisible: bool,
+    /// Sent back with the answer, as Discord asks.
+    rqtoken: Option<String>,
+    session_id: Option<String>,
+}
+
+impl Captcha {
+    fn from_response(body: &[u8]) -> Option<Captcha> {
+        let body: Value = serde_json::from_slice(body).ok()?;
+        if !is_captcha(&body) {
+            return None;
+        }
+        let text = |key: &str| body[key].as_str().filter(|s| !s.is_empty()).map(str::to_owned);
+        Some(Captcha {
+            service: text("captcha_service").unwrap_or_else(|| "hcaptcha".into()),
+            sitekey: text("captcha_sitekey")?,
+            rqdata: text("captcha_rqdata"),
+            invisible: body["should_serve_invisible"].as_bool().unwrap_or(false),
+            rqtoken: text("captcha_rqtoken"),
+            session_id: text("captcha_session_id"),
+        })
+    }
+}
+
+/// Shows a captcha and resolves to its answer, or to `None` if it went
+/// unsolved.
+pub type CaptchaSolver = Rc<dyn Fn(Captcha) -> Pin<Box<dyn Future<Output = Option<String>>>>>;
+
 #[derive(Clone)]
 pub struct Rest {
     session: soup::Session,
     token: Option<String>,
+    captchas: Option<CaptchaSolver>,
 }
 
 impl Rest {
@@ -51,7 +98,13 @@ impl Rest {
         let session = soup::Session::new();
         session.set_user_agent(&identity::user_agent());
         session.set_timeout(30);
-        Rest { session, token: None }
+        Rest { session, token: None, captchas: None }
+    }
+
+    /// Have `solver` answer captchas, and send the request again with the
+    /// answer, instead of failing with [`Error::Captcha`].
+    pub fn solving_captchas(self, solver: CaptchaSolver) -> Self {
+        Rest { captchas: Some(solver), ..self }
     }
 
     /// Up to `limit` (max 100) messages, oldest first, from where `page` says.
@@ -167,9 +220,12 @@ impl Rest {
         }
     }
 
-    /// The status and body of a request, retrying once on a rate limit.
-    pub(crate) async fn send(&self, call: Call, body: Option<serde_json::Value>) -> Result<(u32, glib::Bytes), Error> {
+    /// The status and body of a request, retrying once on a rate limit and
+    /// after each captcha solved.
+    pub(crate) async fn send(&self, call: Call, body: Option<Value>) -> Result<(u32, glib::Bytes), Error> {
         let mut retries = 0;
+        let mut captchas = 0;
+        let mut answer: Option<(String, Captcha)> = None;
         loop {
             let msg = soup::Message::new(call.method(), &format!("{}{}", identity::API_BASE, call.path()))
                 .expect("API URL is valid");
@@ -178,6 +234,15 @@ impl Rest {
                 headers.replace("Authorization", token);
             }
             headers.replace("X-Discord-Locale", "en-US");
+            if let Some((key, captcha)) = &answer {
+                headers.replace("X-Captcha-Key", key);
+                if let Some(rqtoken) = &captcha.rqtoken {
+                    headers.replace("X-Captcha-Rqtoken", rqtoken);
+                }
+                if let Some(id) = &captcha.session_id {
+                    headers.replace("X-Captcha-Session-Id", id);
+                }
+            }
             if let Some(body) = &body {
                 let bytes = glib::Bytes::from_owned(body.to_string().into_bytes());
                 msg.set_request_body_from_bytes(Some("application/json"), Some(&bytes));
@@ -186,21 +251,57 @@ impl Rest {
             let response =
                 self.session.send_and_read_future(&msg, glib::Priority::DEFAULT).await.map_err(Error::Transport)?;
             let status = msg.status_code();
-            if status != 429 || retries >= MAX_RATE_LIMIT_RETRIES {
-                return Ok((status, response));
+            if status == 429 && retries < MAX_RATE_LIMIT_RETRIES {
+                retries += 1;
+                let wait = serde_json::from_slice::<Value>(&response)
+                    .ok()
+                    .and_then(|v| v["retry_after"].as_f64())
+                    .unwrap_or(1.0);
+                glib::timeout_future(std::time::Duration::from_secs_f64(wait.min(10.0))).await;
+                continue;
             }
-            retries += 1;
-            let wait = serde_json::from_slice::<serde_json::Value>(&response)
-                .ok()
-                .and_then(|v| v["retry_after"].as_f64())
-                .unwrap_or(1.0);
-            glib::timeout_future(std::time::Duration::from_secs_f64(wait.min(10.0))).await;
+            if status == 400
+                && captchas < MAX_CAPTCHAS
+                && let Some(solver) = &self.captchas
+                && let Some(captcha) = Captcha::from_response(&response)
+                && let Some(key) = solver(captcha.clone()).await
+            {
+                captchas += 1;
+                answer = Some((key, captcha));
+                continue;
+            }
+            return Ok((status, response));
         }
     }
 }
 
 /// Discord answers a request it wants a captcha for with a 400 whose body
 /// has `captcha_key`, whatever the endpoint.
-pub(crate) fn is_captcha(body: &serde_json::Value) -> bool {
+pub(crate) fn is_captcha(body: &Value) -> bool {
     body.get("captcha_key").is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Captcha;
+
+    #[test]
+    fn captcha_challenges() {
+        let body = br#"{"captcha_key": ["captcha-required"], "captcha_sitekey": "k",
+            "captcha_service": "hcaptcha", "captcha_session_id": "s", "captcha_rqdata": "d", "captcha_rqtoken": "t",
+            "should_serve_invisible": true}"#;
+        let captcha = Captcha::from_response(body).unwrap();
+        assert_eq!(
+            (captcha.service.as_str(), captcha.rqdata.as_deref(), captcha.invisible),
+            ("hcaptcha", Some("d"), true)
+        );
+        assert_eq!((captcha.rqtoken.as_deref(), captcha.session_id.as_deref()), (Some("t"), Some("s")));
+
+        let bare = br#"{"captcha_key": ["captcha-required"], "captcha_sitekey": "k", "captcha_service": "hcaptcha"}"#;
+        let captcha = Captcha::from_response(bare).unwrap();
+        assert_eq!((captcha.rqdata, captcha.rqtoken, captcha.invisible), (None, None, false));
+
+        assert!(Captcha::from_response(br#"{"captcha_key": ["captcha-required"]}"#).is_none(), "no site key");
+        assert!(Captcha::from_response(br#"{"code": 50035, "message": "Invalid Form Body"}"#).is_none());
+    }
 }

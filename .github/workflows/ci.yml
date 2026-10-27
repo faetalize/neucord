@@ -15,7 +15,7 @@ jobs:
     container: archlinux:latest
     steps:
       - name: Install dependencies
-        run: pacman -Syu --noconfirm --needed base-devel git rust gtk4 libadwaita libsoup3 libsecret openssl
+        run: pacman -Syu --noconfirm --needed base-devel git rust gtk4 libadwaita libsoup3 webkitgtk-6.0 libsecret openssl
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - name: Format
