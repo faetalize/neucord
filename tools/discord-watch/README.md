@@ -21,6 +21,10 @@ names so two builds differ only where Discord changed something:
   those handlers read. Handlers often pass the payload on whole, so a missing
   field proves nothing.
 - The enums anchored in `watch.json`, matched by member names.
+- The source of the methods named in `watch.json`, with minified names
+  replaced. These are rules Neucord copies rather than data it reads:
+  `isSystemDM` is where the client shows no message box, and posting there
+  anyway got an account flagged (#51).
 
 What Neucord uses is read from `crates/discord`: the endpoint table in
 `endpoints.rs`, which every REST request goes through, and the event names

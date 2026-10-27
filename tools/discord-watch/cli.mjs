@@ -55,6 +55,9 @@ switch (command) {
       process.exit(1);
     }
     for (const { method, path } of unmatched(cur, uses)) log(`no client endpoint matches ${method} ${path}`);
+    for (const [name, bodies] of Object.entries(cur.methods ?? {})) {
+      if (bodies.length === 0) log(`no method ${name} in the client`);
+    }
     const result = compare(old, cur, uses);
     if (values.report) await writeFile(values.report, report(old, cur, result));
     console.log(JSON.stringify({ affects: result.affects.length, other: result.other.length }));
