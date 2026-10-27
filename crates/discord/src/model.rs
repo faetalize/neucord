@@ -334,9 +334,8 @@ pub struct Message {
     /// The message a reply answers, as Discord resolved it.
     #[serde(default, deserialize_with = "referenced")]
     pub referenced_message: Referenced,
-    /// Only counted, to describe a sticker-only message.
     #[serde(default)]
-    pub sticker_items: Vec<serde::de::IgnoredAny>,
+    pub sticker_items: Vec<Sticker>,
     #[serde(default)]
     pub embeds: Vec<Embed>,
     #[serde(default)]
@@ -390,6 +389,31 @@ impl Message {
             return None;
         }
         self.message_reference.as_ref()?.message_id
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Sticker {
+    pub id: Snowflake,
+    pub name: String,
+    #[serde(default)]
+    pub format_type: u8,
+}
+
+impl Sticker {
+    /// The official client's size for a sticker in a message.
+    pub const SIZE: u32 = 160;
+
+    /// Where the sticker's image is, at `size` pixels, and whether it is
+    /// animated. `None` for Lottie stickers, which are vector animations.
+    pub fn image(&self, size: u32) -> Option<(String, bool)> {
+        let (ext, animated) = match self.format_type {
+            // PNG, and APNG (which shows its first frame).
+            1 | 2 => ("png", false),
+            4 => ("gif", true),
+            _ => return None,
+        };
+        Some((format!("https://media.discordapp.net/stickers/{}.{ext}?size={size}", self.id), animated))
     }
 }
 
@@ -588,6 +612,16 @@ mod tests {
         assert!(!heading(&message("1088216706570268681", "null")));
         assert!(heading(&message("100", r#""2024-01-01T00:00:00.000000+00:00""#)), "edited since");
         assert!(!heading(&message("100", r#""2022-01-01T00:00:00.000000+00:00""#)));
+    }
+
+    #[test]
+    fn stickers() {
+        let sticker = |format: u8| -> Sticker {
+            serde_json::from_str(&format!(r#"{{"id":"7","name":"wave","format_type":{format}}}"#)).unwrap()
+        };
+        assert_eq!(sticker(1).image(160), Some(("https://media.discordapp.net/stickers/7.png?size=160".into(), false)));
+        assert_eq!(sticker(4).image(320), Some(("https://media.discordapp.net/stickers/7.gif?size=320".into(), true)));
+        assert_eq!(sticker(3).image(160), None, "Lottie");
     }
 
     #[test]

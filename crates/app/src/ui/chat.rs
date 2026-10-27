@@ -915,6 +915,9 @@ impl App {
             );
             body.append(&gtk::Label::builder().use_markup(true).label(markup).xalign(0.0).build());
         }
+        for sticker in &message.sticker_items {
+            body.append(&sticker_widget(sticker, &self.images, media.gif_auto_play));
+        }
         // A link in a spoiler covers all the message's embeds, as in Discord.
         let spoilered = discord::embed::has_spoilered_link(&message.content);
         for embed in embeds {
@@ -1050,6 +1053,27 @@ fn system_icon(icon: system::Icon) -> &'static str {
         Icon::Poll => "view-list-bullet-symbolic",
         Icon::Other => "dialog-information-symbolic",
     }
+}
+
+/// A sticker, or for one we can't draw, its name.
+fn sticker_widget(sticker: &discord::Sticker, images: &crate::images::Images, autoplay: bool) -> gtk::Widget {
+    let size = discord::Sticker::SIZE;
+    let request = crate::images::request_size((size as i32, size as i32), images.scale(), None).0;
+    let Some((url, animated)) = sticker.image(request) else {
+        return gtk::Label::builder()
+            .label(format!("Sticker: {}", sticker.name))
+            .xalign(0.0)
+            .css_classes(["dimmed"])
+            .build()
+            .upcast();
+    };
+    let fitted = fitted_picture(Some(size), Some(size), size as f64, size as f64);
+    // Stickers are cut out: no backdrop behind them, as media has.
+    fitted.picture.set_css_classes(&[]);
+    fitted.picture.set_tooltip_text(Some(&sticker.name));
+    fitted.picture.set_alternative_text(Some(&sticker.name));
+    images.set(&fitted.picture, &url, animated && autoplay);
+    fitted.frame.upcast()
 }
 
 /// An inline image attachment, scaled to fit a reasonable box.

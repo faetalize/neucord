@@ -25,7 +25,8 @@ pub mod system;
 
 pub use gateway::{Event, Gateway, Ready, Resume};
 pub use model::{
-    Attachment, Channel, ChannelKind, Guild, Message, MessageEdit, MessageReference, Referenced, Snowflake, User,
+    Attachment, Channel, ChannelKind, Guild, Message, MessageEdit, MessageReference, Referenced, Snowflake, Sticker,
+    User,
 };
 pub use rest::{Captcha, CaptchaSolver, Rest};
 
