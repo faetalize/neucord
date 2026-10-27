@@ -354,6 +354,17 @@ impl Message {
     /// Discord's message type for a reply.
     const REPLY: u8 = 19;
 
+    /// The message's markup. Headings and lists count only in messages sent
+    /// or edited since Discord added them, as in the official client.
+    pub fn markup(&self) -> Vec<crate::markup::Span> {
+        // The first message after the change, and the time it was sent.
+        const SINCE_ID: Snowflake = Snowflake(1_088_216_706_570_268_682);
+        const SINCE: &str = "2023-03-22T21:44:40";
+        // An edit we saw live has no time, but is recent.
+        let edited = self.edited_timestamp.as_deref().is_some_and(|t| t.is_empty() || t >= SINCE);
+        crate::markup::parse_with(&self.content, self.id >= SINCE_ID || edited)
+    }
+
     /// Whether the official client offers Reply on this message: ordinary
     /// messages and replies, commands, and a few system messages people
     /// answer (boosts, joins, …), but not, say, pins or calls.
@@ -549,6 +560,22 @@ mod tests {
         )
         .unwrap();
         assert!(!pin.is_replyable());
+    }
+
+    #[test]
+    fn headings_only_since_discord_had_them() {
+        let message = |id: &str, edited: &str| -> Message {
+            serde_json::from_str(&format!(
+                r##"{{"id":"{id}","channel_id":"1","author":{{"id":"5","username":"a"}},"content":"# hi",
+                    "timestamp":"t","edited_timestamp":{edited}}}"##
+            ))
+            .unwrap()
+        };
+        let heading = |m: &Message| matches!(m.markup()[0], crate::markup::Span::Heading { .. });
+        assert!(heading(&message("1088216706570268682", "null")));
+        assert!(!heading(&message("1088216706570268681", "null")));
+        assert!(heading(&message("100", r#""2024-01-01T00:00:00.000000+00:00""#)), "edited since");
+        assert!(!heading(&message("100", r#""2022-01-01T00:00:00.000000+00:00""#)));
     }
 
     #[test]

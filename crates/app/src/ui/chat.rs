@@ -733,17 +733,17 @@ impl App {
     }
 }
 
-/// User ids referenced by `<@id>` mentions within a parsed span (recursive, so
-/// mentions inside styled/quoted spans count).
+/// User ids referenced by `<@id>` mentions within a parsed span, at any
+/// depth.
 pub(super) fn collect_user_mentions(span: &discord::markup::Span) -> Vec<u64> {
     use discord::markup::{Entity, Span};
-    match span {
-        Span::Entity(Entity::User(id)) => vec![*id],
-        Span::Styled(_, children) | Span::Link { children, .. } => {
-            children.iter().flat_map(collect_user_mentions).collect()
-        }
-        _ => Vec::new(),
-    }
+    std::iter::once(span)
+        .chain(span.descendants())
+        .filter_map(|span| match span {
+            Span::Entity(Entity::User(id)) => Some(*id),
+            _ => None,
+        })
+        .collect()
 }
 
 pub(super) fn parse_time(timestamp: &str) -> Option<glib::DateTime> {
@@ -826,7 +826,7 @@ impl App {
         if discord::embed::hides_content(&message.content, &embeds, media.inline_embed_media) {
             // A bare GIF or image link: the media below stands for it.
         } else if !message.content.is_empty() {
-            body.append(&render::render(&discord::markup::parse(&message.content), &cx, edited));
+            body.append(&render::render(&message.markup(), &cx, edited));
         } else if edited {
             body.append(&render::render(&[], &cx, edited));
         }

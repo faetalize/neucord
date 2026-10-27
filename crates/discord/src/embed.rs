@@ -357,7 +357,8 @@ pub fn has_spoilered_link(content: &str) -> bool {
         spans.iter().any(|span| match span {
             Span::Styled(style, children) => walk(children, in_spoiler || *style == Style::Spoiler),
             Span::Link { children, .. } => in_spoiler || walk(children, in_spoiler),
-            _ => false,
+            Span::List { items, .. } => items.iter().any(|item| walk(item, in_spoiler)),
+            other => walk(other.children(), in_spoiler),
         })
     }
     walk(&crate::markup::parse(content), false)

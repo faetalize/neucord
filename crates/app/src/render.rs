@@ -74,50 +74,104 @@ pub fn set_accent(background: &gdk::RGBA, foreground: &gdk::RGBA) {
 /// Build the content widget for one message body. `edited` appends a faint
 /// "(edited)" marker after the content.
 pub fn render(spans: &[Span], cx: &Context, edited: bool) -> gtk::Widget {
-    let column = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).build();
-    let mut spoilers = 0;
-    let mut inline: Vec<&Span> = Vec::new();
-
-    let flush = |inline: &mut Vec<&Span>, spoilers: &mut usize, edited: bool| {
-        let mut text = Inline::new(cx, *spoilers);
-        text.spans(trim_breaks(inline));
-        if edited {
-            text.edited_marker();
-        }
-        *spoilers = text.next_spoiler;
-        if !text.is_empty() {
-            column.append(&text.widget(cx));
-        }
-        inline.clear();
-    };
-
-    for span in spans {
-        match span {
-            Span::CodeBlock { lang, code } => {
-                flush(&mut inline, &mut spoilers, false);
-                column.append(&code_block(lang.as_deref(), code));
-            }
-            Span::Styled(Style::Quote, children) => {
-                flush(&mut inline, &mut spoilers, false);
-                let mut text = Inline::new(cx, spoilers);
-                text.spans(trim_breaks(&children.iter().collect::<Vec<_>>()));
-                spoilers = text.next_spoiler;
-                let bar = gtk::Box::builder().css_classes(["quote"]).build();
-                bar.append(&text.widget(cx));
-                column.append(&bar);
-            }
-            other => inline.push(other),
-        }
-    }
-    // Trail the marker on the last inline line, or on its own if the content
-    // ended with a block (code/quote).
-    flush(&mut inline, &mut spoilers, edited);
-
+    let column = Blocks { cx, next_spoiler: 0 }.column(spans, edited);
     // An empty body (e.g. a message that was only an attachment) renders nothing.
     if column.first_child().is_none() {
         column.append(&Inline::new(cx, 0).widget(cx));
     }
     column.upcast()
+}
+
+/// Builds block widgets, numbering spoilers across all of them.
+struct Blocks<'c, 'a> {
+    cx: &'c Context<'a>,
+    next_spoiler: usize,
+}
+
+impl Blocks<'_, '_> {
+    /// A column of `spans`: runs of inline spans as text, and blocks.
+    fn column(&mut self, spans: &[Span], edited: bool) -> gtk::Box {
+        let column = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).build();
+        let mut inline: Vec<&Span> = Vec::new();
+        for span in spans {
+            let block = match span {
+                Span::CodeBlock { lang, code } => code_block(lang.as_deref(), code),
+                Span::Styled(Style::Quote, children) => {
+                    let bar = gtk::Box::builder().css_classes(["quote"]).build();
+                    bar.append(&self.column(children, false));
+                    bar.upcast()
+                }
+                // libadwaita's type scale, from the largest that suits a message.
+                Span::Heading { level, children } => {
+                    let class = match level {
+                        1 => "title-2",
+                        2 => "title-3",
+                        _ => "title-4",
+                    };
+                    self.text(children, &[class])
+                }
+                Span::Subtext(children) => self.text(children, &["caption", "dimmed"]),
+                Span::List { start, items } => self.list(*start, items),
+                other => {
+                    inline.push(other);
+                    continue;
+                }
+            };
+            self.flush(&column, &mut inline, false);
+            column.append(&block);
+        }
+        // Trail the marker on the last inline line, or on its own if the
+        // content ended with a block.
+        self.flush(&column, &mut inline, edited);
+        column
+    }
+
+    fn flush(&mut self, column: &gtk::Box, inline: &mut Vec<&Span>, edited: bool) {
+        let mut text = Inline::new(self.cx, self.next_spoiler);
+        text.spans(trim_breaks(inline));
+        if edited {
+            text.edited_marker();
+        }
+        self.next_spoiler = text.next_spoiler;
+        if !text.is_empty() {
+            column.append(&text.widget(self.cx));
+        }
+        inline.clear();
+    }
+
+    fn text(&mut self, spans: &[Span], classes: &[&str]) -> gtk::Widget {
+        let mut text = Inline::new(self.cx, self.next_spoiler);
+        text.spans(spans);
+        self.next_spoiler = text.next_spoiler;
+        let widget = text.widget(self.cx);
+        for class in classes {
+            widget.add_css_class(class);
+        }
+        widget
+    }
+
+    /// Items beside their bullets or numbers, which line up on the right.
+    /// Not a grid: one measures wrapping text at its narrowest, so rows
+    /// would come out too tall.
+    fn list(&mut self, start: Option<u32>, items: &[Vec<Span>]) -> gtk::Widget {
+        let list = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).build();
+        let markers = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
+        for (n, item) in items.iter().enumerate() {
+            let marker = match start {
+                Some(start) => format!("{}.", start as u64 + n as u64),
+                None => "•".to_owned(),
+            };
+            let marker = gtk::Label::builder().label(marker).xalign(1.0).valign(gtk::Align::Start).build();
+            markers.add_widget(&marker);
+            let content = self.column(item, false);
+            content.set_hexpand(true);
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            row.append(&marker);
+            row.append(&content);
+            list.append(&row);
+        }
+        list.upcast()
+    }
 }
 
 /// Line breaks at either end of a run of inline spans take room for nothing.
@@ -241,6 +295,16 @@ impl<'a> Inline<'a> {
                 self.emoji.push((image, Emoji { id: *id, animated: *animated }));
                 self.text_object();
             }
+            // Blocks met where only text can go read as their text.
+            Span::Heading { children, .. } | Span::Subtext(children) => self.spans(children),
+            Span::List { items, .. } => {
+                for (n, item) in items.iter().enumerate() {
+                    if n > 0 {
+                        self.text("\n");
+                    }
+                    self.spans(item);
+                }
+            }
             Span::Entity(entity @ Entity::Emoji { .. }) => self.text(&entity_text(entity, self.names)),
             Span::Entity(entity) => {
                 let (background, foreground) = ACCENT.with(|accent| accent.borrow().clone());
@@ -332,6 +396,17 @@ pub fn plain_text(spans: &[Span], names: &Names) -> String {
                 Span::Styled(_, children) | Span::Link { children, .. } => walk(children, names, out),
                 Span::Entity(entity) => out.push_str(&entity_text(entity, names)),
                 Span::Break => out.push('\n'),
+                // Blocks take their own lines.
+                Span::Heading { children, .. } | Span::Subtext(children) => {
+                    walk(children, names, out);
+                    out.push('\n');
+                }
+                Span::List { items, .. } => {
+                    for item in items {
+                        walk(item, names, out);
+                        out.push('\n');
+                    }
+                }
             }
         }
     }
@@ -435,6 +510,7 @@ mod tests {
         let text = |s: &str| plain_text(&discord::markup::parse(s), &names);
         assert_eq!(text("**hey** <@5>, look: ||secret||"), "hey @alice, look: ▒▒▒▒");
         assert_eq!(text("<:blob:42>"), ":blob:");
+        assert_eq!(text("# Title\n- one\n- two\nend"), "Title\none\ntwo\nend");
     }
 
     #[test]
