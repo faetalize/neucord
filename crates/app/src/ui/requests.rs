@@ -1,7 +1,7 @@
 //! Message requests: DMs from people we share no friendship with, which
 //! Discord holds back (or files as spam) until we accept them. Home lists
 //! them on their own page; opening one shows its messages with accept and
-//! ignore in place of the composer.
+//! ignore in place of the composer (see `update_notice_bar`).
 
 use std::rc::Rc;
 
@@ -124,29 +124,8 @@ impl App {
         }
     }
 
-    /// The bar that replaces the composer while a message request is open.
-    pub(super) fn update_request_bar(self: &Rc<Self>) {
-        let bar = &self.request_bar;
-        while let Some(child) = bar.first_child() {
-            bar.remove(&child);
-        }
-        let request = self.state.borrow().open_request().map(|c| (c.id, c.spam, c.title()));
-        self.composer_box.set_visible(request.is_none());
-        bar.set_visible(request.is_some());
-        let Some((id, spam, title)) = request else { return };
-        let text = if spam {
-            format!("Discord filed this message request from {title} as likely spam.")
-        } else {
-            format!("{title} wants to message you. Accept to reply.")
-        };
-        bar.append(&gtk::Label::builder().label(text).xalign(0.0).wrap(true).hexpand(true).build());
-        for button in self.request_actions(id) {
-            bar.append(&button);
-        }
-    }
-
     /// Accept and Ignore buttons for a request.
-    fn request_actions(self: &Rc<Self>, channel: Snowflake) -> [gtk::Button; 2] {
+    pub(super) fn request_actions(self: &Rc<Self>, channel: Snowflake) -> [gtk::Button; 2] {
         [("Accept", true), ("Ignore", false)].map(|(label, accept)| {
             let button = gtk::Button::builder().label(label).valign(gtk::Align::Center).build();
             if accept {
@@ -182,7 +161,7 @@ impl App {
                     this.rebuild_requests();
                 } else {
                     this.show_composer_error(&text);
-                    this.update_request_bar();
+                    this.update_notice_bar();
                 }
             }
         });

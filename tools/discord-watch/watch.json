@@ -8,5 +8,6 @@
     "MessageType": ["DEFAULT", "REPLY", "CHANNEL_PINNED_MESSAGE"],
     "RelationshipType": ["FRIEND", "BLOCKED", "PENDING_INCOMING", "PENDING_OUTGOING"],
     "StatusType": ["ONLINE", "IDLE", "DND", "INVISIBLE", "OFFLINE"]
-  }
+  },
+  "methods": ["isSystemDM", "isSystemUser"]
 }

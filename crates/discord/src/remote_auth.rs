@@ -284,6 +284,7 @@ fn parse_user(payload: &str) -> Option<User> {
         global_name: None,
         avatar: (avatar != "0").then(|| avatar.to_owned()),
         bot: false,
+        system: false,
     })
 }
 

@@ -1,6 +1,6 @@
 // Compare two snapshots and write the report: first what touches Neucord
 // (calls it makes, headers on every request, events it handles, enum values
-// it may rely on), then a summary of everything else.
+// it may rely on, rules it copies), then a summary of everything else.
 
 import { endpointsFor } from "./uses.mjs";
 
@@ -75,6 +75,16 @@ export function compare(old, cur, uses) {
     else if (!before)
       affects.push(`- ${code(event)}: the client now handles it, reading ${after.map(code).join(", ") || "nothing"}`);
     else affects.push(`- ${code(event)}: fields the client reads: ${listChange(before, after)}`);
+  }
+
+  // The methods in watch.json are rules Neucord copies, such as where the
+  // client shows no message box; if one changes, Neucord may now disagree.
+  // Snapshots from before methods were recorded have none to compare.
+  const rule = (bodies) => (bodies?.length ? bodies.map(code).join(" | ") : "not found");
+  for (const name of Object.keys({ ...old.methods, ...cur.methods }).sort()) {
+    const [before, after] = [old.methods?.[name], cur.methods?.[name]];
+    if (!old.methods || same(before, after)) continue;
+    affects.push(`- ${code(name)}: the client's rule changed\n  - was: ${rule(before)}\n  - now: ${rule(after)}`);
   }
 
   const additions = [];

@@ -68,8 +68,8 @@ pub struct App {
     scroller: gtk::ScrolledWindow,
     composer: gtk::TextView,
     composer_box: gtk::Box,
-    /// Accept or ignore, in place of the composer while a message request is open.
-    request_bar: gtk::Box,
+    /// In place of the composer where we can't post: message requests, the system DM.
+    notice_bar: gtk::Box,
     composer_error: gtk::Label,
     images: Images,
     /// Mention autocomplete, anchored to the composer.
@@ -162,10 +162,10 @@ impl App {
                 .css_classes(["composer-input"])
                 .build(),
             composer_box: gtk::Box::builder().css_classes(["composer", "card-row"]).build(),
-            request_bar: gtk::Box::builder()
+            notice_bar: gtk::Box::builder()
                 .spacing(8)
                 .visible(false)
-                .css_classes(["composer", "card-row", "request-bar"])
+                .css_classes(["composer", "card-row", "notice-bar"])
                 .build(),
             composer_error: gtk::Label::builder()
                 .xalign(0.0)

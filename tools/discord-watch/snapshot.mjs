@@ -1,8 +1,9 @@
 // Distil a build into what a third-party client depends on: REST endpoint
 // paths, the fields each REST call sends, the headers added to every
 // request, the gateway events the client handles and the payload fields it
-// reads, and the enums named in watch.json. Minified names are dropped, so
-// snapshots of two builds differ only where Discord changed something.
+// reads, and the enums and methods named in watch.json. Minified names are
+// dropped, so snapshots of two builds differ only where Discord changed
+// something.
 
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -125,6 +126,48 @@ function enumsIn(sequence) {
   return [...groups.values()].filter((e) => Object.keys(e).length >= 2);
 }
 
+/** A function's source with its minified names replaced: its own variables
+ * become a0, a1… in order of appearance, and anything from another module
+ * (`I.rbe.DM`, `(0, _.pp)(…)`) becomes `<import>`, keeping what is read from
+ * it (`<import>.DM`). Whitespace goes too, so the text only changes with the
+ * code. */
+function normalized(source, fn) {
+  const bound = new Set();
+  walk(fn, (n) => {
+    const patterns = isFunction(n) || n.type === "FunctionDeclaration" ? [...n.params, n.id] : [];
+    if (n.type === "VariableDeclarator") patterns.push(n.id);
+    if (n.type === "CatchClause") patterns.push(n.param);
+    for (const p of patterns.filter(Boolean)) walk(p, (m) => void (m.type === "Identifier" && bound.add(m.name)));
+  });
+  const names = new Set();
+  const edits = [];
+  walk(fn, (n) => {
+    if (n.type === "MemberExpression" && !n.computed) {
+      names.add(n.property);
+      const root = n.object;
+      if (root.type === "Identifier" && !bound.has(root.name) && !(root.name in globalThis)) {
+        edits.push({ start: root.start, end: n.end, text: "<import>" });
+        return false;
+      }
+    }
+    if ((n.type === "Property" && !n.computed && !n.shorthand) || n.type === "MethodDefinition") names.add(n.key);
+    if (n.type !== "Identifier" || names.has(n)) return;
+    if (bound.has(n.name)) edits.push({ start: n.start, end: n.end, local: n.name });
+    else if (!(n.name in globalThis)) edits.push({ start: n.start, end: n.end, text: "<import>" });
+  });
+  const locals = new Map();
+  let text = "";
+  let at = fn.start;
+  for (const edit of edits.sort((a, b) => a.start - b.start)) {
+    if (edit.start < at) continue;
+    if (edit.local && !locals.has(edit.local)) locals.set(edit.local, `a${locals.size}`);
+    text += source.slice(at, edit.start) + (edit.text ?? locals.get(edit.local));
+    at = edit.end;
+  }
+  text += source.slice(at, fn.end);
+  return text.replace(/\s*([^\w\s$])\s*/g, "$1").replace(/\s+/g, " ");
+}
+
 /** Sort object keys recursively, so the JSON is stable across runs. */
 function sorted(value) {
   if (Array.isArray(value)) return value.map(sorted);
@@ -145,6 +188,7 @@ export async function snapshot(dir) {
   const gateway = new Map();
   const headers = new Set();
   const enums = new Map(Object.keys(WATCH.enums).map((name) => [name, new Set()]));
+  const methods = new Map(WATCH.methods.map((name) => [name, new Set()]));
   let modules = 0;
   let unparsed = 0;
 
@@ -225,6 +269,11 @@ export async function snapshot(dir) {
             }
           }
         }
+        // Class methods and object methods alike: `isSystemDM() { … }`.
+        if ((node.type === "MethodDefinition" || node.type === "Property") && isFunction(node.value)) {
+          const name = !node.computed && node.key.type === "Identifier" ? node.key.name : null;
+          if (methods.has(name)) methods.get(name).add(normalized(source, node.value));
+        }
         if (node.type === "SequenceExpression") {
           for (const found of enumsIn(node)) {
             for (const [name, anchors] of Object.entries(WATCH.enums)) {
@@ -251,5 +300,6 @@ export async function snapshot(dir) {
     gateway: Object.fromEntries([...gateway].map(([k, v]) => [k, [...v].sort()])),
     headers: [...headers].sort(),
     enums: Object.fromEntries([...enums].map(([k, v]) => [k, [...v].sort().map((s) => JSON.parse(s))])),
+    methods: Object.fromEntries([...methods].map(([k, v]) => [k, [...v].sort()])),
   });
 }

@@ -581,4 +581,18 @@ mod tests {
         let dms = private_channels(&ready);
         assert_eq!(dms[0].title(), "a, b");
     }
+
+    #[test]
+    fn ready_system_dm() {
+        let ready = json!({
+            "users": [{"id": "5", "username": "discord", "system": true}, {"id": "6", "username": "b", "system": null}],
+            "private_channels": [
+                {"id": "1", "type": 1, "recipient_ids": ["5"]},
+                {"id": "2", "type": 1, "recipient_ids": ["6"]},
+                {"id": "3", "type": 3, "recipient_ids": ["5", "6"]}
+            ]
+        });
+        let system: Vec<bool> = private_channels(&ready).iter().map(Channel::is_system_dm).collect();
+        assert_eq!(system, [true, false, false]);
+    }
 }
