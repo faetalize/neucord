@@ -23,3 +23,8 @@ pub fn client_properties() -> Value {
         "device": NAME,
     })
 }
+
+/// [`client_properties`] in base64, for the `X-Super-Properties` header.
+pub(crate) fn super_properties() -> String {
+    openssl::base64::encode_block(client_properties().to_string().as_bytes())
+}

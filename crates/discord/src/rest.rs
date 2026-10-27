@@ -234,6 +234,10 @@ impl Rest {
                 headers.replace("Authorization", token);
             }
             headers.replace("X-Discord-Locale", "en-US");
+            if self.token.is_none() {
+                // Without it, logging in turns down valid two-factor codes.
+                headers.replace("X-Super-Properties", &identity::super_properties());
+            }
             if let Some((key, captcha)) = &answer {
                 headers.replace("X-Captcha-Key", key);
                 if let Some(rqtoken) = &captcha.rqtoken {
