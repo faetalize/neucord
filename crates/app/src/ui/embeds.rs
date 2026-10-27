@@ -310,7 +310,7 @@ fn fields(embed: &Embed, names: &Names, images: Option<&Images>) -> gtk::Grid {
     grid
 }
 
-fn colour_bar(colour: u32) -> gtk::DrawingArea {
+pub(super) fn colour_bar(colour: u32) -> gtk::DrawingArea {
     let bar = gtk::DrawingArea::builder().width_request(4).vexpand(true).build();
     let channel = |shift: u32| ((colour >> shift) & 0xFF) as f64 / 255.0;
     let (r, g, b) = (channel(16), channel(8), channel(0));

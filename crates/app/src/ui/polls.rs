@@ -1,7 +1,8 @@
 //! Polls, and the results of closed ones. Read-only for now: Neucord
 //! doesn't vote yet.
 
-use discord::poll::{Emoji, Outcome, Poll};
+use discord::model::Emoji;
+use discord::poll::{Outcome, Poll};
 use gtk::pango;
 use gtk::prelude::*;
 
@@ -106,7 +107,7 @@ fn wrapping(text: &str, classes: &[&str]) -> gtk::Label {
 }
 
 /// A custom emoji's image, or a Unicode one as text.
-fn emoji_widget(emoji: &Emoji, images: &Images) -> gtk::Widget {
+pub(super) fn emoji_widget(emoji: &Emoji, images: &Images) -> gtk::Widget {
     match emoji.id {
         Some(id) => {
             let picture = gtk::Picture::builder()

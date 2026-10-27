@@ -7,6 +7,7 @@
 pub mod account;
 pub mod auth;
 pub mod cdn;
+pub mod component;
 pub mod embed;
 mod endpoints;
 pub mod gateway;

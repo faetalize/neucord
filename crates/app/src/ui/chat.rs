@@ -13,7 +13,7 @@ use super::App;
 use super::embeds::{behind_spoiler, embed_widget};
 use super::state::now_unix;
 use super::widgets::avatar_widget;
-use super::{attachments, polls};
+use super::{attachments, components, polls};
 use crate::render::{Context, Names, Spoilers};
 use crate::rich_text::RichText;
 use crate::{render, timelines};
@@ -924,7 +924,9 @@ impl App {
         let voice = message.is_voice_message();
         // A poll's attachments are its answers' images, which the official
         // client shows with them, not under it.
-        let attached = message.attachments.iter().filter(|a| !a.is_hidden() && message.poll.is_none());
+        // Nor do messages built from components show theirs: the components do.
+        let shown = message.poll.is_none() && !message.is_components_v2();
+        let attached = message.attachments.iter().filter(|a| !a.is_hidden() && shown);
         for attachment in attached {
             body.append(&attachments::attachment(attachment, voice, &self.images, &media));
         }
@@ -940,6 +942,9 @@ impl App {
             } else {
                 body.append(&embed_widget(&embed, names, Some(&self.images), &media));
             }
+        }
+        if !message.components.is_empty() {
+            body.append(&components::components(&message.components, &cx));
         }
         if let Some(original) = message.forwarded() {
             body.append(&self.forward(message, &original, names));

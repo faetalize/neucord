@@ -5,6 +5,7 @@ mod account;
 mod attachments;
 mod captcha;
 mod chat;
+mod components;
 mod composer;
 mod connection;
 mod embeds;

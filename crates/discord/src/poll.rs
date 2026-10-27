@@ -3,7 +3,7 @@
 
 use serde::Deserialize;
 
-use crate::model::{Message, Snowflake};
+use crate::model::{Emoji, Message, Snowflake};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Poll {
@@ -27,17 +27,6 @@ pub struct PollMedia {
     pub text: Option<String>,
     #[serde(default)]
     pub emoji: Option<Emoji>,
-}
-
-/// A custom emoji has an id; a Unicode one only its name, the emoji itself.
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
-pub struct Emoji {
-    #[serde(default)]
-    pub id: Option<Snowflake>,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub animated: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]

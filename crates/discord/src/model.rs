@@ -399,6 +399,8 @@ pub struct Message {
     /// What a forward carries.
     #[serde(default)]
     pub message_snapshots: Vec<Snapshot>,
+    #[serde(default)]
+    pub components: Vec<crate::component::Component>,
     /// For a call's system message: who joined it, and when it ended.
     #[serde(default)]
     pub call: Option<Call>,
@@ -416,6 +418,12 @@ pub struct Call {
 impl Message {
     const SUPPRESS_EMBEDS: u64 = 1 << 2;
     const IS_VOICE_MESSAGE: u64 = 1 << 13;
+    const IS_COMPONENTS_V2: u64 = 1 << 15;
+
+    /// Built from components alone: its attachments are what they show.
+    pub fn is_components_v2(&self) -> bool {
+        self.flags & Self::IS_COMPONENTS_V2 != 0
+    }
 
     /// A recorded voice message: its audio attachment plays with a waveform.
     pub fn is_voice_message(&self) -> bool {
@@ -466,6 +474,7 @@ impl Message {
             attachments: snapshot.attachments.clone(),
             embeds: snapshot.embeds.clone(),
             sticker_items: snapshot.sticker_items.clone(),
+            components: snapshot.components.clone(),
             flags: snapshot.flags,
             mentions: Vec::new(),
             mention_everyone: false,
@@ -486,6 +495,17 @@ impl Message {
         }
         self.message_reference.as_ref()?.message_id
     }
+}
+
+/// A custom emoji has an id; a Unicode one only its name, the emoji itself.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct Emoji {
+    #[serde(default)]
+    pub id: Option<Snowflake>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub animated: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -550,6 +570,8 @@ pub struct SnapshotMessage {
     pub embeds: Vec<Embed>,
     #[serde(default)]
     pub sticker_items: Vec<Sticker>,
+    #[serde(default)]
+    pub components: Vec<crate::component::Component>,
     #[serde(default)]
     pub flags: u64,
 }
