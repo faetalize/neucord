@@ -14,6 +14,7 @@ use discord::markup::{Entity, Span, Style};
 use gtk::prelude::*;
 use gtk::{gdk, pango};
 
+use crate::highlight;
 use crate::images::Images;
 use crate::rich_text::{self, RichText};
 
@@ -183,20 +184,47 @@ fn trim_breaks<'s>(spans: &[&'s Span]) -> Vec<&'s Span> {
 
 fn code_block(lang: Option<&str>, code: &str) -> gtk::Widget {
     let container = gtk::Box::builder().orientation(gtk::Orientation::Vertical).css_classes(["code-block"]).build();
-    if let Some(lang) = lang.filter(|l| !l.is_empty()) {
+    let lang = lang.filter(|l| !l.is_empty());
+    if let Some(lang) = lang {
         container.append(&gtk::Label::builder().label(lang).xalign(0.0).css_classes(["code-lang"]).build());
     }
-    container.append(
-        &gtk::Label::builder()
-            .label(code)
-            .wrap(true)
-            .wrap_mode(pango::WrapMode::WordChar)
-            .xalign(0.0)
-            .selectable(true)
-            .css_classes(["code-body"])
-            .build(),
-    );
+    let label = gtk::Label::builder()
+        .label(code)
+        .wrap(true)
+        .wrap_mode(pango::WrapMode::WordChar)
+        .xalign(0.0)
+        .selectable(true)
+        .css_classes(["code-body"])
+        .build();
+    let dark = adw::StyleManager::default().is_dark();
+    let markup = match lang {
+        Some(lang) if lang.eq_ignore_ascii_case("ansi") => Some(ansi_markup(code)),
+        Some(lang) => highlight::markup(lang, code, dark),
+        None => None,
+    };
+    if let Some(markup) = markup {
+        label.set_markup(&markup);
+    }
+    container.append(&label);
     container.upcast()
+}
+
+/// An `ansi` block without its escape codes, bold and underlined where they
+/// say. Their colours are left out.
+fn ansi_markup(code: &str) -> String {
+    let mut out = String::new();
+    for part in discord::markup::ansi(code) {
+        let text = escape(&part.text);
+        out += &match (part.bold, part.underline) {
+            (false, false) => text,
+            (bold, underline) => format!(
+                "<span{}{}>{text}</span>",
+                if bold { " weight=\"bold\"" } else { "" },
+                if underline { " underline=\"single\"" } else { "" }
+            ),
+        };
+    }
+    out
 }
 
 /// A custom emoji waiting for its image.

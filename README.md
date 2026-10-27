@@ -21,6 +21,7 @@ the issue tracker.
 - libadwaita 1.7 or newer
 - libsoup 3
 - WebKitGTK 6.0, for captchas
+- GtkSourceView 5, to highlight code
 - libsecret, and a Secret Service provider such as GNOME Keyring or KWallet
 - OpenSSL
 - Rust 1.92 or newer, to build
@@ -28,7 +29,7 @@ the issue tracker.
 On Arch Linux:
 
 ```sh
-sudo pacman -S --needed rust gtk4 libadwaita libsoup3 webkitgtk-6.0 libsecret openssl
+sudo pacman -S --needed rust gtk4 libadwaita libsoup3 webkitgtk-6.0 gtksourceview5 libsecret openssl
 ```
 
 ## Building

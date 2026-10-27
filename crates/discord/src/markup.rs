@@ -303,6 +303,95 @@ fn take_list(s: &str, blocks: Blocks) -> Option<(Span, &str)> {
     Some((Span::List { start, items }, &s[end..]))
 }
 
+/// The language a code block's tag names, by the official client's
+/// aliases: `js` is `javascript`, `rs` is `rust`, …. Other tags are
+/// returned lowercased.
+pub fn code_language(tag: &str) -> String {
+    let tag = tag.to_ascii_lowercase();
+    let name = match tag.as_str() {
+        "js" | "mjs" | "cjs" | "jsx" | "node" => "javascript",
+        "ts" | "mts" | "cts" => "typescript",
+        "py" | "gyp" => "python",
+        "rs" => "rust",
+        "cs" | "csharp" | "c#" => "c-sharp",
+        "h" | "hpp" | "cc" | "cxx" | "c++" => "cpp",
+        "yml" => "yaml",
+        "sh" | "shell" | "console" => "bash",
+        "kt" => "kotlin",
+        "rb" => "ruby",
+        "golang" => "go",
+        "md" => "markdown",
+        "jsonc" => "json",
+        "htm" | "xhtml" | "hbs" | "erb" => "html",
+        "svg" | "xsl" | "rss" => "xml",
+        "less" => "css",
+        "ps1" | "pwsh" => "powershell",
+        "tf" => "hcl",
+        "ex" | "exs" => "elixir",
+        "hs" => "haskell",
+        "patch" => "diff",
+        "pgsql" | "postgres" => "sql",
+        _ => return tag,
+    };
+    name.to_owned()
+}
+
+/// A stretch of an `ansi` code block, and how its escape codes style it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Ansi {
+    pub text: String,
+    pub bold: bool,
+    pub underline: bool,
+    /// One of the eight colours, 0 to 7 (codes 30 to 37 and 40 to 47).
+    pub foreground: Option<u8>,
+    pub background: Option<u8>,
+}
+
+/// Split an `ansi` code block by the escape codes in it (`ESC[1;31m`),
+/// which are dropped. Unknown codes change nothing.
+pub fn ansi(code: &str) -> Vec<Ansi> {
+    let mut out: Vec<Ansi> = Vec::new();
+    let mut current = Ansi::default();
+    let mut rest = code;
+    while !rest.is_empty() {
+        let Some(escape) = rest.find("\u{1b}[") else {
+            current.text.push_str(rest);
+            break;
+        };
+        current.text.push_str(&rest[..escape]);
+        let after = &rest[escape + 2..];
+        let Some(end) = after.find(|c: char| !(c.is_ascii_digit() || c == ';')) else {
+            break;
+        };
+        if !after[end..].starts_with('m') {
+            // Not a style code: keep it as text.
+            current.text.push_str(&rest[escape..escape + 2]);
+            rest = after;
+            continue;
+        }
+        let mut next = Ansi { text: String::new(), ..current.clone() };
+        for code in after[..end].split(';') {
+            match code.parse::<u8>().unwrap_or(0) {
+                0 => next = Ansi::default(),
+                1 => next.bold = true,
+                4 => next.underline = true,
+                n @ 30..=37 => next.foreground = Some(n - 30),
+                n @ 40..=47 => next.background = Some(n - 40),
+                _ => {}
+            }
+        }
+        if !current.text.is_empty() {
+            out.push(std::mem::take(&mut current));
+        }
+        current = next;
+        rest = &after[end + 1..];
+    }
+    if !current.text.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
 /// Inline markup within a block of text.
 fn parse_inline(input: &str) -> Vec<Span> {
     Parser { bytes: input.as_bytes(), input, pos: 0 }.run(None)
@@ -537,6 +626,30 @@ mod tests {
             parse("```rust\nfn main() {}\n```"),
             vec![Span::CodeBlock { lang: Some("rust".into()), code: "fn main() {}".into() }]
         );
+    }
+
+    #[test]
+    fn code_languages() {
+        assert_eq!(code_language("JS"), "javascript");
+        assert_eq!(code_language("c++"), "cpp");
+        assert_eq!(code_language("Rust"), "rust");
+        assert_eq!(code_language("brainfuck"), "brainfuck");
+    }
+
+    #[test]
+    fn ansi_codes() {
+        let plain = |text: &str| Ansi { text: text.into(), ..Default::default() };
+        assert_eq!(ansi("plain"), vec![plain("plain")]);
+        assert_eq!(
+            ansi("a\u{1b}[1;31mred\u{1b}[0m b \u{1b}[4;44mc"),
+            vec![
+                plain("a"),
+                Ansi { text: "red".into(), bold: true, foreground: Some(1), ..Default::default() },
+                plain(" b "),
+                Ansi { text: "c".into(), underline: true, background: Some(4), ..Default::default() },
+            ]
+        );
+        assert_eq!(ansi("x\u{1b}[2Jy"), vec![plain("x\u{1b}[2Jy")], "only style codes are read");
     }
 
     #[test]
