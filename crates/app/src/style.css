@@ -11,7 +11,15 @@
 }
 .guild:hover  { border-radius: 16px; background-color: alpha(currentColor, 0.15); }
 .guild.active { border-radius: 16px; background-color: var(--accent-bg-color); color: var(--accent-fg-color); }
-.rail-pill { min-width: 4px; min-height: 8px; border-radius: 0 4px 4px 0; background-color: currentColor; }
+/* The pill grows from unread to hovered to open, and takes the accent
+   colour once hovered or open. */
+.rail-pill {
+  min-width: 4px; min-height: 0; border-radius: 0 4px 4px 0; opacity: 0; background-color: currentColor;
+  transition: min-height 200ms ease-out, opacity 200ms, background-color 200ms;
+}
+.rail-pill.unread { min-height: 8px; opacity: 1; }
+.rail-item:hover > .rail-pill { min-height: 20px; opacity: 1; background-color: var(--accent-bg-color); }
+.rail-item > .rail-pill.active { min-height: 40px; opacity: 1; background-color: var(--accent-bg-color); }
 .rail-separator { margin: 3px 24px; }
 /* Folders: collapsed shows a 2×2 preview on the folder's colour (per-folder
    colours come from a provider the rail regenerates). */
@@ -30,15 +38,15 @@
 .category { margin-top: 12px; font-size: 0.82em; font-weight: bold; }
 .navigation-sidebar > row.unread { font-weight: bold; }
 .navigation-sidebar > row.muted { opacity: var(--dim-opacity); }
-.me { padding: 3px 6px 3px 14px; }
 
 /* Messages. Rows carry no padding of their own, so a collapsed blocked
    message takes no space. */
 listview.messages, listview.messages > row { background: none; padding: 0; }
-/* The right padding leaves room for the hover Reply button (28px plus the
-   row's 16px gap), so text is as wide with or without it. */
-.message       { padding: 3px 6px 3px 18px; }
-.message.first { padding-top: 15px; }
+.message       { padding: 2px 6px 2px 18px; }
+/* Room for the hover Reply button, which floats over the row's top right
+   corner, so text is as wide with or without it. */
+.message-main  { margin-right: 44px; }
+.message.first { padding-top: 14px; }
 .message:hover { background-color: alpha(currentColor, 0.04); }
 .message.replying  { background-color: alpha(var(--accent-bg-color), 0.12); box-shadow: inset 2px 0 var(--accent-bg-color); }
 .message.highlight { background-color: alpha(var(--warning-bg-color), 0.15); box-shadow: inset 2px 0 var(--warning-bg-color); transition: background-color 300ms; }
@@ -58,14 +66,38 @@ picture.avatar { border-radius: 9999px; }
 .reply-snippet { opacity: 0.8; }
 .reply-snippet.missing { font-style: italic; opacity: var(--dim-opacity); }
 
-/* Composer, with the reply bar joined to its top. */
-.composer { margin: 0 12px 12px 12px; padding: 9px 12px; border-radius: 12px; background-color: alpha(currentColor, 0.06); }
+/* Floating controls: translucent over the content scrolling beneath them,
+   which they blur. */
+.floating { background-color: alpha(var(--window-bg-color), 0.75); backdrop-filter: blur(18px); }
+/* A toolbar view's bars over content that runs under them. The blur goes on
+   the bars' container: on the header bar itself, GTK draws none. */
+toolbarview.floating-bars > .top-bar {
+  background-color: alpha(var(--headerbar-bg-color), 0.75); backdrop-filter: blur(18px);
+  box-shadow: 0 1px var(--headerbar-shade-color);
+}
+/* A sidebar sliding over the content, which libadwaita marks as an overlay pane. */
+overlay-split-view > .overlay-pane {
+  background-color: alpha(var(--sidebar-bg-color), 0.75); backdrop-filter: blur(18px);
+}
+
+/* Cards floating over the bottom of a pane: the composer, and the account
+   panel beside it, alike so they line up. */
+.floating-card {
+  margin: 0 12px 12px 12px; border-radius: 12px;
+  border: 1px solid alpha(currentColor, 0.1); box-shadow: 0 4px 16px alpha(black, 0.12);
+}
+.card-row { min-height: 34px; padding: 4px 4px 4px 12px; }
+.account-panel {
+  background-color: var(--sidebar-bg-color);
+  background-image: linear-gradient(alpha(currentColor, 0.05), alpha(currentColor, 0.05));
+}
+/* The composer has the reply bar or an error at its top. */
+.composer { padding-right: 12px; }
 textview.composer-input, textview.composer-input text { background: none; }
-.reply-bar { margin: 0 12px; padding: 3px 3px 3px 12px; border-radius: 12px 12px 0 0; background-color: alpha(currentColor, 0.1); font-size: 0.9em; }
-.reply-bar + .composer { border-top-left-radius: 0; border-top-right-radius: 0; }
+.reply-bar { padding: 3px 3px 3px 12px; border-bottom: 1px solid alpha(currentColor, 0.08); font-size: 0.9em; }
 .reply-ping { font-weight: bold; padding: 2px 8px; }
 .reply-ping:checked { background: none; color: var(--accent-color); }
-.composer-error { margin: 0 18px 6px 18px; font-size: 0.9em; }
+.composer-error { margin: 6px 12px 0 12px; font-size: 0.9em; }
 
 /* Presence, on avatars in a boxed list: a ring the colour of the row behind
    it. Cards are translucent, so the ring is the card over the window. */

@@ -242,6 +242,7 @@ impl App {
     }
 
     pub(super) fn show_login(self: &Rc<Self>, error: Option<&str>) {
+        self.set_content_title("Neucord");
         self.login.clear();
         self.login.set_error(error);
         self.stack.set_visible_child_name("login");

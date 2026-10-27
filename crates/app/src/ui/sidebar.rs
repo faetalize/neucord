@@ -27,7 +27,7 @@ impl App {
         let state = self.state.borrow();
         self.drawn.borrow_mut().1 = state.sidebar_signature();
         let Some(id) = state.guild else {
-            self.guild_name.set_title("Direct Messages");
+            self.guild_name.set("Direct Messages", None);
             self.append_home_entry(
                 "Friends",
                 state.page == Some(Page::Friends),
@@ -59,7 +59,7 @@ impl App {
         let Some(guild) = state.guilds.iter().find(|g| g.id == id) else {
             return;
         };
-        self.guild_name.set_title(&guild.name);
+        self.guild_name.set(&guild.name, None);
         for (category, channels) in guild.sidebar() {
             if let Some(category) = category {
                 let label = gtk::Label::builder()
@@ -121,8 +121,7 @@ impl App {
         self.append_row(&row, Some(target), active);
     }
 
-    /// Open what a row stands for. On a narrow window this also turns from
-    /// the sidebar to the content.
+    /// Open what a row stands for, putting the sidebar away on a narrow window.
     pub(super) fn activate_sidebar_row(self: &Rc<Self>, index: i32) {
         let target = usize::try_from(index).ok().and_then(|i| self.targets.borrow().get(i).copied().flatten());
         match target {
@@ -131,7 +130,7 @@ impl App {
             Some(Target::Requests) => self.show_requests(),
             None => return,
         }
-        self.split.set_show_content(true);
+        self.show_content();
     }
 }
 

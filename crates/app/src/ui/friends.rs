@@ -12,7 +12,7 @@ use gtk::glib;
 
 use super::App;
 use super::state::Page;
-use super::widgets::avatar_widget;
+use super::widgets::{Title, avatar_widget};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Tab {
@@ -130,7 +130,9 @@ impl App {
         });
 
         let switcher = adw::ViewSwitcher::builder().stack(&page.stack).policy(adw::ViewSwitcherPolicy::Wide).build();
-        let header = adw::HeaderBar::builder().title_widget(&switcher).build();
+        let header = Title::new("Friends").header_bar(&[self.sidebar_toggle().upcast_ref()]);
+        header.set_title_widget(Some(&switcher));
+        header.set_show_title(true);
         let bar = adw::ViewSwitcherBar::builder().stack(&page.stack).build();
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.append(&page.error);
@@ -145,7 +147,7 @@ impl App {
             800.0,
             adw::LengthUnit::Sp,
         ));
-        narrow.add_setter(&header, "title-widget", Some(&adw::WindowTitle::new("Friends", "").to_value()));
+        narrow.add_setter(&switcher, "visible", Some(&false.to_value()));
         narrow.add_setter(&bar, "reveal", Some(&true.to_value()));
         page.root.add_breakpoint(narrow);
         page.root.set_child(Some(&view));
