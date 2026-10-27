@@ -1,6 +1,6 @@
 // Compare two snapshots and write the report: first what touches Neucord
-// (calls it makes, events it handles, enum values it may rely on), then a
-// summary of everything else.
+// (calls it makes, headers on every request, events it handles, enum values
+// it may rely on), then a summary of everything else.
 
 import { endpointsFor } from "./uses.mjs";
 
@@ -61,6 +61,12 @@ export function compare(old, cur, uses) {
       }
     }
   }
+
+  // Every request goes through the client's HTTP layer, so a header it
+  // starts or stops adding may soon be expected of Neucord's requests too.
+  // Snapshots from before headers were recorded have none to compare.
+  const headers = old.headers && listChange(old.headers, cur.headers);
+  if (headers) affects.push(`- Headers the client adds to every request: ${headers}`);
 
   for (const event of uses.events) {
     const [before, after] = [old.gateway[event], cur.gateway[event]];
