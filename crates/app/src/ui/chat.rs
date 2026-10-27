@@ -12,7 +12,7 @@ use super::App;
 use super::embeds::{behind_spoiler, embed_widget, fitted_picture};
 use super::state::now_unix;
 use super::widgets::avatar_widget;
-use crate::render::Names;
+use crate::render::{Context, Names, Spoilers};
 use crate::{render, timelines};
 
 /// Messages fetched when a channel opens: enough to fill the view, small so
@@ -822,12 +822,13 @@ impl App {
         let media = self.state.borrow().media;
         let edited = message.edited_timestamp.is_some();
         let embeds = discord::embed::visible(message, &media);
+        let cx = Context { spoilers: Some(self.spoilers(message.id)), ..Context::new(&names, Some(&self.images)) };
         if discord::embed::hides_content(&message.content, &embeds, media.inline_embed_media) {
             // A bare GIF or image link: the media below stands for it.
         } else if !message.content.is_empty() {
-            body.append(&render::render(&discord::markup::parse(&message.content), &names, edited));
+            body.append(&render::render(&discord::markup::parse(&message.content), &cx, edited));
         } else if edited {
-            body.append(&render::render(&[], &names, edited));
+            body.append(&render::render(&[], &cx, edited));
         }
         for attachment in message.attachments.iter().filter(|a| !a.is_hidden()) {
             if attachment.is_image() && media.inline_attachment_media {
@@ -888,6 +889,19 @@ impl App {
         } else {
             row.append(&main);
         }
+    }
+
+    /// The spoilers revealed in a message's text, remembered while the app
+    /// runs as its row is rebuilt.
+    fn spoilers(self: &Rc<Self>, message: Snowflake) -> Spoilers {
+        let revealed = self.state.borrow().revealed_spoilers.get(&message).cloned().unwrap_or_default();
+        let this = Rc::downgrade(self);
+        let on_reveal = move |n| {
+            if let Some(this) = this.upgrade() {
+                this.state.borrow_mut().revealed_spoilers.entry(message).or_default().insert(n);
+            }
+        };
+        Spoilers { revealed, on_reveal: Rc::new(on_reveal) }
     }
 
     /// The line above a reply: who it answers and the start of what they said.

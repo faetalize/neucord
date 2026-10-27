@@ -1,16 +1,21 @@
 //! Render a parsed Discord message ([`discord::markup`]) into GTK widgets.
 //!
-//! Inline spans become Pango markup inside one wrapping `Label`; code blocks
-//! and quotes become their own widgets (they need distinct surfaces), so one
-//! message is a vertical box of labels and blocks.
+//! Inline spans become Pango markup in a [`RichText`], which draws custom
+//! emoji among the words and covers spoilers until they are clicked. Code
+//! blocks and quotes become their own widgets (they need distinct surfaces),
+//! so one message is a vertical box of text and blocks.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::fmt::Write;
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
+use std::rc::Rc;
 
 use discord::markup::{Entity, Span, Style};
 use gtk::prelude::*;
 use gtk::{gdk, pango};
+
+use crate::images::Images;
+use crate::rich_text::{self, RichText};
 
 /// Names we can resolve while rendering, gathered from the message and the
 /// open guild. Missing ids fall back to a readable placeholder.
@@ -20,12 +25,36 @@ pub struct Names {
     pub channels: HashMap<u64, String>,
 }
 
+/// What rendering draws on besides the spans.
+pub struct Context<'a> {
+    pub names: &'a Names,
+    /// Where custom emoji load from. Without, they read `:name:`.
+    pub images: Option<&'a Images>,
+    /// Remembers revealed spoilers across rebuilds of the same text.
+    pub spoilers: Option<Spoilers>,
+}
+
+impl<'a> Context<'a> {
+    pub fn new(names: &'a Names, images: Option<&'a Images>) -> Self {
+        Context { names, images, spoilers: None }
+    }
+}
+
+/// The spoilers of one text the reader has revealed, by number in reading
+/// order, and what to tell when they reveal another.
+#[derive(Clone)]
+pub struct Spoilers {
+    pub revealed: HashSet<usize>,
+    pub on_reveal: Rc<dyn Fn(usize)>,
+}
+
 // Pango markup can't use the stylesheet's colours. A grey shade reads on
 // light and dark backgrounds alike; mentions take the accent colour, which
 // the UI keeps current with `set_accent`.
 const CODE_OPEN: &str = "<tt><span background=\"#808080\" bgalpha=\"15%\">";
 const SPOILER_OPEN: &str = "<span background=\"#808080\" bgalpha=\"40%\">";
-const EDITED_MARKER: &str = " <span fgalpha=\"55%\" size=\"small\">(edited)</span>";
+/// Custom emoji in running text (the official client's size).
+const EMOJI: i32 = 22;
 
 thread_local! {
     /// Mention background and text colours, as Pango colour strings.
@@ -44,14 +73,20 @@ pub fn set_accent(background: &gdk::RGBA, foreground: &gdk::RGBA) {
 
 /// Build the content widget for one message body. `edited` appends a faint
 /// "(edited)" marker after the content.
-pub fn render(spans: &[Span], names: &Names, edited: bool) -> gtk::Widget {
+pub fn render(spans: &[Span], cx: &Context, edited: bool) -> gtk::Widget {
     let column = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).build();
-    let mut inline = String::new();
+    let mut spoilers = 0;
+    let mut inline: Vec<&Span> = Vec::new();
 
-    let flush = |inline: &mut String, column: &gtk::Box| {
-        let trimmed = inline.trim_matches('\n');
-        if !trimmed.is_empty() {
-            column.append(&inline_label(trimmed));
+    let flush = |inline: &mut Vec<&Span>, spoilers: &mut usize, edited: bool| {
+        let mut text = Inline::new(cx, *spoilers);
+        text.spans(trim_breaks(inline));
+        if edited {
+            text.edited_marker();
+        }
+        *spoilers = text.next_spoiler;
+        if !text.is_empty() {
+            column.append(&text.widget(cx));
         }
         inline.clear();
     };
@@ -59,39 +94,37 @@ pub fn render(spans: &[Span], names: &Names, edited: bool) -> gtk::Widget {
     for span in spans {
         match span {
             Span::CodeBlock { lang, code } => {
-                flush(&mut inline, &column);
+                flush(&mut inline, &mut spoilers, false);
                 column.append(&code_block(lang.as_deref(), code));
             }
             Span::Styled(Style::Quote, children) => {
-                flush(&mut inline, &column);
-                column.append(&quote_block(children, names));
+                flush(&mut inline, &mut spoilers, false);
+                let mut text = Inline::new(cx, spoilers);
+                text.spans(trim_breaks(&children.iter().collect::<Vec<_>>()));
+                spoilers = text.next_spoiler;
+                let bar = gtk::Box::builder().css_classes(["quote"]).build();
+                bar.append(&text.widget(cx));
+                column.append(&bar);
             }
-            other => inline_markup(other, names, &mut inline),
+            other => inline.push(other),
         }
     }
     // Trail the marker on the last inline line, or on its own if the content
     // ended with a block (code/quote).
-    if edited {
-        inline.push_str(EDITED_MARKER);
-    }
-    flush(&mut inline, &column);
+    flush(&mut inline, &mut spoilers, edited);
 
     // An empty body (e.g. a message that was only an attachment) renders nothing.
     if column.first_child().is_none() {
-        column.append(&inline_label(""));
+        column.append(&Inline::new(cx, 0).widget(cx));
     }
     column.upcast()
 }
 
-fn inline_label(markup: &str) -> gtk::Label {
-    gtk::Label::builder()
-        .use_markup(true)
-        .label(markup)
-        .wrap(true)
-        .wrap_mode(pango::WrapMode::WordChar)
-        .xalign(0.0)
-        .selectable(true)
-        .build()
+/// Line breaks at either end of a run of inline spans take room for nothing.
+fn trim_breaks<'s>(spans: &[&'s Span]) -> Vec<&'s Span> {
+    let start = spans.iter().position(|s| **s != Span::Break).unwrap_or(spans.len());
+    let end = spans.iter().rposition(|s| **s != Span::Break).map_or(start, |e| e + 1);
+    spans[start..end].to_vec()
 }
 
 fn code_block(lang: Option<&str>, code: &str) -> gtk::Widget {
@@ -112,45 +145,156 @@ fn code_block(lang: Option<&str>, code: &str) -> gtk::Widget {
     container.upcast()
 }
 
-fn quote_block(children: &[Span], names: &Names) -> gtk::Widget {
-    let mut markup = String::new();
-    for span in children {
-        inline_markup(span, names, &mut markup);
-    }
-    let bar = gtk::Box::builder().css_classes(["quote"]).build();
-    bar.append(&inline_label(markup.trim_matches('\n')));
-    bar.upcast()
+/// A custom emoji waiting for its image.
+struct Emoji {
+    id: u64,
+    animated: bool,
 }
 
-/// Append the Pango markup for one inline span.
-fn inline_markup(span: &Span, names: &Names, out: &mut String) {
-    match span {
-        Span::Text(t) => out.push_str(&escape(t)),
-        Span::Break => out.push('\n'),
-        Span::Styled(style, children) => {
-            let (open, close) = tags(*style);
-            out.push_str(open);
-            for child in children {
-                inline_markup(child, names, out);
-            }
-            out.push_str(close);
+/// Pango markup for a run of inline spans, with where its images and
+/// spoilers fall in the text it parses to.
+struct Inline<'a> {
+    names: &'a Names,
+    /// Custom emoji show as images (else as `:name:`).
+    images: bool,
+    markup: String,
+    /// Bytes of text so far: the markup without its tags and escapes.
+    len: u32,
+    emoji: Vec<(rich_text::Image, Emoji)>,
+    spoilers: Vec<(Range<u32>, usize)>,
+    /// The number the next spoiler gets, counted across the whole message.
+    next_spoiler: usize,
+}
+
+impl<'a> Inline<'a> {
+    fn new(cx: &Context<'a>, next_spoiler: usize) -> Self {
+        Inline {
+            names: cx.names,
+            images: cx.images.is_some(),
+            markup: String::new(),
+            len: 0,
+            emoji: Vec::new(),
+            spoilers: Vec::new(),
+            next_spoiler,
         }
-        Span::Code(code) => {
-            let _ = write!(out, "{CODE_OPEN} {} </span></tt>", escape(code));
-        }
-        Span::CodeBlock { code, .. } => {
-            // A code block nested where only inline is expected: show inline.
-            let _ = write!(out, "<tt>{}</tt>", escape(code));
-        }
-        Span::Link { url, children } => {
-            let mut inner = String::new();
-            for child in children {
-                inline_markup(child, names, &mut inner);
-            }
-            let _ = write!(out, "<a href=\"{}\">{}</a>", escape(url), inner);
-        }
-        Span::Entity(entity) => out.push_str(&entity_markup(entity, names)),
     }
+
+    fn is_empty(&self) -> bool {
+        self.markup.is_empty()
+    }
+
+    fn text(&mut self, text: &str) {
+        // The object character means an image here; text can't have one.
+        let text = text.replace(rich_text::OBJECT, "");
+        self.markup.push_str(&escape(&text));
+        self.len += text.len() as u32;
+    }
+
+    fn tag(&mut self, tag: &str) {
+        self.markup.push_str(tag);
+    }
+
+    fn spans(&mut self, spans: impl IntoIterator<Item = &'a Span>) {
+        for span in spans {
+            self.span(span);
+        }
+    }
+
+    fn span(&mut self, span: &'a Span) {
+        match span {
+            Span::Text(t) => self.text(t),
+            Span::Break => self.text("\n"),
+            Span::Styled(Style::Spoiler, children) => {
+                let start = self.len;
+                let number = self.next_spoiler;
+                self.next_spoiler += 1;
+                self.tag(SPOILER_OPEN);
+                self.spans(children);
+                self.tag("</span>");
+                self.spoilers.push((start..self.len, number));
+            }
+            Span::Styled(style, children) => {
+                let (open, close) = tags(*style);
+                self.tag(open);
+                self.spans(children);
+                self.tag(close);
+            }
+            Span::Code(code) => {
+                self.tag(CODE_OPEN);
+                self.text(&format!(" {code} "));
+                self.tag("</span></tt>");
+            }
+            Span::CodeBlock { code, .. } => {
+                // A code block nested where only inline is expected: show inline.
+                self.tag("<tt>");
+                self.text(code);
+                self.tag("</tt>");
+            }
+            Span::Link { url, children } => {
+                self.tag(&format!("<a href=\"{}\">", escape(url)));
+                self.spans(children);
+                self.tag("</a>");
+            }
+            Span::Entity(Entity::Emoji { name, id, animated }) if self.images => {
+                let image =
+                    rich_text::Image { index: self.len, size: EMOJI, alt: format!(":{name}:"), paintable: None };
+                self.emoji.push((image, Emoji { id: *id, animated: *animated }));
+                self.text_object();
+            }
+            Span::Entity(entity @ Entity::Emoji { .. }) => self.text(&entity_text(entity, self.names)),
+            Span::Entity(entity) => {
+                let (background, foreground) = ACCENT.with(|accent| accent.borrow().clone());
+                self.tag(&format!("<span background=\"{background}\" bgalpha=\"25%\" foreground=\"{foreground}\">"));
+                self.text(&format!("\u{a0}{}\u{a0}", entity_text(entity, self.names)));
+                self.tag("</span>");
+            }
+        }
+    }
+
+    fn text_object(&mut self) {
+        let mut buf = [0; 4];
+        self.markup.push_str(rich_text::OBJECT.encode_utf8(&mut buf));
+        self.len += rich_text::OBJECT.len_utf8() as u32;
+    }
+
+    fn edited_marker(&mut self) {
+        self.text(" ");
+        self.tag("<span fgalpha=\"55%\" size=\"small\">");
+        self.text("(edited)");
+        self.tag("</span>");
+    }
+
+    /// The widget, its emoji loading.
+    fn widget(self, cx: &Context) -> gtk::Widget {
+        let (images, emoji): (Vec<_>, Vec<_>) = self.emoji.into_iter().unzip();
+        let revealed = |n: &usize| cx.spoilers.as_ref().is_some_and(|s| s.revealed.contains(n));
+        let numbers: Vec<usize> = self.spoilers.iter().map(|(_, n)| *n).collect();
+        let spoilers = self.spoilers.into_iter().map(|(range, n)| (range, revealed(&n))).collect();
+        let text = RichText::new(&self.markup, images, spoilers);
+        if let Some(memory) = &cx.spoilers {
+            let on_reveal = memory.on_reveal.clone();
+            text.connect_reveal(move |i| on_reveal(numbers[i]));
+        }
+        if let Some(images) = cx.images {
+            let request = emoji_request(EMOJI, images.scale());
+            for (n, emoji) in emoji.into_iter().enumerate() {
+                let weak = text.downgrade();
+                let url = discord::cdn::emoji_url(emoji.id, emoji.animated, request);
+                images.load(&url, emoji.animated, move |paintable| {
+                    if let Some(text) = weak.upgrade() {
+                        text.set_image(n, paintable);
+                    }
+                });
+            }
+        }
+        text.upcast()
+    }
+}
+
+/// The CDN size to ask for an emoji shown at `size`: enough pixels for the
+/// screen's scale, in the powers of two the CDN serves.
+fn emoji_request(size: i32, scale: i32) -> u16 {
+    ((size * scale.max(1)) as u32).next_power_of_two().clamp(16, 4096) as u16
 }
 
 fn tags(style: Style) -> (&'static str, &'static str) {
@@ -159,7 +303,7 @@ fn tags(style: Style) -> (&'static str, &'static str) {
         Style::Italic => ("<i>", "</i>"),
         Style::Underline => ("<u>", "</u>"),
         Style::Strikethrough => ("<s>", "</s>"),
-        // Click-to-reveal comes later; for now mark it with a dark background.
+        // Tinted once revealed; until then the text covers it.
         Style::Spoiler => (SPOILER_OPEN, "</span>"),
         // Quotes are handled as blocks; if one is nested inline, pass through.
         Style::Quote => ("", ""),
@@ -174,20 +318,6 @@ fn entity_text(entity: &Entity, names: &Names) -> String {
         Entity::Role(_) => "@role".into(),
         Entity::Emoji { name, .. } => format!(":{name}:"),
         Entity::Timestamp { unix, style } => format_timestamp(*unix, *style),
-    }
-}
-
-fn entity_markup(entity: &Entity, names: &Names) -> String {
-    let text = escape(&entity_text(entity, names));
-    match entity {
-        // Emoji read as plain text until they render as images.
-        Entity::Emoji { .. } => text,
-        _ => ACCENT.with(|accent| {
-            let (background, foreground) = &*accent.borrow();
-            format!(
-                "<span background=\"{background}\" bgalpha=\"25%\" foreground=\"{foreground}\">\u{a0}{text}\u{a0}</span>"
-            )
-        }),
     }
 }
 
@@ -246,11 +376,10 @@ mod tests {
     /// Exercises the inline markup path without needing a GTK display.
     fn inline(input: &str) -> String {
         let names = names();
-        let mut out = String::new();
-        for span in parse(input) {
-            inline_markup(&span, &names, &mut out);
-        }
-        out
+        let spans = parse(input);
+        let mut text = Inline::new(&Context::new(&names, None), 0);
+        text.spans(&spans);
+        text.markup
     }
 
     #[test]
@@ -278,6 +407,29 @@ mod tests {
     }
 
     #[test]
+    fn images_and_spoilers_know_where_they_are() {
+        let names = names();
+        let spans = parse("a & <:blob:42> ||é <:spin:43>|| **||b||**");
+        let mut text = Inline::new(&Context::new(&names, None), 3);
+        text.images = true;
+        text.spans(&spans);
+        let parsed = pango::parse_markup(&text.markup, '\0').unwrap().1;
+        let at = |index: u32| &parsed[index as usize..];
+        let indices: Vec<u32> = text.emoji.iter().map(|(image, _)| image.index).collect();
+        assert!(indices.iter().all(|&i| at(i).starts_with(rich_text::OBJECT)));
+        assert_eq!(text.emoji.iter().map(|(image, _)| image.alt.as_str()).collect::<Vec<_>>(), [":blob:", ":spin:"]);
+        let spoilers: Vec<(&str, usize)> =
+            text.spoilers.iter().map(|(r, n)| (&parsed[r.start as usize..r.end as usize], *n)).collect();
+        assert_eq!(spoilers, [("é \u{fffc}", 3), ("b", 4)]);
+        assert_eq!(text.next_spoiler, 5);
+    }
+
+    #[test]
+    fn object_character_in_text_is_dropped() {
+        assert_eq!(inline("a\u{fffc}b"), "ab");
+    }
+
+    #[test]
     fn plain_text_for_notifications() {
         let names = Names { users: [(5, "alice".into())].into(), channels: HashMap::new() };
         let text = |s: &str| plain_text(&discord::markup::parse(s), &names);
@@ -286,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn emoji_shows_name() {
+    fn emoji_without_images_shows_name() {
         assert_eq!(inline("<:blob:42>"), ":blob:");
     }
 }

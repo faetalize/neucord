@@ -2,6 +2,7 @@
 
 mod images;
 mod render;
+mod rich_text;
 mod timelines;
 mod ui;
 

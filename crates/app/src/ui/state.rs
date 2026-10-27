@@ -53,6 +53,8 @@ pub(super) struct State {
     /// Runs of blocked users' messages the user chose to see, by the run's
     /// first message.
     pub(super) revealed_blocked: HashSet<Snowflake>,
+    /// Spoilers revealed in each message's text, by number.
+    pub(super) revealed_spoilers: HashMap<Snowflake, HashSet<usize>>,
     /// Display names by user id, accumulated from every user we see plus lazy
     /// `GET /users/{id}` lookups, so mentions resolve even for people no longer
     /// in the server.
