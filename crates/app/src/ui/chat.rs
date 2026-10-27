@@ -28,6 +28,8 @@ const FLASH: std::time::Duration = std::time::Duration::from_secs(2);
 /// Start fetching more messages this many screens before reaching the end,
 /// so they are usually in place before the user gets there.
 const PREFETCH_SCREENS: f64 = 3.0;
+/// Space between the last message and the composer, as around the composer.
+const COMPOSER_GAP: i32 = 12;
 /// Consecutive messages by one author within this window share a header.
 const GROUP_WINDOW_SECS: i64 = 7 * 60;
 
@@ -131,8 +133,11 @@ impl App {
         );
         let pad = move |page: &adw::ToolbarView| {
             let (top, bottom) = (page.top_bar_height(), page.bottom_bar_height());
+            // The last message stops short of the composer by the composer's
+            // own margin.
+            let end = bottom + COMPOSER_GAP;
             padding.load_from_string(&format!(
-                "listview.messages {{ padding-top: {top}px; padding-bottom: {bottom}px; }}\n\
+                "listview.messages {{ padding-top: {top}px; padding-bottom: {end}px; }}\n\
                  scrolledwindow.messages > scrollbar.vertical {{ margin-top: {top}px; margin-bottom: {bottom}px; }}"
             ));
         };
