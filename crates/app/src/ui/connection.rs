@@ -121,6 +121,10 @@ impl App {
                     }
                     self.refresh_badges();
                 }
+                Event::RequiredActionUpdate(action) => {
+                    self.state.borrow_mut().required_action = action;
+                    self.apply_required_action();
+                }
                 Event::MediaSettingsUpdate(patch) => {
                     self.state.borrow_mut().media.apply(patch);
                     self.refresh_rows();
@@ -202,6 +206,7 @@ impl App {
             notification_settings,
             guild_folders,
             media_settings,
+            required_action,
         } = ready;
         self.learn_users(private_channels.iter().flat_map(|c| &c.recipients));
         self.learn_users(
@@ -226,6 +231,7 @@ impl App {
             state.guild_folders = guild_folders;
             state.notifications = notification_settings;
             state.media = media_settings;
+            state.required_action = required_action;
             let store = (!state.persisted).then(|| (state.token.clone(), user.username.clone()));
             state.persisted = true;
             state.users.insert(user.id.0, user.display_name().to_string());
@@ -243,6 +249,7 @@ impl App {
         let me = self.state.borrow().me.as_ref().map(|u| u.display_name().to_owned()).unwrap_or_default();
         self.me_label.set_label(&me);
         self.stack.set_visible_child_name("main");
+        self.apply_required_action();
 
         // Stay on a Home page across reconnects.
         let page = self.state.borrow().page.filter(|_| was_ready);

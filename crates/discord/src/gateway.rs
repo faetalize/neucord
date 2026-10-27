@@ -54,6 +54,9 @@ pub struct Ready {
     /// Server folders and order; empty if the user never arranged servers.
     pub guild_folders: Vec<GuildFolder>,
     pub media_settings: MediaSettings,
+    /// A step Discord requires before the account can be used, if any
+    /// (see [`crate::account`]).
+    pub required_action: Option<String>,
 }
 
 #[derive(Debug)]
@@ -108,6 +111,8 @@ pub enum Event {
     GuildFoldersUpdate(Vec<GuildFolder>),
     /// The user changed how embeds and media show.
     MediaSettingsUpdate(MediaPatch),
+    /// Discord started or stopped requiring a step (see [`crate::account`]).
+    RequiredActionUpdate(Option<String>),
     /// A resume succeeded; everything missed has been replayed before this.
     Resumed,
     /// The connection is gone. `code` is the websocket close code. `resume`
@@ -431,11 +436,15 @@ fn dispatch(state: &State, name: &str, data: Value) {
                     media.apply(MediaPatch::from_settings(&data["user_settings"]));
                     media
                 },
+                required_action: data["required_action"].as_str().map(str::to_owned),
                 user,
                 guilds,
             }))
         }
         "RESUMED" => Event::Resumed,
+        "USER_REQUIRED_ACTION_UPDATE" => {
+            Event::RequiredActionUpdate(data["required_action"].as_str().map(str::to_owned))
+        }
         "MESSAGE_ACK" => {
             let (Some(channel_id), Some(message_id)) = (parse_id(&data["channel_id"]), parse_id(&data["message_id"]))
             else {

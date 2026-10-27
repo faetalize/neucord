@@ -23,6 +23,7 @@ pub(crate) const LOGOUT: Endpoint = Endpoint::post("/auth/logout");
 pub(crate) const SEND_MFA_SMS: Endpoint = Endpoint::post("/auth/mfa/sms/send");
 pub(crate) const VERIFY_MFA: Endpoint = Endpoint::post("/auth/mfa/{method}");
 pub(crate) const REMOTE_AUTH_LOGIN: Endpoint = Endpoint::post("/users/@me/remote-auth/login");
+pub(crate) const SAFETY_HUB: Endpoint = Endpoint::get("/safety-hub/@me");
 
 /// An HTTP method and a path template.
 #[derive(Clone, Copy, Debug)]

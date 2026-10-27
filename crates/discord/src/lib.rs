@@ -4,6 +4,7 @@
 //! Depends on GLib/GIO/libsoup (it runs on the GLib main loop) but never on
 //! GTK, so the UI can be replaced without touching this crate.
 
+pub mod account;
 pub mod auth;
 pub mod cdn;
 pub mod embed;

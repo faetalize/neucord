@@ -34,6 +34,8 @@ pub(super) struct State {
     pub(super) rest: Option<Rest>,
     pub(super) gateway: Option<Gateway>,
     pub(super) me: Option<User>,
+    /// A step Discord requires before the account can be used.
+    pub(super) required_action: Option<String>,
     pub(super) guilds: Vec<Guild>,
     /// DMs and group DMs, message requests included.
     pub(super) private_channels: Vec<Channel>,
