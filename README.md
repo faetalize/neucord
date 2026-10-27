@@ -9,15 +9,15 @@ Another GTK Discord client? Daring today, are we...?
 
 Reactions, editing or deleting your own messages, uploads, emoji and
 sticker pickers, threads and forums, the member list, voice and video.
-Custom emoji show as `:name:` and video attachments as links. Logins that
-Discord answers with a captcha, and two-factor with security keys. Planned
-work is in the issue tracker.
+Custom emoji show as `:name:` and video attachments as links. Two-factor
+with security keys. Planned work is in the issue tracker.
 
 ## Requirements
 
 - GTK 4.24 or newer
 - libadwaita 1.7 or newer
 - libsoup 3
+- WebKitGTK 6.0, for captchas
 - libsecret, and a Secret Service provider such as GNOME Keyring or KWallet
 - OpenSSL
 - Rust 1.92 or newer, to build
@@ -25,7 +25,7 @@ work is in the issue tracker.
 On Arch Linux:
 
 ```sh
-sudo pacman -S --needed rust gtk4 libadwaita libsoup3 libsecret openssl
+sudo pacman -S --needed rust gtk4 libadwaita libsoup3 webkitgtk-6.0 libsecret openssl
 ```
 
 ## Building
@@ -40,18 +40,19 @@ cargo run --release
 
 Scan the QR code with the Discord app on your phone, or use your email and
 password. With the QR code, your password never passes through Neucord.
-Discord sometimes answers a password login with a captcha, which Neucord
-can't show yet; use the QR code then.
+Discord sometimes asks for a captcha first, which Neucord shows in a
+window.
 
 You can still log in with a token. Guard it: anyone who has it controls your
 account SO NEVER SHARE IT ANYWHERE!
 
 ## Privacy
 
-Neucord connects only to Discord's API, gateway and CDN. There are no
-analytics, no crash reporting, and none of the tracking calls the official
-client makes. It identifies itself to Discord as Neucord instead of
-impersonating the official client.
+Neucord connects only to Discord's API, gateway and CDN, and to hCaptcha
+when Discord asks for a captcha. Captchas run in a private web view that
+keeps nothing once it closes. There are no analytics, no crash reporting,
+and none of the tracking calls the official client makes. It identifies
+itself to Discord as Neucord instead of impersonating the official client.
 
 Link previews and GIFs load through Discord's media proxy, never from the
 site they link to, so those sites don't see your IP address.

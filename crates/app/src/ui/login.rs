@@ -270,11 +270,12 @@ impl App {
 
     fn login_failed(&self, error: &Error) {
         self.login.form.set_sensitive(true);
-        let message = match error {
-            Error::Captcha => format!("{error}. Log in with the QR code instead."),
-            _ => error.to_string(),
-        };
-        self.login.set_error(Some(&message));
+        self.login.set_error(Some(&error.to_string()));
+    }
+
+    /// For the login endpoints, before there is a token.
+    fn anonymous_rest(&self) -> Rest {
+        Rest::anonymous().solving_captchas(super::captcha::solver(&self.window))
     }
 
     fn token_login(self: &Rc<Self>) {
@@ -292,9 +293,9 @@ impl App {
         }
         self.login.form.set_sensitive(false);
         self.login.set_error(None);
-        let this = self.clone();
+        let (this, rest) = (self.clone(), self.anonymous_rest());
         glib::spawn_future_local(async move {
-            let result = Rest::anonymous().login(&login, &password).await;
+            let result = rest.login(&login, &password).await;
             if !this.on_login_page() {
                 return;
             }
@@ -324,10 +325,10 @@ impl App {
             MfaMethod::Backup => "Enter one of your backup codes.",
         });
         if method == MfaMethod::Sms {
-            let this = Rc::downgrade(self);
+            let (this, rest) = (Rc::downgrade(self), self.anonymous_rest());
             let mfa = mfa.clone();
             glib::spawn_future_local(async move {
-                let sent = Rest::anonymous().send_mfa_sms(&mfa).await;
+                let sent = rest.send_mfa_sms(&mfa).await;
                 let Some(this) = this.upgrade() else { return };
                 // Still waiting for this code?
                 if this.login.mfa.borrow().as_ref().map(|(_, m)| *m) != Some(MfaMethod::Sms) {
@@ -383,9 +384,9 @@ impl App {
         }
         self.login.form.set_sensitive(false);
         self.login.set_error(None);
-        let this = self.clone();
+        let (this, rest) = (self.clone(), self.anonymous_rest());
         glib::spawn_future_local(async move {
-            let result = Rest::anonymous().verify_mfa(&mfa, method, &code).await;
+            let result = rest.verify_mfa(&mfa, method, &code).await;
             if !this.on_login_page() {
                 return;
             }
