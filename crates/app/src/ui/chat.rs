@@ -759,6 +759,23 @@ pub(super) fn format_time(time: &glib::DateTime) -> String {
     time.format(pattern).map(String::from).unwrap_or_default()
 }
 
+/// When a forwarded message was first sent: the time today, the day this
+/// week, else the date.
+fn forward_time(time: &glib::DateTime) -> String {
+    let Ok(now) = glib::DateTime::now_local() else { return String::new() };
+    let days = now.difference(time).as_seconds() / 86_400;
+    let pattern = if now.ymd() == time.ymd() {
+        "%H:%M"
+    } else if now.add_days(-1).is_ok_and(|yesterday| yesterday.ymd() == time.ymd()) {
+        "Yesterday at %H:%M"
+    } else if days < 7 {
+        "%A"
+    } else {
+        "%Y-%m-%d"
+    };
+    time.format(pattern).map(String::from).unwrap_or_default()
+}
+
 pub(super) fn is_grouped(message: &Message, previous: Option<&Message>) -> bool {
     let Some(previous) = previous.filter(|p| p.is_user_message()) else { return false };
     // A reply always shows what it answers, under a full header.
@@ -924,6 +941,64 @@ impl App {
                 body.append(&embed_widget(&embed, names, Some(&self.images), &media));
             }
         }
+        if let Some(original) = message.forwarded() {
+            body.append(&self.forward(message, &original, names));
+        }
+    }
+
+    /// A forwarded message, under a bar as quotes are: what it said, and
+    /// where and when it was first sent. Clicking that goes there.
+    fn forward(self: &Rc<Self>, message: &Message, original: &Message, names: &Names) -> gtk::Widget {
+        let bar = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).css_classes(["quote"]).build();
+        let header = gtk::Box::builder().spacing(4).css_classes(["caption", "dimmed"]).build();
+        header.append(&gtk::Image::from_icon_name("mail-forward-symbolic"));
+        header.append(&gtk::Label::new(Some("Forwarded")));
+        bar.append(&header);
+        self.message_content(&bar, original, names);
+
+        // Where it came from, as the official client names it: the channel
+        // if it is in this server, else the server.
+        let origin = {
+            let state = self.state.borrow();
+            let here = state.find_channel(message.channel_id).and_then(|(guild, _)| guild.map(|g| g.id));
+            match state.find_channel(original.channel_id) {
+                Some((Some(guild), channel)) if Some(guild.id) == here => {
+                    channel.name.as_ref().map(|name| format!("#{name}"))
+                }
+                Some((Some(guild), _)) => Some(guild.name.clone()),
+                Some((None, dm)) => Some(dm.title()),
+                None => {
+                    original.guild_id.and_then(|id| state.guilds.iter().find(|g| g.id == id)).map(|g| g.name.clone())
+                }
+            }
+        };
+        let time = parse_time(&original.timestamp).map(|t| forward_time(&t));
+        let footer: Vec<String> = origin.into_iter().chain(time).collect();
+        if !footer.is_empty() {
+            let label = gtk::Label::builder()
+                .label(footer.join(" • "))
+                .xalign(0.0)
+                .css_classes(["caption", "dimmed"])
+                .tooltip_text("Go to the original message")
+                .build();
+            label.set_cursor_from_name(Some("pointer"));
+            let click = gtk::GestureClick::new();
+            click.connect_released({
+                let this = Rc::downgrade(self);
+                let (channel, id) = (original.channel_id, original.id);
+                move |_, _, _, _| {
+                    let Some(this) = this.upgrade() else { return };
+                    if this.state.borrow().channel == Some(channel) {
+                        this.jump_to(channel, id);
+                    } else if this.state.borrow().find_channel(channel).is_some() {
+                        this.open_channel(channel);
+                    }
+                }
+            });
+            label.add_controller(click);
+            bar.append(&label);
+        }
+        bar.upcast()
     }
 
     /// How a message shows: as written, as a system message, or not at all.
@@ -996,7 +1071,9 @@ impl App {
                 let name = format!("{}{}", if pinged { "@" } else { "" }, original.author.display_name());
                 preview.append(&gtk::Label::builder().label(name).css_classes(["heading"]).build());
                 let names = self.message_names(original);
-                let text = render::plain_text(&discord::markup::parse(&original.content), &names);
+                // A forward reads as what it forwards.
+                let content = original.forwarded().map_or_else(|| original.content.clone(), |f| f.content);
+                let text = render::plain_text(&discord::markup::parse(&content), &names);
                 let text = match text.lines().find(|line| !line.trim().is_empty()) {
                     _ if blocked => "Blocked message".to_owned(),
                     _ if let Kind::System(system) = self.message_kind(original) => system.text(),

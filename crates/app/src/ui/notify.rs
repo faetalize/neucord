@@ -25,7 +25,9 @@ impl App {
             };
             drop(state);
             let names = self.message_names(message);
-            let mut body = render::plain_text(&discord::markup::parse(&message.content), &names);
+            // A forward reads as what it forwards.
+            let content = message.forwarded().map_or_else(|| message.content.clone(), |f| f.content);
+            let mut body = render::plain_text(&discord::markup::parse(&content), &names);
             if body.is_empty() && !message.attachments.is_empty() {
                 body = "Sent an attachment".into();
             } else if body.is_empty() && !message.sticker_items.is_empty() {

@@ -396,6 +396,9 @@ pub struct Message {
     pub flags: u64,
     #[serde(default)]
     pub poll: Option<crate::poll::Poll>,
+    /// What a forward carries.
+    #[serde(default)]
+    pub message_snapshots: Vec<Snapshot>,
     /// For a call's system message: who joined it, and when it ended.
     #[serde(default)]
     pub call: Option<Call>,
@@ -445,6 +448,37 @@ impl Message {
         matches!(self.kind, 0 | 7 | 19 | 20 | 23 | 24 | 25 | 32..=42 | 45 | 46 | 69)
     }
 
+    const FORWARD: u8 = 1;
+
+    /// What this message forwards, as a message of its own: dated by the
+    /// original's id, in the place it was sent.
+    pub fn forwarded(&self) -> Option<Message> {
+        let reference = self.message_reference.as_ref().filter(|r| r.kind == Self::FORWARD)?;
+        let snapshot = &self.message_snapshots.first()?.message;
+        Some(Message {
+            id: reference.message_id.unwrap_or(self.id),
+            channel_id: reference.channel_id.unwrap_or(self.channel_id),
+            guild_id: reference.guild_id,
+            kind: snapshot.kind,
+            content: snapshot.content.clone(),
+            timestamp: snapshot.timestamp.clone(),
+            edited_timestamp: snapshot.edited_timestamp.clone(),
+            attachments: snapshot.attachments.clone(),
+            embeds: snapshot.embeds.clone(),
+            sticker_items: snapshot.sticker_items.clone(),
+            flags: snapshot.flags,
+            mentions: Vec::new(),
+            mention_everyone: false,
+            mention_roles: Vec::new(),
+            message_reference: None,
+            referenced_message: Referenced::Unresolved,
+            message_snapshots: Vec::new(),
+            poll: None,
+            call: None,
+            ..self.clone()
+        })
+    }
+
     /// The id of the message this one replies to.
     pub fn reply_to(&self) -> Option<Snowflake> {
         if self.kind != Self::REPLY {
@@ -481,10 +515,43 @@ impl Sticker {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct MessageReference {
+    /// 0 for a reply (or pin notice, …), 1 for a forward.
+    #[serde(rename = "type", default)]
+    pub kind: u8,
     #[serde(default)]
     pub message_id: Option<Snowflake>,
     #[serde(default)]
     pub channel_id: Option<Snowflake>,
+    #[serde(default)]
+    pub guild_id: Option<Snowflake>,
+}
+
+/// A copy of a forwarded message, as it was when forwarded.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Snapshot {
+    pub message: SnapshotMessage,
+}
+
+/// What a forward copies of the original: not its author, nor whom it
+/// mentions.
+#[derive(Clone, Debug, Deserialize)]
+pub struct SnapshotMessage {
+    #[serde(rename = "type", default)]
+    pub kind: u8,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub timestamp: String,
+    #[serde(default)]
+    pub edited_timestamp: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+    #[serde(default)]
+    pub embeds: Vec<Embed>,
+    #[serde(default)]
+    pub sticker_items: Vec<Sticker>,
+    #[serde(default)]
+    pub flags: u64,
 }
 
 /// `referenced_message` has three states that matter: absent when Discord
@@ -706,6 +773,30 @@ mod tests {
         assert_eq!(sticker(1).image(160), Some(("https://media.discordapp.net/stickers/7.png?size=160".into(), false)));
         assert_eq!(sticker(4).image(320), Some(("https://media.discordapp.net/stickers/7.gif?size=320".into(), true)));
         assert_eq!(sticker(3).image(160), None, "Lottie");
+    }
+
+    #[test]
+    fn forwards() {
+        let forward: Message = serde_json::from_str(
+            r##"{"id":"200","channel_id":"11","author":{"id":"5","username":"a"},"timestamp":"t","content":"",
+                "message_reference":{"type":1,"message_id":"100","channel_id":"12","guild_id":"3"},
+                "message_snapshots":[{"message":{"type":0,"content":"# hi","timestamp":"2026-01-01T00:00:00+00:00",
+                    "attachments":[],"embeds":[],"flags":0}}]}"##,
+        )
+        .unwrap();
+        let original = forward.forwarded().unwrap();
+        assert_eq!(
+            (original.id, original.channel_id, original.content.as_str()),
+            (Snowflake(100), Snowflake(12), "# hi")
+        );
+        assert!(forward.reply_to().is_none());
+        // A reply's reference is no forward.
+        let reply: Message = serde_json::from_str(
+            r#"{"id":"201","channel_id":"11","author":{"id":"5","username":"a"},"timestamp":"t","type":19,
+                "message_reference":{"message_id":"100"}}"#,
+        )
+        .unwrap();
+        assert!(reply.forwarded().is_none());
     }
 
     #[test]
