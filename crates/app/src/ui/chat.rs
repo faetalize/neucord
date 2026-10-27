@@ -10,7 +10,8 @@ use gtk::prelude::*;
 use gtk::{gio, glib};
 
 use super::App;
-use super::embeds::{behind_spoiler, embed_widget, fitted_picture};
+use super::attachments;
+use super::embeds::{behind_spoiler, embed_widget};
 use super::state::now_unix;
 use super::widgets::avatar_widget;
 use crate::render::{Context, Names, Spoilers};
@@ -897,26 +898,12 @@ impl App {
         } else if edited {
             body.append(&render::render(&[], &cx, edited));
         }
+        let voice = message.is_voice_message();
         for attachment in message.attachments.iter().filter(|a| !a.is_hidden()) {
-            if attachment.is_image() && media.inline_attachment_media {
-                let autoplay = media.gif_auto_play;
-                if attachment.is_spoiler() {
-                    let (attachment, images) = (attachment.clone(), self.images.clone());
-                    body.append(&behind_spoiler(move || image_attachment(&attachment, &images, autoplay)));
-                } else {
-                    body.append(&image_attachment(attachment, &self.images, autoplay));
-                }
-                continue;
-            }
-            let markup = format!(
-                "<a href=\"{}\">📎 {}</a>",
-                glib::markup_escape_text(&attachment.url),
-                glib::markup_escape_text(&attachment.filename)
-            );
-            body.append(&gtk::Label::builder().use_markup(true).label(markup).xalign(0.0).build());
+            body.append(&attachments::attachment(attachment, voice, &self.images, &media));
         }
         for sticker in &message.sticker_items {
-            body.append(&sticker_widget(sticker, &self.images, media.gif_auto_play));
+            body.append(&attachments::sticker(sticker, &self.images, media.gif_auto_play));
         }
         // A link in a spoiler covers all the message's embeds, as in Discord.
         let spoilered = discord::embed::has_spoilered_link(&message.content);
@@ -1053,39 +1040,4 @@ fn system_icon(icon: system::Icon) -> &'static str {
         Icon::Poll => "view-list-bullet-symbolic",
         Icon::Other => "dialog-information-symbolic",
     }
-}
-
-/// A sticker, or for one we can't draw, its name.
-fn sticker_widget(sticker: &discord::Sticker, images: &crate::images::Images, autoplay: bool) -> gtk::Widget {
-    let size = discord::Sticker::SIZE;
-    let request = crate::images::request_size((size as i32, size as i32), images.scale(), None).0;
-    let Some((url, animated)) = sticker.image(request) else {
-        return gtk::Label::builder()
-            .label(format!("Sticker: {}", sticker.name))
-            .xalign(0.0)
-            .css_classes(["dimmed"])
-            .build()
-            .upcast();
-    };
-    let fitted = fitted_picture(Some(size), Some(size), size as f64, size as f64);
-    // Stickers are cut out: no backdrop behind them, as media has.
-    fitted.picture.set_css_classes(&[]);
-    fitted.picture.set_tooltip_text(Some(&sticker.name));
-    fitted.picture.set_alternative_text(Some(&sticker.name));
-    images.set(&fitted.picture, &url, animated && autoplay);
-    fitted.frame.upcast()
-}
-
-/// An inline image attachment, scaled to fit a reasonable box.
-fn image_attachment(attachment: &discord::Attachment, images: &crate::images::Images, autoplay: bool) -> gtk::Widget {
-    // The official client's box for a single image attachment.
-    const MAX_W: f64 = 550.0;
-    const MAX_H: f64 = 350.0;
-    let fitted = fitted_picture(attachment.width, attachment.height, MAX_W, MAX_H);
-    fitted.picture.set_css_classes(&["attachment-image"]);
-    // Through the media proxy when we can, which sends it at the size shown.
-    let url = attachment.proxy_url.as_deref().unwrap_or(&attachment.url);
-    let original = attachment.width.zip(attachment.height);
-    images.set_sized(&fitted.picture, url, fitted.size, original, autoplay && attachment.is_animated());
-    fitted.frame.upcast()
 }

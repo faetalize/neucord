@@ -269,6 +269,15 @@ pub struct Attachment {
     pub height: Option<u32>,
     #[serde(default)]
     pub flags: u64,
+    /// In bytes.
+    #[serde(default)]
+    pub size: Option<u64>,
+    /// A voice message's length, in seconds.
+    #[serde(default)]
+    pub duration_secs: Option<f64>,
+    /// A voice message's loudness over time: base64, a byte a sample.
+    #[serde(default)]
+    pub waveform: Option<String>,
 }
 
 impl Attachment {
@@ -299,6 +308,51 @@ impl Attachment {
             None => self.width.is_some() && self.height.is_some(),
         }
     }
+
+    /// A video to play inline. The official client goes by the extension,
+    /// and wants dimensions.
+    pub fn is_video(&self) -> bool {
+        let sized = self.width.is_some_and(|w| w > 0) && self.height.is_some_and(|h| h > 0);
+        sized && self.extension_in(&["mp4", "webm", "mov", "qt"])
+    }
+
+    /// Sound to play inline.
+    pub fn is_audio(&self) -> bool {
+        self.extension_in(&["mp3", "m4a", "ogg", "opus", "wav", "flac"])
+    }
+
+    fn extension_in(&self, extensions: &[&str]) -> bool {
+        let extension = self.filename.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+        extension.is_some_and(|e| extensions.contains(&e.as_str()))
+    }
+
+    /// A voice message's loudness, 0 to 1, as `bars` bars: samples averaged
+    /// when there are more, and silence after them when there are fewer.
+    pub fn waveform_bars(&self, bars: usize) -> Vec<f32> {
+        let samples = self.waveform.as_deref().map(glib::base64_decode).unwrap_or_default();
+        (0..bars)
+            .map(|bar| {
+                if samples.len() <= bars {
+                    return samples.get(bar).map_or(0.0, |&s| s as f32 / 255.0);
+                }
+                let range = &samples[bar * samples.len() / bars..(bar + 1) * samples.len() / bars];
+                range.iter().map(|&s| s as f32).sum::<f32>() / range.len().max(1) as f32 / 255.0
+            })
+            .collect()
+    }
+}
+
+/// How many bars a voice message's waveform has: more for longer ones, as
+/// the official client draws it on a 6-pixel pitch.
+pub fn voice_bars(duration: f64) -> usize {
+    let width = if duration <= 0.5 {
+        40.0
+    } else if duration >= 45.0 {
+        294.0
+    } else {
+        (duration - 0.5) / 44.5 * 254.0 + 40.0
+    };
+    ((width + 4.0) / 6.0).floor() as usize
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -356,6 +410,12 @@ pub struct Call {
 
 impl Message {
     const SUPPRESS_EMBEDS: u64 = 1 << 2;
+    const IS_VOICE_MESSAGE: u64 = 1 << 13;
+
+    /// A recorded voice message: its audio attachment plays with a waveform.
+    pub fn is_voice_message(&self) -> bool {
+        self.flags & Self::IS_VOICE_MESSAGE != 0
+    }
 
     /// The author (or a moderator) removed the embeds.
     pub fn embeds_suppressed(&self) -> bool {
@@ -553,6 +613,28 @@ mod tests {
         assert!(!attachment("").is_spoiler());
         assert!(attachment(r#","flags":2"#).is_hidden());
         assert!(!attachment(r#","flags":32"#).is_animated(), "the flag counts for WebP and AVIF only");
+    }
+
+    #[test]
+    fn attachment_kinds() {
+        let attachment = |name: &str, extra: &str| -> Attachment {
+            serde_json::from_str(&format!(r#"{{"id":"1","filename":"{name}","url":"u"{extra}}}"#)).unwrap()
+        };
+        assert!(attachment("clip.MP4", r#","width":640,"height":480"#).is_video());
+        assert!(!attachment("clip.mp4", "").is_video(), "no dimensions");
+        assert!(attachment("song.flac", "").is_audio());
+        assert!(!attachment("notes.txt", "").is_audio());
+    }
+
+    #[test]
+    fn voice_waveforms() {
+        assert_eq!((voice_bars(0.2), voice_bars(10.0), voice_bars(60.0)), (7, 16, 49));
+        // Four samples: 0, 255, 51, 102.
+        let voice: Attachment =
+            serde_json::from_str(r#"{"id":"1","filename":"voice-message.ogg","url":"u","waveform":"AP8zZg=="}"#)
+                .unwrap();
+        assert_eq!(voice.waveform_bars(2), [0.5, 0.3]);
+        assert_eq!(voice.waveform_bars(5), [0.0, 1.0, 0.2, 0.4, 0.0]);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! `discord` crate. All of this runs on the GTK main thread.
 
 mod account;
+mod attachments;
 mod captcha;
 mod chat;
 mod composer;

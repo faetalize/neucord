@@ -1,6 +1,6 @@
 //! Async image loading with memory and disk caches, for avatars, guild
-//! icons, custom emoji, inline attachments and embeds, plus the files embed
-//! videos play from.
+//! icons, custom emoji, inline attachments and embeds, plus the files videos
+//! and sound play from.
 //!
 //! Encoded bytes are fetched once (memory → disk → network). Still images
 //! decode once per URL into a shared `gdk::Texture`, so rows rebuilt while
@@ -182,7 +182,7 @@ impl Images {
         Some(bytes)
     }
 
-    /// A video as a file GTK can open, kept on disk (within a budget, least
+    /// A video or sound as a file GTK can open, kept on disk (within a budget, least
     /// recently played going first) and never in memory.
     pub async fn file(&self, url: &str) -> Option<PathBuf> {
         let path = self.0.video_dir.join(cache_key(url));
