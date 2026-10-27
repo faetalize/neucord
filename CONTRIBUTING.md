@@ -42,7 +42,8 @@ One feature or fix per pull request, against `master`, linked to its issue.
 If it makes Neucord rely on something new in the official client (a field,
 an enum value, a rule such as which channels take messages), extend
 `tools/discord-watch` in the same pull request, so the weekly check notices
-when Discord changes it.
+when Discord changes it. If you're not comfortable doing so, just mention it
+in the PR body and I'll handle it.
 
 Name the branch `<type>/<issue>-<what it does>`, for example
 `feature/21-qr-login`. The type is one of `feature`, `fix`, `docs`,
