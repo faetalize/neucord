@@ -344,7 +344,7 @@ impl App {
         self.header.set(&title, subtitle.as_deref());
         self.set_content_title(&title);
         self.composer_error.set_visible(false);
-        self.update_request_bar();
+        self.update_notice_bar();
 
         // Show what we have at once (instant for a recently viewed channel),
         // then fetch the newest page and merge it in.

@@ -319,7 +319,7 @@ impl App {
     /// request bar if the changed DM is open.
     fn refresh_home(self: &Rc<Self>, home: bool, open: bool) {
         if open {
-            self.update_request_bar();
+            self.update_notice_bar();
         }
         if home {
             self.rebuild_sidebar();

@@ -52,6 +52,9 @@ pub struct User {
     pub avatar: Option<String>,
     #[serde(default)]
     pub bot: bool,
+    /// Discord's own account, which sends official notifications.
+    #[serde(default, deserialize_with = "null_is_false")]
+    pub system: bool,
 }
 
 impl User {
@@ -154,6 +157,12 @@ impl Channel {
     /// A message request or spam: kept out of the DM list until accepted.
     pub fn is_request(&self) -> bool {
         self.message_request || self.spam
+    }
+
+    /// The DM with Discord's own account. It takes no messages: a message
+    /// there is one no official client can send.
+    pub fn is_system_dm(&self) -> bool {
+        self.kind == ChannelKind::Dm && self.recipients.first().is_some_and(|u| u.system)
     }
 
     /// Sort key for the DM list: most recent activity first.

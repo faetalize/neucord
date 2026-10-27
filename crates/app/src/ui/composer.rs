@@ -33,7 +33,7 @@ impl App {
     /// The message box floating under the list, with its mention popup and keys.
     pub(super) fn build_composer(self: &Rc<Self>, area: &gtk::Box) {
         area.append(&self.composer_error);
-        area.append(&self.request_bar);
+        area.append(&self.notice_bar);
         self.reply_bar.append(&self.reply_label);
         self.reply_bar.append(&self.reply_ping);
         self.reply_ping.connect_toggled(|button| {
@@ -126,10 +126,44 @@ impl App {
         self.composer.add_controller(keys);
     }
 
+    /// What replaces the message box where we can't post: accept and ignore
+    /// in a message request, a notice in the system DM.
+    pub(super) fn update_notice_bar(self: &Rc<Self>) {
+        let bar = &self.notice_bar;
+        while let Some(child) = bar.first_child() {
+            bar.remove(&child);
+        }
+        let (system, request) = {
+            let state = self.state.borrow();
+            let system = state.channel.and_then(|id| state.find_channel(id)).is_some_and(|(_, c)| c.is_system_dm());
+            (system, state.open_request().map(|c| (c.id, c.spam, c.title())))
+        };
+        let text = match &request {
+            _ if system => "This chat is reserved for official Discord notifications. \
+                Discord will never ask for your password or token."
+                .to_owned(),
+            Some((_, true, title)) => format!("Discord filed this message request from {title} as likely spam."),
+            Some((_, false, title)) => format!("{title} wants to message you. Accept to reply."),
+            None => {
+                self.composer_box.set_visible(true);
+                bar.set_visible(false);
+                return;
+            }
+        };
+        self.composer_box.set_visible(false);
+        bar.set_visible(true);
+        bar.append(&gtk::Label::builder().label(text).xalign(0.0).wrap(true).hexpand(true).build());
+        if let Some((id, ..)) = request.filter(|_| !system) {
+            for button in self.request_actions(id) {
+                bar.append(&button);
+            }
+        }
+    }
+
     /// Reply to `message`. Like Discord, the reply pings unless `no_ping`
     /// (Shift held when clicking Reply).
     pub(super) fn start_reply(self: &Rc<Self>, message: &Message, no_ping: bool) {
-        // A message request has no message box to reply from.
+        // Message requests and the system DM have no message box to reply from.
         if !self.composer_box.is_visible() {
             return;
         }
@@ -274,7 +308,8 @@ impl App {
             (state.channel, state.rest.clone())
         };
         let (Some(channel), Some(rest)) = (channel, rest) else { return };
-        if text.is_empty() {
+        // A hidden message box is a channel we must never post to (#51).
+        if text.is_empty() || !self.composer_box.is_visible() {
             return;
         }
         let replying = self.reply.borrow().clone().filter(|r| r.channel == channel);

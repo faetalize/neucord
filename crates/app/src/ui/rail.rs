@@ -222,7 +222,7 @@ impl App {
                     state.page = None;
                 }
                 self.content.set_visible_child_name("chat");
-                self.update_request_bar();
+                self.update_notice_bar();
                 self.show_blank();
                 self.header.set("No text channels you can see here", None);
                 self.set_content_title("Neucord");
