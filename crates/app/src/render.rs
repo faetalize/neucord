@@ -11,6 +11,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use discord::markup::{Entity, Span, Style};
+use discord::system::Part;
 use gtk::prelude::*;
 use gtk::{gdk, pango};
 
@@ -421,6 +422,27 @@ fn tags(style: Style) -> (&'static str, &'static str) {
     }
 }
 
+/// Pango markup for a system message's line, with when it happened.
+pub fn system_markup(parts: &[Part], time: &str) -> String {
+    let mut out = String::new();
+    for part in parts {
+        out += &match part {
+            Part::Text(text) => escape(text),
+            Part::Name(text) | Part::Strong(text) => format!("<b>{}</b>", escape(text)),
+            Part::Jump { label, to } => format!("<a href=\"{JUMP}{to}\">{}</a>", escape(label)),
+        };
+    }
+    out + &format!("  <span fgalpha=\"55%\" size=\"small\">{}</span>", escape(time))
+}
+
+/// Links to a message in the same channel.
+const JUMP: &str = "neucord:message/";
+
+/// The message a link made by [`system_markup`] jumps to.
+pub fn jump_target(uri: &str) -> Option<discord::Snowflake> {
+    uri.strip_prefix(JUMP)?.parse().ok().map(discord::Snowflake)
+}
+
 /// What an entity reads as: `@name`, `#channel`, `:emoji:`, a date.
 fn entity_text(entity: &Entity, names: &Names) -> String {
     match entity {
@@ -544,6 +566,19 @@ mod tests {
             text.spoilers.iter().map(|(r, n)| (&parsed[r.start as usize..r.end as usize], *n)).collect();
         assert_eq!(spoilers, [("é \u{fffc}", 3), ("b", 4)]);
         assert_eq!(text.next_spoiler, 5);
+    }
+
+    #[test]
+    fn system_lines() {
+        let parts = [
+            Part::Name("a&b".into()),
+            Part::Text(" pinned ".into()),
+            Part::Jump { label: "a message".into(), to: discord::Snowflake(9) },
+        ];
+        let markup = system_markup(&parts, "12:00");
+        assert!(markup.starts_with("<b>a&amp;b</b> pinned <a href=\"neucord:message/9\">a message</a>"));
+        assert_eq!(jump_target("neucord:message/9"), Some(discord::Snowflake(9)));
+        assert_eq!(jump_target("https://e.com"), None);
     }
 
     #[test]

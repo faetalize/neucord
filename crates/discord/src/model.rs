@@ -341,6 +341,18 @@ pub struct Message {
     pub embeds: Vec<Embed>,
     #[serde(default)]
     pub flags: u64,
+    /// For a call's system message: who joined it, and when it ended.
+    #[serde(default)]
+    pub call: Option<Call>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Call {
+    #[serde(default)]
+    pub participants: Vec<Snowflake>,
+    /// ISO 8601; `None` while the call goes on.
+    #[serde(default)]
+    pub ended_timestamp: Option<String>,
 }
 
 impl Message {

@@ -4,6 +4,7 @@
 use std::rc::Rc;
 
 use discord::rest::Page;
+use discord::system::{self, Kind};
 use discord::{Message, MessageEdit, Referenced, Snowflake, User};
 use gtk::prelude::*;
 use gtk::{gio, glib};
@@ -13,6 +14,7 @@ use super::embeds::{behind_spoiler, embed_widget, fitted_picture};
 use super::state::now_unix;
 use super::widgets::avatar_widget;
 use crate::render::{Context, Names, Spoilers};
+use crate::rich_text::RichText;
 use crate::{render, timelines};
 
 /// Messages fetched when a channel opens: enough to fill the view, small so
@@ -757,7 +759,7 @@ pub(super) fn format_time(time: &glib::DateTime) -> String {
 }
 
 pub(super) fn is_grouped(message: &Message, previous: Option<&Message>) -> bool {
-    let Some(previous) = previous else { return false };
+    let Some(previous) = previous.filter(|p| p.is_user_message()) else { return false };
     // A reply always shows what it answers, under a full header.
     if previous.author.id != message.author.id || message.reply_to().is_some() {
         return false;
@@ -781,7 +783,12 @@ impl App {
         while let Some(child) = row.first_child() {
             row.remove(&child);
         }
-        let grouped = is_grouped(message, previous);
+        let kind = self.message_kind(message);
+        if kind == Kind::Hidden {
+            row.set_visible(false);
+            return;
+        }
+        let grouped = kind == Kind::Normal && is_grouped(message, previous);
         let mut classes = vec!["message"];
         if !grouped {
             classes.push("first");
@@ -799,14 +806,18 @@ impl App {
 
         let main = gtk::Box::builder().spacing(16).css_classes(["message-main"]).build();
         let gutter = gtk::Box::builder().width_request(40).valign(gtk::Align::Start).build();
-        if !grouped {
+        if let Kind::System(system) = &kind {
+            gutter.append(&gtk::Image::builder().icon_name(system_icon(system.icon)).halign(gtk::Align::End).build());
+        } else if !grouped {
             gutter.append(&avatar_widget(&message.author, 40, Some(&self.images)));
         }
         main.append(&gutter);
 
         let names = self.message_names(message);
         let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).hexpand(true).build();
-        if !grouped {
+        if let Kind::System(system) = &kind {
+            body.append(&self.system_line(message, system));
+        } else if !grouped {
             let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             header.append(
                 &gtk::Label::builder()
@@ -819,49 +830,8 @@ impl App {
             header.append(&gtk::Label::builder().label(time).css_classes(["caption", "dimmed"]).build());
             body.append(&header);
         }
-        let media = self.state.borrow().media;
-        let edited = message.edited_timestamp.is_some();
-        let embeds = discord::embed::visible(message, &media);
-        let spans = message.markup();
-        let cx = Context {
-            spoilers: Some(self.spoilers(message.id)),
-            jumbo: discord::markup::is_jumbo(&spans),
-            ..Context::new(&names, Some(&self.images))
-        };
-        if discord::embed::hides_content(&message.content, &embeds, media.inline_embed_media) {
-            // A bare GIF or image link: the media below stands for it.
-        } else if !message.content.is_empty() {
-            body.append(&render::render(&spans, &cx, edited));
-        } else if edited {
-            body.append(&render::render(&[], &cx, edited));
-        }
-        for attachment in message.attachments.iter().filter(|a| !a.is_hidden()) {
-            if attachment.is_image() && media.inline_attachment_media {
-                let autoplay = media.gif_auto_play;
-                if attachment.is_spoiler() {
-                    let (attachment, images) = (attachment.clone(), self.images.clone());
-                    body.append(&behind_spoiler(move || image_attachment(&attachment, &images, autoplay)));
-                } else {
-                    body.append(&image_attachment(attachment, &self.images, autoplay));
-                }
-                continue;
-            }
-            let markup = format!(
-                "<a href=\"{}\">📎 {}</a>",
-                glib::markup_escape_text(&attachment.url),
-                glib::markup_escape_text(&attachment.filename)
-            );
-            body.append(&gtk::Label::builder().use_markup(true).label(markup).xalign(0.0).build());
-        }
-        // A link in a spoiler covers all the message's embeds, as in Discord.
-        let spoilered = discord::embed::has_spoilered_link(&message.content);
-        for embed in embeds {
-            if spoilered {
-                let (names, images) = (names.clone(), self.images.clone());
-                body.append(&behind_spoiler(move || embed_widget(&embed, &names, Some(&images), &media)));
-            } else {
-                body.append(&embed_widget(&embed, &names, Some(&self.images), &media));
-            }
+        if kind == Kind::Normal {
+            self.message_content(&body, message, &names);
         }
         main.append(&body);
 
@@ -909,6 +879,85 @@ impl App {
         Spoilers { revealed, on_reveal: Rc::new(on_reveal) }
     }
 
+    /// What a message says, and shows: its text, attachments and embeds.
+    fn message_content(self: &Rc<Self>, body: &gtk::Box, message: &Message, names: &Names) {
+        let media = self.state.borrow().media;
+        let edited = message.edited_timestamp.is_some();
+        let embeds = discord::embed::visible(message, &media);
+        let spans = message.markup();
+        let cx = Context {
+            spoilers: Some(self.spoilers(message.id)),
+            jumbo: discord::markup::is_jumbo(&spans),
+            ..Context::new(names, Some(&self.images))
+        };
+        if discord::embed::hides_content(&message.content, &embeds, media.inline_embed_media) {
+            // A bare GIF or image link: the media below stands for it.
+        } else if !message.content.is_empty() {
+            body.append(&render::render(&spans, &cx, edited));
+        } else if edited {
+            body.append(&render::render(&[], &cx, edited));
+        }
+        for attachment in message.attachments.iter().filter(|a| !a.is_hidden()) {
+            if attachment.is_image() && media.inline_attachment_media {
+                let autoplay = media.gif_auto_play;
+                if attachment.is_spoiler() {
+                    let (attachment, images) = (attachment.clone(), self.images.clone());
+                    body.append(&behind_spoiler(move || image_attachment(&attachment, &images, autoplay)));
+                } else {
+                    body.append(&image_attachment(attachment, &self.images, autoplay));
+                }
+                continue;
+            }
+            let markup = format!(
+                "<a href=\"{}\">📎 {}</a>",
+                glib::markup_escape_text(&attachment.url),
+                glib::markup_escape_text(&attachment.filename)
+            );
+            body.append(&gtk::Label::builder().use_markup(true).label(markup).xalign(0.0).build());
+        }
+        // A link in a spoiler covers all the message's embeds, as in Discord.
+        let spoilered = discord::embed::has_spoilered_link(&message.content);
+        for embed in embeds {
+            if spoilered {
+                let (names, images) = (names.clone(), self.images.clone());
+                body.append(&behind_spoiler(move || embed_widget(&embed, &names, Some(&images), &media)));
+            } else {
+                body.append(&embed_widget(&embed, names, Some(&self.images), &media));
+            }
+        }
+    }
+
+    /// How a message shows: as written, as a system message, or not at all.
+    fn message_kind(&self, message: &Message) -> Kind {
+        let state = self.state.borrow();
+        let channel = state.find_channel(message.channel_id);
+        let place = system::Place {
+            me: state.me(),
+            guild_name: channel.and_then(|(guild, _)| guild).map(|g| g.name.as_str()),
+            group: channel.is_some_and(|(_, c)| c.kind == discord::ChannelKind::GroupDm),
+        };
+        system::kind(message, &place)
+    }
+
+    /// A system message's line, and when it happened. Its link to a message
+    /// jumps there.
+    fn system_line(self: &Rc<Self>, message: &Message, system: &system::System) -> gtk::Widget {
+        let time = parse_time(&message.timestamp).map(|t| format_time(&t)).unwrap_or_default();
+        let text = RichText::new(&render::system_markup(&system.parts, &time), Vec::new(), Vec::new());
+        text.label().connect_activate_link({
+            let this = Rc::downgrade(self);
+            let channel = message.channel_id;
+            move |_, uri| {
+                let Some(to) = render::jump_target(uri) else { return glib::Propagation::Proceed };
+                if let Some(this) = this.upgrade() {
+                    this.jump_to(channel, to);
+                }
+                glib::Propagation::Stop
+            }
+        });
+        text.upcast()
+    }
+
     /// The line above a reply: who it answers and the start of what they said.
     /// Clicking it jumps to the original.
     fn reply_preview(self: &Rc<Self>, message: &Message, to: Snowflake, messages: &gio::ListStore) -> gtk::Widget {
@@ -951,6 +1000,7 @@ impl App {
                 let text = render::plain_text(&discord::markup::parse(&original.content), &names);
                 let text = match text.lines().find(|line| !line.trim().is_empty()) {
                     _ if blocked => "Blocked message".to_owned(),
+                    _ if let Kind::System(system) = self.message_kind(original) => system.text(),
                     Some(line) => line.to_owned(),
                     // The official client's wording for messages with no text.
                     None if !original.sticker_items.is_empty() => "Click to see sticker".to_owned(),
@@ -981,6 +1031,24 @@ impl App {
             preview.add_controller(click);
         }
         preview.upcast()
+    }
+}
+
+fn system_icon(icon: system::Icon) -> &'static str {
+    use system::Icon;
+    match icon {
+        Icon::Join => "go-next-symbolic",
+        Icon::Leave => "go-previous-symbolic",
+        Icon::Call => "call-start-symbolic",
+        Icon::MissedCall => "call-missed-symbolic",
+        Icon::Pin => "view-pin-symbolic",
+        Icon::Boost => "starred-symbolic",
+        Icon::Edit => "document-edit-symbolic",
+        Icon::Thread => "chat-message-new-symbolic",
+        Icon::Stage => "audio-speakers-symbolic",
+        Icon::Alert => "dialog-warning-symbolic",
+        Icon::Poll => "view-list-bullet-symbolic",
+        Icon::Other => "dialog-information-symbolic",
     }
 }
 

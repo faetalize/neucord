@@ -21,6 +21,7 @@ pub mod rest;
 pub mod session;
 pub mod settings;
 pub mod shape;
+pub mod system;
 
 pub use gateway::{Event, Gateway, Ready, Resume};
 pub use model::{
