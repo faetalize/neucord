@@ -822,11 +822,16 @@ impl App {
         let media = self.state.borrow().media;
         let edited = message.edited_timestamp.is_some();
         let embeds = discord::embed::visible(message, &media);
-        let cx = Context { spoilers: Some(self.spoilers(message.id)), ..Context::new(&names, Some(&self.images)) };
+        let spans = message.markup();
+        let cx = Context {
+            spoilers: Some(self.spoilers(message.id)),
+            jumbo: discord::markup::is_jumbo(&spans),
+            ..Context::new(&names, Some(&self.images))
+        };
         if discord::embed::hides_content(&message.content, &embeds, media.inline_embed_media) {
             // A bare GIF or image link: the media below stands for it.
         } else if !message.content.is_empty() {
-            body.append(&render::render(&message.markup(), &cx, edited));
+            body.append(&render::render(&spans, &cx, edited));
         } else if edited {
             body.append(&render::render(&[], &cx, edited));
         }

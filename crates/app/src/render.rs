@@ -33,11 +33,13 @@ pub struct Context<'a> {
     pub images: Option<&'a Images>,
     /// Remembers revealed spoilers across rebuilds of the same text.
     pub spoilers: Option<Spoilers>,
+    /// The text is only emoji, shown large.
+    pub jumbo: bool,
 }
 
 impl<'a> Context<'a> {
     pub fn new(names: &'a Names, images: Option<&'a Images>) -> Self {
-        Context { names, images, spoilers: None }
+        Context { names, images, spoilers: None, jumbo: false }
     }
 }
 
@@ -54,8 +56,11 @@ pub struct Spoilers {
 // the UI keeps current with `set_accent`.
 const CODE_OPEN: &str = "<tt><span background=\"#808080\" bgalpha=\"15%\">";
 const SPOILER_OPEN: &str = "<span background=\"#808080\" bgalpha=\"40%\">";
-/// Custom emoji in running text (the official client's size).
+/// Custom emoji in running text, and alone (the official client's sizes).
 const EMOJI: i32 = 22;
+const JUMBO_EMOJI: i32 = 48;
+/// Unicode emoji alone, about as large as custom ones.
+const JUMBO_TEXT: &str = "<span size=\"300%\">";
 
 thread_local! {
     /// Mention background and text colours, as Pango colour strings.
@@ -129,7 +134,14 @@ impl Blocks<'_, '_> {
 
     fn flush(&mut self, column: &gtk::Box, inline: &mut Vec<&Span>, edited: bool) {
         let mut text = Inline::new(self.cx, self.next_spoiler);
-        text.spans(trim_breaks(inline));
+        let spans = trim_breaks(inline);
+        if self.cx.jumbo && !spans.is_empty() {
+            text.tag(JUMBO_TEXT);
+            text.spans(spans);
+            text.tag("</span>");
+        } else {
+            text.spans(spans);
+        }
         if edited {
             text.edited_marker();
         }
@@ -239,6 +251,7 @@ struct Inline<'a> {
     names: &'a Names,
     /// Custom emoji show as images (else as `:name:`).
     images: bool,
+    emoji_size: i32,
     markup: String,
     /// Bytes of text so far: the markup without its tags and escapes.
     len: u32,
@@ -253,6 +266,7 @@ impl<'a> Inline<'a> {
         Inline {
             names: cx.names,
             images: cx.images.is_some(),
+            emoji_size: if cx.jumbo { JUMBO_EMOJI } else { EMOJI },
             markup: String::new(),
             len: 0,
             emoji: Vec::new(),
@@ -318,8 +332,12 @@ impl<'a> Inline<'a> {
                 self.tag("</a>");
             }
             Span::Entity(Entity::Emoji { name, id, animated }) if self.images => {
-                let image =
-                    rich_text::Image { index: self.len, size: EMOJI, alt: format!(":{name}:"), paintable: None };
+                let image = rich_text::Image {
+                    index: self.len,
+                    size: self.emoji_size,
+                    alt: format!(":{name}:"),
+                    paintable: None,
+                };
                 self.emoji.push((image, Emoji { id: *id, animated: *animated }));
                 self.text_object();
             }
@@ -368,7 +386,8 @@ impl<'a> Inline<'a> {
             text.connect_reveal(move |i| on_reveal(numbers[i]));
         }
         if let Some(images) = cx.images {
-            let request = emoji_request(EMOJI, images.scale());
+            let size = if cx.jumbo { JUMBO_EMOJI } else { EMOJI };
+            let request = emoji_request(size, images.scale());
             for (n, emoji) in emoji.into_iter().enumerate() {
                 let weak = text.downgrade();
                 let url = discord::cdn::emoji_url(emoji.id, emoji.animated, request);
@@ -525,6 +544,11 @@ mod tests {
             text.spoilers.iter().map(|(r, n)| (&parsed[r.start as usize..r.end as usize], *n)).collect();
         assert_eq!(spoilers, [("é \u{fffc}", 3), ("b", 4)]);
         assert_eq!(text.next_spoiler, 5);
+    }
+
+    #[test]
+    fn jumbo_markup_parses() {
+        assert!(pango::parse_markup(&format!("{JUMBO_TEXT}x</span>"), '\0').is_ok());
     }
 
     #[test]

@@ -336,6 +336,88 @@ pub fn code_language(tag: &str) -> String {
     name.to_owned()
 }
 
+/// The most emoji a message can be and still show them large.
+pub const JUMBO_MAX: usize = 30;
+
+/// Whether a message's spans are nothing but emoji (custom or Unicode) and
+/// whitespace, few enough that the official client shows them large.
+pub fn is_jumbo(spans: &[Span]) -> bool {
+    let mut count = 0;
+    for span in spans {
+        count += match span {
+            Span::Entity(Entity::Emoji { .. }) => 1,
+            Span::Text(text) => match emoji_count(text) {
+                Some(n) => n,
+                None => return false,
+            },
+            Span::Break => 0,
+            _ => return false,
+        };
+    }
+    (1..=JUMBO_MAX).contains(&count)
+}
+
+/// How many emoji `text` is, if it is nothing but emoji and whitespace. A
+/// sequence (a flag, a keycap, skin tones, people joined into a family)
+/// counts once.
+pub fn emoji_count(text: &str) -> Option<usize> {
+    const VS16: char = '\u{FE0F}';
+    const ZWJ: char = '\u{200D}';
+    const KEYCAP: char = '\u{20E3}';
+    let regional = |c: char| ('\u{1F1E6}'..='\u{1F1FF}').contains(&c);
+    let modifier = |c: char| ('\u{1F3FB}'..='\u{1F3FF}').contains(&c) || ('\u{E0020}'..='\u{E007F}').contains(&c);
+    let mut chars = text.chars().peekable();
+    let mut count = 0;
+    while let Some(c) = chars.next() {
+        if c.is_whitespace() {
+            continue;
+        }
+        count += 1;
+        if regional(c) {
+            chars.next_if(|&c| regional(c));
+            continue;
+        }
+        if c.is_ascii_digit() || c == '#' || c == '*' {
+            chars.next_if_eq(&VS16);
+            chars.next_if_eq(&KEYCAP)?;
+            continue;
+        }
+        let mut presentation = !text_default(c);
+        if !pictographic(c) {
+            return None;
+        }
+        loop {
+            if chars.next_if(|&c| c == VS16 || modifier(c)).is_some() {
+                presentation = true;
+            } else if chars.next_if_eq(&ZWJ).is_some() {
+                chars.next_if(|&c| pictographic(c))?;
+            } else {
+                break;
+            }
+        }
+        if !presentation {
+            return None;
+        }
+    }
+    Some(count)
+}
+
+/// Characters that are emoji (close to Unicode's Extended_Pictographic).
+fn pictographic(c: char) -> bool {
+    matches!(c as u32,
+        0xA9 | 0xAE | 0x203C | 0x2049 | 0x2122 | 0x2139 | 0x2194..=0x21AA | 0x231A..=0x23FF | 0x24C2
+        | 0x25AA..=0x25FE | 0x2600..=0x27BF | 0x2934..=0x2935 | 0x2B05..=0x2B55 | 0x3030 | 0x303D | 0x3297
+        | 0x3299 | 0x1F000..=0x1FAFF)
+}
+
+/// Emoji that are text unless a variation selector makes them emoji.
+fn text_default(c: char) -> bool {
+    matches!(
+        c as u32,
+        0xA9 | 0xAE | 0x203C | 0x2049 | 0x2122 | 0x2139 | 0x2194..=0x21AA | 0x24C2 | 0x3030 | 0x303D | 0x3297 | 0x3299
+    )
+}
+
 /// A stretch of an `ansi` code block, and how its escape codes style it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Ansi {
@@ -634,6 +716,24 @@ mod tests {
         assert_eq!(code_language("c++"), "cpp");
         assert_eq!(code_language("Rust"), "rust");
         assert_eq!(code_language("brainfuck"), "brainfuck");
+    }
+
+    #[test]
+    fn emoji_only() {
+        assert_eq!(emoji_count("😀 👍🏽"), Some(2));
+        assert_eq!(emoji_count("👨‍👩‍👧 🇫🇷 1️⃣ ❤️ ❤"), Some(5), "family, flag, keycap, heart with and without VS16");
+        assert_eq!(emoji_count("😀 a"), None);
+        assert_eq!(emoji_count("1"), None);
+        assert_eq!(emoji_count("©"), None, "text unless asked to be emoji");
+        assert_eq!(emoji_count("©️"), Some(1));
+        assert_eq!(emoji_count("  "), Some(0));
+
+        assert!(is_jumbo(&parse("<:blob:1> 😀\n<a:spin:2>")));
+        assert!(!is_jumbo(&parse("<:blob:1> hi")));
+        assert!(!is_jumbo(&parse("**😀**")));
+        assert!(!is_jumbo(&parse(" ")));
+        assert!(is_jumbo(&parse(&"😀".repeat(JUMBO_MAX))));
+        assert!(!is_jumbo(&parse(&"😀".repeat(JUMBO_MAX + 1))));
     }
 
     #[test]
