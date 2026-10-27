@@ -12,6 +12,11 @@ pub struct Snowflake(pub u64);
 impl Snowflake {
     const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
 
+    /// When it was made, in milliseconds since 1970.
+    pub fn unix_ms(self) -> i64 {
+        ((self.0 >> 22) + Self::DISCORD_EPOCH_MS) as i64
+    }
+
     /// A snowflake for "now", used as a message nonce.
     pub fn now() -> Self {
         let unix_ms = (glib::real_time() / 1000) as u64;
@@ -726,6 +731,11 @@ mod tests {
                 .unwrap();
         assert_eq!(voice.waveform_bars(2), [0.5, 0.3]);
         assert_eq!(voice.waveform_bars(5), [0.0, 1.0, 0.2, 0.4, 0.0]);
+    }
+
+    #[test]
+    fn snowflake_times() {
+        assert_eq!(Snowflake(1_088_216_706_570_268_682).unix_ms(), 1_679_521_480_935);
     }
 
     #[test]

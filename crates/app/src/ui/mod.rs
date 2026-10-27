@@ -91,6 +91,11 @@ pub struct App {
     reply: RefCell<Option<composer::ReplyCtx>>,
     /// "You're viewing older messages", while the open channel is detached.
     present_bar: adw::Banner,
+    /// How many messages are new since the channel was last read, with a
+    /// way to jump to the first.
+    unread_bar: adw::Banner,
+    /// The divider above the first unread message, while it has a row.
+    unread_divider: glib::WeakRef<gtk::Box>,
     /// A message flashed after jumping to it.
     highlight: Cell<Option<Snowflake>>,
     state: RefCell<state::State>,
@@ -201,6 +206,8 @@ impl App {
                 .title("You're viewing older messages")
                 .button_label("Jump to Present")
                 .build(),
+            unread_bar: adw::Banner::builder().button_label("Jump").build(),
+            unread_divider: glib::WeakRef::new(),
             highlight: Cell::default(),
             state: RefCell::default(),
             drawn: RefCell::default(),

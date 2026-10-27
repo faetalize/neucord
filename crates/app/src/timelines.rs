@@ -87,6 +87,11 @@ fn id_at(store: &gio::ListStore, position: u32) -> Option<Snowflake> {
     store.item(position).and_downcast::<glib::BoxedAnyObject>().map(|o| o.borrow::<Message>().id)
 }
 
+/// Every message's id, oldest first.
+pub fn ids(store: &gio::ListStore) -> Vec<Snowflake> {
+    (0..store.n_items()).filter_map(|position| id_at(store, position)).collect()
+}
+
 pub fn find(store: &gio::ListStore, id: Snowflake) -> Option<(u32, Message)> {
     // Recent messages are the likely targets of edits and deletes: search from the end.
     (0..store.n_items()).rev().find_map(|position| {

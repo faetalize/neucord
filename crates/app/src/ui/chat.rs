@@ -3,6 +3,7 @@
 
 use std::rc::Rc;
 
+use discord::read_state::starts_unread;
 use discord::rest::Page;
 use discord::system::{self, Kind};
 use discord::{Message, MessageEdit, Referenced, Snowflake, User};
@@ -11,7 +12,7 @@ use gtk::{gio, glib};
 
 use super::App;
 use super::embeds::{behind_spoiler, embed_widget};
-use super::state::now_unix;
+use super::state::{Unread, now_unix};
 use super::widgets::avatar_widget;
 use super::{attachments, components, polls};
 use crate::render::{Context, Names, Spoilers};
@@ -44,8 +45,12 @@ impl App {
         factory.connect_setup(|_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
             item.set_activatable(false);
-            // A bar for collapsed blocked messages, then the message itself.
+            // A divider for a new day or the first unread message, a bar for
+            // collapsed blocked messages, then the message itself.
             let cell = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            cell.append(
+                &gtk::Box::builder().visible(false).spacing(8).margin_top(12).margin_start(18).margin_end(18).build(),
+            );
             cell.append(&gtk::Box::builder().visible(false).css_classes(["blocked-bar"]).build());
             cell.append(&gtk::Box::new(gtk::Orientation::Vertical, 2));
             item.set_child(Some(&cell));
@@ -56,12 +61,15 @@ impl App {
                 let Some(this) = this.upgrade() else { return };
                 let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
                 let cell = item.child().expect("cell");
-                let bar = cell.first_child().and_downcast::<gtk::Box>().expect("blocked bar");
+                let divider = cell.first_child().and_downcast::<gtk::Box>().expect("divider");
+                let bar = divider.next_sibling().and_downcast::<gtk::Box>().expect("blocked bar");
                 let row = bar.next_sibling().and_downcast::<gtk::Box>().expect("row box");
                 let Some(message) = item.item().and_downcast::<glib::BoxedAnyObject>() else { return };
                 let message = message.borrow::<Message>().clone();
                 let messages = this.messages();
                 let position = item.position();
+                let previous = position.checked_sub(1).and_then(|p| timelines::message_at(&messages, p));
+                let divided = this.fill_divider(&divider, &message, previous.as_ref());
                 let (run, revealed) = {
                     let state = this.state.borrow();
                     let run = timelines::run_at(&messages, position, |m| state.relationships.is_blocked(m.author.id));
@@ -75,8 +83,7 @@ impl App {
                 if !row.is_visible() {
                     return;
                 }
-                let previous = position.checked_sub(1).and_then(|p| timelines::message_at(&messages, p));
-                this.fill_message_row(&row, &message, previous.as_ref(), &messages);
+                this.fill_message_row(&row, &message, previous.as_ref().filter(|_| !divided), &messages);
             }
         });
         self.list.set_factory(Some(&factory));
@@ -92,6 +99,7 @@ impl App {
                 if let Some(this) = this.upgrade() {
                     this.maybe_load_older();
                     this.maybe_load_newer();
+                    this.check_unread_seen();
                 }
             }
         });
@@ -123,6 +131,15 @@ impl App {
         let header = self.header.header_bar(&[self.sidebar_toggle().upcast_ref()]);
         page.add_top_bar(&header);
         page.add_top_bar(&self.present_bar);
+        page.add_top_bar(&self.unread_bar);
+        self.unread_bar.connect_button_clicked({
+            let this = Rc::downgrade(self);
+            move |_| {
+                if let Some(this) = this.upgrade() {
+                    this.jump_to_unread();
+                }
+            }
+        });
         page.add_bottom_bar(&composer);
 
         // The list scrolls under the bars, and pads its ends to their height
@@ -256,6 +273,95 @@ impl App {
         }
     }
 
+    /// Above a message: the date where a new day starts, and "New" above the
+    /// first unread message. Returns whether there is a divider, which
+    /// starts a new group of messages.
+    fn fill_divider(&self, divider: &gtk::Box, message: &Message, previous: Option<&Message>) -> bool {
+        while let Some(child) = divider.first_child() {
+            divider.remove(&child);
+        }
+        let time = parse_time(&message.timestamp);
+        let day = |m: &Message| parse_time(&m.timestamp).map(|t| t.ymd());
+        let new_day = previous.is_none_or(|p| day(p) != time.as_ref().map(|t| t.ymd()));
+        let unread = self.open_unread().is_some_and(|u| {
+            u.channel == message.channel_id && starts_unread(previous.map(|p| p.id), message.id, u.acked)
+        });
+        // The list keeps many more rows than it shows, so where the first
+        // unread one is decides whether it has been seen, not its binding.
+        if unread {
+            self.unread_divider.set(Some(divider));
+        } else if self.unread_divider.upgrade().as_ref() == Some(divider) {
+            self.unread_divider.set(None);
+        }
+        divider.set_visible(new_day || unread);
+        if !divider.is_visible() {
+            return false;
+        }
+        let line = || gtk::Separator::builder().hexpand(true).valign(gtk::Align::Center).build();
+        divider.append(&line());
+        if let Some(time) = time.filter(|_| new_day) {
+            let date = time.format("%e %B %Y").map(|d| d.trim().to_owned()).unwrap_or_default();
+            divider.append(&gtk::Label::builder().label(date).css_classes(["caption", "dimmed"]).build());
+            divider.append(&line());
+        }
+        if unread {
+            divider.append(&gtk::Label::builder().label("New").css_classes(["caption-heading", "accent"]).build());
+        }
+        true
+    }
+
+    /// Once the first unread message has come into view, stop offering to
+    /// jump to it.
+    fn check_unread_seen(&self) {
+        let Some(divider) = self.unread_divider.upgrade().filter(|d| d.is_mapped()) else { return };
+        let Some(bounds) = divider.compute_bounds(&self.scroller) else { return };
+        let height = self.scroller.height() as f32;
+        if bounds.y() + bounds.height() > 0.0 && bounds.y() < height {
+            self.unread_seen();
+        }
+    }
+
+    fn unread_seen(&self) {
+        if let Some(unread) = self.state.borrow_mut().unread.as_mut() {
+            unread.seen = true;
+        }
+        self.unread_bar.set_revealed(false);
+    }
+
+    /// What was unread in the open channel when it opened.
+    fn open_unread(&self) -> Option<Unread> {
+        let state = self.state.borrow();
+        state.unread.filter(|u| Some(u.channel) == state.channel)
+    }
+
+    /// Offer to jump to the first unread message, until it has been in view:
+    /// how many there are, and since when.
+    pub(super) fn update_unread_bar(&self) {
+        let Some(unread) = self.open_unread().filter(|u| !u.seen) else {
+            return self.unread_bar.set_revealed(false);
+        };
+        let store = self.messages();
+        let (count, mut more) = discord::read_state::unread_count(&timelines::ids(&store), unread.acked);
+        more &= !self.timelines.borrow().get(unread.channel).is_some_and(|t| t.complete);
+        if count == 0 {
+            return self.unread_bar.set_revealed(false);
+        }
+        // Since the first unread message, or if that isn't loaded, about
+        // when the last read one was sent.
+        let first = timelines::ids(&store).iter().position(|&id| id > unread.acked);
+        let since = match first.filter(|_| !more).and_then(|p| timelines::message_at(&store, p as u32)) {
+            Some(first) => parse_time(&first.timestamp),
+            None => glib::DateTime::from_unix_local(unread.acked.unix_ms() / 1000).ok(),
+        };
+        let today = glib::DateTime::now_local().ok().map(|now| now.ymd());
+        let pattern = if since.as_ref().map(|t| t.ymd()) == today { "%H:%M" } else { "%H:%M on %e %B %Y" };
+        let since = since.and_then(|t| t.format(pattern).ok()).unwrap_or_default();
+        let plural = if count == 1 && !more { "" } else { "s" };
+        let plus = if more { "+" } else { "" };
+        self.unread_bar.set_title(&format!("{count}{plus} new message{plural} since {since}"));
+        self.unread_bar.set_revealed(true);
+    }
+
     /// Show the "viewing older messages" bar while the open channel is detached.
     pub(super) fn update_present_bar(&self) {
         let channel = self.state.borrow().channel;
@@ -332,6 +438,13 @@ impl App {
             (title, state.rest.clone(), left)
         };
         let subtitle = self.channel_subtitle(id);
+        // What is unread now, before opening the channel reads it.
+        let unread = {
+            let state = self.state.borrow();
+            let acked = state.find_channel(id).filter(|(_, c)| state.is_unread(c)).and_then(|_| state.read.acked(id));
+            acked.map(|acked| Unread { channel: id, acked, seen: false })
+        };
+        self.state.borrow_mut().unread = unread;
         // The channel we left keeps only its newest messages: live events keep
         // those current, and coming back refetches the newest page anyway.
         if let Some(left) = left
@@ -354,6 +467,7 @@ impl App {
         let store = self.timelines.borrow_mut().open(id).store.clone();
         self.selection.set_model(Some(&store));
         self.update_present_bar();
+        self.update_unread_bar();
         self.scroll_to_end();
 
         if rest.is_some() {
@@ -389,6 +503,7 @@ impl App {
                         }
                     }
                     this.update_present_bar();
+                    this.update_unread_bar();
                     if let Some(newest) = store.n_items().checked_sub(1).and_then(|p| timelines::message_at(&store, p))
                     {
                         // READY's newest-message ids can be stale; history is not.
@@ -469,6 +584,7 @@ impl App {
                     }
                     this.learn_messages(&page);
                     timelines::prepend(&store, page);
+                    this.update_unread_bar();
                     this.load_older_if_short();
                 }
                 Ok(_) => {}
@@ -554,6 +670,42 @@ impl App {
             self.flash(id, position);
             return;
         }
+        self.load_around(channel, id, true, move |this, store| {
+            if let Some((position, _)) = timelines::find(store, id) {
+                this.flash(id, position);
+            }
+        });
+    }
+
+    /// Show the first unread message of the open channel, loading the
+    /// messages around the last one read if need be.
+    fn jump_to_unread(self: &Rc<Self>) {
+        let Some(Unread { channel, acked, .. }) = self.open_unread() else { return };
+        let show = move |this: &Rc<Self>, store: &gio::ListStore| {
+            let first = timelines::ids(store).iter().position(|&id| id > acked).map(|p| p as u32);
+            if let Some(position) = first {
+                this.list.scroll_to(position, gtk::ListScrollFlags::NONE, None);
+                this.unread_seen();
+            }
+        };
+        let store = self.messages();
+        let loaded = timelines::oldest_id(&store).is_some_and(|oldest| oldest <= acked);
+        if loaded {
+            show(self, &store);
+        } else {
+            self.load_around(channel, acked, false, show);
+        }
+    }
+
+    /// Replace the open channel's messages with those around `id`, then
+    /// call `then`. With `must_exist`, a page without `id` is an error.
+    fn load_around(
+        self: &Rc<Self>,
+        channel: Snowflake,
+        id: Snowflake,
+        must_exist: bool,
+        then: impl FnOnce(&Rc<Self>, &gio::ListStore) + 'static,
+    ) {
         let Some(rest) = self.state.borrow().rest.clone() else { return };
         let this = self.clone();
         glib::spawn_future_local(async move {
@@ -564,7 +716,7 @@ impl App {
             if this.state.borrow().channel != Some(channel) {
                 return;
             }
-            if !page.iter().any(|m| m.id == id) {
+            if must_exist && !page.iter().any(|m| m.id == id) {
                 return this.show_composer_error("That message no longer exists.");
             }
             this.learn_messages(&page);
@@ -582,9 +734,8 @@ impl App {
                 return;
             };
             this.update_present_bar();
-            if let Some((position, _)) = timelines::find(&store, id) {
-                this.flash(id, position);
-            }
+            this.update_unread_bar();
+            then(&this, &store);
         });
     }
 
@@ -783,7 +934,7 @@ pub(super) fn is_grouped(message: &Message, previous: Option<&Message>) -> bool 
         return false;
     }
     match (parse_time(&previous.timestamp), parse_time(&message.timestamp)) {
-        (Some(a), Some(b)) => b.difference(&a).as_seconds() < GROUP_WINDOW_SECS,
+        (Some(a), Some(b)) => b.difference(&a).as_seconds() < GROUP_WINDOW_SECS && a.ymd() == b.ymd(),
         _ => false,
     }
 }

@@ -20,6 +20,17 @@ pub(super) enum Page {
     MessageRequests,
 }
 
+/// Where the unread messages of a channel started when it was opened, for
+/// the "New" divider and the offer to jump there.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Unread {
+    pub(super) channel: Snowflake,
+    /// The last message read then.
+    pub(super) acked: Snowflake,
+    /// The first unread message has been in view.
+    pub(super) seen: bool,
+}
+
 #[derive(Default)]
 pub(super) struct State {
     pub(super) token: Option<String>,
@@ -53,6 +64,8 @@ pub(super) struct State {
     /// Runs of blocked users' messages the user chose to see, by the run's
     /// first message.
     pub(super) revealed_blocked: HashSet<Snowflake>,
+    /// What was unread in the open channel when it opened.
+    pub(super) unread: Option<Unread>,
     /// Spoilers revealed in each message's text, by number.
     pub(super) revealed_spoilers: HashMap<Snowflake, HashSet<usize>>,
     /// Display names by user id, accumulated from every user we see plus lazy
