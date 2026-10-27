@@ -230,13 +230,8 @@ impl Rest {
             let msg = soup::Message::new(call.method(), &format!("{}{}", identity::API_BASE, call.path()))
                 .expect("API URL is valid");
             let headers = msg.request_headers().expect("request has headers");
-            if let Some(token) = &self.token {
-                headers.replace("Authorization", token);
-            }
-            headers.replace("X-Discord-Locale", "en-US");
-            if self.token.is_none() {
-                // Without it, logging in turns down valid two-factor codes.
-                headers.replace("X-Super-Properties", &identity::super_properties());
+            for (name, value) in base_headers(self.token.as_deref()) {
+                headers.replace(name, &value);
             }
             if let Some((key, captcha)) = &answer {
                 headers.replace("X-Captcha-Key", key);
@@ -279,6 +274,17 @@ impl Rest {
     }
 }
 
+/// The headers every request starts with.
+fn base_headers(token: Option<&str>) -> Vec<(&'static str, String)> {
+    let mut headers = vec![("X-Discord-Locale", "en-US".to_owned())];
+    match token {
+        Some(token) => headers.push(("Authorization", token.to_owned())),
+        // Without it, logging in turns down valid two-factor codes.
+        None => headers.push(("X-Super-Properties", identity::super_properties())),
+    }
+    headers
+}
+
 /// Discord answers a request it wants a captcha for with a 400 whose body
 /// has `captcha_key`, whatever the endpoint.
 pub(crate) fn is_captcha(body: &Value) -> bool {
@@ -287,7 +293,20 @@ pub(crate) fn is_captcha(body: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::Captcha;
+    use super::{Captcha, base_headers};
+    use crate::identity;
+
+    #[test]
+    fn logging_in_sends_neucords_properties() {
+        let header = |token, name| base_headers(token).into_iter().find(|(n, _)| *n == name).map(|(_, v)| v);
+        let properties = header(None, "X-Super-Properties").expect("sent without a token");
+        let decoded = openssl::base64::decode_block(&properties).unwrap();
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&decoded).unwrap(), identity::client_properties());
+        assert_eq!(header(None, "Authorization"), None);
+
+        assert_eq!(header(Some("t"), "Authorization").as_deref(), Some("t"));
+        assert_eq!(header(Some("t"), "X-Super-Properties"), None);
+    }
 
     #[test]
     fn captcha_challenges() {
