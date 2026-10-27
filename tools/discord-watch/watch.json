@@ -1,13 +1,22 @@
 {
   "enums": {
+    "AccountStanding": ["ALL_GOOD", "LIMITED", "VERY_LIMITED", "AT_RISK", "SUSPENDED"],
     "ActivityType": ["PLAYING", "STREAMING", "LISTENING", "WATCHING", "CUSTOM_STATUS", "COMPETING"],
     "ApiErrorCode": ["UNKNOWN_ACCOUNT", "RELATIONSHIP_INVALID_NO_CONFIRMATION"],
     "ChannelType": ["DM", "GROUP_DM", "GUILD_TEXT", "GUILD_CATEGORY"],
     "ConsentStatus": ["UNSPECIFIED", "PENDING", "ACCEPTED", "REJECTED"],
     "GatewayOpcode": ["DISPATCH", "HEARTBEAT", "IDENTIFY", "RESUME", "HELLO", "HEARTBEAT_ACK"],
+    "LoginRequiredAction": ["UPDATE_PASSWORD"],
     "MessageType": ["DEFAULT", "REPLY", "CHANNEL_PINNED_MESSAGE"],
     "RelationshipType": ["FRIEND", "BLOCKED", "PENDING_INCOMING", "PENDING_OUTGOING"],
+    "RequiredAction": [
+      "AGREEMENTS",
+      "REQUIRE_CAPTCHA",
+      "REQUIRE_VERIFIED_EMAIL",
+      "REQUIRE_VERIFIED_PHONE",
+      "REQUIRE_SAFETY_FLOWS"
+    ],
     "StatusType": ["ONLINE", "IDLE", "DND", "INVISIBLE", "OFFLINE"]
   },
-  "methods": ["isSystemDM", "isSystemUser"]
+  "methods": ["handleRequiredAction", "isSystemDM", "isSystemUser"]
 }
