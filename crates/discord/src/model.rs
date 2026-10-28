@@ -47,6 +47,10 @@ fn null_is_false<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     Ok(Option::<bool>::deserialize(d)?.unwrap_or(false))
 }
 
+fn null_is_zero<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    Ok(Option::<u32>::deserialize(d)?.unwrap_or(0))
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct User {
     pub id: Snowflake,
@@ -146,6 +150,9 @@ pub struct Channel {
     /// A message request Discord filed as spam.
     #[serde(default, rename = "is_spam", deserialize_with = "null_is_false")]
     pub spam: bool,
+    /// Slowmode: seconds each member must wait between messages; 0 when off.
+    #[serde(default, deserialize_with = "null_is_zero")]
+    pub rate_limit_per_user: u32,
 }
 
 impl Channel {
@@ -186,9 +193,47 @@ pub struct Guild {
     pub default_message_notifications: u8,
     /// Our roles here, for role mentions. Filled in by the gateway.
     pub my_roles: Vec<Snowflake>,
+    /// When our timeout here ends, in seconds since 1970. Filled in by the
+    /// gateway; may lie in the past.
+    pub timed_out_until: Option<i64>,
+}
+
+/// What Neucord uses of our own member in a server, which READY, GUILD_CREATE
+/// and GUILD_MEMBER_UPDATE carry.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Member {
+    pub roles: Vec<Snowflake>,
+    /// `communication_disabled_until`, rounded up to the second.
+    pub timed_out_until: Option<i64>,
+}
+
+impl Member {
+    pub fn from_value(value: &serde_json::Value) -> Member {
+        let id = |v: &serde_json::Value| v.as_str()?.parse().ok().map(Snowflake);
+        let until = value["communication_disabled_until"].as_str().and_then(|until| {
+            let time = glib::DateTime::from_iso8601(until, Some(&glib::TimeZone::utc())).ok()?;
+            Some(time.to_unix() + i64::from(time.microsecond() > 0))
+        });
+        Member {
+            roles: value["roles"].as_array().into_iter().flatten().filter_map(id).collect(),
+            timed_out_until: until,
+        }
+    }
 }
 
 impl Guild {
+    pub fn set_member(&mut self, member: Member) {
+        self.my_roles = member.roles;
+        self.timed_out_until = member.timed_out_until;
+    }
+
+    /// Seconds left of our timeout here, if we are in one. Then the official
+    /// client lets us read and nothing else; it makes an exception for
+    /// administrators, which Discord doesn't let anyone time out.
+    pub fn timeout_left(&self, now_unix: i64) -> Option<i64> {
+        self.timed_out_until.map(|until| until - now_unix).filter(|&left| left > 0)
+    }
+
     /// Text channels in sidebar order: uncategorised first, then each
     /// category by position, channels by position within it. Returns
     /// `(category name, channels)` groups.
@@ -254,6 +299,7 @@ impl<'de> Deserialize<'de> for Guild {
             channels: raw.channels,
             default_message_notifications: default.unwrap_or(0),
             my_roles: Vec::new(),
+            timed_out_until: None,
         })
     }
 }
@@ -631,6 +677,16 @@ impl MessageEdit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slowmode_off() {
+        let channel = |rate: &str| -> Channel {
+            serde_json::from_str(&format!(r#"{{"id":"1","type":0,"rate_limit_per_user":{rate}}}"#)).unwrap()
+        };
+        assert_eq!(channel("null").rate_limit_per_user, 0);
+        assert_eq!(channel("0").rate_limit_per_user, 0);
+        assert_eq!(channel("21600").rate_limit_per_user, 21600);
+    }
 
     #[test]
     fn guild_with_top_level_name() {

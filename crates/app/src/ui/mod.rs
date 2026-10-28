@@ -74,8 +74,11 @@ pub struct App {
     scroller: gtk::ScrolledWindow,
     composer: gtk::TextView,
     composer_box: gtk::Box,
-    /// In place of the composer where we can't post: message requests, the system DM.
+    /// In place of the composer where we can't post: message requests, the
+    /// system DM, a timeout. Above it while slowmode makes us wait.
     notice_bar: gtk::Box,
+    /// Counts the notice bar's wait down, while it shows one.
+    notice_tick: RefCell<Option<glib::SourceId>>,
     composer_error: gtk::Label,
     images: Images,
     /// Mention autocomplete, anchored to the composer.
@@ -179,6 +182,7 @@ impl App {
                 .visible(false)
                 .css_classes(["composer", "card-row", "notice-bar"])
                 .build(),
+            notice_tick: RefCell::default(),
             composer_error: gtk::Label::builder()
                 .xalign(0.0)
                 .wrap(true)
