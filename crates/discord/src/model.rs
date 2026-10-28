@@ -5,7 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::embed::Embed;
-use crate::verification::{Membership, Rules};
+use crate::verification::Rules;
 
 /// Discord IDs are 64-bit integers sent as JSON strings.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -47,6 +47,10 @@ impl<'de> Deserialize<'de> for Snowflake {
 
 fn null_is_false<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     Ok(Option::<bool>::deserialize(d)?.unwrap_or(false))
+}
+
+fn null_is_zero<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    Ok(Option::<u32>::deserialize(d)?.unwrap_or(0))
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -148,6 +152,9 @@ pub struct Channel {
     /// A message request Discord filed as spam.
     #[serde(default, rename = "is_spam", deserialize_with = "null_is_false")]
     pub spam: bool,
+    /// Slowmode: seconds each member must wait between messages; 0 when off.
+    #[serde(default, deserialize_with = "null_is_zero")]
+    pub rate_limit_per_user: u32,
 }
 
 impl Channel {
@@ -186,16 +193,73 @@ pub struct Guild {
     pub channels: Vec<Channel>,
     /// Notification level for members who never changed it: 0 all, 1 mentions.
     pub default_message_notifications: u8,
+    /// The server's owner, who has every permission.
+    pub owner_id: Option<Snowflake>,
     /// Our roles here, for role mentions. Filled in by the gateway.
     pub my_roles: Vec<Snowflake>,
+    /// When our timeout here ends, in seconds since 1970. Filled in by the
+    /// gateway; may lie in the past.
+    pub timed_out_until: Option<i64>,
     /// What the server asks before members can talk.
     pub verification: Rules,
-    /// Our own membership. The gateway fills it in from our member; the
-    /// guild itself only knows when we joined.
-    pub membership: Membership,
+    /// When we joined, in seconds since 1970.
+    pub joined_at: Option<i64>,
+    /// Membership screening holds us until we accept the server's rules.
+    pub pending: bool,
+    /// Our member flags here.
+    pub member_flags: u64,
+}
+
+/// What Neucord uses of our own member in a server, which READY, GUILD_CREATE
+/// and GUILD_MEMBER_UPDATE carry.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Member {
+    pub roles: Vec<Snowflake>,
+    /// `communication_disabled_until`, rounded up to the second.
+    pub timed_out_until: Option<i64>,
+    /// Rounded up to the second too, so the time-based gates never lift early.
+    pub joined_at: Option<i64>,
+    pub pending: bool,
+    pub flags: u64,
+}
+
+impl Member {
+    pub fn from_value(value: &Value) -> Member {
+        let id = |v: &Value| v.as_str()?.parse().ok().map(Snowflake);
+        Member {
+            roles: value["roles"].as_array().into_iter().flatten().filter_map(id).collect(),
+            timed_out_until: unix_rounded_up(&value["communication_disabled_until"]),
+            joined_at: unix_rounded_up(&value["joined_at"]),
+            pending: value["pending"] == true,
+            flags: value["flags"].as_u64().unwrap_or(0),
+        }
+    }
+}
+
+/// An ISO 8601 time, in seconds since 1970, a part second counting as whole.
+fn unix_rounded_up(value: &Value) -> Option<i64> {
+    let time = glib::DateTime::from_iso8601(value.as_str()?, Some(&glib::TimeZone::utc())).ok()?;
+    Some(time.to_unix() + i64::from(time.microsecond() > 0))
 }
 
 impl Guild {
+    pub fn set_member(&mut self, member: Member) {
+        self.my_roles = member.roles;
+        self.timed_out_until = member.timed_out_until;
+        // READY's members may leave it out; the guild has it too.
+        self.joined_at = member.joined_at.or(self.joined_at);
+        self.pending = member.pending;
+        self.member_flags = member.flags;
+    }
+
+    /// Seconds left of our timeout here, if we are in one. Then the official
+    /// client lets us read and nothing else. It exempts administrators, whom
+    /// Discord doesn't let anyone time out; we can't tell who they are until
+    /// permissions are computed (#11).
+    pub fn timeout_left(&self, now_unix: i64) -> Option<i64> {
+        self.timed_out_until.map(|until| until - now_unix).filter(|&left| left > 0)
+    }
+
     /// Text channels in sidebar order: uncategorised first, then each
     /// category by position, channels by position within it. Returns
     /// `(category name, channels)` groups.
@@ -232,6 +296,8 @@ impl<'de> Deserialize<'de> for Guild {
             icon: Option<String>,
             #[serde(default)]
             default_message_notifications: Option<u8>,
+            #[serde(default)]
+            owner_id: Option<Snowflake>,
         }
         #[derive(Deserialize)]
         struct Raw {
@@ -246,13 +312,15 @@ impl<'de> Deserialize<'de> for Guild {
             channels: Vec<Channel>,
             #[serde(default)]
             default_message_notifications: Option<u8>,
+            #[serde(default)]
+            owner_id: Option<Snowflake>,
         }
 
         let value = Value::deserialize(d)?;
         let raw = Raw::deserialize(&value).map_err(serde::de::Error::custom)?;
-        let (name, icon, default) = match (raw.name, raw.properties) {
-            (Some(name), _) => (name, raw.icon, raw.default_message_notifications),
-            (None, Some(p)) => (p.name, p.icon, p.default_message_notifications),
+        let (name, icon, default, owner_id) = match (raw.name, raw.properties) {
+            (Some(name), _) => (name, raw.icon, raw.default_message_notifications, raw.owner_id),
+            (None, Some(p)) => (p.name, p.icon, p.default_message_notifications, p.owner_id),
             (None, None) => return Err(serde::de::Error::custom("guild has no name (unavailable)")),
         };
         Ok(Guild {
@@ -261,12 +329,13 @@ impl<'de> Deserialize<'de> for Guild {
             icon,
             channels: raw.channels,
             default_message_notifications: default.unwrap_or(0),
+            owner_id,
             my_roles: Vec::new(),
+            timed_out_until: None,
             verification: Rules::from_guild(&value),
-            membership: Membership {
-                joined_at: value["joined_at"].as_str().and_then(crate::verification::unix_ms),
-                ..Default::default()
-            },
+            joined_at: unix_rounded_up(&value["joined_at"]),
+            pending: false,
+            member_flags: 0,
         })
     }
 }
@@ -646,9 +715,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn slowmode_off() {
+        let channel = |rate: &str| -> Channel {
+            serde_json::from_str(&format!(r#"{{"id":"1","type":0,"rate_limit_per_user":{rate}}}"#)).unwrap()
+        };
+        assert_eq!(channel("null").rate_limit_per_user, 0);
+        assert_eq!(channel("0").rate_limit_per_user, 0);
+        assert_eq!(channel("21600").rate_limit_per_user, 21600);
+    }
+
+    #[test]
     fn guild_with_top_level_name() {
         let g: Guild = serde_json::from_str(
-            r#"{"id":"1","name":"Legacy","icon":null,"channels":[
+            r#"{"id":"1","name":"Legacy","icon":null,"owner_id":"7","channels":[
                 {"id":"10","type":4,"name":"Cat","position":0},
                 {"id":"11","type":0,"name":"b","position":1,"parent_id":"10"},
                 {"id":"12","type":0,"name":"a","position":0,"parent_id":"10"},
@@ -657,7 +736,7 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        assert_eq!(g.name, "Legacy");
+        assert_eq!((g.name.as_str(), g.owner_id), ("Legacy", Some(Snowflake(7))));
         let sidebar = g.sidebar();
         let names: Vec<(Option<&str>, Vec<&str>)> = sidebar
             .iter()
@@ -669,8 +748,9 @@ mod tests {
     #[test]
     fn guild_with_properties() {
         let g: Guild =
-            serde_json::from_str(r#"{"id":"2","properties":{"name":"New","icon":"abc"},"channels":[]}"#).unwrap();
-        assert_eq!((g.name.as_str(), g.icon.as_deref()), ("New", Some("abc")));
+            serde_json::from_str(r#"{"id":"2","properties":{"name":"New","icon":"abc","owner_id":"7"},"channels":[]}"#)
+                .unwrap();
+        assert_eq!((g.name.as_str(), g.icon.as_deref(), g.owner_id), ("New", Some("abc"), Some(Snowflake(7))));
     }
 
     #[test]

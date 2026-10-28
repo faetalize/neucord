@@ -4,12 +4,12 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use discord::{Channel, Event, Gateway, Guild, Ready, Rest, Snowflake, session};
+use discord::{Channel, Event, Gateway, Guild, Member, Ready, Rest, Snowflake, session};
 use gtk::glib;
 use gtk::prelude::*;
 
 use super::App;
-use super::state::{Page, State};
+use super::state::{Page, State, now_ms};
 
 impl App {
     pub(super) fn logout(self: &Rc<Self>) {
@@ -100,27 +100,27 @@ impl App {
             match event {
                 Event::Ready(ready) => self.on_ready(*ready),
                 Event::GuildCreate(guild) => self.on_guild(guild),
-                Event::GuildUpdate { guild_id, rules } => {
-                    if let Some(guild) = self.state.borrow_mut().guilds.iter_mut().find(|g| g.id == guild_id) {
-                        guild.verification = rules;
-                    }
-                    self.update_notice_bar();
+                Event::PrivateChannelCreate(channel) | Event::PrivateChannelUpdate(channel) => {
+                    self.on_private_channel(channel)
                 }
-                Event::MemberUpdate { guild_id, roles, membership } => {
-                    if let Some(guild) = self.state.borrow_mut().guilds.iter_mut().find(|g| g.id == guild_id) {
-                        guild.my_roles = roles;
-                        guild.membership = membership;
+                Event::PrivateChannelDelete(id) => self.on_private_channel_delete(id),
+                Event::GuildChannelUpdate { guild_id, channel } => self.on_guild_channel(guild_id, channel),
+                Event::MemberUpdate { guild_id, member } => self.on_member(guild_id, member),
+                Event::GuildUpdate { guild_id, rules } => {
+                    let open = {
+                        let mut state = self.state.borrow_mut();
+                        let Some(guild) = state.guilds.iter_mut().find(|g| g.id == guild_id) else { continue };
+                        guild.verification = rules;
+                        state.guild == Some(guild_id)
+                    };
+                    if open {
+                        self.update_notice_bar();
                     }
-                    self.update_notice_bar();
                 }
                 Event::AccountUpdate(account) => {
                     self.state.borrow_mut().account = Some(account);
                     self.update_notice_bar();
                 }
-                Event::PrivateChannelCreate(channel) | Event::PrivateChannelUpdate(channel) => {
-                    self.on_private_channel(channel)
-                }
-                Event::PrivateChannelDelete(id) => self.on_private_channel_delete(id),
                 Event::MessageCreate(message) => self.on_message(*message),
                 Event::MessageUpdate(edit) => self.on_message_update(edit),
                 Event::MessageDelete { id, channel_id } => self.on_message_delete(id, channel_id),
@@ -379,6 +379,41 @@ impl App {
         self.rebuild_rail();
         if is_open {
             self.rebuild_sidebar();
+            self.update_notice_bar();
+        }
+    }
+
+    /// A server channel changed: its name, topic, place, slowmode.
+    pub(super) fn on_guild_channel(self: &Rc<Self>, guild_id: Snowflake, channel: Channel) {
+        let (guild_open, channel_open) = {
+            let mut state = self.state.borrow_mut();
+            let state = &mut *state;
+            let Some(guild) = state.guilds.iter_mut().find(|g| g.id == guild_id) else { return };
+            let Some(existing) = guild.channels.iter_mut().find(|c| c.id == channel.id) else { return };
+            state.slowmode.update(&channel, now_ms());
+            let id = channel.id;
+            *existing = channel;
+            (state.guild == Some(guild_id), state.channel == Some(id))
+        };
+        if guild_open {
+            self.rebuild_sidebar();
+        }
+        if channel_open {
+            self.update_notice_bar();
+        }
+    }
+
+    /// Our member in a server changed: a timeout began or was lifted, our
+    /// roles changed, or screening let us in.
+    pub(super) fn on_member(self: &Rc<Self>, guild_id: Snowflake, member: Member) {
+        let open = {
+            let mut state = self.state.borrow_mut();
+            let state = &mut *state;
+            let Some(guild) = state.guilds.iter_mut().find(|g| g.id == guild_id) else { return };
+            guild.set_member(member);
+            state.guild == Some(guild_id)
+        };
+        if open {
             self.update_notice_bar();
         }
     }

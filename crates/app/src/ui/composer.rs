@@ -3,13 +3,15 @@
 use std::rc::Rc;
 use std::time::Duration;
 
+use discord::cooldowns::{Slowmode, bypasses_slowmode, wait_words};
 use discord::rest::Reply;
 use discord::verification::{self, Gate};
-use discord::{Message, Snowflake};
+use discord::{Channel, Message, Snowflake};
 use gtk::glib;
 use gtk::prelude::*;
 
 use super::App;
+use super::state::{now_ms, now_unix};
 
 /// The message the composer is replying to.
 #[derive(Clone)]
@@ -128,43 +130,63 @@ impl App {
     }
 
     /// What replaces the message box where we can't post: accept and ignore
-    /// in a message request, a notice in the system DM, and what a server's
-    /// verification still asks of us.
+    /// in a message request, a notice in the system DM, during a timeout, or
+    /// while a server's verification asks for more. While slowmode makes us
+    /// wait, the box stays and the wait shows above it.
     pub(super) fn update_notice_bar(self: &Rc<Self>) {
         let bar = &self.notice_bar;
         while let Some(child) = bar.first_child() {
             bar.remove(&child);
         }
-        if let Some(timer) = self.notice_timer.take() {
-            timer.remove();
+        if let Some(tick) = self.notice_tick.take() {
+            tick.remove();
         }
-        let now = glib::real_time() / 1000;
-        let (system, request, gate) = {
+        let (system, request, timeout, gate, slowmode) = {
             let state = self.state.borrow();
             let open = state.channel.and_then(|id| state.find_channel(id));
             let system = open.is_some_and(|(_, c)| c.is_system_dm());
             let guild = open.and_then(|(guild, _)| guild);
-            let gate = guild.zip(state.account.as_ref()).and_then(|(g, account)| verification::gate(g, account, now));
-            (system, state.open_request().map(|c| (c.id, c.spam, c.title())), gate)
+            let timeout = guild.and_then(|g| g.timeout_left(now_unix()));
+            let gate = guild.zip(state.account.as_ref()).and_then(|(g, a)| verification::gate(g, a, now_unix()));
+            let slowmode = open.map_or(0, |(_, c)| state.slowmode.remaining_ms(c, now_ms()));
+            (system, state.open_request().map(|c| (c.id, c.spam, c.title())), timeout, gate, slowmode)
         };
-        let text = match &request {
+        let label = |text: String| gtk::Label::builder().label(text).xalign(0.0).wrap(true).hexpand(true).build();
+        let text = match (&request, timeout) {
             _ if system => "This chat is reserved for official Discord notifications. \
                 Discord will never ask for your password or token."
                 .to_owned(),
-            Some((_, true, title)) => format!("Discord filed this message request from {title} as likely spam."),
-            Some((_, false, title)) => format!("{title} wants to message you. Accept to reply."),
-            None => match &gate {
-                Some(gate) => self.gate_notice(gate, now),
+            (_, Some(left)) => format!(
+                "You're in timeout in this server for {}. Until then you can read, but not send messages or react.",
+                wait_words(left)
+            ),
+            (Some((_, true, title)), None) => {
+                format!("Discord filed this message request from {title} as likely spam.")
+            }
+            (Some((_, false, title)), None) => format!("{title} wants to message you. Accept to reply."),
+            (None, None) => match &gate {
+                Some(gate) => gate_notice(gate, now_unix()),
                 None => {
                     self.composer_box.set_visible(true);
-                    bar.set_visible(false);
+                    bar.set_visible(slowmode > 0);
+                    if slowmode > 0 {
+                        let seconds = (slowmode + 999) / 1000;
+                        bar.append(&label(format!(
+                            "Slowmode is enabled. You can send another message in this channel in {}.",
+                            wait_words(seconds)
+                        )));
+                        self.tick_notice_bar();
+                    }
                     return;
                 }
             },
         };
         self.composer_box.set_visible(false);
         bar.set_visible(true);
-        bar.append(&gtk::Label::builder().label(text).xalign(0.0).wrap(true).hexpand(true).build());
+        bar.append(&label(text));
+        if timeout.is_some() || gate.as_ref().and_then(Gate::until).is_some() {
+            self.tick_notice_bar();
+        }
         if let Some((id, ..)) = request.filter(|_| !system) {
             for button in self.request_actions(id) {
                 bar.append(&button);
@@ -172,30 +194,18 @@ impl App {
         }
     }
 
-    /// The official client's words for what a server still asks of us. The
-    /// gates that only take time update the bar when they clear.
-    fn gate_notice(self: &Rc<Self>, gate: &Gate, now: i64) -> String {
-        let text = gate.text();
-        if *gate == Gate::Screening {
-            return format!("{text} Accept the server's rules in the official app.");
-        }
-        let Some(until) = gate.until() else { return text };
+    /// Show the notice bar again in a second, to count its wait down and to
+    /// give the message box back when the wait is over.
+    fn tick_notice_bar(self: &Rc<Self>) {
         let this = Rc::downgrade(self);
-        let wait = Duration::from_millis(until.saturating_sub(now).max(0) as u64);
-        let timer = glib::timeout_add_local_once(wait, move || {
+        let tick = glib::timeout_add_local_once(Duration::from_secs(1), move || {
             if let Some(this) = this.upgrade() {
-                // Fired, so there is nothing left to remove.
-                this.notice_timer.take();
+                // The source is spent; there is nothing left to remove.
+                this.notice_tick.take();
                 this.update_notice_bar();
             }
         });
-        self.notice_timer.replace(Some(timer));
-        // Round up, so the time shown is never one where sending still fails.
-        let minute = (until + 59_999) / 60_000 * 60;
-        match glib::DateTime::from_unix_local(minute).and_then(|t| t.format("%H:%M")) {
-            Ok(at) => format!("{text} You can send messages here from {at}."),
-            Err(_) => text,
-        }
+        self.notice_tick.replace(Some(tick));
     }
 
     /// Reply to `message`. Like Discord, the reply pings unless `no_ping`
@@ -338,6 +348,31 @@ impl App {
         Some(gtk::gdk::Rectangle::new(x, y, 1, strong.height()))
     }
 
+    /// Milliseconds before we may post in `channel` again.
+    fn slowmode_left(&self, channel: Snowflake) -> i64 {
+        let state = self.state.borrow();
+        state.find_channel(channel).map_or(0, |(_, c)| state.slowmode.remaining_ms(c, now_ms()))
+    }
+
+    /// Tell the slowmode tracker about a message to `channel`, then show the
+    /// wait if that channel is still open. `record` is told whether we
+    /// bypass slowmode there.
+    fn record_slowmode(self: &Rc<Self>, channel: Snowflake, record: impl FnOnce(&mut Slowmode, &Channel, bool)) {
+        let open = {
+            let mut state = self.state.borrow_mut();
+            let state = &mut *state;
+            let me = state.me();
+            let Some((guild, c)) = state.find_channel(channel) else { return };
+            let bypass = guild.zip(me).is_some_and(|(guild, me)| bypasses_slowmode(guild, me));
+            let c = c.clone();
+            record(&mut state.slowmode, &c, bypass);
+            state.channel == Some(channel)
+        };
+        if open {
+            self.update_notice_bar();
+        }
+    }
+
     pub(super) fn send_composer(self: &Rc<Self>) {
         let buffer = self.composer.buffer();
         let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).trim().to_owned();
@@ -350,6 +385,10 @@ impl App {
         if text.is_empty() || !self.composer_box.is_visible() {
             return;
         }
+        // Slowmode would refuse it; the notice bar says how long is left.
+        if self.slowmode_left(channel) > 0 {
+            return self.update_notice_bar();
+        }
         let replying = self.reply.borrow().clone().filter(|r| r.channel == channel);
         let reply = replying.as_ref().map(|r| Reply {
             to: r.to,
@@ -357,6 +396,7 @@ impl App {
             ping: r.fixed_ping.unwrap_or(self.reply_ping.is_active()),
         });
         let ping = self.reply_ping.is_active();
+        self.record_slowmode(channel, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
         buffer.set_text("");
         self.set_reply(None);
         self.mention_popover.popdown();
@@ -365,13 +405,23 @@ impl App {
             // The gateway echoes our own message back, which is what adds it to the list.
             match rest.send_message(channel, &text, reply).await {
                 Ok(_) => {
+                    this.record_slowmode(channel, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
                     // Sending from an old stretch of history returns to the present.
                     if this.timelines.borrow().get(channel).is_some_and(|t| t.detached) {
                         this.load_newest(channel);
                     }
                 }
                 Err(e) => {
-                    this.show_composer_error(&format!("Not sent: {e}"));
+                    match e.slowmode_wait() {
+                        Some(wait) => {
+                            this.record_slowmode(channel, |slowmode, c, _| slowmode.refused(c, wait, now_ms()));
+                            this.show_composer_error("Not sent: slowmode is enabled in this channel.");
+                        }
+                        None => {
+                            this.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c));
+                            this.show_composer_error(&format!("Not sent: {e}"));
+                        }
+                    }
                     let buffer = this.composer.buffer();
                     if buffer.char_count() == 0 && this.reply.borrow().is_none() {
                         buffer.set_text(&text);
@@ -383,6 +433,17 @@ impl App {
                 }
             }
         });
+    }
+}
+
+/// The official client's words for what a server's verification still asks
+/// of us. The gates that only take time count down, as the client's do.
+fn gate_notice(gate: &Gate, now_unix: i64) -> String {
+    let text = gate.text();
+    match gate.until() {
+        Some(until) => format!("{text} You can send messages here in {}.", wait_words(until - now_unix)),
+        None if *gate == Gate::Screening => format!("{text} Accept the server's rules in the official app."),
+        None => text,
     }
 }
 

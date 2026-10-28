@@ -69,6 +69,16 @@ Your token is stored in the system keyring. Images are cached in
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
+If you open a PR using an AI agent, be upfront about it; I won't bite.
+
+## LLM Disclosure
+
+This project is NOT vibecoded NOR mainly LLM written, however a lot of the tooling surrounding the project itself is LLM assisted!
+Documentation, like the README you're currently reading, is written by me.
+However, issue creation and feature discovery might be LLM spear-headed, because fuzzing through a large project such as Discord suuuuucks. I don't wanna write an issue for every single lil Discord quirk I discover.
+I have an LLM doing the decomp work and diffing with the real client, alongside my own automated API diffing tools. Trust me, it helps. It'll help you avoid account bans due to missed fields or unsent headers, etc.
+Finally, when it comes to actually writing the code, I personally do it.
+I do press tab sometimes when VSCode's completions are good.... sometimes...
 
 ## License
 

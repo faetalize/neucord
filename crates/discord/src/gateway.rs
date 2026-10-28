@@ -20,8 +20,8 @@ use crate::notifications::{GuildSettings, NotificationSettings};
 use crate::read_state::ReadStates;
 use crate::relationships::{Presence, Relationship, Relationships};
 use crate::settings::{self, GuildFolder, MediaPatch, MediaSettings};
-use crate::verification::{Account, Membership, Rules};
-use crate::{Channel, Error, Guild, Message, MessageEdit, Snowflake, User, identity};
+use crate::verification::{Account, Rules};
+use crate::{Channel, Error, Guild, Member, Message, MessageEdit, Snowflake, User, identity};
 
 /// Gateway capability bits. 0 asks for the classic payload shapes, which the
 /// model parses directly; the guild parser also accepts the newer shape.
@@ -66,19 +66,6 @@ pub struct Ready {
 pub enum Event {
     Ready(Box<Ready>),
     GuildCreate(Guild),
-    /// A server's settings changed; only what verification reads is kept.
-    GuildUpdate {
-        guild_id: Snowflake,
-        rules: Rules,
-    },
-    /// Our own membership of a server changed: roles, or screening passed.
-    MemberUpdate {
-        guild_id: Snowflake,
-        roles: Vec<Snowflake>,
-        membership: Membership,
-    },
-    /// Our account changed, for instance its email was verified.
-    AccountUpdate(Account),
     /// A DM or group DM was opened (or reopened), or a message request
     /// arrived. Guild channels are not reported yet.
     PrivateChannelCreate(Channel),
@@ -86,6 +73,23 @@ pub enum Event {
     PrivateChannelUpdate(Channel),
     /// A DM or group DM was closed, or we left the group.
     PrivateChannelDelete(Snowflake),
+    /// A server channel changed: its name, topic or slowmode, say.
+    GuildChannelUpdate {
+        guild_id: Snowflake,
+        channel: Channel,
+    },
+    /// Our own member in a server changed: roles, a timeout, screening passed.
+    MemberUpdate {
+        guild_id: Snowflake,
+        member: Member,
+    },
+    /// A server's settings changed; only what verification reads is kept.
+    GuildUpdate {
+        guild_id: Snowflake,
+        rules: Rules,
+    },
+    /// Our account changed, for instance its email was verified.
+    AccountUpdate(Account),
     MessageCreate(Box<Message>),
     /// An edit, or link previews arriving for a message.
     MessageUpdate(MessageEdit),
@@ -167,7 +171,7 @@ struct Payload {
 
 struct State {
     token: String,
-    /// Our user id, known from READY on; used to find our roles in GUILD_CREATE.
+    /// Our user id, known from READY on; used to find our own member.
     me: Cell<Option<Snowflake>>,
     /// Session id and resume URL from READY (or the resume we were given).
     session: RefCell<Option<(String, String)>>,
@@ -383,26 +387,20 @@ fn parse_id(value: &Value) -> Option<Snowflake> {
     value.as_str()?.parse().ok().map(Snowflake)
 }
 
-/// A guild with `my_roles` and `membership` taken from our own entry in its
-/// `members`, or in `merged`, READY's `merged_members` entry for it.
-fn guild_with_roles(value: &Value, merged: &Value, me: Snowflake) -> Option<Guild> {
-    let mut guild = Guild::deserialize(value).ok()?;
-    let members = value["members"].as_array().or(merged.as_array());
-    let mine = members
-        .into_iter()
-        .flatten()
-        .find(|m| parse_id(&m["user"]["id"]) == Some(me) || parse_id(&m["user_id"]) == Some(me));
-    if let Some(member) = mine {
-        guild.my_roles = roles(member);
-        let joined_at = guild.membership.joined_at;
-        guild.membership = Membership::from_member(member);
-        guild.membership.joined_at = guild.membership.joined_at.or(joined_at);
-    }
-    Some(guild)
+/// Whether a member object is ours; it names its user either inline or by id.
+fn is_me(member: &Value, me: Snowflake) -> bool {
+    parse_id(&member["user"]["id"]) == Some(me) || parse_id(&member["user_id"]) == Some(me)
 }
 
-fn roles(member: &Value) -> Vec<Snowflake> {
-    member["roles"].as_array().into_iter().flatten().filter_map(parse_id).collect()
+/// A guild with our own member applied, found in its `members` or, in
+/// READY's newer shape, in `merged`: its entry of `merged_members`.
+fn guild_with_member(value: &Value, merged: &Value, me: Snowflake) -> Option<Guild> {
+    let mut guild = Guild::deserialize(value).ok()?;
+    let members = value["members"].as_array().into_iter().chain(merged.as_array()).flatten();
+    if let Some(member) = members.into_iter().find(|m| is_me(m, me)) {
+        guild.set_member(Member::from_value(member));
+    }
+    Some(guild)
 }
 
 /// READY's DMs, message requests included. Recipients come either inline as `recipients` (the classic
@@ -448,11 +446,11 @@ fn dispatch(state: &State, name: &str, data: Value) {
             }
             let guilds = data["guilds"]
                 .as_array()
-                .map(|raw| {
-                    let merged = &data["merged_members"];
-                    raw.iter().enumerate().filter_map(|(i, g)| guild_with_roles(g, &merged[i], user.id)).collect()
-                })
-                .unwrap_or_default();
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .filter_map(|(i, g)| guild_with_member(g, &data["merged_members"][i], user.id))
+                .collect();
             Event::Ready(Box::new(Ready {
                 private_channels: private_channels(&data),
                 relationships: Relationships::from_ready(&data),
@@ -511,10 +509,27 @@ fn dispatch(state: &State, name: &str, data: Value) {
             Ok(_) => return,
             Err(e) => return eprintln!("gateway: bad CHANNEL_CREATE: {e}"),
         },
-        "CHANNEL_UPDATE" => match Channel::deserialize(&data) {
-            Ok(channel) if channel.kind.is_private() => Event::PrivateChannelUpdate(channel),
-            Ok(_) => return,
-            Err(e) => return eprintln!("gateway: bad CHANNEL_UPDATE: {e}"),
+        "CHANNEL_UPDATE" => match (Channel::deserialize(&data), parse_id(&data["guild_id"])) {
+            (Ok(channel), _) if channel.kind.is_private() => Event::PrivateChannelUpdate(channel),
+            (Ok(channel), Some(guild_id)) => Event::GuildChannelUpdate { guild_id, channel },
+            (Ok(_), None) => return,
+            (Err(e), _) => return eprintln!("gateway: bad CHANNEL_UPDATE: {e}"),
+        },
+        // Discord may send other members' too; only ours matters.
+        "GUILD_MEMBER_UPDATE" => {
+            let Some(guild_id) = parse_id(&data["guild_id"]) else { return };
+            if !state.me.get().is_some_and(|me| is_me(&data, me)) {
+                return;
+            }
+            Event::MemberUpdate { guild_id, member: Member::from_value(&data) }
+        }
+        "GUILD_UPDATE" => match parse_id(&data["id"]) {
+            Some(guild_id) => Event::GuildUpdate { guild_id, rules: Rules::from_guild(&data) },
+            None => return,
+        },
+        "USER_UPDATE" => match Account::from_user(&data) {
+            Some(account) if Some(account.id) == state.me.get() => Event::AccountUpdate(account),
+            _ => return,
         },
         "RELATIONSHIP_ADD" => match Relationship::from_value(&data, &Default::default()) {
             Some(relationship) => {
@@ -546,27 +561,11 @@ fn dispatch(state: &State, name: &str, data: Value) {
         }
         "GUILD_CREATE" => {
             let Some(me) = state.me.get() else { return };
-            match guild_with_roles(&data, &Value::Null, me) {
+            match guild_with_member(&data, &Value::Null, me) {
                 Some(guild) => Event::GuildCreate(guild),
                 None => return,
             }
         }
-        "GUILD_UPDATE" => match parse_id(&data["id"]) {
-            Some(guild_id) => Event::GuildUpdate { guild_id, rules: Rules::from_guild(&data) },
-            None => return,
-        },
-        // Anyone's; only ours matter.
-        "GUILD_MEMBER_UPDATE" => {
-            let (Some(guild_id), Some(me)) = (parse_id(&data["guild_id"]), state.me.get()) else { return };
-            if parse_id(&data["user"]["id"]) != Some(me) {
-                return;
-            }
-            Event::MemberUpdate { guild_id, roles: roles(&data), membership: Membership::from_member(&data) }
-        }
-        "USER_UPDATE" => match Account::from_user(&data) {
-            Some(account) if Some(account.id) == state.me.get() => Event::AccountUpdate(account),
-            _ => return,
-        },
         "MESSAGE_CREATE" => match serde_json::from_value(data) {
             Ok(message) => Event::MessageCreate(Box::new(message)),
             Err(e) => return eprintln!("gateway: bad MESSAGE_CREATE: {e}"),
@@ -618,26 +617,76 @@ mod tests {
     #[test]
     fn guild_roles_from_own_member() {
         let raw = json!({"id": "1", "name": "G", "default_message_notifications": 1, "members": [
-            {"user": {"id": "8"}, "roles": ["70"]},
-            {"user": {"id": "5"}, "roles": ["40", "41"]}
+            {"user": {"id": "8"}, "roles": ["70"], "communication_disabled_until": "2026-10-28T12:00:00+00:00"},
+            {"user": {"id": "5"}, "roles": ["40", "41"], "communication_disabled_until": null}
         ]});
-        let guild = guild_with_roles(&raw, &Value::Null, Snowflake(5)).unwrap();
+        let guild = guild_with_member(&raw, &Value::Null, Snowflake(5)).unwrap();
         assert_eq!(guild.my_roles, vec![Snowflake(40), Snowflake(41)]);
+        assert_eq!(guild.timed_out_until, None, "someone else's timeout");
         assert_eq!(guild.default_message_notifications, 1);
     }
 
     #[test]
-    fn ready_merged_members() {
+    fn own_member_and_channel_updates() {
         let ready = json!({
-            "guilds": [{"id": "1", "joined_at": "2024-01-01T00:00:00+00:00",
-                        "properties": {"name": "G", "verification_level": 3, "features": []}}],
-            "merged_members": [[{"user_id": "5", "roles": ["40"], "pending": true, "joined_at": null}]]
+            "user": {"id": "5", "username": "me"},
+            "guilds": [
+                {"id": "1", "properties": {"name": "A"}},
+                {"id": "2", "properties": {"name": "B"}}
+            ],
+            "merged_members": [
+                [{"user_id": "5", "roles": ["40"], "communication_disabled_until": "2026-10-28T12:00:00.250000+00:00"}],
+                [{"user_id": "5", "roles": []}]
+            ]
         });
-        let guild = guild_with_roles(&ready["guilds"][0], &ready["merged_members"][0], Snowflake(5)).unwrap();
-        assert_eq!(guild.my_roles, vec![Snowflake(40)]);
-        assert!(guild.membership.pending);
-        assert_eq!(guild.membership.joined_at, Some(1_704_067_200_000), "the guild's, as the member has none");
-        assert_eq!(guild.verification.level, crate::verification::VerificationLevel::High);
+        let (tx, rx) = async_channel::unbounded();
+        let state = State {
+            token: String::new(),
+            me: Cell::new(None),
+            session: RefCell::new(None),
+            resuming: Cell::new(false),
+            resumable: Cell::new(true),
+            seq: Cell::new(None),
+            acked: Cell::new(true),
+            events: tx,
+        };
+        dispatch(&state, "READY", ready);
+        let Ok(Event::Ready(ready)) = rx.try_recv() else { panic!("no READY") };
+        let noon = glib::DateTime::from_iso8601("2026-10-28T12:00:00Z", None).unwrap().to_unix();
+        let a = &ready.guilds[0];
+        assert_eq!((a.my_roles.as_slice(), a.timed_out_until), (&[Snowflake(40)][..], Some(noon + 1)));
+        assert_eq!(a.timeout_left(noon), Some(1), "a part second rounds up, never down");
+        assert_eq!(a.timeout_left(noon + 1), None);
+        assert_eq!(ready.guilds[1].timed_out_until, None);
+
+        let update = |user: &str, until: Value| {
+            dispatch(
+                &state,
+                "GUILD_MEMBER_UPDATE",
+                json!({"guild_id": "1", "user": {"id": user}, "roles": ["40"], "communication_disabled_until": until}),
+            );
+            rx.try_recv().ok()
+        };
+        assert!(update("8", json!("2026-10-28T12:00:00+00:00")).is_none(), "not ours");
+        let Some(Event::MemberUpdate { guild_id, member }) = update("5", json!("2026-10-28T12:00:00+00:00")) else {
+            panic!("our member")
+        };
+        assert_eq!((guild_id, member.timed_out_until), (Snowflake(1), Some(noon)));
+        let Some(Event::MemberUpdate { member, .. }) = update("5", Value::Null) else { panic!("our member") };
+        assert_eq!(member.timed_out_until, None, "the timeout lifted early");
+
+        dispatch(&state, "GUILD_UPDATE", json!({"id": "1", "name": "A", "verification_level": 3}));
+        let Ok(Event::GuildUpdate { guild_id, rules }) = rx.try_recv() else { panic!("no guild update") };
+        assert_eq!((guild_id, rules.level), (Snowflake(1), crate::verification::VerificationLevel::High));
+        dispatch(&state, "USER_UPDATE", json!({"id": "8", "verified": true}));
+        assert!(rx.try_recv().is_err(), "someone else");
+        dispatch(&state, "USER_UPDATE", json!({"id": "5", "verified": true, "email": "a@example.org"}));
+        let Ok(Event::AccountUpdate(account)) = rx.try_recv() else { panic!("no account update") };
+        assert!(account.verified && account.email && !account.phone);
+
+        dispatch(&state, "CHANNEL_UPDATE", json!({"id": "9", "type": 0, "guild_id": "1", "rate_limit_per_user": 30}));
+        let Ok(Event::GuildChannelUpdate { guild_id, channel }) = rx.try_recv() else { panic!("no channel update") };
+        assert_eq!((guild_id, channel.rate_limit_per_user), (Snowflake(1), 30));
     }
 
     #[test]

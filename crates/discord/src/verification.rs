@@ -22,7 +22,7 @@ const BYPASSES_VERIFICATION: u64 = 1 << 2;
 /// Members who joined before onboarding existed keep the role exemption in
 /// servers that ever enabled it. The client reads this date in local time;
 /// UTC is near enough.
-const ONBOARDING_CUTOFF_MS: i64 = 1_669_939_200_000; // 2022-12-02
+const ONBOARDING_CUTOFF: i64 = 1_669_939_200; // 2022-12-02
 
 /// A server's `verification_level`, each step adding to the last.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -56,8 +56,6 @@ impl VerificationLevel {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Rules {
     pub level: VerificationLevel,
-    /// The owner skips all of it.
-    pub owner: Option<Snowflake>,
     /// A role members need to talk, given out once they verify, and its name.
     pub role: Option<(Snowflake, String)>,
     /// Membership screening (`MEMBER_VERIFICATION_GATE_ENABLED`): new
@@ -84,7 +82,6 @@ impl Rules {
         };
         Rules {
             level: VerificationLevel::from_raw(props["verification_level"].as_u64().unwrap_or(0)),
-            owner: parse_id(&props["owner_id"]),
             role: role_id.map(|id| {
                 let name = roles.iter().find(|r| parse_id(&r["id"]) == Some(id)).and_then(|r| r["name"].as_str());
                 (id, name.unwrap_or("verified").to_owned())
@@ -92,29 +89,6 @@ impl Rules {
             screening: has_feature("MEMBER_VERIFICATION_GATE_ENABLED"),
             onboarding: has_feature("GUILD_ONBOARDING_EVER_ENABLED"),
             plain_roles: roles.iter().filter(|r| r["managed"] != true).filter_map(|r| parse_id(&r["id"])).collect(),
-        }
-    }
-}
-
-/// Our own membership of a server, as far as verification cares. Our roles
-/// are [`Guild::my_roles`].
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Membership {
-    /// When we joined, in milliseconds since 1970.
-    pub joined_at: Option<i64>,
-    /// Held by membership screening.
-    pub pending: bool,
-    pub flags: u64,
-}
-
-impl Membership {
-    /// From our member object, which READY, GUILD_CREATE and
-    /// GUILD_MEMBER_UPDATE carry.
-    pub fn from_member(member: &Value) -> Self {
-        Membership {
-            joined_at: member["joined_at"].as_str().and_then(unix_ms),
-            pending: member["pending"] == true,
-            flags: member["flags"].as_u64().unwrap_or(0),
         }
     }
 }
@@ -154,7 +128,7 @@ pub enum Gate {
     Role(String),
     Phone,
     Email,
-    /// We joined too recently; this clears at `until` (milliseconds since 1970).
+    /// We joined too recently; this clears at `until` (seconds since 1970).
     NewMember {
         until: i64,
     },
@@ -197,14 +171,13 @@ impl Gate {
     }
 }
 
-/// Why `account` can't talk in `guild` at `now` (milliseconds since 1970),
-/// or `None` if it can. Staff accounts skip most of this in the official
+/// Why `account` can't talk in `guild` at `now` (seconds since 1970), or
+/// `None` if it can. Staff accounts skip most of this in the official
 /// client; Neucord doesn't, which only ever holds back a message.
 pub fn gate(guild: &Guild, account: &Account, now: i64) -> Option<Gate> {
     let rules = &guild.verification;
-    let member = &guild.membership;
-    let screening = rules.screening && member.pending;
-    let exempt = rules.owner == Some(account.id) || member.flags & BYPASSES_VERIFICATION != 0;
+    let screening = rules.screening && guild.pending;
+    let exempt = guild.owner_id == Some(account.id) || guild.member_flags & BYPASSES_VERIFICATION != 0;
     let leveled = rules.level != VerificationLevel::None && !exempt;
 
     let role = rules.role.as_ref().filter(|(id, _)| !exempt && !guild.my_roles.contains(id));
@@ -213,11 +186,12 @@ pub fn gate(guild: &Guild, account: &Account, now: i64) -> Option<Gate> {
     let checked = leveled
         && !account.phone
         && (rules.role.is_some()
-            || (rules.onboarding && member.joined_at.is_some_and(|t| t >= ONBOARDING_CUTOFF_MS))
+            || (rules.onboarding && guild.joined_at.is_some_and(|t| t >= ONBOARDING_CUTOFF))
             || !guild.my_roles.iter().any(|r| rules.plain_roles.contains(r)));
     let at_least = |level| checked && rules.level >= level;
-    let account_until = account.id.unix_ms() + ACCOUNT_AGE_MINUTES * 60_000;
-    let member_until = member.joined_at.unwrap_or(0) + MEMBER_AGE_MINUTES * 60_000;
+    // The account's age counts from its id, to the millisecond; round up.
+    let account_until = (account.id.unix_ms() + 999) / 1000 + ACCOUNT_AGE_MINUTES * 60;
+    let member_until = guild.joined_at.unwrap_or(0) + MEMBER_AGE_MINUTES * 60;
 
     if at_least(VerificationLevel::Low) && !account.email {
         Some(Gate::Unclaimed)
@@ -242,22 +216,22 @@ fn parse_id(value: &Value) -> Option<Snowflake> {
     value.as_str()?.parse().ok().map(Snowflake)
 }
 
-pub(crate) fn unix_ms(timestamp: &str) -> Option<i64> {
-    let time = glib::DateTime::from_iso8601(timestamp, Some(&glib::TimeZone::utc())).ok()?;
-    Some(time.to_unix() * 1000 + i64::from(time.microsecond()) / 1000)
-}
-
 #[cfg(test)]
 mod tests {
     use serde::Deserialize;
     use serde_json::json;
 
     use super::*;
+    use crate::Member;
 
-    const ME: Snowflake = Snowflake(1 << 32);
+    /// Made at a whole second, so its age needs no rounding.
+    const ME: Snowflake = Snowflake(1000 << 22);
+    fn made() -> i64 {
+        ME.unix_ms() / 1000
+    }
     /// An hour after ME was made.
     fn later() -> i64 {
-        ME.unix_ms() + 3_600_000
+        made() + 3600
     }
 
     fn account() -> Account {
@@ -271,7 +245,7 @@ mod tests {
                       {"id": "41", "name": "Booster", "managed": true}],
         });
         let mut guild = Guild::deserialize(&raw).unwrap();
-        guild.membership.joined_at = Some(ME.unix_ms());
+        guild.joined_at = Some(made());
         guild
     }
 
@@ -289,13 +263,12 @@ mod tests {
 
     #[test]
     fn time_gates_clear_by_themselves() {
-        let made = ME.unix_ms();
-        assert_eq!(gate(&guild(2), &account(), made + 60_000), Some(Gate::NewAccount { until: made + 300_000 }));
-        assert_eq!(gate(&guild(2), &account(), made + 300_000), None);
+        assert_eq!(gate(&guild(2), &account(), made() + 60), Some(Gate::NewAccount { until: made() + 300 }));
+        assert_eq!(gate(&guild(2), &account(), made() + 300), None);
         // At High, a newly joined member waits ten minutes from joining.
         let mut high = guild(3);
-        high.membership.joined_at = Some(later());
-        let until = later() + 600_000;
+        high.joined_at = Some(later());
+        let until = later() + 600;
         assert_eq!(gate(&high, &account(), later()), Some(Gate::NewMember { until }));
         assert_eq!(gate(&high, &account(), later()).and_then(|g| g.until()), Some(until));
         assert_eq!(gate(&high, &account(), until), None);
@@ -305,11 +278,11 @@ mod tests {
     fn who_skips_the_level() {
         let unverified = Account { verified: false, ..account() };
         let mut owned = guild(4);
-        owned.verification.owner = Some(ME);
+        owned.owner_id = Some(ME);
         assert_eq!(gate(&owned, &unverified, later()), None);
 
         let mut bypassed = guild(4);
-        bypassed.membership.flags = BYPASSES_VERIFICATION;
+        bypassed.member_flags = BYPASSES_VERIFICATION;
         assert_eq!(gate(&bypassed, &unverified, later()), None);
 
         let mut role = guild(4);
@@ -319,9 +292,9 @@ mod tests {
         assert_eq!(gate(&role, &unverified, later()), Some(Gate::Phone), "an integration's role doesn't");
         role.my_roles = vec![Snowflake(40)];
         role.verification.onboarding = true;
-        role.membership.joined_at = Some(ONBOARDING_CUTOFF_MS - 1);
+        role.joined_at = Some(ONBOARDING_CUTOFF - 1);
         assert_eq!(gate(&role, &unverified, later()), None, "joined before onboarding");
-        role.membership.joined_at = Some(ONBOARDING_CUTOFF_MS);
+        role.joined_at = Some(ONBOARDING_CUTOFF);
         assert_eq!(gate(&role, &unverified, later()), Some(Gate::Phone), "roles picked in onboarding");
     }
 
@@ -345,15 +318,17 @@ mod tests {
 
     #[test]
     fn screening_holds_pending_members() {
-        let raw = json!({"id": "9", "properties": {"name": "G", "owner_id": "2", "verification_level": 1,
-                         "features": ["COMMUNITY", "MEMBER_VERIFICATION_GATE_ENABLED"]}});
+        let raw = json!({"id": "9", "joined_at": "2024-01-01T00:00:00+00:00",
+                         "properties": {"name": "G", "owner_id": "2", "verification_level": 1,
+                                        "features": ["COMMUNITY", "MEMBER_VERIFICATION_GATE_ENABLED"]}});
         let mut guild = Guild::deserialize(&raw).unwrap();
         assert_eq!(guild.verification.level, VerificationLevel::Low, "read from properties");
-        guild.membership = Membership::from_member(&json!({"pending": true, "joined_at": null}));
+        guild.set_member(Member::from_value(&json!({"pending": true, "joined_at": null})));
+        assert_eq!(guild.joined_at, Some(1_704_067_200), "the guild's, as the member has none");
         assert_eq!(gate(&guild, &account(), later()), Some(Gate::Screening));
-        guild.verification.owner = Some(ME);
+        guild.owner_id = Some(ME);
         assert_eq!(gate(&guild, &account(), later()), Some(Gate::Screening), "even the owner is held");
-        guild.membership.pending = false;
+        guild.pending = false;
         assert_eq!(gate(&guild, &account(), later()), None);
     }
 
@@ -364,7 +339,7 @@ mod tests {
             Account::from_user(&user),
             Some(Account { id: Snowflake(5), verified: true, email: true, phone: false })
         );
-        let member = Membership::from_member(&json!({"joined_at": "2022-12-02T00:00:00.250000+00:00", "flags": 4}));
-        assert_eq!(member, Membership { joined_at: Some(ONBOARDING_CUTOFF_MS + 250), pending: false, flags: 4 });
+        let member = Member::from_value(&json!({"joined_at": "2022-12-02T00:00:00.250000+00:00", "flags": 4}));
+        assert_eq!((member.joined_at, member.pending, member.flags), (Some(ONBOARDING_CUTOFF + 1), false, 4));
     }
 }

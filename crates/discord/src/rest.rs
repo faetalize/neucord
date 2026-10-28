@@ -14,8 +14,16 @@ use crate::{Channel, Error, Message, Snowflake, identity};
 /// Error code for accepting a stranger's friend request without confirming.
 pub const STRANGER_NOT_CONFIRMED: u64 = 80013;
 
+/// Error code for a message refused because the channel's slowmode hasn't
+/// run out for us. Its 429 says how long is left in `retry_after`.
+pub const SLOWMODE_RATE_LIMITED: u64 = 20016;
+
 /// One HTTP 429 retry is enough for interactive use; further limits surface as errors.
 const MAX_RATE_LIMIT_RETRIES: u32 = 1;
+
+/// The longest a request waits on a 429 before trying again. Past this it
+/// fails instead: a retry sent early would only be refused again.
+const MAX_RATE_LIMIT_WAIT: f64 = 10.0;
 
 /// Captchas shown for one request before giving up, in case Discord keeps
 /// turning the answers down.
@@ -254,13 +262,12 @@ impl Rest {
             let response =
                 self.session.send_and_read_future(&msg, glib::Priority::DEFAULT).await.map_err(Error::Transport)?;
             let status = msg.status_code();
-            if status == 429 && retries < MAX_RATE_LIMIT_RETRIES {
+            if status == 429
+                && retries < MAX_RATE_LIMIT_RETRIES
+                && let Some(wait) = rate_limit_wait(&response)
+            {
                 retries += 1;
-                let wait = serde_json::from_slice::<Value>(&response)
-                    .ok()
-                    .and_then(|v| v["retry_after"].as_f64())
-                    .unwrap_or(1.0);
-                glib::timeout_future(std::time::Duration::from_secs_f64(wait.min(10.0))).await;
+                glib::timeout_future(std::time::Duration::from_secs_f64(wait)).await;
                 continue;
             }
             if status == 400
@@ -276,6 +283,17 @@ impl Rest {
             return Ok((status, response));
         }
     }
+}
+
+/// How long to wait before retrying a request Discord rate limited, or
+/// `None` to fail at once. Like the official client's message queue, a
+/// slowmode refusal is never retried: the cooldown is the user's to wait out.
+fn rate_limit_wait(body: &[u8]) -> Option<f64> {
+    let body = serde_json::from_slice::<Value>(body).unwrap_or_default();
+    if body["code"].as_u64() == Some(SLOWMODE_RATE_LIMITED) {
+        return None;
+    }
+    Some(body["retry_after"].as_f64().unwrap_or(1.0)).filter(|&wait| wait <= MAX_RATE_LIMIT_WAIT)
 }
 
 /// The headers every request starts with.
@@ -297,7 +315,7 @@ pub(crate) fn is_captcha(body: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Captcha, base_headers};
+    use super::{Captcha, base_headers, rate_limit_wait};
     use crate::identity;
 
     #[test]
@@ -310,6 +328,15 @@ mod tests {
 
         assert_eq!(header(Some("t"), "Authorization").as_deref(), Some("t"));
         assert_eq!(header(Some("t"), "X-Super-Properties"), None);
+    }
+
+    #[test]
+    fn rate_limit_retries() {
+        assert_eq!(rate_limit_wait(br#"{"message": "You are being rate limited.", "retry_after": 0.4}"#), Some(0.4));
+        assert_eq!(rate_limit_wait(b""), Some(1.0), "no body: a second, as before");
+        assert_eq!(rate_limit_wait(br#"{"retry_after": 30.0}"#), None, "too long to wait for");
+        let slowmode = br#"{"message": "You are being rate limited.", "retry_after": 2.0, "code": 20016}"#;
+        assert_eq!(rate_limit_wait(slowmode), None, "slowmode is never retried");
     }
 
     #[test]

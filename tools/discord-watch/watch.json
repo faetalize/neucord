@@ -2,7 +2,7 @@
   "enums": {
     "AccountStanding": ["ALL_GOOD", "LIMITED", "VERY_LIMITED", "AT_RISK", "SUSPENDED"],
     "ActivityType": ["PLAYING", "STREAMING", "LISTENING", "WATCHING", "CUSTOM_STATUS", "COMPETING"],
-    "ApiErrorCode": ["UNKNOWN_ACCOUNT", "RELATIONSHIP_INVALID_NO_CONFIRMATION"],
+    "ApiErrorCode": ["UNKNOWN_ACCOUNT", "RELATIONSHIP_INVALID_NO_CONFIRMATION", "SLOWMODE_RATE_LIMITED"],
     "ButtonStyle": ["PRIMARY", "SECONDARY", "SUCCESS", "DESTRUCTIVE", "LINK", "PREMIUM"],
     "ChannelType": ["DM", "GROUP_DM", "GUILD_TEXT", "GUILD_CATEGORY"],
     "ComponentType": ["ACTION_ROW", "BUTTON", "STRING_SELECT", "SECTION", "TEXT_DISPLAY", "CONTAINER"],
@@ -25,7 +25,15 @@
     "StickerFormat": ["PNG", "APNG", "LOTTIE", "GIF"],
     "VerificationLevel": ["NONE", "LOW", "MEDIUM", "HIGH", "VERY_HIGH"]
   },
-  "methods": ["getForwardInfo", "getSystemMessageUserJoin", "handleRequiredAction", "isSystemDM", "isSystemUser"],
+  "methods": [
+    "createResponseHandler",
+    "getForwardInfo",
+    "getSystemMessageUserJoin",
+    "handleRequiredAction",
+    "isChannelOnCooldown",
+    "isSystemDM",
+    "isSystemUser"
+  ],
   "stores": ["GuildVerificationStore"],
   "constants": ["ACCOUNT_AGE", "MAX_EMOJI_TO_BE_JUMBO", "MEMBER_AGE", "REPLYABLE", "USER_MESSAGE"]
 }

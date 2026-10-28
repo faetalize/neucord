@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
+use discord::cooldowns::Slowmode;
 use discord::notifications::{NotificationSettings, Place};
 use discord::read_state::ReadStates;
 use discord::relationships::Relationships;
@@ -83,6 +84,8 @@ pub(super) struct State {
     pub(super) media: MediaSettings,
     /// Acks waiting to be sent: channel → newest message read.
     pub(super) pending_acks: HashMap<Snowflake, Snowflake>,
+    /// How long until we may post again in each channel.
+    pub(super) slowmode: Slowmode,
 }
 
 impl State {
@@ -251,4 +254,8 @@ impl State {
 
 pub(super) fn now_unix() -> i64 {
     glib::real_time() / 1_000_000
+}
+
+pub(super) fn now_ms() -> i64 {
+    glib::real_time() / 1_000
 }
