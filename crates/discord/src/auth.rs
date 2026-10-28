@@ -69,6 +69,9 @@ impl Rest {
     pub async fn login(&self, login: &str, password: &str) -> Result<Login, Error> {
         let body = json!({ "login": login, "password": password, "undelete": false });
         let response = self.auth(call!(LOGIN), body).await?;
+        // Sent here even when a second factor follows; that answer has none.
+        let required: Vec<String> = serde_json::from_value(response["required_actions"].clone()).unwrap_or_default();
+        check_required(&required)?;
         if let Some(token) = response["token"].as_str() {
             return Ok(Login::Token(token.to_owned()));
         }
@@ -113,6 +116,20 @@ impl Rest {
     }
 }
 
+/// Turn down a login that came with steps Neucord can't take. Discord sends
+/// the token all the same, but the official client won't let the account in
+/// until they're done: closing its forced password change logs out.
+fn check_required(actions: &[String]) -> Result<(), Error> {
+    if actions.iter().any(|a| a == "update_password") {
+        return Err(Error::Rejected(
+            "Discord requires a new password for this account. Change it in the official app \
+             or at discord.com, then log in here with the new one."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn token(response: &Value) -> Result<String, Error> {
     response["token"].as_str().map(str::to_owned).ok_or_else(|| Error::Protocol("no token in the answer".into()))
 }
@@ -125,7 +142,9 @@ fn refusal(body: &Value) -> Option<Error> {
         return Some(Error::Captcha);
     }
     if body.get("suspended_user_token").is_some() {
-        return Some(Error::Rejected("Discord has suspended this account.".into()));
+        return Some(Error::Rejected(
+            "Discord has suspended this account. Log in at discord.com to see why and to appeal.".into(),
+        ));
     }
     fn first_form_error(errors: &Value) -> Option<&str> {
         if let Some(message) = errors["_errors"][0]["message"].as_str() {
@@ -160,6 +179,12 @@ mod tests {
             Some(Error::Captcha)
         ));
         assert!(refusal(&Value::Null).is_none());
+    }
+
+    #[test]
+    fn forced_password_change() {
+        assert!(check_required(&["update_password".into()]).is_err());
+        assert!(check_required(&[]).is_ok());
     }
 
     #[test]

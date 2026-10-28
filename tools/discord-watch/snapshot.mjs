@@ -123,7 +123,9 @@ function enumsIn(sequence) {
     if (!groups.has(object)) groups.set(object, {});
     groups.get(object)[name] = value;
   }
-  return [...groups.values()].filter((e) => Object.keys(e).length >= 2);
+  // Single members too: only anchors pick from these, and Discord has
+  // one-member enums (`UPDATE_PASSWORD`).
+  return [...groups.values()];
 }
 
 /** A function's source with its minified names replaced: its own variables

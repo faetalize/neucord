@@ -12,7 +12,7 @@ use crate::render;
 
 impl App {
     pub(super) fn send_notification(&self, message: &Message, place: &Place) {
-        let Some(app) = self.window.application() else { return };
+        let Some(app) = self.window.application().filter(|_| self.notifications_allowed()) else { return };
         let (title, body) = {
             let state = self.state.borrow();
             let author = message.author.display_name();
@@ -42,7 +42,7 @@ impl App {
     }
 
     pub(super) fn notify_friend_request(&self, request: &discord::relationships::Relationship) {
-        let Some(app) = self.window.application() else { return };
+        let Some(app) = self.window.application().filter(|_| self.notifications_allowed()) else { return };
         let notification = gio::Notification::new(request.user.display_name());
         notification.set_body(Some("Sent you a friend request"));
         notification.set_default_action("app.open-friends");
@@ -50,6 +50,12 @@ impl App {
     }
 
     /// The request was answered, here or elsewhere.
+    /// Not while Discord requires a step: the official client stays quiet
+    /// then too, and a notification would lead nowhere.
+    fn notifications_allowed(&self) -> bool {
+        self.state.borrow().required_action.is_none()
+    }
+
     pub(super) fn withdraw_friend_request(&self, user: Snowflake) {
         if let Some(app) = self.window.application() {
             app.withdraw_notification(&friend_request_id(user));

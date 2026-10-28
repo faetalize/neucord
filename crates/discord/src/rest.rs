@@ -208,7 +208,11 @@ impl Rest {
         Ok(())
     }
 
-    async fn request<T: DeserializeOwned>(&self, call: Call, body: Option<serde_json::Value>) -> Result<T, Error> {
+    pub(crate) async fn request<T: DeserializeOwned>(
+        &self,
+        call: Call,
+        body: Option<serde_json::Value>,
+    ) -> Result<T, Error> {
         let (status, response) = self.send(call, body).await?;
         match status {
             // 204 No Content reads as `null`, which `()` accepts.

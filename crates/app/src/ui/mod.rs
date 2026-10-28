@@ -1,6 +1,7 @@
 //! The window and everything in it, plus the glue between the UI and the
 //! `discord` crate. All of this runs on the GTK main thread.
 
+mod account;
 mod captcha;
 mod chat;
 mod composer;
@@ -41,6 +42,8 @@ pub struct App {
     medium: adw::Breakpoint,
     stack: gtk::Stack,
     loading: adw::StatusPage,
+    /// Covers the window while Discord requires a step.
+    blocked: adw::StatusPage,
     login: login::Page,
     /// The sidebar (rail and channels) beside the content.
     split: adw::OverlaySplitView,
@@ -131,6 +134,7 @@ impl App {
             narrow,
             stack: gtk::Stack::builder().transition_type(gtk::StackTransitionType::Crossfade).build(),
             loading: adw::StatusPage::builder().paintable(&adw::SpinnerPaintable::new(gtk::Widget::NONE)).build(),
+            blocked: adw::StatusPage::new(),
             login: login::Page::new(),
             split: adw::OverlaySplitView::new(),
             // Pinned, or widening the window would show it, empty.
@@ -245,6 +249,7 @@ impl App {
         self.stack.add_named(&self.build_loading(), Some("loading"));
         self.stack.add_named(&self.build_login(), Some("login"));
         self.stack.add_named(&self.build_main(), Some("main"));
+        self.stack.add_named(&self.build_blocked(), Some("blocked"));
         self.window.set_content(Some(&self.stack));
 
         let logout = gio::ActionEntry::builder("logout")
@@ -257,7 +262,17 @@ impl App {
                 }
             })
             .build();
-        self.window.add_action_entries([logout]);
+        let standing = gio::ActionEntry::builder("account-standing")
+            .activate({
+                let this = Rc::downgrade(self);
+                move |_: &adw::ApplicationWindow, _, _| {
+                    if let Some(this) = this.upgrade() {
+                        this.show_standing();
+                    }
+                }
+            })
+            .build();
+        self.window.add_action_entries([logout, standing]);
         if let Some(app) = self.window.application() {
             app.set_accels_for_action("win.logout", &["<Control><Shift>l"]);
             // Notification clicks arrive as an app action, with the channel id.
@@ -414,6 +429,7 @@ impl App {
         row.append(&self.me_label);
         // The app's menu too, as Discord's settings live here.
         let menu = gio::Menu::new();
+        menu.append(Some("Account _Standing"), Some("win.account-standing"));
         menu.append(Some("_About Neucord"), Some("app.about"));
         menu.append(Some("_Log Out"), Some("win.logout"));
         row.append(
