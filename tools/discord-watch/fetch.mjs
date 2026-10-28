@@ -68,7 +68,10 @@ async function appPage(channel) {
   const origin = ORIGINS[channel];
   if (!origin) throw new Error(`unknown channel ${channel}`);
   const page = (await get(`${origin}/app`)).toString("utf8");
-  return { origin, page, build: page.match(/BUILD_NUMBER"\s*:\s*"(\d+)"/)?.[1] ?? "unknown" };
+  const build = page.match(/BUILD_NUMBER"\s*:\s*"(\d+)"/)?.[1] ?? "unknown";
+  // The API and gateway version the client speaks, from the page's GLOBAL_ENV.
+  const apiVersion = Number(page.match(/"API_VERSION"\s*:\s*(\d+)/)?.[1]) || null;
+  return { origin, page, build, apiVersion };
 }
 
 /** The build number `channel` serves now, without downloading it. */
@@ -78,7 +81,7 @@ export async function currentBuild(channel = "stable") {
 
 /** Fetch `channel`'s current build into `dir/assets`. Returns its metadata. */
 export async function fetchBuild(dir, { channel = "stable", log = () => {} } = {}) {
-  const { origin, page, build } = await appPage(channel);
+  const { origin, page, build, apiVersion } = await appPage(channel);
   const entries = new Set([...page.matchAll(/(?:src|href)="\/assets\/([\w.-]+\.js)"/g)].map((m) => m[1]));
   if (entries.size === 0) throw new Error(`no scripts on ${origin}/app; did the page change?`);
 
@@ -127,7 +130,7 @@ export async function fetchBuild(dir, { channel = "stable", log = () => {} } = {
   log(`build ${build}: ${chunks.size} chunks`);
   failed += await pool(chunks);
 
-  const meta = { channel, build, scripts: entries.size + chunks.size, failed };
+  const meta = { channel, build, apiVersion, scripts: entries.size + chunks.size, failed };
   await writeFile(join(dir, "build.json"), JSON.stringify(meta, null, 2) + "\n");
   return meta;
 }
