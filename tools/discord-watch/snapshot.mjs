@@ -1,9 +1,9 @@
 // Distil a build into what a third-party client depends on: REST endpoint
 // paths, the fields each REST call sends, the headers added to every
 // request, the gateway events the client handles and the payload fields it
-// reads, and the enums, methods and constants named in watch.json. Minified
-// names are dropped, so snapshots of two builds differ only where Discord
-// changed something.
+// reads, and the enums, methods, stores and constants named in watch.json.
+// Minified names are dropped, so snapshots of two builds differ only where
+// Discord changed something.
 
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -128,33 +128,122 @@ function enumsIn(sequence) {
   return [...groups.values()];
 }
 
+/** The identifiers a pattern declares: `a`, `{ b: [c] }`, `...d`, `e = 1`. */
+function declaredBy(pattern) {
+  switch (pattern?.type) {
+    case "Identifier":
+      return [pattern];
+    case "ObjectPattern":
+      return pattern.properties.flatMap((p) => declaredBy(p.type === "RestElement" ? p.argument : p.value));
+    case "ArrayPattern":
+      return pattern.elements.flatMap(declaredBy);
+    case "RestElement":
+      return declaredBy(pattern.argument);
+    case "AssignmentPattern":
+      return declaredBy(pattern.left);
+    default:
+      return [];
+  }
+}
+
+const BLOCKS = new Set(["BlockStatement", "ForStatement", "ForInStatement", "ForOfStatement", "SwitchStatement"]);
+
+/** Where each identifier in `root` is declared, if within `root`: a map
+ * from identifier to the identifier declaring it. Minifiers reuse a name in
+ * scopes that don't see each other, so the name alone can't say whether `i`
+ * is an import or a local. `var` and parameters belong to their function;
+ * `let`, `const`, classes and functions to their block. */
+function declarations(root) {
+  const scopes = new Map();
+  const declare = (scope, ids) => {
+    if (!scopes.has(scope)) scopes.set(scope, new Map());
+    for (const id of ids) if (!scopes.get(scope).has(id.name)) scopes.get(scope).set(id.name, id);
+  };
+  const children = (node) =>
+    Object.values(node)
+      .flat()
+      .filter((c) => c && typeof c.type === "string");
+  // Declarations first, as they hoist: a scope is a function or a block node.
+  const hoist = (node, fn, block) => {
+    if (isFunction(node) || node.type === "FunctionDeclaration") {
+      if (node.type === "FunctionDeclaration" && node.id) declare(block, [node.id]);
+      if (node.type === "FunctionExpression" && node.id) declare(node, [node.id]);
+      declare(node, node.params.flatMap(declaredBy));
+      for (const child of [...node.params, ...(node.body.type === "BlockStatement" ? node.body.body : [node.body])])
+        hoist(child, node, node);
+      return;
+    }
+    if (node.type === "VariableDeclaration") {
+      declare(
+        node.kind === "var" ? fn : block,
+        node.declarations.flatMap((d) => declaredBy(d.id)),
+      );
+    }
+    if (node.type === "ClassDeclaration" && node.id) declare(block, [node.id]);
+    if (node.type === "CatchClause") declare(node, declaredBy(node.param));
+    const inner = BLOCKS.has(node.type) || node.type === "CatchClause" ? node : block;
+    for (const child of children(node)) hoist(child, fn, inner);
+  };
+  hoist(root, root, root);
+  const found = new Map();
+  const resolve = (node, chain) => {
+    // A function declaration's name belongs to the scope around it.
+    const name = node.type === "FunctionDeclaration" ? node.id : null;
+    if (name) resolve(name, chain);
+    if (scopes.has(node)) chain = [node, ...chain];
+    if (node.type === "Identifier") {
+      const scope = chain.find((s) => scopes.get(s).has(node.name));
+      if (scope) found.set(node, scopes.get(scope).get(node.name));
+    }
+    for (const child of children(node)) if (child !== name) resolve(child, chain);
+  };
+  resolve(root, []);
+  return found;
+}
+
 /** A function's source with its minified names replaced: its own variables
- * become a0, a1… in order of appearance, and anything from another module
- * (`I.rbe.DM`, `(0, _.pp)(…)`) becomes `<import>`, keeping what is read from
- * it (`<import>.DM`). Whitespace goes too, so the text only changes with the
- * code. */
-function normalized(source, fn) {
-  const bound = new Set();
+ * become a0, a1… by name, in order of appearance, and anything from another
+ * module (`I.rbe.DM`, `(0, _.pp)(…)`) becomes `<import>`, keeping what is
+ * read from it (`<import>.DM`). Whitespace goes too, so the text only changes with the
+ * code. A whole webpack module takes its imports (`r = n(17928)`) for
+ * another module's, and its export map for `<exports>`, as both are named
+ * by the minifier. */
+function normalized(source, fn, { module = false } = {}) {
+  const require = module ? fn.params[2]?.name : undefined;
+  const declared = declarations(fn);
+  const imports = new Set();
   walk(fn, (n) => {
-    const patterns = isFunction(n) || n.type === "FunctionDeclaration" ? [...n.params, n.id] : [];
-    if (n.type === "VariableDeclarator") patterns.push(n.id);
-    if (n.type === "CatchClause") patterns.push(n.param);
-    for (const p of patterns.filter(Boolean)) walk(p, (m) => void (m.type === "Identifier" && bound.add(m.name)));
+    const init = n.type === "VariableDeclarator" ? n.init : null;
+    if (require && init?.type === "CallExpression" && init.callee.type === "Identifier" && init.callee.name === require)
+      imports.add(n.id);
   });
+  // Declared within, and not as an import.
+  const local = (id) => declared.has(id) && !imports.has(declared.get(id));
   const names = new Set();
   const edits = [];
   walk(fn, (n) => {
+    const callee = n.type === "CallExpression" ? n.callee : null;
+    if (
+      require &&
+      callee?.type === "MemberExpression" &&
+      callee.object.name === require &&
+      callee.property.name === "d"
+    ) {
+      edits.push({ start: n.start, end: n.end, text: "<exports>" });
+      return false;
+    }
     if (n.type === "MemberExpression" && !n.computed) {
       names.add(n.property);
       const root = n.object;
-      if (root.type === "Identifier" && !bound.has(root.name) && !(root.name in globalThis)) {
+      if (root.type === "Identifier" && !local(root) && !(root.name in globalThis)) {
         edits.push({ start: root.start, end: n.end, text: "<import>" });
         return false;
       }
     }
-    if ((n.type === "Property" && !n.computed && !n.shorthand) || n.type === "MethodDefinition") names.add(n.key);
+    const keyed = ["MethodDefinition", "PropertyDefinition"].includes(n.type) && !n.computed;
+    if ((n.type === "Property" && !n.computed && !n.shorthand) || keyed) names.add(n.key);
     if (n.type !== "Identifier" || names.has(n)) return;
-    if (bound.has(n.name)) edits.push({ start: n.start, end: n.end, local: n.name });
+    if (local(n)) edits.push({ start: n.start, end: n.end, local: n.name });
     else if (!(n.name in globalThis)) edits.push({ start: n.start, end: n.end, text: "<import>" });
   });
   const locals = new Map();
@@ -206,6 +295,7 @@ export async function snapshot(dir) {
   const headers = new Set();
   const enums = new Map(Object.keys(WATCH.enums).map((name) => [name, new Set()]));
   const methods = new Map(WATCH.methods.map((name) => [name, new Set()]));
+  const stores = new Map(WATCH.stores.map((name) => [name, new Set()]));
   const constants = new Map(WATCH.constants.map((name) => [name, new Set()]));
   let modules = 0;
   let unparsed = 0;
@@ -300,6 +390,12 @@ export async function snapshot(dir) {
           const name = !node.computed && node.key.type === "Identifier" ? node.key.name : null;
           if (methods.has(name)) methods.get(name).add(normalized(source, node.value));
         }
+        // Stores name themselves: `static displayName = "GuildVerificationStore"`.
+        // Their rules live in functions of the module around them.
+        if (node.type === "PropertyDefinition" && node.static && !node.computed && node.key.name === "displayName") {
+          const name = node.value?.value;
+          if (stores.has(name)) stores.get(name).add(normalized(source, body, { module: true }));
+        }
         if (node.type === "SequenceExpression") {
           for (const found of enumsIn(node)) {
             for (const [name, anchors] of Object.entries(WATCH.enums)) {
@@ -335,6 +431,7 @@ export async function snapshot(dir) {
     headers: [...headers].sort(),
     enums: Object.fromEntries([...enums].map(([k, v]) => [k, [...v].sort().map((s) => JSON.parse(s))])),
     methods: Object.fromEntries([...methods].map(([k, v]) => [k, [...v].sort()])),
+    stores: Object.fromEntries([...stores].map(([k, v]) => [k, [...v].sort()])),
     constants: Object.fromEntries([...constants].map(([k, v]) => [k, [...v].sort().map((s) => JSON.parse(s))])),
   });
 }

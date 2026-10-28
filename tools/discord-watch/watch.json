@@ -8,6 +8,7 @@
     "ComponentType": ["ACTION_ROW", "BUTTON", "STRING_SELECT", "SECTION", "TEXT_DISPLAY", "CONTAINER"],
     "ConsentStatus": ["UNSPECIFIED", "PENDING", "ACCEPTED", "REJECTED"],
     "GatewayOpcode": ["DISPATCH", "HEARTBEAT", "IDENTIFY", "RESUME", "HELLO", "HEARTBEAT_ACK"],
+    "GuildMemberFlags": ["DID_REJOIN", "BYPASSES_VERIFICATION"],
     "LoginRequiredAction": ["UPDATE_PASSWORD"],
     "MessageFlags": ["SUPPRESS_EMBEDS", "IS_VOICE_MESSAGE", "IS_COMPONENTS_V2"],
     "MessageReferenceType": ["DEFAULT", "FORWARD"],
@@ -21,8 +22,10 @@
       "REQUIRE_SAFETY_FLOWS"
     ],
     "StatusType": ["ONLINE", "IDLE", "DND", "INVISIBLE", "OFFLINE"],
-    "StickerFormat": ["PNG", "APNG", "LOTTIE", "GIF"]
+    "StickerFormat": ["PNG", "APNG", "LOTTIE", "GIF"],
+    "VerificationLevel": ["NONE", "LOW", "MEDIUM", "HIGH", "VERY_HIGH"]
   },
   "methods": ["getForwardInfo", "getSystemMessageUserJoin", "handleRequiredAction", "isSystemDM", "isSystemUser"],
-  "constants": ["MAX_EMOJI_TO_BE_JUMBO", "REPLYABLE", "USER_MESSAGE"]
+  "stores": ["GuildVerificationStore"],
+  "constants": ["ACCOUNT_AGE", "MAX_EMOJI_TO_BE_JUMBO", "MEMBER_AGE", "REPLYABLE", "USER_MESSAGE"]
 }
