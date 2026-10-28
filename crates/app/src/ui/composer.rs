@@ -11,7 +11,18 @@ use gtk::glib;
 use gtk::prelude::*;
 
 use super::App;
+use super::chat::MessageTarget;
+use super::menus::{self, Entry, Item, Kind};
 use super::state::{now_ms, now_unix};
+
+/// Reply to a message from its menu; Shift turns the ping off, as with the
+/// button.
+pub(super) const REPLY: Entry<MessageTarget> = Entry::Item(Item {
+    name: "reply",
+    label: "_Reply",
+    shows: |app, target| app.offers_reply(&target.message),
+    kind: Kind::Action(|app, target| app.start_reply(&target.message, app.shift_held())),
+});
 
 /// The message the composer is replying to.
 #[derive(Clone)]
@@ -35,6 +46,7 @@ pub(super) struct MentionCtx {
 impl App {
     /// The message box floating under the list, with its mention popup and keys.
     pub(super) fn build_composer(self: &Rc<Self>, area: &gtk::Box) {
+        menus::extend(self, &self.composer, menus::COMPOSER, || ());
         area.append(&self.composer_error);
         area.append(&self.notice_bar);
         self.reply_bar.append(&self.reply_label);
@@ -226,6 +238,12 @@ impl App {
             }
         });
         self.notice_tick.replace(Some(tick));
+    }
+
+    /// Whether Reply shows for `message`: what the official client replies
+    /// to, where it lets us.
+    pub(super) fn offers_reply(&self, message: &Message) -> bool {
+        message.is_replyable() && self.state.borrow().can_reply(message.channel_id)
     }
 
     /// Reply to `message`. Like Discord, the reply pings unless `no_ping`

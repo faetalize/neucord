@@ -179,6 +179,7 @@ impl App {
                     self.state.borrow_mut().media.apply(patch);
                     self.refresh_rows();
                 }
+                Event::DeveloperModeUpdate(on) => self.state.borrow_mut().developer_mode = on,
                 Event::RelationshipAdd { relationship, notify } => {
                     self.learn_users(std::iter::once(&relationship.user));
                     let blocked = relationship.kind == discord::relationships::Kind::Blocked;
@@ -260,6 +261,7 @@ impl App {
             notification_settings,
             guild_folders,
             media_settings,
+            developer_mode,
             required_action,
         } = ready;
         self.learn_users(private_channels.iter().flat_map(|c| &c.recipients));
@@ -287,6 +289,7 @@ impl App {
             state.guild_folders = guild_folders;
             state.notifications = notification_settings;
             state.media = media_settings;
+            state.developer_mode = developer_mode;
             state.required_action = required_action;
             state.account = Some(account);
             let store = (!state.persisted).then(|| (state.token.clone(), user.username.clone()));

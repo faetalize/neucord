@@ -847,6 +847,27 @@ impl Message {
         })
     }
 
+    /// What the official client's Copy Text copies (`getContentMessage` in
+    /// 383233, then 355682): the markup as written, of the forwarded message
+    /// for a forward, and of the texts for one built from components. `None`
+    /// when that is empty.
+    pub fn copy_text(&self) -> Option<String> {
+        let forwarded = self.forwarded();
+        let message = forwarded.as_ref().unwrap_or(self);
+        let text = match message.is_components_v2() {
+            true => crate::component::Component::texts(&message.components).join("\n"),
+            false => message.content.clone(),
+        };
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// The message's link in Discord's web app, which every client opens.
+    /// `guild` is its channel's server, which messages often don't carry.
+    pub fn link(&self, guild: Option<Snowflake>) -> String {
+        let guild = guild.map_or("@me".to_owned(), |g| g.to_string());
+        format!("https://discord.com/channels/{guild}/{}/{}", self.channel_id, self.id)
+    }
+
     /// The message a thread was started from, which the thread's first
     /// message stands for (a `THREAD_STARTER_MESSAGE`), when Discord sent
     /// it along. The client shows it in its place (`nK` in 425812).
@@ -1280,6 +1301,27 @@ mod tests {
         )
         .unwrap();
         assert!(reply.forwarded().is_none());
+        assert_eq!(forward.copy_text().as_deref(), Some("# hi"), "the forwarded text");
+    }
+
+    #[test]
+    fn copy_text_and_link() {
+        let message = |content: &str, flags: u64, components: &str| -> Message {
+            serde_json::from_str(&format!(
+                r#"{{"id":"100","channel_id":"11","author":{{"id":"5","username":"a"}},"timestamp":"t",
+                    "content":"{content}","flags":{flags},"components":{components}}}"#
+            ))
+            .unwrap()
+        };
+        assert_eq!(message("**hi**", 0, "[]").copy_text().as_deref(), Some("**hi**"), "as written");
+        assert_eq!(message("", 0, "[]").copy_text(), None);
+        let texts = r#"[{"type":10,"content":"a"},{"type":17,"components":[{"type":10,"content":"b"}]}]"#;
+        assert_eq!(message("ignored", 1 << 15, texts).copy_text().as_deref(), Some("a\nb"));
+        assert_eq!(message("", 1 << 15, r#"[{"type":14}]"#).copy_text(), None);
+
+        let m = message("", 0, "[]");
+        assert_eq!(m.link(Some(Snowflake(3))), "https://discord.com/channels/3/11/100");
+        assert_eq!(m.link(None), "https://discord.com/channels/@me/11/100");
     }
 
     #[test]

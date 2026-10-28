@@ -261,6 +261,7 @@ struct Inline<'a> {
     len: u32,
     emoji: Vec<(rich_text::Image, Emoji)>,
     spoilers: Vec<(Range<u32>, usize)>,
+    links: Vec<(Range<u32>, String)>,
     /// The number the next spoiler gets, counted across the whole message.
     next_spoiler: usize,
 }
@@ -275,6 +276,7 @@ impl<'a> Inline<'a> {
             len: 0,
             emoji: Vec::new(),
             spoilers: Vec::new(),
+            links: Vec::new(),
             next_spoiler,
         }
     }
@@ -331,9 +333,11 @@ impl<'a> Inline<'a> {
                 self.tag("</tt>");
             }
             Span::Link { url, children } => {
+                let start = self.len;
                 self.tag(&format!("<a href=\"{}\">", escape(url)));
                 self.spans(children);
                 self.tag("</a>");
+                self.links.push((start..self.len, url.clone()));
             }
             Span::Entity(Entity::Emoji { name, id, animated }) if self.images => {
                 let image = rich_text::Image {
@@ -392,7 +396,7 @@ impl<'a> Inline<'a> {
         let revealed = |n: &usize| cx.spoilers.as_ref().is_some_and(|s| s.revealed.contains(n));
         let numbers: Vec<usize> = self.spoilers.iter().map(|(_, n)| *n).collect();
         let spoilers = self.spoilers.into_iter().map(|(range, n)| (range, revealed(&n))).collect();
-        let text = RichText::new(&self.markup, images, spoilers);
+        let text = RichText::new(&self.markup, images, spoilers, self.links);
         if let Some(memory) = &cx.spoilers {
             let on_reveal = memory.on_reveal.clone();
             text.connect_reveal(move |i| on_reveal(numbers[i]));
@@ -619,6 +623,24 @@ mod tests {
             text.spoilers.iter().map(|(r, n)| (&parsed[r.start as usize..r.end as usize], *n)).collect();
         assert_eq!(spoilers, [("é \u{fffc}", 3), ("b", 4)]);
         assert_eq!(text.next_spoiler, 5);
+    }
+
+    #[test]
+    fn links_know_where_they_are() {
+        let names = names();
+        let spans = parse("é [**x**](https://e.com/?a&b) <https://f.com>");
+        let mut text = Inline::new(&Context::new(&names, None), 0);
+        text.spans(&spans);
+        // Labels take links out before Pango sees the markup.
+        let mut markup = text.markup.replace("</a>", "");
+        while let Some(start) = markup.find("<a ") {
+            let end = start + markup[start..].find('>').unwrap();
+            markup.replace_range(start..=end, "");
+        }
+        let parsed = pango::parse_markup(&markup, '\0').unwrap().1;
+        let links: Vec<(&str, &str)> =
+            text.links.iter().map(|(r, url)| (&parsed[r.start as usize..r.end as usize], url.as_str())).collect();
+        assert_eq!(links, [("x", "https://e.com/?a&b"), ("https://f.com", "https://f.com")]);
     }
 
     #[test]

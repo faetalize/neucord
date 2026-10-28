@@ -8,10 +8,11 @@ use discord::rest::Page;
 use discord::system::{self, Kind};
 use discord::{Message, MessageEdit, Referenced, Snowflake, User};
 use gtk::prelude::*;
-use gtk::{gio, glib};
+use gtk::{gdk, gio, glib, graphene};
 
 use super::App;
 use super::embeds::{behind_spoiler, embed_widget};
+use super::menus::{self, At, Entry, Item};
 use super::state::{Unread, now_unix};
 use super::widgets::avatar_widget;
 use super::{attachments, components, polls};
@@ -37,23 +38,112 @@ const COMPOSER_GAP: i32 = 12;
 /// Consecutive messages by one author within this window share a header.
 const GROUP_WINDOW_SECS: i64 = 7 * 60;
 
+/// What a message's menu acts on.
+pub(super) struct MessageTarget {
+    /// The row's message.
+    pub(super) message: Message,
+    /// The text selected in it, as Ctrl+C would copy it.
+    pub(super) selection: Option<String>,
+    /// Where the link the menu was opened on goes.
+    pub(super) link: Option<String>,
+}
+
+impl MessageTarget {
+    /// The message the row shows: for a thread's first message, the one
+    /// the thread was started from.
+    fn shown(&self) -> &Message {
+        self.message.thread_starter().unwrap_or(&self.message)
+    }
+}
+
+/// The selection, as on the desktop official client (373963).
+pub(super) const COPY_SELECTION: Entry<MessageTarget> = Entry::Item(Item {
+    name: "copy",
+    label: "_Copy",
+    shows: |_, target| target.selection.is_some(),
+    kind: menus::Kind::Action(|app, target| app.copy(target.selection.as_deref().unwrap_or_default())),
+});
+
+pub(super) const COPY_TEXT: Entry<MessageTarget> = Entry::Item(Item {
+    name: "copy-text",
+    label: "Copy _Text",
+    shows: |_, target| target.shown().copy_text().is_some(),
+    kind: menus::Kind::Action(|app, target| app.copy(&target.shown().copy_text().unwrap_or_default())),
+});
+
+pub(super) const COPY_MESSAGE_LINK: Entry<MessageTarget> = Entry::Item(Item {
+    name: "copy-message-link",
+    label: "Copy Message _Link",
+    shows: |_, _| true,
+    kind: menus::Kind::Action(|app, target| {
+        let message = target.shown();
+        let guild =
+            app.state.borrow().find_channel(message.channel_id).map_or(message.guild_id, |(g, _)| g.map(|g| g.id));
+        app.copy(&message.link(guild));
+    }),
+});
+
+/// The link the menu was opened on (777933).
+pub(super) const COPY_LINK: Entry<MessageTarget> = Entry::Item(Item {
+    name: "copy-link",
+    label: "Copy Lin_k",
+    shows: |_, target| target.link.is_some(),
+    kind: menus::Kind::Action(|app, target| app.copy(target.link.as_deref().unwrap_or_default())),
+});
+
+pub(super) const OPEN_LINK: Entry<MessageTarget> = Entry::Item(Item {
+    name: "open-link",
+    label: "_Open Link",
+    shows: |_, target| target.link.is_some(),
+    kind: menus::Kind::Action(|app, target| {
+        if let Some(link) = &target.link {
+            gtk::UriLauncher::new(link).launch(Some(&app.window), gio::Cancellable::NONE, |_| {});
+        }
+    }),
+});
+
+/// Only in Developer Mode (50268). Shift adds the channel's id in front.
+pub(super) const COPY_MESSAGE_ID: Entry<MessageTarget> = Entry::Item(Item {
+    name: "copy-message-id",
+    label: "Copy Message _ID",
+    shows: |app, _| app.state.borrow().developer_mode,
+    kind: menus::Kind::Action(|app, target| {
+        let message = target.shown();
+        app.copy(&match app.shift_held() {
+            true => format!("{}-{}", message.channel_id, message.id),
+            false => message.id.to_string(),
+        });
+    }),
+});
+
 impl App {
     /// The chat column: the message list (with scrollback) from edge to edge,
     /// and the header bar and composer floating over it.
     pub(super) fn build_chat(self: &Rc<Self>) -> gtk::Widget {
         let factory = gtk::SignalListItemFactory::new();
-        factory.connect_setup(|_, item| {
-            let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
-            item.set_activatable(false);
-            // A divider for a new day or the first unread message, a bar for
-            // collapsed blocked messages, then the message itself.
-            let cell = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            cell.append(
-                &gtk::Box::builder().visible(false).spacing(8).margin_top(12).margin_start(18).margin_end(18).build(),
-            );
-            cell.append(&gtk::Box::builder().visible(false).css_classes(["blocked-bar"]).build());
-            cell.append(&gtk::Box::new(gtk::Orientation::Vertical, 2));
-            item.set_child(Some(&cell));
+        factory.connect_setup({
+            let this = Rc::downgrade(self);
+            move |_, item| {
+                let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
+                item.set_activatable(false);
+                // A divider for a new day or the first unread message, a bar for
+                // collapsed blocked messages, then the message itself.
+                let cell = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                cell.append(
+                    &gtk::Box::builder()
+                        .visible(false)
+                        .spacing(8)
+                        .margin_top(12)
+                        .margin_start(18)
+                        .margin_end(18)
+                        .build(),
+                );
+                cell.append(&gtk::Box::builder().visible(false).css_classes(["blocked-bar"]).build());
+                let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
+                cell.append(&row);
+                item.set_child(Some(&cell));
+                attach_message_menu(&this, item, &cell, &row);
+            }
         });
         factory.connect_bind({
             let this = Rc::downgrade(self);
@@ -88,6 +178,13 @@ impl App {
         });
         self.list.set_factory(Some(&factory));
         self.list.add_css_class("messages");
+        // The keys for a menu open the focused message's, wherever in it the
+        // focus is: ahead of a label's own menu.
+        menus::on_keys(&self.list, |list| {
+            // The focused list item holds the cell the menu's action is on.
+            let cell = list.focus_child().and_then(|item| item.first_child());
+            cell.is_some_and(|cell| cell.activate_action("message.menu", None).is_ok())
+        });
         self.scroller.set_child(Some(&self.list));
         self.scroller.add_css_class("messages");
 
@@ -930,6 +1027,69 @@ impl App {
     }
 }
 
+/// Open the menu of the message `row` shows, from a right-click or
+/// long-press on it, or from the keys for a menu through `cell`'s
+/// `message.menu`, at its top left corner.
+fn attach_message_menu(this: &std::rc::Weak<App>, item: &gtk::ListItem, cell: &gtk::Box, row: &gtk::Box) {
+    let open = Rc::new({
+        let (this, item, row) = (this.clone(), item.downgrade(), row.downgrade());
+        move |at: At, link: Option<String>| {
+            let (Some(this), Some(item), Some(row)) = (this.upgrade(), item.upgrade(), row.upgrade()) else { return };
+            // Hidden rows: collapsed blocked messages, and those that show nothing.
+            let Some(message) = item.item().and_downcast::<glib::BoxedAnyObject>().filter(|_| row.is_visible()) else {
+                return;
+            };
+            let message = message.borrow::<Message>().clone();
+            this.message_menu(&row, message, at, link);
+        }
+    });
+    menus::on_secondary(row, {
+        let (open, row) = (open.clone(), row.downgrade());
+        move |x, y| {
+            let link = row.upgrade().and_then(|row| link_at(row.upcast_ref(), x, y));
+            open(At::Point(x, y), link);
+        }
+    });
+    let action = gio::SimpleAction::new("menu", None);
+    action.connect_activate(move |_, _| open(At::Point(0.0, 0.0), None));
+    let actions = gio::SimpleActionGroup::new();
+    actions.add_action(&action);
+    cell.insert_action_group("message", Some(&actions));
+}
+
+/// The text selected in `row`, in the label with the focus, as Ctrl+C would
+/// copy it.
+fn selection_in(row: &gtk::Widget) -> Option<String> {
+    let label = row.root()?.focus().and_downcast::<gtk::Label>().filter(|l| l.is_ancestor(row))?;
+    let text = match label.parent().and_downcast::<RichText>() {
+        Some(text) => text.selected_text()?,
+        None => {
+            let (start, end) = label.selection_bounds()?;
+            label.text().chars().skip(start as usize).take((end - start) as usize).collect()
+        }
+    };
+    (!text.is_empty()).then_some(text)
+}
+
+/// Where the link at `(x, y)` in `row` goes.
+fn link_at(row: &gtk::Widget, x: f64, y: f64) -> Option<String> {
+    let mut widget = row.pick(x, y, gtk::PickFlags::DEFAULT);
+    while let Some(w) = widget.filter(|w| w != row) {
+        if let Some(text) = w.downcast_ref::<RichText>() {
+            let point = row.compute_point(text, &graphene::Point::new(x as f32, y as f32))?;
+            return text.link_at(point.x() as f64, point.y() as f64);
+        }
+        // Other labels are all one link, if any: file names, embed titles.
+        if let Some(label) = w.downcast_ref::<gtk::Label>()
+            && !label.parent().is_some_and(|p| p.is::<RichText>())
+        {
+            return label.current_uri().map(String::from);
+        }
+        widget = w.parent();
+    }
+    None
+}
+
 /// User ids referenced by `<@id>` mentions within a parsed span, at any
 /// depth.
 pub(super) fn collect_user_mentions(span: &discord::markup::Span) -> Vec<u64> {
@@ -1058,35 +1218,53 @@ impl App {
         }
         main.append(&body);
 
-        if message.is_replyable() && self.state.borrow().can_reply(message.channel_id) {
+        // Over the row, not in it: as part of the layout they would make
+        // every one-line message as tall as the buttons.
+        let actions = gtk::Box::builder().halign(gtk::Align::End).valign(gtk::Align::Start).build();
+        if self.offers_reply(message) {
             let reply = gtk::Button::builder()
                 .icon_name("mail-reply-sender-symbolic")
                 .tooltip_text("Reply (Shift: without pinging)")
-                .halign(gtk::Align::End)
-                .valign(gtk::Align::Start)
                 .css_classes(["flat", "message-action"])
                 .build();
             reply.connect_clicked({
                 let this = Rc::downgrade(self);
                 let message = message.clone();
-                move |button| {
-                    let shift =
-                        button.display().default_seat().and_then(|seat| seat.keyboard()).is_some_and(|keyboard| {
-                            keyboard.modifier_state().contains(gtk::gdk::ModifierType::SHIFT_MASK)
-                        });
+                move |_| {
                     if let Some(this) = this.upgrade() {
-                        this.start_reply(&message, shift);
+                        this.start_reply(&message, this.shift_held());
                     }
                 }
             });
-            // Over the row, not in it: as part of the layout it would make
-            // every one-line message as tall as the button.
-            let overlay = gtk::Overlay::builder().child(&main).build();
-            overlay.add_overlay(&reply);
-            row.append(&overlay);
-        } else {
-            row.append(&main);
+            actions.append(&reply);
         }
+        let more = gtk::Button::builder()
+            .icon_name("view-more-symbolic")
+            .tooltip_text("More")
+            // Leaving the focus where it is keeps a selection to copy.
+            .focus_on_click(false)
+            .css_classes(["flat", "message-action"])
+            .build();
+        more.connect_clicked({
+            let this = Rc::downgrade(self);
+            let (message, row) = (message.clone(), row.downgrade());
+            move |button| {
+                let (Some(this), Some(row)) = (this.upgrade(), row.upgrade()) else { return };
+                let Some(b) = button.compute_bounds(&row) else { return };
+                let rect = gdk::Rectangle::new(b.x() as i32, b.y() as i32, b.width() as i32, b.height() as i32);
+                this.message_menu(&row, message.clone(), At::Below(rect), None);
+            }
+        });
+        actions.append(&more);
+        let overlay = gtk::Overlay::builder().child(&main).build();
+        overlay.add_overlay(&actions);
+        row.append(&overlay);
+    }
+
+    /// Open the menu for `message`, whose row is `row`, at `at` there.
+    fn message_menu(self: &Rc<Self>, row: &gtk::Box, message: Message, at: At, link: Option<String>) {
+        let target = MessageTarget { selection: selection_in(row.upcast_ref()), link, message };
+        menus::popup(self, menus::MESSAGE, target, row, at);
     }
 
     /// The spoilers revealed in a message's text, remembered while the app
@@ -1224,7 +1402,7 @@ impl App {
     /// jumps there.
     fn system_line(self: &Rc<Self>, message: &Message, system: &system::System) -> gtk::Widget {
         let time = parse_time(&message.timestamp).map(|t| format_time(&t)).unwrap_or_default();
-        let text = RichText::new(&render::system_markup(&system.parts, &time), Vec::new(), Vec::new());
+        let text = RichText::new(&render::system_markup(&system.parts, &time), Vec::new(), Vec::new(), Vec::new());
         text.label().connect_activate_link({
             let this = Rc::downgrade(self);
             let channel = message.channel_id;

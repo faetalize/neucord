@@ -39,6 +39,8 @@ mod imp {
         pub images: RefCell<Vec<Image>>,
         /// Byte ranges of the spoilers, and whether each is revealed.
         pub spoilers: RefCell<Vec<(Range<u32>, bool)>>,
+        /// Byte ranges of the links, and where each goes.
+        pub links: RefCell<Vec<(Range<u32>, String)>>,
         pub on_reveal: RefCell<Option<RevealHandler>>,
         /// The pointer is over a hidden spoiler.
         pub over_spoiler: Cell<bool>,
@@ -171,9 +173,15 @@ glib::wrapper! {
 }
 
 impl RichText {
-    /// Text from Pango `markup`, with `images` and `spoilers` (byte ranges
-    /// of its text, and whether each starts revealed).
-    pub fn new(markup: &str, images: Vec<Image>, spoilers: Vec<(Range<u32>, bool)>) -> Self {
+    /// Text from Pango `markup`, with `images`, `spoilers` (byte ranges of
+    /// its text, and whether each starts revealed) and `links` (byte ranges,
+    /// and where each goes).
+    pub fn new(
+        markup: &str,
+        images: Vec<Image>,
+        spoilers: Vec<(Range<u32>, bool)>,
+        links: Vec<(Range<u32>, String)>,
+    ) -> Self {
         let this: Self = glib::Object::new();
         let label = this.label();
         label.set_markup(markup);
@@ -194,6 +202,7 @@ impl RichText {
         this.set_has_tooltip(!images.is_empty());
         *this.imp().images.borrow_mut() = images;
         *this.imp().spoilers.borrow_mut() = spoilers;
+        *this.imp().links.borrow_mut() = links;
         this
     }
 
@@ -242,6 +251,15 @@ impl RichText {
         inside.then_some(index as u32)
     }
 
+    /// Where the link under a point goes, unless a spoiler still hides it.
+    pub fn link_at(&self, x: f64, y: f64) -> Option<String> {
+        if self.hidden_spoiler_at(x, y).is_some() {
+            return None;
+        }
+        let index = self.index_at(x, y)?;
+        self.imp().links.borrow().iter().find(|(range, _)| range.contains(&index)).map(|(_, url)| url.clone())
+    }
+
     fn hidden_spoiler_at(&self, x: f64, y: f64) -> Option<usize> {
         let spoilers = self.imp().spoilers.borrow();
         if spoilers.iter().all(|(_, revealed)| *revealed) {
@@ -261,7 +279,7 @@ impl RichText {
     }
 
     /// The selection, with images as their alt text.
-    fn selected_text(&self) -> Option<String> {
+    pub fn selected_text(&self) -> Option<String> {
         let label = self.label();
         let (start, end) = label.selection_bounds()?;
         let text = label.layout().text();
