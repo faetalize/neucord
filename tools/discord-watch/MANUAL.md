@@ -28,17 +28,25 @@ changed for unrelated reasons only needs a note in the issue.
 
 ## Sending, and what the client holds back
 
-- **A server's owner has every permission**, so slowmode and verification
-  don't apply to them (`cooldowns::bypasses_slowmode`, `verification::gate`).
-  Client: the permission computation in 488926 (the owner branch; anchor
-  `lurkerPermissionsMask`) and the check in 260509.
-- **A timeout leaves only reading**, and administrators are exempt
+- **Our permissions** (`permissions.rs`), which decide what Neucord shows,
+  sends and holds back below. The bits, `PermissionStore` (when they're
+  recomputed) and `GuildRoleStore` are watched. The computation isn't:
+  488926 (anchor `lurkerPermissionsMask`) gives the owner everything, then
+  adds roles to `@everyone`, applies overwrites in order, cuts quarantined
+  and timed-out members unless Administrator, holds pending members and
+  guests, and takes the moderation permissions (the list in 818348 next to
+  the permission bits) where the server requires 2FA and the account lacks
+  it. The owner check is in 260509; verification makes its own
+  (`verification::gate`, in the watched `GuildVerificationStore`).
+- **A timeout leaves only reading**, and administrators see no notice
   (`Guild::timeout_left`). Client: 316031 (the `communicationDisabledUntil`
-  check), 488926 (cut to View Channel and Read Message History unless
-  Administrator), `renderMessageBanner` in 688606, and the 10-second expiry
-  sweep in 592713 (`clearGuildMemberTimeout`).
+  check), 488926 (the cut), `renderMessageBanner` in 688606 (the notice
+  unless `can(ADMINISTRATOR, guild)`), and the 10-second expiry sweep in
+  592713 (`clearGuildMemberTimeout`).
 - **When a slowmode cooldown starts** (`Slowmode` in `cooldowns.rs`). The
-  store itself is watched (`SlowmodeStore`). What feeds it isn't: 148494
+  store itself is watched (`SlowmodeStore`). Who skips it is in 960850:
+  Bypass Slowmode in the channel (`cooldowns::bypasses_slowmode`). What
+  feeds it isn't watched either: 148494
   resets the cooldown only after a send succeeds and reads `retry_after` on
   `SLOWMODE_RATE_LIMITED`, and 741961 reads `message_send_cooldown_ms` from
   the typing endpoint's answer, which Neucord doesn't send for yet (#8).
@@ -47,8 +55,10 @@ changed for unrelated reasons only needs a note in the issue.
   wrapped by 578434 in DMs (the system DM, a blocked user) and by 80683 in
   servers, where membership screening shows for a `pending` member when the
   server has `MEMBER_VERIFICATION_GATE_ENABLED` (anchor
-  `missingVerificationRole`). The order and wording of Neucord's notices are
-  its own.
+  `missingVerificationRole`). In a server the box is disabled without Send
+  Messages in the channel, or while pending (845207, anchor
+  `canEveryoneSendMessages`; `permissions::can_send`). The order and wording
+  of Neucord's notices are its own.
 - **A login that must change its password** (`auth::check_required`). The
   login store is watched (`LoginRequiredActionStore`). The forced modal, and
   logging out when it's closed, are in `handleConnectionOpen` in 165685.
@@ -63,10 +73,11 @@ changed for unrelated reasons only needs a note in the issue.
   `remote_auth.rs`). How often Neucord reconnects to the remote auth
   gateway. Client: 52423 (logger `useAuthWebsocket`), with the backoff in
   158390.
-- **When Reply is offered** (`Message::is_replyable`). `REPLYABLE` is
-  watched, but only covers message types. 517997 also needs Send Messages
-  and Read Message History in servers, a sent and non-ephemeral message, no
-  timeout, and no archived thread.
+- **When Reply is offered** (`Message::is_replyable`,
+  `permissions::can_reply`). `REPLYABLE` is watched, but only covers message
+  types. 517997 also needs Send Messages and Read Message History in
+  servers, which Neucord checks, and a sent and non-ephemeral message, no
+  timeout and no archived thread, which it doesn't yet (#65).
 
 ## Notifications and unread state
 
@@ -85,6 +96,11 @@ changed for unrelated reasons only needs a note in the issue.
 
 ## What shows at all
 
+- **Channels we can't view** (`Guild::sidebar`, `Guild::can_view`). Neucord
+  lists, counts unread and opens only channels with View Channel. Client:
+  the unread state in 458294 skips a channel without its
+  `accessPermissions` (95701: View Channel, and Connect too for voice
+  channels).
 - **System messages that show nothing** (`HIDDEN` in `system.rs`). Client:
   the type-to-renderer map in 64369 (logger `SystemMessage`), where those
   types map to `void 0`.
