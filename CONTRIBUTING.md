@@ -35,17 +35,32 @@ Neucord handles other people's messages and a credential with full account
 access. Never log tokens, message contents or user data, and never commit
 real IDs, names or payloads: use made-up test data.
 
+## What every issue and pull request looks at
+
+Neucord follows the official client, so each issue and pull request checks
+it for three things:
+
+- **Account safety.** Neucord sends nothing the official client wouldn't,
+  and holds back where it does: a request no official client makes is how
+  an account gets flagged. Look at how the client sends anything Neucord
+  hasn't sent before.
+- **Drift.** If Neucord comes to rely on something new in the official
+  client (a field, an enum value, a rule such as which channels take
+  messages), extend `tools/discord-watch` in the same pull request, so the
+  weekly check notices when Discord changes it. If it can't be snapshotted,
+  such as a rule in an unnamed function, add it to
+  `tools/discord-watch/MANUAL.md`, which gets checked by hand every week.
+- **Context menus.** Say whether the official client offers the feature in
+  a context menu: on which surface, which items, under what conditions. If
+  Neucord has that surface, the pull request adds the entries through the
+  context menu baseline (#78); if not, the issue notes them for when it does.
+
+If you're not comfortable doing so, just mention it in the PR body and I'll
+handle it.
+
 ## Pull requests
 
 One feature or fix per pull request, against `master`, linked to its issue.
-
-If it makes Neucord rely on something new in the official client (a field,
-an enum value, a rule such as which channels take messages), extend
-`tools/discord-watch` in the same pull request, so the weekly check notices
-when Discord changes it. If it can't be snapshotted, such as a rule in an
-unnamed function, add it to `tools/discord-watch/MANUAL.md`, which gets
-checked by hand every week. If you're not comfortable doing so, just mention
-it in the PR body and I'll handle it.
 
 Name the branch `<type>/<issue>-<what it does>`, for example
 `feature/21-qr-login`. The type is one of `feature`, `fix`, `docs`,
