@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use discord::cooldowns::{Slowmode, bypasses_slowmode, wait_words};
 use discord::rest::Reply;
+use discord::verification::{self, Gate};
 use discord::{Channel, Message, Snowflake};
 use gtk::glib;
 use gtk::prelude::*;
@@ -129,8 +130,9 @@ impl App {
     }
 
     /// What replaces the message box where we can't post: accept and ignore
-    /// in a message request, a notice in the system DM or during a timeout.
-    /// While slowmode makes us wait, the box stays and the wait shows above it.
+    /// in a message request, a notice in the system DM, during a timeout, or
+    /// while a server's verification asks for more. While slowmode makes us
+    /// wait, the box stays and the wait shows above it.
     pub(super) fn update_notice_bar(self: &Rc<Self>) {
         let bar = &self.notice_bar;
         while let Some(child) = bar.first_child() {
@@ -139,13 +141,15 @@ impl App {
         if let Some(tick) = self.notice_tick.take() {
             tick.remove();
         }
-        let (system, request, timeout, slowmode) = {
+        let (system, request, timeout, gate, slowmode) = {
             let state = self.state.borrow();
             let open = state.channel.and_then(|id| state.find_channel(id));
             let system = open.is_some_and(|(_, c)| c.is_system_dm());
-            let timeout = open.and_then(|(guild, _)| guild?.timeout_left(now_unix()));
+            let guild = open.and_then(|(guild, _)| guild);
+            let timeout = guild.and_then(|g| g.timeout_left(now_unix()));
+            let gate = guild.zip(state.account.as_ref()).and_then(|(g, a)| verification::gate(g, a, now_unix()));
             let slowmode = open.map_or(0, |(_, c)| state.slowmode.remaining_ms(c, now_ms()));
-            (system, state.open_request().map(|c| (c.id, c.spam, c.title())), timeout, slowmode)
+            (system, state.open_request().map(|c| (c.id, c.spam, c.title())), timeout, gate, slowmode)
         };
         let label = |text: String| gtk::Label::builder().label(text).xalign(0.0).wrap(true).hexpand(true).build();
         let text = match (&request, timeout) {
@@ -160,24 +164,27 @@ impl App {
                 format!("Discord filed this message request from {title} as likely spam.")
             }
             (Some((_, false, title)), None) => format!("{title} wants to message you. Accept to reply."),
-            (None, None) => {
-                self.composer_box.set_visible(true);
-                bar.set_visible(slowmode > 0);
-                if slowmode > 0 {
-                    let seconds = (slowmode + 999) / 1000;
-                    bar.append(&label(format!(
-                        "Slowmode is enabled. You can send another message in this channel in {}.",
-                        wait_words(seconds)
-                    )));
-                    self.tick_notice_bar();
+            (None, None) => match &gate {
+                Some(gate) => gate_notice(gate, now_unix()),
+                None => {
+                    self.composer_box.set_visible(true);
+                    bar.set_visible(slowmode > 0);
+                    if slowmode > 0 {
+                        let seconds = (slowmode + 999) / 1000;
+                        bar.append(&label(format!(
+                            "Slowmode is enabled. You can send another message in this channel in {}.",
+                            wait_words(seconds)
+                        )));
+                        self.tick_notice_bar();
+                    }
+                    return;
                 }
-                return;
-            }
+            },
         };
         self.composer_box.set_visible(false);
         bar.set_visible(true);
         bar.append(&label(text));
-        if timeout.is_some() {
+        if timeout.is_some() || gate.as_ref().and_then(Gate::until).is_some() {
             self.tick_notice_bar();
         }
         if let Some((id, ..)) = request.filter(|_| !system) {
@@ -426,6 +433,17 @@ impl App {
                 }
             }
         });
+    }
+}
+
+/// The official client's words for what a server's verification still asks
+/// of us. The gates that only take time count down, as the client's do.
+fn gate_notice(gate: &Gate, now_unix: i64) -> String {
+    let text = gate.text();
+    match gate.until() {
+        Some(until) => format!("{text} You can send messages here in {}.", wait_words(until - now_unix)),
+        None if *gate == Gate::Screening => format!("{text} Accept the server's rules in the official app."),
+        None => text,
     }
 }
 

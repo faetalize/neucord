@@ -2,8 +2,10 @@
 //! ignored, so Discord adding fields never breaks parsing.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
 
 use crate::embed::Embed;
+use crate::verification::Rules;
 
 /// Discord IDs are 64-bit integers sent as JSON strings.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -198,6 +200,14 @@ pub struct Guild {
     /// When our timeout here ends, in seconds since 1970. Filled in by the
     /// gateway; may lie in the past.
     pub timed_out_until: Option<i64>,
+    /// What the server asks before members can talk.
+    pub verification: Rules,
+    /// When we joined, in seconds since 1970.
+    pub joined_at: Option<i64>,
+    /// Membership screening holds us until we accept the server's rules.
+    pub pending: bool,
+    /// Our member flags here.
+    pub member_flags: u64,
 }
 
 /// What Neucord uses of our own member in a server, which READY, GUILD_CREATE
@@ -207,26 +217,39 @@ pub struct Member {
     pub roles: Vec<Snowflake>,
     /// `communication_disabled_until`, rounded up to the second.
     pub timed_out_until: Option<i64>,
+    /// Rounded up to the second too, so the time-based gates never lift early.
+    pub joined_at: Option<i64>,
+    pub pending: bool,
+    pub flags: u64,
 }
 
 impl Member {
-    pub fn from_value(value: &serde_json::Value) -> Member {
-        let id = |v: &serde_json::Value| v.as_str()?.parse().ok().map(Snowflake);
-        let until = value["communication_disabled_until"].as_str().and_then(|until| {
-            let time = glib::DateTime::from_iso8601(until, Some(&glib::TimeZone::utc())).ok()?;
-            Some(time.to_unix() + i64::from(time.microsecond() > 0))
-        });
+    pub fn from_value(value: &Value) -> Member {
+        let id = |v: &Value| v.as_str()?.parse().ok().map(Snowflake);
         Member {
             roles: value["roles"].as_array().into_iter().flatten().filter_map(id).collect(),
-            timed_out_until: until,
+            timed_out_until: unix_rounded_up(&value["communication_disabled_until"]),
+            joined_at: unix_rounded_up(&value["joined_at"]),
+            pending: value["pending"] == true,
+            flags: value["flags"].as_u64().unwrap_or(0),
         }
     }
+}
+
+/// An ISO 8601 time, in seconds since 1970, a part second counting as whole.
+fn unix_rounded_up(value: &Value) -> Option<i64> {
+    let time = glib::DateTime::from_iso8601(value.as_str()?, Some(&glib::TimeZone::utc())).ok()?;
+    Some(time.to_unix() + i64::from(time.microsecond() > 0))
 }
 
 impl Guild {
     pub fn set_member(&mut self, member: Member) {
         self.my_roles = member.roles;
         self.timed_out_until = member.timed_out_until;
+        // READY's members may leave it out; the guild has it too.
+        self.joined_at = member.joined_at.or(self.joined_at);
+        self.pending = member.pending;
+        self.member_flags = member.flags;
     }
 
     /// Seconds left of our timeout here, if we are in one. Then the official
@@ -293,7 +316,8 @@ impl<'de> Deserialize<'de> for Guild {
             owner_id: Option<Snowflake>,
         }
 
-        let raw = Raw::deserialize(d)?;
+        let value = Value::deserialize(d)?;
+        let raw = Raw::deserialize(&value).map_err(serde::de::Error::custom)?;
         let (name, icon, default, owner_id) = match (raw.name, raw.properties) {
             (Some(name), _) => (name, raw.icon, raw.default_message_notifications, raw.owner_id),
             (None, Some(p)) => (p.name, p.icon, p.default_message_notifications, p.owner_id),
@@ -308,6 +332,10 @@ impl<'de> Deserialize<'de> for Guild {
             owner_id,
             my_roles: Vec::new(),
             timed_out_until: None,
+            verification: Rules::from_guild(&value),
+            joined_at: unix_rounded_up(&value["joined_at"]),
+            pending: false,
+            member_flags: 0,
         })
     }
 }

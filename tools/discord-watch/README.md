@@ -25,6 +25,10 @@ names so two builds differ only where Discord changed something:
   replaced. These are rules Neucord copies rather than data it reads:
   `isSystemDM` is where the client shows no message box, and posting there
   anyway got an account flagged (#51).
+- The modules of the stores named in `watch.json`, reduced the same way. A
+  store names itself (`static displayName`), the functions holding its
+  rules don't: `GuildVerificationStore` decides where the client shows a
+  server's verification steps instead of the message box (#53).
 - The values named in `watch.json` (a literal, or a list or set of them),
   wherever the client defines or exports them: how many emoji a message
   can be and still show them large, which message types people write.

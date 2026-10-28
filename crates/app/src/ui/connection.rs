@@ -106,6 +106,25 @@ impl App {
                 Event::PrivateChannelDelete(id) => self.on_private_channel_delete(id),
                 Event::GuildChannelUpdate { guild_id, channel } => self.on_guild_channel(guild_id, channel),
                 Event::MemberUpdate { guild_id, member } => self.on_member(guild_id, member),
+                Event::GuildUpdate { guild_id, owner_id, rules } => {
+                    let open = {
+                        let mut state = self.state.borrow_mut();
+                        let Some(guild) = state.guilds.iter_mut().find(|g| g.id == guild_id) else { continue };
+                        // A transferred server stops exempting its old owner.
+                        if owner_id.is_some() {
+                            guild.owner_id = owner_id;
+                        }
+                        guild.verification = rules;
+                        state.guild == Some(guild_id)
+                    };
+                    if open {
+                        self.update_notice_bar();
+                    }
+                }
+                Event::AccountUpdate(account) => {
+                    self.state.borrow_mut().account = Some(account);
+                    self.update_notice_bar();
+                }
                 Event::MessageCreate(message) => self.on_message(*message),
                 Event::MessageUpdate(edit) => self.on_message_update(edit),
                 Event::MessageDelete { id, channel_id } => self.on_message_delete(id, channel_id),
@@ -201,6 +220,7 @@ impl App {
     pub(super) fn on_ready(self: &Rc<Self>, ready: Ready) {
         let Ready {
             user,
+            account,
             guilds,
             private_channels,
             relationships,
@@ -234,6 +254,7 @@ impl App {
             state.notifications = notification_settings;
             state.media = media_settings;
             state.required_action = required_action;
+            state.account = Some(account);
             let store = (!state.persisted).then(|| (state.token.clone(), user.username.clone()));
             state.persisted = true;
             state.users.insert(user.id.0, user.display_name().to_string());
@@ -386,8 +407,8 @@ impl App {
         }
     }
 
-    /// Our member in a server changed: a timeout began or was lifted, or our
-    /// roles changed.
+    /// Our member in a server changed: a timeout began or was lifted, our
+    /// roles changed, or screening let us in.
     pub(super) fn on_member(self: &Rc<Self>, guild_id: Snowflake, member: Member) {
         let open = {
             let mut state = self.state.borrow_mut();

@@ -88,6 +88,14 @@ export function compare(old, cur, uses) {
     affects.push(`- ${code(name)}: the client's rule changed\n  - was: ${rule(before)}\n  - now: ${rule(after)}`);
   }
 
+  // The stores in watch.json hold rules too, spread over a module too long
+  // to quote: the full diff shows what changed.
+  for (const name of Object.keys({ ...old.stores, ...cur.stores }).sort()) {
+    const [before, after] = [old.stores?.[name], cur.stores?.[name]];
+    if (!old.stores || same(before, after)) continue;
+    affects.push(`- ${code(name)}: ${after?.length ? "the client's rule changed" : "not found"}`);
+  }
+
   // The constants in watch.json are values Neucord copies, such as how
   // many emoji a message can be and still show them large.
   const value = (values) => (values?.length ? values.map((v) => code(JSON.stringify(v))).join(" | ") : "not found");

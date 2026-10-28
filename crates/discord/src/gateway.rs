@@ -20,6 +20,7 @@ use crate::notifications::{GuildSettings, NotificationSettings};
 use crate::read_state::ReadStates;
 use crate::relationships::{Presence, Relationship, Relationships};
 use crate::settings::{self, GuildFolder, MediaPatch, MediaSettings};
+use crate::verification::{Account, Rules};
 use crate::{Channel, Error, Guild, Member, Message, MessageEdit, Snowflake, User, identity};
 
 /// Gateway capability bits. 0 asks for the classic payload shapes, which the
@@ -44,6 +45,8 @@ pub struct Resume {
 #[derive(Debug)]
 pub struct Ready {
     pub user: User,
+    /// What servers' verification asks of the same user.
+    pub account: Account,
     pub guilds: Vec<Guild>,
     /// DMs and group DMs, message requests included, in no particular order.
     pub private_channels: Vec<Channel>,
@@ -75,11 +78,20 @@ pub enum Event {
         guild_id: Snowflake,
         channel: Channel,
     },
-    /// Our own member in a server changed: roles, a timeout.
+    /// Our own member in a server changed: roles, a timeout, screening passed.
     MemberUpdate {
         guild_id: Snowflake,
         member: Member,
     },
+    /// A server's settings changed; only its owner and what verification
+    /// reads are kept.
+    GuildUpdate {
+        guild_id: Snowflake,
+        owner_id: Option<Snowflake>,
+        rules: Rules,
+    },
+    /// Our account changed, for instance its email was verified.
+    AccountUpdate(Account),
     MessageCreate(Box<Message>),
     /// An edit, or link previews arriving for a message.
     MessageUpdate(MessageEdit),
@@ -428,6 +440,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 Ok(user) => user,
                 Err(e) => return eprintln!("gateway: READY without a usable user: {e}"),
             };
+            let Some(account) = Account::from_user(&data["user"]) else { return };
             state.me.set(Some(user.id));
             state.resuming.set(false);
             if let (Some(id), Some(url)) = (data["session_id"].as_str(), data["resume_gateway_url"].as_str()) {
@@ -452,6 +465,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
                     media
                 },
                 required_action: data["required_action"].as_str().map(str::to_owned),
+                account,
                 user,
                 guilds,
             }))
@@ -511,6 +525,18 @@ fn dispatch(state: &State, name: &str, data: Value) {
             }
             Event::MemberUpdate { guild_id, member: Member::from_value(&data) }
         }
+        "GUILD_UPDATE" => match parse_id(&data["id"]) {
+            Some(guild_id) => Event::GuildUpdate {
+                guild_id,
+                owner_id: parse_id(&data["owner_id"]).or_else(|| parse_id(&data["properties"]["owner_id"])),
+                rules: Rules::from_guild(&data),
+            },
+            None => return,
+        },
+        "USER_UPDATE" => match Account::from_user(&data) {
+            Some(account) if Some(account.id) == state.me.get() => Event::AccountUpdate(account),
+            _ => return,
+        },
         "RELATIONSHIP_ADD" => match Relationship::from_value(&data, &Default::default()) {
             Some(relationship) => {
                 Event::RelationshipAdd { relationship, notify: data["should_notify"].as_bool() == Some(true) }
@@ -654,6 +680,19 @@ mod tests {
         assert_eq!((guild_id, member.timed_out_until), (Snowflake(1), Some(noon)));
         let Some(Event::MemberUpdate { member, .. }) = update("5", Value::Null) else { panic!("our member") };
         assert_eq!(member.timed_out_until, None, "the timeout lifted early");
+
+        dispatch(&state, "GUILD_UPDATE", json!({"id": "1", "name": "A", "owner_id": "8", "verification_level": 3}));
+        let Ok(Event::GuildUpdate { guild_id, owner_id, rules }) = rx.try_recv() else { panic!("no guild update") };
+        assert_eq!(
+            (guild_id, owner_id, rules.level),
+            (Snowflake(1), Some(Snowflake(8)), crate::verification::VerificationLevel::High),
+            "ownership can move, and with it slowmode and verification exemptions"
+        );
+        dispatch(&state, "USER_UPDATE", json!({"id": "8", "verified": true}));
+        assert!(rx.try_recv().is_err(), "someone else");
+        dispatch(&state, "USER_UPDATE", json!({"id": "5", "verified": true, "email": "a@example.org"}));
+        let Ok(Event::AccountUpdate(account)) = rx.try_recv() else { panic!("no account update") };
+        assert!(account.verified && account.email && !account.phone);
 
         dispatch(&state, "CHANNEL_UPDATE", json!({"id": "9", "type": 0, "guild_id": "1", "rate_limit_per_user": 30}));
         let Ok(Event::GuildChannelUpdate { guild_id, channel }) = rx.try_recv() else { panic!("no channel update") };
