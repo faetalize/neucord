@@ -9,6 +9,7 @@ use gtk::{glib, pango};
 
 use super::App;
 use super::state::{Page, now_ms, now_unix};
+use super::thread_line::ThreadLine;
 use super::widgets::{avatar_widget, badge, round_picture};
 use crate::images::Images;
 
@@ -95,17 +96,20 @@ impl App {
                 } else if state.is_unread(channel) {
                     row.add_css_class("unread");
                 }
-                for thread in state.sidebar_threads(guild, channel) {
-                    self.append_thread(&state, thread);
+                let threads = state.sidebar_threads(guild, channel);
+                for (i, thread) in threads.iter().enumerate() {
+                    self.append_thread(&state, thread, i + 1 == threads.len());
                 }
             }
         }
         self.watch_thread_expiry(guild);
     }
 
-    /// A thread's row, under its parent's.
-    fn append_thread(&self, state: &super::state::State, thread: &Channel) {
-        let row = gtk::Box::builder().spacing(6).margin_start(18).build();
+    /// A thread's row, under its parent's, joined to it by a line; `last`
+    /// if no thread of the same parent follows.
+    fn append_thread(&self, state: &super::state::State, thread: &Channel, last: bool) {
+        let row = gtk::Box::builder().spacing(6).build();
+        row.append(&ThreadLine::new(last));
         row.append(
             &gtk::Label::builder()
                 .label(thread.name.as_deref().unwrap_or("unnamed"))

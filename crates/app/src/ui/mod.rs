@@ -19,6 +19,7 @@ mod rail;
 mod requests;
 mod sidebar;
 mod state;
+mod thread_line;
 mod unread;
 mod widgets;
 
