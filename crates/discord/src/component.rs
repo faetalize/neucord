@@ -89,6 +89,26 @@ pub struct Media {
 }
 
 impl Component {
+    /// The markup of every text in `components`, nested ones included, in
+    /// the order they show.
+    pub fn texts(components: &[Component]) -> Vec<&str> {
+        let mut out = Vec::new();
+        for component in components {
+            match component {
+                Component::Text(text) => out.push(text.as_str()),
+                Component::Row(children) | Component::Container { components: children, .. } => {
+                    out.extend(Component::texts(children))
+                }
+                Component::Section { components, accessory } => {
+                    out.extend(Component::texts(components));
+                    out.extend(Component::texts(accessory.as_deref().map(std::slice::from_ref).unwrap_or_default()));
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
     fn from_value(value: &Value) -> Component {
         let text = |key: &str| value[key].as_str().map(String::from);
         let flag = |key: &str| value[key].as_bool().unwrap_or(false);
@@ -229,5 +249,17 @@ mod tests {
         );
         assert!(matches!(&components[3], Component::File { name: Some(n), size: Some(12), .. } if n == "a.txt"));
         assert_eq!(components[4], Component::Unknown);
+    }
+
+    #[test]
+    fn texts_in_order() {
+        let parsed = parse(
+            r#"[{"type":10,"content":"a"},
+                {"type":17,"components":[
+                    {"type":9,"components":[{"type":10,"content":"b"},{"type":10,"content":"c"}],
+                     "accessory":{"type":2,"style":1,"label":"x"}},
+                    {"type":10,"content":"d"}]}]"#,
+        );
+        assert_eq!(Component::texts(&parsed), ["a", "b", "c", "d"]);
     }
 }

@@ -62,6 +62,7 @@
     "fetchMessages",
     "getAckTimestamp",
     "getAlgorithm",
+    "getContentMessage",
     "getForwardInfo",
     "getGuildChannelUnreadState",
     "getSystemMessageUserJoin",

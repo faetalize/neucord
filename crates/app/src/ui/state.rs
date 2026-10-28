@@ -85,6 +85,8 @@ pub(super) struct State {
     pub(super) notifications: NotificationSettings,
     /// How embeds and media show.
     pub(super) media: MediaSettings,
+    /// Menus offer to copy ids.
+    pub(super) developer_mode: bool,
     /// Acks waiting to be sent: channel → newest message read.
     pub(super) pending_acks: HashMap<Snowflake, Snowflake>,
     /// How long until we may post again in each channel.

@@ -43,9 +43,9 @@
    message takes no space. */
 listview.messages, listview.messages > row { background: none; padding: 0; }
 .message       { padding: 2px 6px 2px 18px; }
-/* Room for the hover Reply button, which floats over the row's top right
-   corner, so text is as wide with or without it. */
-.message-main  { margin-right: 44px; }
+/* Room for the hover buttons (Reply, and More for the menu), which float
+   over the row's top right corner, so text is as wide with or without them. */
+.message-main  { margin-right: 72px; }
 .message.first { padding-top: 14px; }
 .message:hover { background-color: alpha(currentColor, 0.04); }
 .message.replying  { background-color: alpha(var(--accent-bg-color), 0.12); box-shadow: inset 2px 0 var(--accent-bg-color); }

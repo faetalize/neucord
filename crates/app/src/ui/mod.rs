@@ -12,6 +12,7 @@ mod embeds;
 mod friends;
 mod login;
 mod media_frame;
+mod menus;
 mod notify;
 mod panes;
 mod polls;

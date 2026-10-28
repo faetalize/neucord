@@ -62,6 +62,7 @@ pub struct Ready {
     /// Server folders and order; empty if the user never arranged servers.
     pub guild_folders: Vec<GuildFolder>,
     pub media_settings: MediaSettings,
+    pub developer_mode: bool,
     /// A step Discord requires before the account can be used, if any
     /// (see [`crate::account`]).
     pub required_action: Option<String>,
@@ -174,6 +175,7 @@ pub enum Event {
     GuildFoldersUpdate(Vec<GuildFolder>),
     /// The user changed how embeds and media show.
     MediaSettingsUpdate(MediaPatch),
+    DeveloperModeUpdate(bool),
     /// Discord started or stopped requiring a step (see [`crate::account`]).
     RequiredActionUpdate(Option<String>),
     /// A resume succeeded; everything missed has been replayed before this.
@@ -578,6 +580,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
                     media.apply(MediaPatch::from_settings(&data["user_settings"]));
                     media
                 },
+                developer_mode: settings::developer_mode(&data["user_settings"]).unwrap_or(false),
                 required_action: data["required_action"].as_str().map(str::to_owned),
                 account,
                 user,
@@ -614,6 +617,9 @@ fn dispatch(state: &State, name: &str, data: Value) {
             let media = MediaPatch::from_settings(&data);
             if !media.is_empty() {
                 let _ = state.events.try_send(Event::MediaSettingsUpdate(media));
+            }
+            if let Some(on) = settings::developer_mode(&data) {
+                let _ = state.events.try_send(Event::DeveloperModeUpdate(on));
             }
             match settings::guild_folders(&data) {
                 Some(folders) => Event::GuildFoldersUpdate(folders),
