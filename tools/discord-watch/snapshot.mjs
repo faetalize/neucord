@@ -445,6 +445,7 @@ export async function snapshot(dir) {
   return sorted({
     channel: meta.channel,
     build: meta.build,
+    apiVersion: meta.apiVersion ?? null,
     stats: { scripts: meta.scripts, modules, unparsed },
     endpoints,
     calls: Object.fromEntries([...calls].map(([k, v]) => [k, [...v].sort().map((s) => JSON.parse(s))])),
