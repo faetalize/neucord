@@ -1,7 +1,7 @@
 // What Neucord depends on, read from its own source so there is no list to
 // keep: REST calls are the table in crates/discord/src/endpoints.rs, which
 // every request goes through; gateway events are the event names gateway.rs
-// matches on.
+// matches on; the API version is identity.rs's API_BASE.
 
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -25,6 +25,11 @@ export async function neucordUses(repo) {
   }
   if (rest.length === 0) unread.push("no endpoints in endpoints.rs");
 
+  // The API version: `pub const API_BASE: &str = "https://discord.com/api/v9";`
+  const identity = await readFile(join(src, "identity.rs"), "utf8");
+  const apiVersion = Number(identity.match(/API_BASE: &str = "https:\/\/discord\.com\/api\/v(\d+)"/)?.[1]) || null;
+  if (!apiVersion) unread.push("no API version in identity.rs");
+
   const events = new Set();
   const gateway = await readFile(join(src, "gateway.rs"), "utf8");
   // Match arms: `"MESSAGE_CREATE" =>` and `"READY" | "RESUMED"`.
@@ -34,6 +39,7 @@ export async function neucordUses(repo) {
   return {
     rest: rest.sort((a, b) => `${a.path} ${a.method}`.localeCompare(`${b.path} ${b.method}`)),
     events: [...events].sort(),
+    apiVersion,
     unread,
   };
 }

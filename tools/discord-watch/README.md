@@ -14,6 +14,8 @@ names so two builds differ only where Discord changed something:
 
 - REST endpoint paths, and for every request the client makes, the body,
   query and header fields it sends.
+- The API version the client speaks, from its page's `API_VERSION`. Neucord
+  speaks the same one, since any other sets every request apart (#73).
 - The headers its HTTP layer adds to every request, by name. Neucord sends
   `X-Super-Properties` because login needs it (#47); a new header there may
   be the next one Discord insists on.
@@ -36,8 +38,8 @@ names so two builds differ only where Discord changed something:
   can be and still show them large, which message types people write.
 
 What Neucord uses is read from `crates/discord`: the endpoint table in
-`endpoints.rs`, which every REST request goes through, and the event names
-`gateway.rs` matches on. Only `watch.json` is kept by hand.
+`endpoints.rs`, which every REST request goes through, the event names
+`gateway.rs` matches on, and the API version in `identity.rs`. Only `watch.json` is kept by hand.
 
 What can't be snapshotted is in [MANUAL.md](MANUAL.md): another weekly
 workflow opens an issue to check it by hand.

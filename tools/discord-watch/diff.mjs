@@ -66,6 +66,15 @@ export function compare(old, cur, uses) {
   // Every request goes through the client's HTTP layer, so a header it
   // starts or stops adding may soon be expected of Neucord's requests too.
   // Snapshots from before headers were recorded have none to compare.
+  // Neucord speaks the client's API version, as any other would set its
+  // requests apart (#73). Snapshots from before it was recorded have none.
+  if (cur.apiVersion !== (old.apiVersion ?? cur.apiVersion)) {
+    affects.push(`- The client's API version: ${old.apiVersion} → ${cur.apiVersion ?? "not found"}`);
+  }
+  if (cur.apiVersion && uses.apiVersion !== cur.apiVersion) {
+    affects.push(`- Neucord speaks API v${uses.apiVersion}, the client v${cur.apiVersion}`);
+  }
+
   const headers = old.headers && listChange(old.headers, cur.headers);
   if (headers) affects.push(`- Headers the client adds to every request: ${headers}`);
 
