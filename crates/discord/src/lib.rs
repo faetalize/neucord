@@ -13,6 +13,7 @@ pub mod embed;
 mod endpoints;
 pub mod gateway;
 mod identity;
+mod inflate;
 pub mod markup;
 pub mod members;
 pub mod model;

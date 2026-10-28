@@ -4,8 +4,9 @@
 //! A dropped connection is reported as [`Event::Closed`], carrying a
 //! [`Resume`] when the session can be resumed: the caller passes it back to
 //! [`Gateway::connect`], which then sends RESUME instead of IDENTIFY and
-//! Discord replays what was missed. Not handled yet: zlib transport
-//! compression (payloads come as plain JSON text frames).
+//! Discord replays what was missed.
+//!
+//! Payloads come compressed, as for the official client: see [`Inflater`].
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -16,6 +17,7 @@ use serde_json::{Value, json};
 use soup::prelude::*;
 
 use crate::embed::Embed;
+use crate::inflate::Inflater;
 use crate::members::Members;
 use crate::notifications::{GuildSettings, NotificationSettings};
 use crate::read_state::ReadStates;
@@ -279,11 +281,23 @@ impl Gateway {
 
         conn.connect_message({
             let state = state.clone();
+            let inflater = RefCell::new(Inflater::new());
             move |conn, kind, bytes| {
-                if kind != soup::ffi::SOUP_WEBSOCKET_DATA_TEXT {
+                if kind != soup::ffi::SOUP_WEBSOCKET_DATA_BINARY {
                     return;
                 }
-                match serde_json::from_slice::<Payload>(bytes) {
+                let text = match inflater.borrow_mut().push(bytes) {
+                    Ok(Some(text)) => text,
+                    Ok(None) => return,
+                    Err(e) => {
+                        // Nothing after this can be read: start over on a
+                        // new connection, resuming, as the client does.
+                        eprintln!("gateway: cannot inflate: {e}");
+                        conn.close(CLOSE_RECONNECT, Some("decompression error"));
+                        return;
+                    }
+                };
+                match serde_json::from_slice::<Payload>(&text) {
                     Ok(payload) => handle(conn, &state, payload),
                     Err(e) => eprintln!("gateway: unparseable payload: {e}"),
                 }
