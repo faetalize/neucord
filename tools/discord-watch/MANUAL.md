@@ -172,6 +172,16 @@ changed for unrelated reasons only needs a note in the issue.
   521981 (`hasSpoilerEmbeds`).
 - **Attachments the client hides** (`Attachment::is_hidden`). Client:
   `renderAttachments` in 91688 drops `IS_THUMBNAIL`.
+- **The message menu** (`MESSAGE` in `ui/menus.rs`). Client: 355682
+  builds it; Neucord keeps its sections and order. Copy Text copies the
+  content of `getContentMessage` (watched), or the text displays of a
+  components message joined by newlines (`N` in 437517), and shows only if
+  that isn't empty. Copy Message Link is 345254, with the path from
+  `CHANNEL` in 901123. Copy Message ID is 50268, only in Developer Mode
+  (`developer_mode` in the JSON user settings). Copy for the selection
+  (373963) and Copy Link and Open Link (777933) are desktop-only there.
+  Neucord leaves out the analytics these send (`MESSAGE_LINK_COPIED`,
+  `CONTEXT_MENU_LINK_COPIED`).
 - **Poll vote counts and shares** (`poll.rs`). Client: 320095 and 969632
   count the votes, and 951727 works out shares, the leader and when counts
   show.
