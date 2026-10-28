@@ -37,6 +37,9 @@ What Neucord uses is read from `crates/discord`: the endpoint table in
 `endpoints.rs`, which every REST request goes through, and the event names
 `gateway.rs` matches on. Only `watch.json` is kept by hand.
 
+What can't be snapshotted is in [MANUAL.md](MANUAL.md): another weekly
+workflow opens an issue to check it by hand.
+
 Snapshots live on the `discord-snapshots` branch, one commit per build, so
 its history is the history of the client. An issue links the full diff.
 

@@ -1,0 +1,29 @@
+name: Manual drift check
+
+# Some of what Neucord copies from the official client can't be snapshotted,
+# so tools/discord-watch/MANUAL.md lists it for a hand check. Open the week's
+# issue for that check, whatever the Discord watch found.
+on:
+  schedule:
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  issue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open this week's check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          MANUAL: ${{ github.server_url }}/${{ github.repository }}/blob/master/tools/discord-watch/MANUAL.md
+        run: |
+          gh label create manual-drift --color 5865F2 \
+            --description "Weekly hand check of what discord-watch can't snapshot" --force >/dev/null
+          gh issue create --label manual-drift --title "Manual drift check, week of $(date -u +%F)" --body "$(cat <<EOF
+          Check what [MANUAL.md]($MANUAL) lists against the current client, following its steps: diff each module since the build it was last checked against, say here what changed and whether Neucord now acts differently, open an issue for each real difference, then commit the new build number to MANUAL.md and close this.
+          EOF
+          )"

@@ -27,13 +27,24 @@
   },
   "methods": [
     "createResponseHandler",
+    "fetchMessages",
     "getForwardInfo",
+    "getGuildChannelUnreadState",
     "getSystemMessageUserJoin",
     "handleRequiredAction",
+    "interceptResponse",
     "isChannelOnCooldown",
     "isSystemDM",
-    "isSystemUser"
+    "isSystemUser",
+    "renderEmbeds"
   ],
-  "stores": ["GuildVerificationStore"],
+  "stores": [
+    "GuildVerificationStore",
+    "LoginRequiredActionStore",
+    "PendingReplyStore",
+    "RpcNotificationSettingsStore",
+    "SafetyHubStore",
+    "SlowmodeStore"
+  ],
   "constants": ["ACCOUNT_AGE", "MAX_EMOJI_TO_BE_JUMBO", "MEMBER_AGE", "REPLYABLE", "USER_MESSAGE"]
 }
