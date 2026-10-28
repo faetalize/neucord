@@ -3,10 +3,14 @@
     "AccountStanding": ["ALL_GOOD", "LIMITED", "VERY_LIMITED", "AT_RISK", "SUSPENDED"],
     "ActivityType": ["PLAYING", "STREAMING", "LISTENING", "WATCHING", "CUSTOM_STATUS", "COMPETING"],
     "ApiErrorCode": ["UNKNOWN_ACCOUNT", "RELATIONSHIP_INVALID_NO_CONFIRMATION"],
+    "ButtonStyle": ["PRIMARY", "SECONDARY", "SUCCESS", "DESTRUCTIVE", "LINK", "PREMIUM"],
     "ChannelType": ["DM", "GROUP_DM", "GUILD_TEXT", "GUILD_CATEGORY"],
+    "ComponentType": ["ACTION_ROW", "BUTTON", "STRING_SELECT", "SECTION", "TEXT_DISPLAY", "CONTAINER"],
     "ConsentStatus": ["UNSPECIFIED", "PENDING", "ACCEPTED", "REJECTED"],
     "GatewayOpcode": ["DISPATCH", "HEARTBEAT", "IDENTIFY", "RESUME", "HELLO", "HEARTBEAT_ACK"],
     "LoginRequiredAction": ["UPDATE_PASSWORD"],
+    "MessageFlags": ["SUPPRESS_EMBEDS", "IS_VOICE_MESSAGE", "IS_COMPONENTS_V2"],
+    "MessageReferenceType": ["DEFAULT", "FORWARD"],
     "MessageType": ["DEFAULT", "REPLY", "CHANNEL_PINNED_MESSAGE"],
     "RelationshipType": ["FRIEND", "BLOCKED", "PENDING_INCOMING", "PENDING_OUTGOING"],
     "RequiredAction": [
@@ -16,7 +20,9 @@
       "REQUIRE_VERIFIED_PHONE",
       "REQUIRE_SAFETY_FLOWS"
     ],
-    "StatusType": ["ONLINE", "IDLE", "DND", "INVISIBLE", "OFFLINE"]
+    "StatusType": ["ONLINE", "IDLE", "DND", "INVISIBLE", "OFFLINE"],
+    "StickerFormat": ["PNG", "APNG", "LOTTIE", "GIF"]
   },
-  "methods": ["handleRequiredAction", "isSystemDM", "isSystemUser"]
+  "methods": ["getForwardInfo", "getSystemMessageUserJoin", "handleRequiredAction", "isSystemDM", "isSystemUser"],
+  "constants": ["MAX_EMOJI_TO_BE_JUMBO", "REPLYABLE", "USER_MESSAGE"]
 }
