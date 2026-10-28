@@ -67,6 +67,7 @@
     "handleRequiredAction",
     "interceptResponse",
     "isChannelOnCooldown",
+    "isForumLikeChannel",
     "isScheduledForDeletion",
     "isSystemDM",
     "isSystemUser",
