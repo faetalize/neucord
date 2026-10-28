@@ -21,7 +21,7 @@ use std::ops::{BitAnd, BitOr};
 use serde::{Deserialize, Deserializer};
 
 use crate::verification::Account;
-use crate::{Channel, Guild};
+use crate::{Channel, ChannelKind, Guild};
 
 /// A set of Discord's permission bits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -339,15 +339,28 @@ fn member(guild: &Guild, overwrites: &[crate::model::Overwrite], me: &Account, n
     permissions
 }
 
+/// What it takes to see `channel` at all (the client's `accessPermissions`):
+/// View Channel, and Connect too for voice and stage channels.
+pub fn access(channel: &Channel) -> Permissions {
+    match channel.kind {
+        ChannelKind::Voice | ChannelKind::Stage => Permissions::VIEW_CHANNEL | Permissions::CONNECT,
+        _ => Permissions::VIEW_CHANNEL,
+    }
+}
+
+/// Whether `channel`, one of `guild`'s, shows at all: what the sidebar
+/// lists, unread dots count and Neucord opens.
+pub fn can_view(guild: &Guild, channel: &Channel, me: &Account, now: i64) -> bool {
+    in_channel(guild, channel, me, now).contains(access(channel))
+}
+
 /// Whether we may post in `channel`: anywhere but the system DM outside
-/// servers, and with View Channel and Send Messages in one. The client asks
-/// only for the latter, but never opens a channel we can't view.
+/// servers, and in one where we can see it with Send Messages. The client
+/// asks only for the latter, but never opens a channel we can't see.
 pub fn can_send(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64) -> bool {
     match guild {
         None => !channel.is_system_dm(),
-        Some(guild) => {
-            in_channel(guild, channel, me, now).contains(Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES)
-        }
+        Some(guild) => in_channel(guild, channel, me, now).contains(access(channel) | Permissions::SEND_MESSAGES),
     }
 }
 
@@ -356,8 +369,10 @@ pub fn can_send(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64
 /// system DM, and in a server only with Send Messages and Read Message
 /// History.
 pub fn can_reply(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64) -> bool {
-    let history = Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY;
-    can_send(guild, channel, me, now) && guild.is_none_or(|g| in_channel(g, channel, me, now).contains(history))
+    can_send(guild, channel, me, now)
+        && guild.is_none_or(|g| {
+            in_channel(g, channel, me, now).contains(access(channel) | Permissions::READ_MESSAGE_HISTORY)
+        })
 }
 
 #[cfg(test)]
@@ -536,6 +551,24 @@ mod tests {
         )
         .unwrap();
         assert!(!can_send(None, &system, &me, 0) && !can_reply(None, &system, &me, 0));
+    }
+
+    #[test]
+    fn voice_and_stage_chats_need_connect() {
+        let guild = guild();
+        let me = me();
+        for kind in [2, 13] {
+            let mut voice = channel(&[]);
+            voice.kind = serde_json::from_value(json!(kind)).unwrap();
+            assert!(!can_view(&guild, &voice, &me, 0), "type {kind}: no Connect from @everyone");
+            assert!(!can_send(Some(&guild), &voice, &me, 0) && !can_reply(Some(&guild), &voice, &me, 0));
+            voice.permission_overwrites =
+                channel(&[(GUILD, Permissions::NONE, Permissions::CONNECT)]).permission_overwrites;
+            assert!(can_view(&guild, &voice, &me, 0) && can_send(Some(&guild), &voice, &me, 0));
+            assert!(can_reply(Some(&guild), &voice, &me, 0));
+        }
+        let text = channel(&[(GUILD, Permissions::CONNECT, Permissions::NONE)]);
+        assert!(can_view(&guild, &text, &me, 0), "a text channel needs no Connect");
     }
 
     #[test]

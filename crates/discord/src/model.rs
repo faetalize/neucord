@@ -370,10 +370,9 @@ impl Guild {
         groups
     }
 
-    /// Whether `channel` shows at all: what the sidebar lists, unread dots
-    /// count and Neucord opens.
+    /// Whether `channel` shows at all (see [`permissions::can_view`]).
     pub fn can_view(&self, channel: &Channel, me: &Account, now_unix: i64) -> bool {
-        permissions::in_channel(self, channel, me, now_unix).contains(Permissions::VIEW_CHANNEL)
+        permissions::can_view(self, channel, me, now_unix)
     }
 }
 

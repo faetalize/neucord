@@ -102,11 +102,12 @@ changed for unrelated reasons only needs a note in the issue.
 
 ## What shows at all
 
-- **Channels we can't view** (`Guild::sidebar`, `Guild::can_view`). Neucord
-  lists, counts unread and opens only channels with View Channel. Client:
-  the unread state in 458294 skips a channel without its
-  `accessPermissions` (95701: View Channel, and Connect too for voice
-  channels).
+- **Channels we can't view** (`Guild::sidebar`, `permissions::access`).
+  Neucord lists, counts unread, opens and posts only where it has a
+  channel's `accessPermissions`: View Channel, and Connect too in voice and
+  stage channels, whose text chats a notification or a forward can open.
+  Client: 95701 defines them, and the unread state in 458294 skips a
+  channel without them.
 - **System messages that show nothing** (`HIDDEN` in `system.rs`). Client:
   the type-to-renderer map in 64369 (logger `SystemMessage`), where those
   types map to `void 0`.
