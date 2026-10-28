@@ -4,6 +4,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use discord::rest::Reply;
+use discord::verification::{self, Gate};
 use discord::{Message, Snowflake};
 use gtk::glib;
 use gtk::prelude::*;
@@ -127,16 +128,24 @@ impl App {
     }
 
     /// What replaces the message box where we can't post: accept and ignore
-    /// in a message request, a notice in the system DM.
+    /// in a message request, a notice in the system DM, and what a server's
+    /// verification still asks of us.
     pub(super) fn update_notice_bar(self: &Rc<Self>) {
         let bar = &self.notice_bar;
         while let Some(child) = bar.first_child() {
             bar.remove(&child);
         }
-        let (system, request) = {
+        if let Some(timer) = self.notice_timer.take() {
+            timer.remove();
+        }
+        let now = glib::real_time() / 1000;
+        let (system, request, gate) = {
             let state = self.state.borrow();
-            let system = state.channel.and_then(|id| state.find_channel(id)).is_some_and(|(_, c)| c.is_system_dm());
-            (system, state.open_request().map(|c| (c.id, c.spam, c.title())))
+            let open = state.channel.and_then(|id| state.find_channel(id));
+            let system = open.is_some_and(|(_, c)| c.is_system_dm());
+            let guild = open.and_then(|(guild, _)| guild);
+            let gate = guild.zip(state.account.as_ref()).and_then(|(g, account)| verification::gate(g, account, now));
+            (system, state.open_request().map(|c| (c.id, c.spam, c.title())), gate)
         };
         let text = match &request {
             _ if system => "This chat is reserved for official Discord notifications. \
@@ -144,11 +153,14 @@ impl App {
                 .to_owned(),
             Some((_, true, title)) => format!("Discord filed this message request from {title} as likely spam."),
             Some((_, false, title)) => format!("{title} wants to message you. Accept to reply."),
-            None => {
-                self.composer_box.set_visible(true);
-                bar.set_visible(false);
-                return;
-            }
+            None => match &gate {
+                Some(gate) => self.gate_notice(gate, now),
+                None => {
+                    self.composer_box.set_visible(true);
+                    bar.set_visible(false);
+                    return;
+                }
+            },
         };
         self.composer_box.set_visible(false);
         bar.set_visible(true);
@@ -157,6 +169,32 @@ impl App {
             for button in self.request_actions(id) {
                 bar.append(&button);
             }
+        }
+    }
+
+    /// The official client's words for what a server still asks of us. The
+    /// gates that only take time update the bar when they clear.
+    fn gate_notice(self: &Rc<Self>, gate: &Gate, now: i64) -> String {
+        let text = gate.text();
+        if *gate == Gate::Screening {
+            return format!("{text} Accept the server's rules in the official app.");
+        }
+        let Some(until) = gate.until() else { return text };
+        let this = Rc::downgrade(self);
+        let wait = Duration::from_millis(until.saturating_sub(now).max(0) as u64);
+        let timer = glib::timeout_add_local_once(wait, move || {
+            if let Some(this) = this.upgrade() {
+                // Fired, so there is nothing left to remove.
+                this.notice_timer.take();
+                this.update_notice_bar();
+            }
+        });
+        self.notice_timer.replace(Some(timer));
+        // Round up, so the time shown is never one where sending still fails.
+        let minute = (until + 59_999) / 60_000 * 60;
+        match glib::DateTime::from_unix_local(minute).and_then(|t| t.format("%H:%M")) {
+            Ok(at) => format!("{text} You can send messages here from {at}."),
+            Err(_) => text,
         }
     }
 

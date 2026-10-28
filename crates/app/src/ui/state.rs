@@ -8,6 +8,7 @@ use discord::notifications::{NotificationSettings, Place};
 use discord::read_state::ReadStates;
 use discord::relationships::Relationships;
 use discord::settings::{GuildFolder, MediaSettings, RailEntry};
+use discord::verification::Account;
 use discord::{Channel, Gateway, Guild, Rest, Resume, Snowflake, User};
 use gtk::glib;
 
@@ -45,6 +46,8 @@ pub(super) struct State {
     pub(super) rest: Option<Rest>,
     pub(super) gateway: Option<Gateway>,
     pub(super) me: Option<User>,
+    /// What servers' verification asks of us.
+    pub(super) account: Option<Account>,
     /// A step Discord requires before the account can be used.
     pub(super) required_action: Option<String>,
     pub(super) guilds: Vec<Guild>,

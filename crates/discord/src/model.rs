@@ -2,8 +2,10 @@
 //! ignored, so Discord adding fields never breaks parsing.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
 
 use crate::embed::Embed;
+use crate::verification::{Membership, Rules};
 
 /// Discord IDs are 64-bit integers sent as JSON strings.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -186,6 +188,11 @@ pub struct Guild {
     pub default_message_notifications: u8,
     /// Our roles here, for role mentions. Filled in by the gateway.
     pub my_roles: Vec<Snowflake>,
+    /// What the server asks before members can talk.
+    pub verification: Rules,
+    /// Our own membership. The gateway fills it in from our member; the
+    /// guild itself only knows when we joined.
+    pub membership: Membership,
 }
 
 impl Guild {
@@ -241,7 +248,8 @@ impl<'de> Deserialize<'de> for Guild {
             default_message_notifications: Option<u8>,
         }
 
-        let raw = Raw::deserialize(d)?;
+        let value = Value::deserialize(d)?;
+        let raw = Raw::deserialize(&value).map_err(serde::de::Error::custom)?;
         let (name, icon, default) = match (raw.name, raw.properties) {
             (Some(name), _) => (name, raw.icon, raw.default_message_notifications),
             (None, Some(p)) => (p.name, p.icon, p.default_message_notifications),
@@ -254,6 +262,11 @@ impl<'de> Deserialize<'de> for Guild {
             channels: raw.channels,
             default_message_notifications: default.unwrap_or(0),
             my_roles: Vec::new(),
+            verification: Rules::from_guild(&value),
+            membership: Membership {
+                joined_at: value["joined_at"].as_str().and_then(crate::verification::unix_ms),
+                ..Default::default()
+            },
         })
     }
 }

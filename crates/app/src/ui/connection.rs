@@ -100,6 +100,23 @@ impl App {
             match event {
                 Event::Ready(ready) => self.on_ready(*ready),
                 Event::GuildCreate(guild) => self.on_guild(guild),
+                Event::GuildUpdate { guild_id, rules } => {
+                    if let Some(guild) = self.state.borrow_mut().guilds.iter_mut().find(|g| g.id == guild_id) {
+                        guild.verification = rules;
+                    }
+                    self.update_notice_bar();
+                }
+                Event::MemberUpdate { guild_id, roles, membership } => {
+                    if let Some(guild) = self.state.borrow_mut().guilds.iter_mut().find(|g| g.id == guild_id) {
+                        guild.my_roles = roles;
+                        guild.membership = membership;
+                    }
+                    self.update_notice_bar();
+                }
+                Event::AccountUpdate(account) => {
+                    self.state.borrow_mut().account = Some(account);
+                    self.update_notice_bar();
+                }
                 Event::PrivateChannelCreate(channel) | Event::PrivateChannelUpdate(channel) => {
                     self.on_private_channel(channel)
                 }
@@ -199,6 +216,7 @@ impl App {
     pub(super) fn on_ready(self: &Rc<Self>, ready: Ready) {
         let Ready {
             user,
+            account,
             guilds,
             private_channels,
             relationships,
@@ -232,6 +250,7 @@ impl App {
             state.notifications = notification_settings;
             state.media = media_settings;
             state.required_action = required_action;
+            state.account = Some(account);
             let store = (!state.persisted).then(|| (state.token.clone(), user.username.clone()));
             state.persisted = true;
             state.users.insert(user.id.0, user.display_name().to_string());
@@ -360,6 +379,7 @@ impl App {
         self.rebuild_rail();
         if is_open {
             self.rebuild_sidebar();
+            self.update_notice_bar();
         }
     }
 }
