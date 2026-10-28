@@ -358,8 +358,6 @@ impl App {
 mod tests {
     use std::cell::RefCell;
 
-    use gio::prelude::*;
-
     use super::*;
 
     /// Stands in for the app: records what entries do.
