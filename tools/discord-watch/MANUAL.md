@@ -149,6 +149,11 @@ changed for unrelated reasons only needs a note in the issue.
   stage channels, whose text chats a notification or a forward can open.
   Client: 95701 defines them, and the unread state in 458294 skips a
   channel without them.
+- **A thread's first message** (`Message::thread_starter`). A
+  `THREAD_STARTER_MESSAGE` shows the message the thread was started from,
+  as written, or "Sorry, we couldn't load the first message in this
+  thread" without it. Client: `nK` in 425812 (anchor `"Message must be a
+  thread starter message"`), and the fallback in 64369.
 - **System messages that show nothing** (`HIDDEN` in `system.rs`). Client:
   the type-to-renderer map in 64369 (logger `SystemMessage`), where those
   types map to `void 0`.

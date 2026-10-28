@@ -1026,16 +1026,18 @@ impl App {
             row.append(&self.reply_preview(message, to, messages));
         }
 
+        // A thread's first message shows the one the thread was started from.
+        let shown = message.thread_starter().unwrap_or(message);
         let main = gtk::Box::builder().spacing(16).css_classes(["message-main"]).build();
         let gutter = gtk::Box::builder().width_request(40).valign(gtk::Align::Start).build();
         if let Kind::System(system) = &kind {
             gutter.append(&gtk::Image::builder().icon_name(system_icon(system.icon)).halign(gtk::Align::End).build());
         } else if !grouped {
-            gutter.append(&avatar_widget(&message.author, 40, Some(&self.images)));
+            gutter.append(&avatar_widget(&shown.author, 40, Some(&self.images)));
         }
         main.append(&gutter);
 
-        let names = self.message_names(message);
+        let names = self.message_names(shown);
         let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).hexpand(true).build();
         if let Kind::System(system) = &kind {
             body.append(&self.system_line(message, system));
@@ -1044,15 +1046,15 @@ impl App {
             }
         } else if !grouped {
             let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            let name = self.name_label(message.channel_id, &message.author, message.author.display_name());
+            let name = self.name_label(shown.channel_id, &shown.author, shown.author.display_name());
             name.set_ellipsize(gtk::pango::EllipsizeMode::End);
             header.append(&name);
-            let time = parse_time(&message.timestamp).map(|t| format_time(&t)).unwrap_or_default();
+            let time = parse_time(&shown.timestamp).map(|t| format_time(&t)).unwrap_or_default();
             header.append(&gtk::Label::builder().label(time).css_classes(["caption", "dimmed"]).build());
             body.append(&header);
         }
         if kind == Kind::Normal {
-            self.message_content(&body, message, &names);
+            self.message_content(&body, shown, &names);
         }
         main.append(&body);
 

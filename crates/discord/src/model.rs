@@ -814,6 +814,7 @@ impl Message {
     }
 
     const FORWARD: u8 = 1;
+    const THREAD_STARTER: u8 = 21;
 
     /// What this message forwards, as a message of its own: dated by the
     /// original's id, in the place it was sent.
@@ -844,6 +845,16 @@ impl Message {
             member: None,
             ..self.clone()
         })
+    }
+
+    /// The message a thread was started from, which the thread's first
+    /// message stands for (a `THREAD_STARTER_MESSAGE`), when Discord sent
+    /// it along. The client shows it in its place (`nK` in 425812).
+    pub fn thread_starter(&self) -> Option<&Message> {
+        match &self.referenced_message {
+            Referenced::Message(original) if self.kind == Self::THREAD_STARTER => Some(original),
+            _ => None,
+        }
     }
 
     /// The id of the message this one replies to.
