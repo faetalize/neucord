@@ -8,6 +8,7 @@ pub mod account;
 pub mod auth;
 pub mod cdn;
 pub mod component;
+pub mod cooldowns;
 pub mod embed;
 mod endpoints;
 pub mod gateway;
@@ -27,8 +28,8 @@ pub mod system;
 
 pub use gateway::{Event, Gateway, Ready, Resume};
 pub use model::{
-    Attachment, Channel, ChannelKind, Guild, Message, MessageEdit, MessageReference, Referenced, Snowflake, Sticker,
-    User,
+    Attachment, Channel, ChannelKind, Guild, Member, Message, MessageEdit, MessageReference, Referenced, Snowflake,
+    Sticker, User,
 };
 pub use rest::{Captcha, CaptchaSolver, Rest};
 
@@ -86,6 +87,19 @@ impl Error {
             _ => None,
         }
     }
+
+    /// Set when Discord refused a message for slowmode
+    /// ([`rest::SLOWMODE_RATE_LIMITED`]): the seconds it asks us to wait.
+    pub fn slowmode_wait(&self) -> Option<f64> {
+        match self {
+            Error::Http { status: 429, body } => {
+                let body = serde_json::from_str::<serde_json::Value>(body).ok()?;
+                (body["code"].as_u64() == Some(rest::SLOWMODE_RATE_LIMITED))
+                    .then(|| body["retry_after"].as_f64().unwrap_or(0.0))
+            }
+            _ => None,
+        }
+    }
 }
 
 impl std::error::Error for Error {}
@@ -114,5 +128,19 @@ mod tests {
         let cut = Error::Http { status: 400, body: r#"{"message": "trunc"#.into() };
         assert_eq!(cut.code(), None, "a truncated body has no code");
         assert!(cut.to_string().ends_with(r#"{"message": "trunc"#));
+    }
+
+    #[test]
+    fn slowmode_refusals() {
+        let refused = |status, body: &str| Error::Http { status, body: body.into() }.slowmode_wait();
+        let slowmode =
+            r#"{"message": "You are being rate limited.", "retry_after": 4.5, "global": false, "code": 20016}"#;
+        assert_eq!(refused(429, slowmode), Some(4.5));
+        assert_eq!(
+            refused(429, r#"{"message": "You are being rate limited.", "retry_after": 1.2, "global": false}"#),
+            None
+        );
+        assert_eq!(refused(429, r#"{"code": 20016}"#), Some(0.0), "still slowmode, for however long");
+        assert_eq!(refused(400, slowmode), None);
     }
 }
