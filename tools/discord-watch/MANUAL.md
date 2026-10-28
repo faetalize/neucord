@@ -59,6 +59,23 @@ changed for unrelated reasons only needs a note in the issue.
   Messages in the channel, or while pending (845207, anchor
   `canEveryoneSendMessages`; `permissions::can_send`). The order and wording
   of Neucord's notices are its own.
+- **Who may post in a thread** (`permissions::in_thread`, through
+  `in_channel`). The bits and thread types are watched, the rule isn't: `x`
+  in 488926, which `G` calls for a channel in `E.Le` (95701's thread types)
+  after returning nothing when the parent is missing or being deleted. A
+  `MEDIA_THREAD` only reads; a private thread we haven't joined gives
+  nothing without Manage Threads, unless we're a guest; otherwise the
+  parent's permissions, with Send Messages set by Send Messages in Threads
+  and cleared in a locked thread without Manage Threads. The box also goes
+  for `UJ` in 406704 (anchor `isArchivedLockedThread`), which `x` already
+  covers. Posting in an archived thread sends nothing first:
+  `sendMessage` in 148494 doesn't call `unarchiveThreadIfNecessary`
+  (472456), while edits and deletes do, so Neucord needs it once it edits
+  or deletes.
+- **Forum and media channels take no message** (the forum page in
+  `select_channel`). Neucord shows no box there and loads nothing. Client:
+  527053 renders a forum view instead of the chat for `isForumLikeChannel`
+  (anchor `"forum channels must exist within a guild"`).
 - **Asking for members** (`members::Members`, `Gateway::request_members`),
   whose roles colour names. Which members the client asks for, and when
   again, is watched (`GuildMemberRequesterStore`), and so is the payload
@@ -82,8 +99,12 @@ changed for unrelated reasons only needs a note in the issue.
 - **When Reply is offered** (`Message::is_replyable`,
   `permissions::can_reply`). `REPLYABLE` is watched, but only covers message
   types. 517997 also needs Send Messages and Read Message History in
-  servers, which Neucord checks, and a sent and non-ephemeral message, no
-  timeout and no archived thread, which it doesn't yet (#65).
+  servers, and in an archived thread that we can reopen it (`lK` in 406704,
+  `permissions::can_unarchive`: Manage Threads if locked, else Send
+  Messages in Threads and Send Messages, and Send Messages in the parent),
+  which Neucord checks; and a sent and non-ephemeral message and no
+  timeout, which it doesn't yet (#65). The keyboard shortcut uses `Et`
+  there instead, without the Send Messages checks.
 
 ## Notifications and unread state
 
@@ -91,16 +112,36 @@ changed for unrelated reasons only needs a note in the issue.
   `ui/chat.rs`). The decision is watched (`RpcNotificationSettingsStore`).
   Levels and mutes resolve in 543465 (`resolvedMessageNotifications`,
   `isGuildOrCategoryOrChannelMuted`), mute expiry is in 544743, and the
-  mention test in 451919.
+  mention test in 451919. A thread's level is in 607508
+  (`NotificationSettings::thread_level`): nothing unless joined, then our
+  thread member's flags, else nothing under a muted parent, else the
+  parent's level. In threads, the decision ignores what the server
+  suppresses, and our thread mute (`JoinedThreadsStore`) silences all.
 - **The unread dot** (`guild_badge` in `ui/state.rs`). The channel rule is
   watched (`getGuildChannelUnreadState`). The per-server build is in 458294
-  (`GuildReadStateStore`).
+  (`GuildReadStateStore`), which adds the active threads we've joined
+  (`getActiveJoinedThreadsForGuild`): their mentions, and a dot unless the
+  thread or the server is muted, whatever their parent.
 - **What counts as read** (`read_state.rs`), since acks go to Discord. Own
   messages are marked read on MESSAGE_CREATE in 573163 (`ReadStateStore`).
   `getAckTimestamp` there falls back to the join or creation time, where
-  Neucord deliberately counts a channel without an entry as read.
+  Neucord deliberately counts a channel without an entry as read, except
+  in threads (`threads::is_unread`), where it copies `eF` (anchor
+  `- 5e3`): when we joined the thread less five seconds, or its last
+  archiving, never before we joined the server unless it's a forum post.
+  `canTrackUnreads` (watched) keeps archived threads from being acked
+  (`threads::is_ackable`).
 
 ## What shows at all
+
+- **Which threads the sidebar lists** (`threads::listed`). The stores are
+  watched (`ActiveJoinedThreadsStore`, with `k` deciding unread and
+  relevant; `ActiveThreadsStore`; `JoinedThreadsStore`). The list itself is
+  `eC` in 297469 (anchor `-e.joinTimestamp`): relevant threads, newest
+  joined first, the open one added in front; under a muted parent that
+  isn't open, only unread ones (`computeState` just above). How long a
+  thread stays relevant is in 826767 (anchor
+  `lastNonMessageActivityTimestamp`).
 
 - **Channels we can't view** (`Guild::sidebar`, `permissions::access`).
   Neucord lists, counts unread, opens and posts only where it has a
