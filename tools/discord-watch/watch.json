@@ -4,15 +4,25 @@
     "ActivityType": ["PLAYING", "STREAMING", "LISTENING", "WATCHING", "CUSTOM_STATUS", "COMPETING"],
     "ApiErrorCode": ["UNKNOWN_ACCOUNT", "RELATIONSHIP_INVALID_NO_CONFIRMATION", "SLOWMODE_RATE_LIMITED"],
     "ButtonStyle": ["PRIMARY", "SECONDARY", "SUCCESS", "DESTRUCTIVE", "LINK", "PREMIUM"],
+    "ChannelFlags": ["IS_SCHEDULED_FOR_DELETION"],
     "ChannelType": ["DM", "GROUP_DM", "GUILD_TEXT", "GUILD_CATEGORY"],
     "ComponentType": ["ACTION_ROW", "BUTTON", "STRING_SELECT", "SECTION", "TEXT_DISPLAY", "CONTAINER"],
     "ConsentStatus": ["UNSPECIFIED", "PENDING", "ACCEPTED", "REJECTED"],
-    "GatewayOpcode": ["DISPATCH", "HEARTBEAT", "IDENTIFY", "RESUME", "HELLO", "HEARTBEAT_ACK"],
-    "GuildMemberFlags": ["DID_REJOIN", "BYPASSES_VERIFICATION"],
+    "GatewayOpcode": ["DISPATCH", "HEARTBEAT", "IDENTIFY", "RESUME", "HELLO", "HEARTBEAT_ACK", "REQUEST_GUILD_MEMBERS"],
+    "GuildMemberFlags": [
+      "DID_REJOIN",
+      "BYPASSES_VERIFICATION",
+      "IS_GUEST",
+      "AUTOMOD_QUARANTINED_USERNAME_OR_GUILD_NICKNAME",
+      "AUTOMOD_QUARANTINED_BIO",
+      "AUTOMOD_QUARANTINED_SERVER_TAG"
+    ],
     "LoginRequiredAction": ["UPDATE_PASSWORD"],
+    "MFALevel": ["NONE", "ELEVATED"],
     "MessageFlags": ["SUPPRESS_EMBEDS", "IS_VOICE_MESSAGE", "IS_COMPONENTS_V2"],
     "MessageReferenceType": ["DEFAULT", "FORWARD"],
     "MessageType": ["DEFAULT", "REPLY", "CHANNEL_PINNED_MESSAGE"],
+    "Permissions": ["VIEW_CHANNEL", "SEND_MESSAGES", "READ_MESSAGE_HISTORY", "ADMINISTRATOR", "BYPASS_SLOWMODE"],
     "RelationshipType": ["FRIEND", "BLOCKED", "PENDING_INCOMING", "PENDING_OUTGOING"],
     "RequiredAction": [
       "AGREEMENTS",
@@ -34,14 +44,19 @@
     "handleRequiredAction",
     "interceptResponse",
     "isChannelOnCooldown",
+    "isScheduledForDeletion",
     "isSystemDM",
     "isSystemUser",
-    "renderEmbeds"
+    "renderEmbeds",
+    "requestGuildMembers"
   ],
   "stores": [
+    "GuildMemberRequesterStore",
+    "GuildRoleStore",
     "GuildVerificationStore",
     "LoginRequiredActionStore",
     "PendingReplyStore",
+    "PermissionStore",
     "RpcNotificationSettingsStore",
     "SafetyHubStore",
     "SlowmodeStore"

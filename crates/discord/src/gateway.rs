@@ -16,12 +16,13 @@ use serde_json::{Value, json};
 use soup::prelude::*;
 
 use crate::embed::Embed;
+use crate::members::Members;
 use crate::notifications::{GuildSettings, NotificationSettings};
 use crate::read_state::ReadStates;
 use crate::relationships::{Presence, Relationship, Relationships};
 use crate::settings::{self, GuildFolder, MediaPatch, MediaSettings};
-use crate::verification::{Account, Rules};
-use crate::{Channel, Error, Guild, Member, Message, MessageEdit, Snowflake, User, identity};
+use crate::verification::Account;
+use crate::{Channel, Error, Guild, Member, Message, MessageEdit, Role, Snowflake, User, identity};
 
 /// Gateway capability bits. 0 asks for the classic payload shapes, which the
 /// model parses directly; the guild parser also accepts the newer shape.
@@ -45,9 +46,11 @@ pub struct Resume {
 #[derive(Debug)]
 pub struct Ready {
     pub user: User,
-    /// What servers' verification asks of the same user.
+    /// What servers ask of the same user.
     pub account: Account,
     pub guilds: Vec<Guild>,
+    /// The other members READY carries.
+    pub members: Members,
     /// DMs and group DMs, message requests included, in no particular order.
     pub private_channels: Vec<Channel>,
     /// Friends, requests and blocks, with friends' presences.
@@ -83,14 +86,28 @@ pub enum Event {
         guild_id: Snowflake,
         member: Member,
     },
-    /// A server's settings changed; only its owner and what verification
-    /// reads are kept.
-    GuildUpdate {
+    /// Other people's members, with their roles: those a server arrives
+    /// with, one that changed, or those we asked for. `not_found` are users
+    /// we asked for who aren't members.
+    Members {
         guild_id: Snowflake,
-        owner_id: Option<Snowflake>,
-        rules: Rules,
+        members: Vec<(Snowflake, Vec<Snowflake>)>,
+        not_found: Vec<Snowflake>,
     },
-    /// Our account changed, for instance its email was verified.
+    /// A server's settings changed, its roles among them. It has no channels
+    /// and no member of ours: see [`Guild::update`].
+    GuildUpdate(Guild),
+    /// A role was created or changed.
+    RoleUpdate {
+        guild_id: Snowflake,
+        role: Role,
+    },
+    RoleDelete {
+        guild_id: Snowflake,
+        role_id: Snowflake,
+    },
+    /// Our account changed, for instance its email was verified or 2FA
+    /// turned on.
     AccountUpdate(Account),
     MessageCreate(Box<Message>),
     /// An edit, or link previews arriving for a message.
@@ -181,6 +198,8 @@ struct State {
     resuming: Cell<bool>,
     /// Cleared by INVALID SESSION (not resumable).
     resumable: Cell<bool>,
+    /// READY or RESUMED arrived: Discord takes requests now.
+    established: Cell<bool>,
     seq: Cell<Option<u64>>,
     acked: Cell<bool>,
     events: async_channel::Sender<Event>,
@@ -189,6 +208,7 @@ struct State {
 /// A live gateway connection. Dropping it closes the connection.
 pub struct Gateway {
     conn: soup::WebsocketConnection,
+    state: Rc<State>,
 }
 
 impl Drop for Gateway {
@@ -228,6 +248,7 @@ impl Gateway {
             me: Cell::new(None),
             resuming: Cell::new(resume.is_some()),
             resumable: Cell::new(true),
+            established: Cell::new(false),
             seq: Cell::new(resume.as_ref().map(|r| r.seq)),
             session: RefCell::new(resume.map(|r| (r.session_id, r.url))),
             acked: Cell::new(true),
@@ -265,14 +286,52 @@ impl Gateway {
             }
         });
 
-        Ok((Gateway { conn }, rx))
+        Ok((Gateway { conn, state }, rx))
+    }
+
+    /// Ask for `users`' members in `guild` (at most
+    /// [`crate::members::REQUEST_LIMIT`]), as the official client does
+    /// (`requestGuildMembers`): they come back as [`Event::Members`]. Like
+    /// the client, nothing is sent before the session is established.
+    pub fn request_members(&self, guild: Snowflake, users: &[Snowflake]) {
+        if self.state.established.get() {
+            send_text(&self.conn, &request_text(8, &MemberRequest::new(guild, users)));
+        }
+    }
+}
+
+/// Op 8's payload, in the client's field order.
+#[derive(serde::Serialize)]
+struct MemberRequest<'a> {
+    guild_id: [Snowflake; 1],
+    user_ids: &'a [Snowflake],
+    presences: bool,
+}
+
+impl<'a> MemberRequest<'a> {
+    fn new(guild: Snowflake, users: &'a [Snowflake]) -> Self {
+        MemberRequest { guild_id: [guild], user_ids: users, presences: false }
+    }
+}
+
+/// A payload as the client packs it: `{"op":…,"d":…}`.
+fn request_text(op: u8, d: &impl serde::Serialize) -> String {
+    #[derive(serde::Serialize)]
+    struct Payload<'a, D> {
+        op: u8,
+        d: &'a D,
+    }
+    serde_json::to_string(&Payload { op, d }).unwrap_or_default()
+}
+
+fn send_text(conn: &soup::WebsocketConnection, text: &str) {
+    if conn.state() == soup::WebsocketState::Open {
+        conn.send_text(text);
     }
 }
 
 fn send(conn: &soup::WebsocketConnection, value: Value) {
-    if conn.state() == soup::WebsocketState::Open {
-        conn.send_text(&value.to_string());
-    }
+    send_text(conn, &value.to_string());
 }
 
 fn heartbeat(conn: &soup::WebsocketConnection, state: &State) {
@@ -405,6 +464,19 @@ fn guild_with_member(value: &Value, merged: &Value, me: Snowflake) -> Option<Gui
     Some(guild)
 }
 
+/// Everyone's members a guild object carries, as in [`guild_with_member`],
+/// with their roles.
+fn members_of(value: &Value, merged: &Value) -> Vec<(Snowflake, Vec<Snowflake>)> {
+    let members = value["members"].as_array().into_iter().chain(merged.as_array()).flatten();
+    members.filter_map(member_roles).collect()
+}
+
+/// A member's user and roles; it names its user either inline or by id.
+fn member_roles(member: &Value) -> Option<(Snowflake, Vec<Snowflake>)> {
+    let user = parse_id(&member["user"]["id"]).or_else(|| parse_id(&member["user_id"]))?;
+    Some((user, Member::from_value(member).roles))
+}
+
 /// READY's DMs, message requests included. Recipients come either inline as `recipients` (the classic
 /// shape) or as `recipient_ids` pointing into READY's top-level `users`.
 fn private_channels(ready: &Value) -> Vec<Channel> {
@@ -443,16 +515,22 @@ fn dispatch(state: &State, name: &str, data: Value) {
             let Some(account) = Account::from_user(&data["user"]) else { return };
             state.me.set(Some(user.id));
             state.resuming.set(false);
+            state.established.set(true);
             if let (Some(id), Some(url)) = (data["session_id"].as_str(), data["resume_gateway_url"].as_str()) {
                 *state.session.borrow_mut() = Some((id.to_owned(), url.to_owned()));
             }
-            let guilds = data["guilds"]
-                .as_array()
-                .into_iter()
-                .flatten()
+            let raw_guilds = data["guilds"].as_array().map(Vec::as_slice).unwrap_or_default();
+            let guilds = raw_guilds
+                .iter()
                 .enumerate()
                 .filter_map(|(i, g)| guild_with_member(g, &data["merged_members"][i], user.id))
                 .collect();
+            let mut members = Members::default();
+            for (i, g) in raw_guilds.iter().enumerate() {
+                if let Some(id) = parse_id(&g["id"]) {
+                    members.add(id, members_of(g, &data["merged_members"][i]), &[]);
+                }
+            }
             Event::Ready(Box::new(Ready {
                 private_channels: private_channels(&data),
                 relationships: Relationships::from_ready(&data),
@@ -468,9 +546,13 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 account,
                 user,
                 guilds,
+                members,
             }))
         }
-        "RESUMED" => Event::Resumed,
+        "RESUMED" => {
+            state.established.set(true);
+            Event::Resumed
+        }
         "USER_REQUIRED_ACTION_UPDATE" => {
             Event::RequiredActionUpdate(data["required_action"].as_str().map(str::to_owned))
         }
@@ -517,21 +599,34 @@ fn dispatch(state: &State, name: &str, data: Value) {
             (Ok(_), None) => return,
             (Err(e), _) => return eprintln!("gateway: bad CHANNEL_UPDATE: {e}"),
         },
-        // Discord may send other members' too; only ours matters.
+        // Discord may send other members' too, whose roles colour their names.
         "GUILD_MEMBER_UPDATE" => {
             let Some(guild_id) = parse_id(&data["guild_id"]) else { return };
             if !state.me.get().is_some_and(|me| is_me(&data, me)) {
-                return;
+                let Some(member) = member_roles(&data) else { return };
+                return send_event(state, Event::Members { guild_id, members: vec![member], not_found: Vec::new() });
             }
             Event::MemberUpdate { guild_id, member: Member::from_value(&data) }
         }
-        "GUILD_UPDATE" => match parse_id(&data["id"]) {
-            Some(guild_id) => Event::GuildUpdate {
-                guild_id,
-                owner_id: parse_id(&data["owner_id"]).or_else(|| parse_id(&data["properties"]["owner_id"])),
-                rules: Rules::from_guild(&data),
-            },
-            None => return,
+        "GUILD_MEMBERS_CHUNK" => {
+            let Some(guild_id) = parse_id(&data["guild_id"]) else { return };
+            let members = data["members"].as_array().into_iter().flatten().filter_map(member_roles).collect();
+            let not_found = data["not_found"].as_array().into_iter().flatten().filter_map(parse_id).collect();
+            Event::Members { guild_id, members, not_found }
+        }
+        "GUILD_UPDATE" => match Guild::deserialize(&data) {
+            Ok(guild) => Event::GuildUpdate(guild),
+            Err(e) => return eprintln!("gateway: bad GUILD_UPDATE: {e}"),
+        },
+        "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" => {
+            match (parse_id(&data["guild_id"]), Role::deserialize(&data["role"])) {
+                (Some(guild_id), Ok(role)) => Event::RoleUpdate { guild_id, role },
+                _ => return eprintln!("gateway: bad {name}"),
+            }
+        }
+        "GUILD_ROLE_DELETE" => match (parse_id(&data["guild_id"]), parse_id(&data["role_id"])) {
+            (Some(guild_id), Some(role_id)) => Event::RoleDelete { guild_id, role_id },
+            _ => return,
         },
         "USER_UPDATE" => match Account::from_user(&data) {
             Some(account) if Some(account.id) == state.me.get() => Event::AccountUpdate(account),
@@ -567,10 +662,11 @@ fn dispatch(state: &State, name: &str, data: Value) {
         }
         "GUILD_CREATE" => {
             let Some(me) = state.me.get() else { return };
-            match guild_with_member(&data, &Value::Null, me) {
-                Some(guild) => Event::GuildCreate(guild),
-                None => return,
-            }
+            let Some(guild) = guild_with_member(&data, &Value::Null, me) else { return };
+            let members =
+                Event::Members { guild_id: guild.id, members: members_of(&data, &Value::Null), not_found: Vec::new() };
+            send_event(state, Event::GuildCreate(guild));
+            members
         }
         "MESSAGE_CREATE" => match serde_json::from_value(data) {
             Ok(message) => Event::MessageCreate(Box::new(message)),
@@ -598,6 +694,10 @@ fn dispatch(state: &State, name: &str, data: Value) {
         }
         _ => return,
     };
+    send_event(state, event);
+}
+
+fn send_event(state: &State, event: Event) {
     let _ = state.events.try_send(event);
 }
 
@@ -622,12 +722,14 @@ mod tests {
 
     #[test]
     fn guild_roles_from_own_member() {
-        let raw = json!({"id": "1", "name": "G", "default_message_notifications": 1, "members": [
+        let raw = json!({"id": "1", "name": "G", "default_message_notifications": 1,
+                         "roles": [{"id": "1", "permissions": "1024"}, {"id": "40", "permissions": "2048"}], "members": [
             {"user": {"id": "8"}, "roles": ["70"], "communication_disabled_until": "2026-10-28T12:00:00+00:00"},
             {"user": {"id": "5"}, "roles": ["40", "41"], "communication_disabled_until": null}
         ]});
         let guild = guild_with_member(&raw, &Value::Null, Snowflake(5)).unwrap();
         assert_eq!(guild.my_roles, vec![Snowflake(40), Snowflake(41)]);
+        assert_eq!(guild.role(Snowflake(40)).map(|r| r.permissions.0), Some(2048));
         assert_eq!(guild.timed_out_until, None, "someone else's timeout");
         assert_eq!(guild.default_message_notifications, 1);
     }
@@ -652,6 +754,7 @@ mod tests {
             session: RefCell::new(None),
             resuming: Cell::new(false),
             resumable: Cell::new(true),
+            established: Cell::new(false),
             seq: Cell::new(None),
             acked: Cell::new(true),
             events: tx,
@@ -661,8 +764,9 @@ mod tests {
         let noon = glib::DateTime::from_iso8601("2026-10-28T12:00:00Z", None).unwrap().to_unix();
         let a = &ready.guilds[0];
         assert_eq!((a.my_roles.as_slice(), a.timed_out_until), (&[Snowflake(40)][..], Some(noon + 1)));
-        assert_eq!(a.timeout_left(noon), Some(1), "a part second rounds up, never down");
-        assert_eq!(a.timeout_left(noon + 1), None);
+        let me = Account { id: Snowflake(5), ..Default::default() };
+        assert_eq!(a.timeout_left(&me, noon), Some(1), "a part second rounds up, never down");
+        assert_eq!(a.timeout_left(&me, noon + 1), None);
         assert_eq!(ready.guilds[1].timed_out_until, None);
 
         let update = |user: &str, until: Value| {
@@ -673,7 +777,10 @@ mod tests {
             );
             rx.try_recv().ok()
         };
-        assert!(update("8", json!("2026-10-28T12:00:00+00:00")).is_none(), "not ours");
+        assert!(
+            matches!(update("8", json!("2026-10-28T12:00:00+00:00")), Some(Event::Members { .. })),
+            "not ours, only someone's roles"
+        );
         let Some(Event::MemberUpdate { guild_id, member }) = update("5", json!("2026-10-28T12:00:00+00:00")) else {
             panic!("our member")
         };
@@ -681,22 +788,95 @@ mod tests {
         let Some(Event::MemberUpdate { member, .. }) = update("5", Value::Null) else { panic!("our member") };
         assert_eq!(member.timed_out_until, None, "the timeout lifted early");
 
-        dispatch(&state, "GUILD_UPDATE", json!({"id": "1", "name": "A", "owner_id": "8", "verification_level": 3}));
-        let Ok(Event::GuildUpdate { guild_id, owner_id, rules }) = rx.try_recv() else { panic!("no guild update") };
-        assert_eq!(
-            (guild_id, owner_id, rules.level),
-            (Snowflake(1), Some(Snowflake(8)), crate::verification::VerificationLevel::High),
-            "ownership can move, and with it slowmode and verification exemptions"
+        dispatch(
+            &state,
+            "GUILD_UPDATE",
+            json!({"id": "1", "name": "A", "owner_id": "8", "verification_level": 3, "mfa_level": 1,
+                   "roles": [{"id": "1", "permissions": "1024"}]}),
         );
+        let Ok(Event::GuildUpdate(update)) = rx.try_recv() else { panic!("no guild update") };
+        assert_eq!(
+            (update.id, update.owner_id, update.verification.level, update.requires_mfa, update.roles.len()),
+            (Snowflake(1), Some(Snowflake(8)), crate::verification::VerificationLevel::High, true, 1),
+            "ownership can move, and with it every permission"
+        );
+
+        dispatch(
+            &state,
+            "GUILD_ROLE_UPDATE",
+            json!({"guild_id": "1", "role": {"id": "40", "name": "Mod", "permissions": "8192"}}),
+        );
+        let Ok(Event::RoleUpdate { guild_id, role }) = rx.try_recv() else { panic!("no role update") };
+        assert_eq!((guild_id, role.id, role.permissions.0), (Snowflake(1), Snowflake(40), 8192));
+        dispatch(&state, "GUILD_ROLE_DELETE", json!({"guild_id": "1", "role_id": "40"}));
+        let Ok(Event::RoleDelete { role_id, .. }) = rx.try_recv() else { panic!("no role delete") };
+        assert_eq!(role_id, Snowflake(40));
         dispatch(&state, "USER_UPDATE", json!({"id": "8", "verified": true}));
         assert!(rx.try_recv().is_err(), "someone else");
-        dispatch(&state, "USER_UPDATE", json!({"id": "5", "verified": true, "email": "a@example.org"}));
+        dispatch(
+            &state,
+            "USER_UPDATE",
+            json!({"id": "5", "verified": true, "email": "a@example.org", "mfa_enabled": true}),
+        );
         let Ok(Event::AccountUpdate(account)) = rx.try_recv() else { panic!("no account update") };
-        assert!(account.verified && account.email && !account.phone);
+        assert!(account.verified && account.email && !account.phone && account.mfa);
 
         dispatch(&state, "CHANNEL_UPDATE", json!({"id": "9", "type": 0, "guild_id": "1", "rate_limit_per_user": 30}));
         let Ok(Event::GuildChannelUpdate { guild_id, channel }) = rx.try_recv() else { panic!("no channel update") };
         assert_eq!((guild_id, channel.rate_limit_per_user), (Snowflake(1), 30));
+    }
+
+    #[test]
+    fn other_members() {
+        let (tx, rx) = async_channel::unbounded();
+        let state = State {
+            token: String::new(),
+            me: Cell::new(None),
+            session: RefCell::new(None),
+            resuming: Cell::new(false),
+            resumable: Cell::new(true),
+            established: Cell::new(false),
+            seq: Cell::new(None),
+            acked: Cell::new(true),
+            events: tx,
+        };
+        let ready = json!({
+            "user": {"id": "5", "username": "me"},
+            "guilds": [{"id": "1", "properties": {"name": "A"}}],
+            "merged_members": [[{"user_id": "5", "roles": []}, {"user_id": "6", "roles": ["40"]}]]
+        });
+        dispatch(&state, "READY", ready);
+        let Ok(Event::Ready(ready)) = rx.try_recv() else { panic!("no READY") };
+        assert_eq!(ready.members.roles(Snowflake(1), Snowflake(6)), Some(&[Snowflake(40)][..]));
+        assert!(state.established.get());
+
+        dispatch(
+            &state,
+            "GUILD_CREATE",
+            json!({"id": "2", "name": "B", "members": [{"user": {"id": "7"}, "roles": ["41"]}]}),
+        );
+        assert!(matches!(rx.try_recv(), Ok(Event::GuildCreate(_))));
+        let Ok(Event::Members { guild_id, members, .. }) = rx.try_recv() else { panic!("no members") };
+        assert_eq!((guild_id, members), (Snowflake(2), vec![(Snowflake(7), vec![Snowflake(41)])]));
+
+        dispatch(&state, "GUILD_MEMBER_UPDATE", json!({"guild_id": "1", "user": {"id": "6"}, "roles": []}));
+        let Ok(Event::Members { members, .. }) = rx.try_recv() else { panic!("someone else's update") };
+        assert_eq!(members, vec![(Snowflake(6), vec![])]);
+
+        dispatch(
+            &state,
+            "GUILD_MEMBERS_CHUNK",
+            json!({"guild_id": "1", "members": [{"user": {"id": "8"}, "roles": ["40"]}], "not_found": ["9"],
+                   "chunk_index": 0, "chunk_count": 1}),
+        );
+        let Ok(Event::Members { members, not_found, .. }) = rx.try_recv() else { panic!("no chunk") };
+        assert_eq!((members, not_found), (vec![(Snowflake(8), vec![Snowflake(40)])], vec![Snowflake(9)]));
+    }
+
+    #[test]
+    fn member_request_as_the_client_sends_it() {
+        let d = MemberRequest::new(Snowflake(1), &[Snowflake(6), Snowflake(7)]);
+        assert_eq!(request_text(8, &d), r#"{"op":8,"d":{"guild_id":["1"],"user_ids":["6","7"],"presences":false}}"#);
     }
 
     #[test]

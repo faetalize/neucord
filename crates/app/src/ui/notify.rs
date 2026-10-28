@@ -72,11 +72,12 @@ impl App {
         }
     }
 
-    /// Jump to any channel, DM or server (from a notification click).
+    /// Jump to any channel we can view, DM or server (from a notification
+    /// click, or a forward's footer).
     pub(super) fn open_channel(self: &Rc<Self>, id: Snowflake) {
         let found = {
             let mut state = self.state.borrow_mut();
-            let guild = state.find_channel(id).map(|(guild, _)| guild.map(|g| g.id));
+            let guild = state.find_channel(id).filter(|_| state.can_view(id)).map(|(guild, _)| guild.map(|g| g.id));
             if let Some(guild) = guild {
                 state.guild = guild;
             }

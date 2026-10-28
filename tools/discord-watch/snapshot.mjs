@@ -128,6 +128,21 @@ function enumsIn(sequence) {
   return [...groups.values()];
 }
 
+/** Flag tables written as objects: `Object.freeze({ PINNED: 2 })`, or
+ * `{ VIEW_CHANNEL: x.vI(10) }` for permissions, whose bits outgrow a number,
+ * kept as the bit's position. Null for any other object. */
+function objectEnum(node) {
+  const found = {};
+  for (const p of node.properties) {
+    const name = p.type === "Property" && !p.computed ? keyName(p) : null;
+    if (!name || !CONSTANT.test(name)) return null;
+    const value = p.value.type === "CallExpression" && p.value.arguments.length === 1 ? p.value.arguments[0] : p.value;
+    if (value.type !== "Literal" || typeof value.value !== "number") return null;
+    found[name] = value.value;
+  }
+  return Object.keys(found).length > 0 ? found : null;
+}
+
 /** The identifiers a pattern declares: `a`, `{ b: [c] }`, `...d`, `e = 1`. */
 function declaredBy(pattern) {
   switch (pattern?.type) {
@@ -395,6 +410,12 @@ export async function snapshot(dir) {
         if (node.type === "PropertyDefinition" && node.static && !node.computed && node.key.name === "displayName") {
           const name = node.value?.value;
           if (stores.has(name)) stores.get(name).add(normalized(source, body, { module: true }));
+        }
+        const table = node.type === "ObjectExpression" && objectEnum(node);
+        if (table) {
+          for (const [name, anchors] of Object.entries(WATCH.enums)) {
+            if (anchors.every((a) => Object.hasOwn(table, a))) enums.get(name).add(JSON.stringify(sorted(table)));
+          }
         }
         if (node.type === "SequenceExpression") {
           for (const found of enumsIn(node)) {

@@ -11,6 +11,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use discord::markup::{Entity, Span, Style};
+use discord::members::RoleColour;
 use discord::system::Part;
 use gtk::prelude::*;
 use gtk::{gdk, pango};
@@ -21,10 +22,12 @@ use crate::rich_text::{self, RichText};
 
 /// Names we can resolve while rendering, gathered from the message and the
 /// open guild. Missing ids fall back to a readable placeholder.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Names {
     pub users: HashMap<u64, String>,
     pub channels: HashMap<u64, String>,
+    /// The open server's roles, and what they're drawn in.
+    pub roles: HashMap<u64, (String, Option<RoleColour>)>,
 }
 
 /// What rendering draws on besides the spans.
@@ -353,6 +356,14 @@ impl<'a> Inline<'a> {
                 }
             }
             Span::Entity(entity @ Entity::Emoji { .. }) => self.text(&entity_text(entity, self.names)),
+            // A role's mention takes its colour, as in the official client.
+            Span::Entity(entity @ Entity::Role(id)) if let Some((_, Some(colour))) = self.names.roles.get(id) => {
+                self.tag(&format!("<span background=\"{}\" bgalpha=\"25%\">", hex(colour.at(0.0))));
+                let text = format!("\u{a0}{}\u{a0}", entity_text(entity, self.names)).replace(rich_text::OBJECT, "");
+                self.len += text.len() as u32;
+                self.markup.push_str(&coloured(&text, colour));
+                self.tag("</span>");
+            }
             Span::Entity(entity) => {
                 let (background, foreground) = ACCENT.with(|accent| accent.borrow().clone());
                 self.tag(&format!("<span background=\"{background}\" bgalpha=\"25%\" foreground=\"{foreground}\">"));
@@ -435,6 +446,30 @@ pub fn system_markup(parts: &[Part], time: &str) -> String {
     out + &format!("  <span fgalpha=\"55%\" size=\"small\">{}</span>", escape(time))
 }
 
+/// Pango markup for `text` in a role's colour. A gradient runs across its
+/// characters.
+pub fn coloured(text: &str, colour: &RoleColour) -> String {
+    match colour {
+        RoleColour::Solid(colour) => format!("<span foreground=\"{}\">{}</span>", hex(*colour), escape(text)),
+        RoleColour::Gradient(_) => {
+            let chars: Vec<char> = text.chars().collect();
+            let last = chars.len().saturating_sub(1).max(1) as f64;
+            chars
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let colour = hex(colour.at(i as f64 / last));
+                    format!("<span foreground=\"{colour}\">{}</span>", escape(&c.to_string()))
+                })
+                .collect()
+        }
+    }
+}
+
+fn hex(colour: u32) -> String {
+    format!("#{:06x}", colour & 0xff_ffff)
+}
+
 /// Links to a message in the same channel.
 const JUMP: &str = "neucord:message/";
 
@@ -448,7 +483,7 @@ fn entity_text(entity: &Entity, names: &Names) -> String {
     match entity {
         Entity::User(id) => format!("@{}", names.users.get(id).map_or("unknown-user", String::as_str)),
         Entity::Channel(id) => format!("#{}", names.channels.get(id).map_or("unknown-channel", String::as_str)),
-        Entity::Role(_) => "@role".into(),
+        Entity::Role(id) => format!("@{}", names.roles.get(id).map_or("unknown-role", |(name, _)| name.as_str())),
         Entity::Emoji { name, .. } => format!(":{name}:"),
         Entity::Timestamp { unix, style } => format_timestamp(*unix, *style),
     }
@@ -514,6 +549,10 @@ mod tests {
         Names {
             users: HashMap::from([(5, "alice".to_string())]),
             channels: HashMap::from([(9, "general".to_string())]),
+            roles: HashMap::from([
+                (40, ("Mods".to_string(), Some(RoleColour::Solid(0xff0000)))),
+                (41, ("Plain".to_string(), None)),
+            ]),
         }
     }
 
@@ -538,6 +577,20 @@ mod tests {
         assert!(inline("<@5>").contains("@alice"));
         assert!(inline("<#9>").contains("#general"));
         assert!(inline("<@999>").contains("@unknown-user"));
+    }
+
+    #[test]
+    fn role_mentions_in_their_colour() {
+        let mods = inline("<@&40>");
+        assert!(mods.contains("@Mods") && mods.contains("foreground=\"#ff0000\""), "{mods}");
+        assert!(inline("<@&41>").contains("@Plain"), "no colour: the accent");
+        assert!(inline("<@&99>").contains("@unknown-role"));
+        let gradient = coloured("ab<", &RoleColour::Gradient(vec![0x000000, 0xffffff]));
+        assert_eq!(
+            gradient,
+            "<span foreground=\"#000000\">a</span><span foreground=\"#808080\">b</span>\
+             <span foreground=\"#ffffff\">&lt;</span>"
+        );
     }
 
     #[test]
@@ -593,7 +646,7 @@ mod tests {
 
     #[test]
     fn plain_text_for_notifications() {
-        let names = Names { users: [(5, "alice".into())].into(), channels: HashMap::new() };
+        let names = Names { users: [(5, "alice".into())].into(), ..Default::default() };
         let text = |s: &str| plain_text(&discord::markup::parse(s), &names);
         assert_eq!(text("**hey** <@5>, look: ||secret||"), "hey @alice, look: ▒▒▒▒");
         assert_eq!(text("<:blob:42>"), ":blob:");

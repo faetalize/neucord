@@ -130,9 +130,9 @@ impl App {
     }
 
     /// What replaces the message box where we can't post: accept and ignore
-    /// in a message request, a notice in the system DM, during a timeout, or
-    /// while a server's verification asks for more. While slowmode makes us
-    /// wait, the box stays and the wait shows above it.
+    /// in a message request, a notice in the system DM, during a timeout,
+    /// while a server's verification asks for more, or without Send Messages.
+    /// While slowmode makes us wait, the box stays and the wait shows above it.
     pub(super) fn update_notice_bar(self: &Rc<Self>) {
         let bar = &self.notice_bar;
         while let Some(child) = bar.first_child() {
@@ -141,15 +141,16 @@ impl App {
         if let Some(tick) = self.notice_tick.take() {
             tick.remove();
         }
-        let (system, request, timeout, gate, slowmode) = {
+        let (system, request, timeout, gate, denied, slowmode) = {
             let state = self.state.borrow();
             let open = state.channel.and_then(|id| state.find_channel(id));
             let system = open.is_some_and(|(_, c)| c.is_system_dm());
-            let guild = open.and_then(|(guild, _)| guild);
-            let timeout = guild.and_then(|g| g.timeout_left(now_unix()));
-            let gate = guild.zip(state.account.as_ref()).and_then(|(g, a)| verification::gate(g, a, now_unix()));
+            let guild = open.and_then(|(guild, _)| guild).zip(state.account.as_ref());
+            let timeout = guild.and_then(|(g, a)| g.timeout_left(a, now_unix()));
+            let gate = guild.and_then(|(g, a)| verification::gate(g, a, now_unix()));
+            let denied = guild.is_some() && !state.channel.is_some_and(|id| state.can_send(id));
             let slowmode = open.map_or(0, |(_, c)| state.slowmode.remaining_ms(c, now_ms()));
-            (system, state.open_request().map(|c| (c.id, c.spam, c.title())), timeout, gate, slowmode)
+            (system, state.open_request().map(|c| (c.id, c.spam, c.title())), timeout, gate, denied, slowmode)
         };
         let label = |text: String| gtk::Label::builder().label(text).xalign(0.0).wrap(true).hexpand(true).build();
         let text = match (&request, timeout) {
@@ -166,6 +167,7 @@ impl App {
             (Some((_, false, title)), None) => format!("{title} wants to message you. Accept to reply."),
             (None, None) => match &gate {
                 Some(gate) => gate_notice(gate, now_unix()),
+                None if denied => "You do not have permission to send messages in this channel.".to_owned(),
                 None => {
                     self.composer_box.set_visible(true);
                     bar.set_visible(slowmode > 0);
@@ -212,7 +214,7 @@ impl App {
     /// (Shift held when clicking Reply).
     pub(super) fn start_reply(self: &Rc<Self>, message: &Message, no_ping: bool) {
         // Message requests and the system DM have no message box to reply from.
-        if !self.composer_box.is_visible() {
+        if !self.composer_box.is_visible() || !self.state.borrow().can_reply(message.channel_id) {
             return;
         }
         let (own, guild) = {
@@ -361,9 +363,9 @@ impl App {
         let open = {
             let mut state = self.state.borrow_mut();
             let state = &mut *state;
-            let me = state.me();
             let Some((guild, c)) = state.find_channel(channel) else { return };
-            let bypass = guild.zip(me).is_some_and(|(guild, me)| bypasses_slowmode(guild, me));
+            let bypass =
+                guild.zip(state.account.as_ref()).is_some_and(|(g, me)| bypasses_slowmode(g, c, me, now_unix()));
             let c = c.clone();
             record(&mut state.slowmode, &c, bypass);
             state.channel == Some(channel)
@@ -385,11 +387,16 @@ impl App {
         if text.is_empty() || !self.composer_box.is_visible() {
             return;
         }
+        // The box follows our permissions, but they may have changed since.
+        if !self.state.borrow().can_send(channel) {
+            return self.update_notice_bar();
+        }
         // Slowmode would refuse it; the notice bar says how long is left.
         if self.slowmode_left(channel) > 0 {
             return self.update_notice_bar();
         }
-        let replying = self.reply.borrow().clone().filter(|r| r.channel == channel);
+        let can_reply = self.state.borrow().can_reply(channel);
+        let replying = self.reply.borrow().clone().filter(|r| r.channel == channel && can_reply);
         let reply = replying.as_ref().map(|r| Reply {
             to: r.to,
             guild: r.guild,

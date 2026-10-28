@@ -4,24 +4,21 @@
 //! (`SlowmodeStore`). A cooldown starts when our message goes through, unless
 //! the Bypass Slowmode permission lets us skip it, or when Discord refuses one
 //! with [`crate::rest::SLOWMODE_RATE_LIMITED`] and says how long is left.
-//!
-//! Neucord can't compute that permission yet, so it holds everyone but the
-//! server's owner (see [`bypasses_slowmode`]). A moderator waits when they
-//! needn't; a message is never refused.
 
 use std::collections::HashMap;
 
+use crate::permissions::{self, Permissions};
+use crate::verification::Account;
 use crate::{Channel, Guild, Snowflake};
 
 /// Added to every cooldown, as the official client does, so the wait ends
 /// after Discord's rather than just before it.
 const MARGIN_MS: i64 = 100;
 
-/// Whether we skip slowmode in `guild`. The client asks for Bypass Slowmode;
-/// until permissions are computed (#11), only the owner, who has them all,
-/// is known to.
-pub fn bypasses_slowmode(guild: &Guild, me: Snowflake) -> bool {
-    guild.owner_id == Some(me)
+/// Whether we skip slowmode in `channel`, one of `guild`'s: the client asks
+/// for Bypass Slowmode there.
+pub fn bypasses_slowmode(guild: &Guild, channel: &Channel, me: &Account, now_unix: i64) -> bool {
+    permissions::in_channel(guild, channel, me, now_unix).contains(Permissions::BYPASS_SLOWMODE)
 }
 
 #[derive(Debug, Default)]
@@ -66,7 +63,7 @@ impl Slowmode {
         if let Some((end, was)) = self.ends.get_mut(&channel.id)
             && *was != rate
         {
-            *end = (*end).min(now_ms + i64::from(rate) * 1000);
+            *end = (*end).min(now_ms + i64::from(rate) * 1000 + MARGIN_MS);
             *was = rate;
         }
     }
@@ -133,12 +130,20 @@ mod tests {
     }
 
     #[test]
-    fn only_the_owner_bypasses() {
-        let guild = |owner: &str| -> Guild {
-            serde_json::from_value(serde_json::json!({ "id": "1", "name": "G", "owner_id": owner })).unwrap()
-        };
-        assert!(bypasses_slowmode(&guild("5"), Snowflake(5)));
-        assert!(!bypasses_slowmode(&guild("6"), Snowflake(5)));
+    fn bypass_slowmode() {
+        let mut guild: Guild = serde_json::from_value(serde_json::json!({
+            "id": "1", "name": "G", "owner_id": "6",
+            "roles": [{"id": "1", "permissions": "3072"}, {"id": "40", "permissions": "4503599627370496"}],
+        }))
+        .unwrap();
+        let me = Account { id: Snowflake(5), ..Default::default() };
+        let general = channel(9, 10);
+        assert!(!bypasses_slowmode(&guild, &general, &me, 0), "@everyone waits");
+        guild.my_roles = vec![Snowflake(40)];
+        assert!(bypasses_slowmode(&guild, &general, &me, 0), "a moderator doesn't");
+        guild.my_roles.clear();
+        guild.owner_id = Some(me.id);
+        assert!(bypasses_slowmode(&guild, &general, &me, 0), "nor the owner");
     }
 
     #[test]
@@ -150,9 +155,13 @@ mod tests {
         assert_eq!(slowmode.remaining_ms(&channel(1, 60), 1_000), 49_100, "same slowmode, same wait");
 
         slowmode.update(&channel(1, 5), 1_000);
-        assert_eq!(slowmode.remaining_ms(&channel(1, 5), 1_000), 5_000, "shortened to the new slowmode");
+        assert_eq!(
+            slowmode.remaining_ms(&channel(1, 5), 1_000),
+            5_100,
+            "shortened to the new slowmode, and the margin"
+        );
         slowmode.update(&channel(1, 120), 1_000);
-        assert_eq!(slowmode.remaining_ms(&channel(1, 120), 1_000), 5_000, "never lengthened");
+        assert_eq!(slowmode.remaining_ms(&channel(1, 120), 1_000), 5_100, "never lengthened");
         assert_eq!(slowmode.remaining_ms(&channel(1, 0), 1_000), 0, "off ends it");
     }
 
