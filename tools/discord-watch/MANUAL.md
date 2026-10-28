@@ -59,6 +59,12 @@ changed for unrelated reasons only needs a note in the issue.
   Messages in the channel, or while pending (845207, anchor
   `canEveryoneSendMessages`; `permissions::can_send`). The order and wording
   of Neucord's notices are its own.
+- **Asking for members** (`members::Members`, `Gateway::request_members`),
+  whose roles colour names. Which members the client asks for, and when
+  again, is watched (`GuildMemberRequesterStore`), and so is the payload
+  (`requestGuildMembers`). Splitting into 100 users a request and sending
+  nothing before the session is established are in the `GUILD_MEMBERS_REQUEST`
+  handler of 403010.
 - **A login that must change its password** (`auth::check_required`). The
   login store is watched (`LoginRequiredActionStore`). The forced modal, and
   logging out when it's closed, are in `handleConnectionOpen` in 165685.

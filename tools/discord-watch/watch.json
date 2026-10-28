@@ -8,7 +8,7 @@
     "ChannelType": ["DM", "GROUP_DM", "GUILD_TEXT", "GUILD_CATEGORY"],
     "ComponentType": ["ACTION_ROW", "BUTTON", "STRING_SELECT", "SECTION", "TEXT_DISPLAY", "CONTAINER"],
     "ConsentStatus": ["UNSPECIFIED", "PENDING", "ACCEPTED", "REJECTED"],
-    "GatewayOpcode": ["DISPATCH", "HEARTBEAT", "IDENTIFY", "RESUME", "HELLO", "HEARTBEAT_ACK"],
+    "GatewayOpcode": ["DISPATCH", "HEARTBEAT", "IDENTIFY", "RESUME", "HELLO", "HEARTBEAT_ACK", "REQUEST_GUILD_MEMBERS"],
     "GuildMemberFlags": [
       "DID_REJOIN",
       "BYPASSES_VERIFICATION",
@@ -47,9 +47,11 @@
     "isScheduledForDeletion",
     "isSystemDM",
     "isSystemUser",
-    "renderEmbeds"
+    "renderEmbeds",
+    "requestGuildMembers"
   ],
   "stores": [
+    "GuildMemberRequesterStore",
     "GuildRoleStore",
     "GuildVerificationStore",
     "LoginRequiredActionStore",
