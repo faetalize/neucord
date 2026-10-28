@@ -105,6 +105,19 @@ impl App {
                 }
                 Event::PrivateChannelDelete(id) => self.on_private_channel_delete(id),
                 Event::GuildChannelUpdate { guild_id, channel } => self.on_guild_channel(guild_id, channel),
+                Event::ThreadUpdate { guild_id, thread } => self.on_threads(guild_id, |g| g.set_thread(thread)),
+                Event::ThreadDelete { guild_id, id } => self.on_thread_delete(guild_id, id),
+                Event::ThreadListSync { guild_id, threads, members } => self.on_threads(guild_id, |g| {
+                    for thread in threads {
+                        g.set_thread(thread);
+                    }
+                    for (thread, member) in members {
+                        g.set_thread_member(thread, Some(member));
+                    }
+                }),
+                Event::ThreadMember { guild_id, thread, member } => {
+                    self.on_threads(guild_id, |g| g.set_thread_member(thread, member))
+                }
                 Event::MemberUpdate { guild_id, member } => self.on_member(guild_id, member),
                 Event::Members { guild_id, members, not_found } => {
                     let open = {
@@ -426,6 +439,37 @@ impl App {
             self.rebuild_sidebar();
         }
         self.permissions_changed(Some(guild_id));
+    }
+
+    /// Threads in a server changed, as `change` makes them: created,
+    /// renamed, archived, locked, joined or left. Whether we may post in one,
+    /// or still see it, may have changed with them.
+    fn on_threads(self: &Rc<Self>, guild_id: Snowflake, change: impl FnOnce(&mut Guild)) {
+        let open = {
+            let mut state = self.state.borrow_mut();
+            let Some(guild) = state.guilds.iter_mut().find(|g| g.id == guild_id) else { return };
+            change(guild);
+            state.guild == Some(guild_id)
+        };
+        if open {
+            self.rebuild_sidebar();
+        }
+        self.permissions_changed(Some(guild_id));
+    }
+
+    /// A thread was deleted. If it was open, its parent opens instead.
+    fn on_thread_delete(self: &Rc<Self>, guild_id: Snowflake, id: Snowflake) {
+        let parent = {
+            let mut state = self.state.borrow_mut();
+            let Some(guild) = state.guilds.iter_mut().find(|g| g.id == guild_id) else { return };
+            let parent = guild.thread(id).and_then(|t| t.parent_id);
+            guild.threads.retain(|t| t.id != id);
+            parent.filter(|_| state.channel == Some(id))
+        };
+        match parent {
+            Some(parent) if self.state.borrow().can_view(parent) => self.select_channel(parent),
+            _ => self.on_threads(guild_id, |_| {}),
+        }
     }
 
     /// Our member in a server changed: a timeout began or was lifted, our

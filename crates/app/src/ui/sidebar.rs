@@ -4,11 +4,11 @@ use std::rc::Rc;
 
 use discord::notifications::Place;
 use discord::{Channel, Snowflake};
-use gtk::pango;
 use gtk::prelude::*;
+use gtk::{glib, pango};
 
 use super::App;
-use super::state::{Page, now_unix};
+use super::state::{Page, now_ms, now_unix};
 use super::widgets::{avatar_widget, badge, round_picture};
 use crate::images::Images;
 
@@ -95,8 +95,52 @@ impl App {
                 } else if state.is_unread(channel) {
                     row.add_css_class("unread");
                 }
+                for thread in state.sidebar_threads(guild, channel) {
+                    self.append_thread(&state, thread);
+                }
             }
         }
+        self.watch_thread_expiry(guild);
+    }
+
+    /// A thread's row, under its parent's.
+    fn append_thread(&self, state: &super::state::State, thread: &Channel) {
+        let row = gtk::Box::builder().spacing(6).margin_start(18).build();
+        row.append(
+            &gtk::Label::builder()
+                .label(thread.name.as_deref().unwrap_or("unnamed"))
+                .xalign(0.0)
+                .hexpand(true)
+                .ellipsize(pango::EllipsizeMode::End)
+                .build(),
+        );
+        if let Some(badge) = badge(state.read.mentions(thread.id)) {
+            row.append(&badge);
+        }
+        let row = self.append_row(&row, Some(Target::Channel(thread.id)), state.channel == Some(thread.id));
+        if super::state::State::thread_muted(thread) {
+            row.add_css_class("muted");
+        } else if state.is_unread(thread) {
+            row.add_css_class("unread");
+        }
+    }
+
+    /// Look at the sidebar again when a thread it lists would drop out on
+    /// its own, quiet for its whole auto-archive window.
+    fn watch_thread_expiry(self: &Rc<Self>, guild: &discord::Guild) {
+        if let Some(timer) = self.thread_expiry.take() {
+            timer.remove();
+        }
+        let Some(at) = discord::threads::next_expiry(guild, now_ms()) else { return };
+        let delay = std::time::Duration::from_millis((at - now_ms()).max(0) as u64 + 1);
+        let this = Rc::downgrade(self);
+        let timer = glib::timeout_add_local_once(delay, move || {
+            if let Some(this) = this.upgrade() {
+                this.thread_expiry.take();
+                this.refresh_badges();
+            }
+        });
+        self.thread_expiry.replace(Some(timer));
     }
 
     /// Add a row to the channel list. Rows without a target are headings.

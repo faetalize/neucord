@@ -131,7 +131,8 @@ impl App {
 
     /// What replaces the message box where we can't post: accept and ignore
     /// in a message request, a notice in the system DM, during a timeout,
-    /// while a server's verification asks for more, or without Send Messages.
+    /// while a server's verification asks for more, or without Send Messages
+    /// (in a thread, by the thread rule: see `permissions::in_channel`).
     /// While slowmode makes us wait, the box stays and the wait shows above it.
     pub(super) fn update_notice_bar(self: &Rc<Self>) {
         let bar = &self.notice_bar;
@@ -145,10 +146,16 @@ impl App {
             let state = self.state.borrow();
             let open = state.channel.and_then(|id| state.find_channel(id));
             let system = open.is_some_and(|(_, c)| c.is_system_dm());
+            let denied_here = match open.map(|(_, c)| c) {
+                Some(c) if c.kind == discord::ChannelKind::MediaThread => "This thread can only be read.",
+                Some(c) if c.is_locked() => "This thread is locked. Only moderators can send messages in it.",
+                _ => "You do not have permission to send messages in this channel.",
+            };
             let guild = open.and_then(|(guild, _)| guild).zip(state.account.as_ref());
             let timeout = guild.and_then(|(g, a)| g.timeout_left(a, now_unix()));
             let gate = guild.and_then(|(g, a)| verification::gate(g, a, now_unix()));
-            let denied = guild.is_some() && !state.channel.is_some_and(|id| state.can_send(id));
+            let denied =
+                (guild.is_some() && !state.channel.is_some_and(|id| state.can_send(id))).then_some(denied_here);
             let slowmode = open.map_or(0, |(_, c)| state.slowmode.remaining_ms(c, now_ms()));
             (system, state.open_request().map(|c| (c.id, c.spam, c.title())), timeout, gate, denied, slowmode)
         };
@@ -165,10 +172,10 @@ impl App {
                 format!("Discord filed this message request from {title} as likely spam.")
             }
             (Some((_, false, title)), None) => format!("{title} wants to message you. Accept to reply."),
-            (None, None) => match &gate {
-                Some(gate) => gate_notice(gate, now_unix()),
-                None if denied => "You do not have permission to send messages in this channel.".to_owned(),
-                None => {
+            (None, None) => match (&gate, denied) {
+                (Some(gate), _) => gate_notice(gate, now_unix()),
+                (None, Some(denied)) => denied.to_owned(),
+                (None, None) => {
                     self.composer_box.set_visible(true);
                     bar.set_visible(slowmode > 0);
                     if slowmode > 0 {

@@ -8,7 +8,8 @@ Another GTK Discord client? Daring today, are we...?
 ## What doesn't work yet
 
 Reactions, editing or deleting your own messages, uploads, emoji and
-sticker pickers, threads and forums, the member list, voice and video.
+sticker pickers, threads you haven't joined, forum post lists and new
+posts, the member list, voice and video.
 Polls and bots' buttons show but can't be used, Lottie stickers show only
 their name, and `ansi` code blocks lose their colours. Two-factor with
 security keys. Steps Discord sometimes requires, such as verifying a phone

@@ -12,9 +12,11 @@
 //! a guest may, and a server that requires 2FA for moderation takes the
 //! moderation permissions from an account without it, owner included.
 //!
+//! A thread takes its parent's permissions, with posting decided by Send
+//! Messages in Threads instead of Send Messages ([`in_thread`]).
+//!
 //! Not copied: lurking and viewing a server as a role, which Neucord can't
-//! do, a public stage's wider allowance for lurkers, and threads, which take
-//! their parent's permissions with rules of their own (#23).
+//! do, and a public stage's wider allowance for lurkers.
 
 use std::ops::{BitAnd, BitOr};
 
@@ -282,12 +284,45 @@ pub fn in_guild(guild: &Guild, me: &Account, now: i64) -> Permissions {
     compute(guild, &[], me, now)
 }
 
-/// Ours in `channel`, one of `guild`'s, at `now`.
+/// Ours in `channel`, one of `guild`'s or a thread in one, at `now`.
 pub fn in_channel(guild: &Guild, channel: &Channel, me: &Account, now: i64) -> Permissions {
     if channel.flags & IS_SCHEDULED_FOR_DELETION != 0 {
         return Permissions::NONE;
     }
+    if channel.kind.is_thread() {
+        // No parent, or one being deleted: nothing, whatever the thread.
+        let parent = channel.parent_id.and_then(|id| guild.channel(id));
+        return match parent {
+            Some(parent) if parent.flags & IS_SCHEDULED_FOR_DELETION == 0 => {
+                in_thread(guild, channel, in_channel(guild, parent, me, now))
+            }
+            _ => Permissions::NONE,
+        };
+    }
     compute(guild, &channel.permission_overwrites, me, now)
+}
+
+/// Ours in `thread`, given ours in its parent (the client's thread rule, `x`
+/// in 488926). A media thread only takes reading. A private thread we
+/// haven't joined gives nothing without Manage Threads, unless we're a
+/// guest. Otherwise the parent's permissions apply, with Send Messages
+/// granted by Send Messages in Threads, and taken away again in a locked
+/// thread without Manage Threads.
+fn in_thread(guild: &Guild, thread: &Channel, parent: Permissions) -> Permissions {
+    if thread.kind == ChannelKind::MediaThread {
+        return Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY;
+    }
+    let joined = thread.member.is_some();
+    let guest = guild.member_flags & IS_GUEST != 0;
+    if thread.kind == ChannelKind::PrivateThread && !joined && !guest && !parent.contains(Permissions::MANAGE_THREADS) {
+        return Permissions::NONE;
+    }
+    let locked_out = thread.is_locked() && !parent.contains(Permissions::MANAGE_THREADS);
+    if parent.contains(Permissions::SEND_MESSAGES_IN_THREADS) && !locked_out {
+        parent | Permissions::SEND_MESSAGES
+    } else {
+        parent.without(Permissions::SEND_MESSAGES)
+    }
 }
 
 fn compute(guild: &Guild, overwrites: &[crate::model::Overwrite], me: &Account, now: i64) -> Permissions {
@@ -366,13 +401,30 @@ pub fn can_send(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64
 
 /// Whether the client offers Reply in `channel` (517997), with
 /// [`crate::Message::is_replyable`] for the message itself: not in the
-/// system DM, and in a server only with Send Messages and Read Message
-/// History.
+/// system DM, in a server only with Send Messages and Read Message History,
+/// and in an archived thread only if we [`can_unarchive`] it.
 pub fn can_reply(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64) -> bool {
     can_send(guild, channel, me, now)
         && guild.is_none_or(|g| {
             in_channel(g, channel, me, now).contains(access(channel) | Permissions::READ_MESSAGE_HISTORY)
+                && (!channel.is_archived() || can_unarchive(g, channel, me, now))
         })
+}
+
+/// Whether we may reopen an archived `thread` (`lK` in 406704): a locked one
+/// with Manage Threads, any other with Send Messages in Threads and Send
+/// Messages there, and Send Messages in its parent. Never a media thread.
+pub fn can_unarchive(guild: &Guild, thread: &Channel, me: &Account, now: i64) -> bool {
+    if !thread.kind.is_thread() || thread.kind == ChannelKind::MediaThread {
+        return false;
+    }
+    let here = in_channel(guild, thread, me, now);
+    if thread.is_locked() {
+        return here.contains(Permissions::MANAGE_THREADS);
+    }
+    let parent = thread.parent_id.and_then(|id| guild.channel(id));
+    here.contains(Permissions::SEND_MESSAGES_IN_THREADS | Permissions::SEND_MESSAGES)
+        && parent.is_some_and(|p| in_channel(guild, p, me, now).contains(Permissions::SEND_MESSAGES))
 }
 
 #[cfg(test)]
@@ -569,6 +621,113 @@ mod tests {
         }
         let text = channel(&[(GUILD, Permissions::CONNECT, Permissions::NONE)]);
         assert!(can_view(&guild, &text, &me, 0), "a text channel needs no Connect");
+    }
+
+    const IN_THREADS: Permissions = Permissions::SEND_MESSAGES_IN_THREADS;
+    const MANAGE_THREADS: Permissions = Permissions::MANAGE_THREADS;
+
+    /// `guild()` with `parent` as channel 9, and a thread of `kind` in it.
+    fn with_thread(parent: Channel, kind: u8, extra: serde_json::Value) -> (Guild, Channel) {
+        let mut guild = guild();
+        guild.channels = vec![parent];
+        let mut thread = json!({"id": "20", "type": kind, "parent_id": "9",
+                                "thread_metadata": {"archived": false, "locked": false}});
+        thread.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        (guild, serde_json::from_value(thread).unwrap())
+    }
+
+    fn joined() -> serde_json::Value {
+        json!({"member": {"flags": 0, "join_timestamp": "2026-10-28T00:00:00+00:00"}})
+    }
+
+    #[test]
+    fn threads_post_with_send_messages_in_threads() {
+        let me = me();
+        let (guild, thread) = with_thread(channel(&[]), 11, json!({}));
+        assert!(can_view(&guild, &thread, &me, 0), "seen as its parent is");
+        assert!(!can_send(Some(&guild), &thread, &me, 0), "Send Messages alone isn't enough");
+
+        let threads_only = channel(&[(GUILD, SEND, IN_THREADS)]);
+        let (guild, thread) = with_thread(threads_only, 11, json!({}));
+        assert!(!can_send(Some(&guild), guild.channel(Snowflake(9)).unwrap(), &me, 0));
+        assert!(can_send(Some(&guild), &thread, &me, 0), "and Send Messages isn't needed");
+        assert!(can_reply(Some(&guild), &thread, &me, 0));
+
+        let hidden = channel(&[(GUILD, VIEW, IN_THREADS)]);
+        let (guild, thread) = with_thread(hidden, 11, json!({}));
+        assert!(!can_view(&guild, &thread, &me, 0) && !can_send(Some(&guild), &thread, &me, 0));
+    }
+
+    #[test]
+    fn locked_threads_take_manage_threads() {
+        let me = me();
+        let locked = json!({"thread_metadata": {"archived": false, "locked": true}});
+        let (mut guild, thread) = with_thread(channel(&[(GUILD, Permissions::NONE, IN_THREADS)]), 11, locked);
+        assert!(can_view(&guild, &thread, &me, 0) && !can_send(Some(&guild), &thread, &me, 0));
+        guild.roles[1].permissions = MANAGE_THREADS;
+        guild.my_roles.push(Snowflake(MOD));
+        assert!(can_send(Some(&guild), &thread, &me, 0));
+    }
+
+    #[test]
+    fn private_threads_we_havent_joined_give_nothing() {
+        let me = me();
+        let parent = channel(&[(GUILD, Permissions::NONE, IN_THREADS)]);
+        let (mut guild, private) = with_thread(parent.clone(), 12, json!({}));
+        assert_eq!(in_channel(&guild, &private, &me, 0), Permissions::NONE);
+        let (_, member) = with_thread(parent.clone(), 12, joined());
+        assert!(can_send(Some(&guild), &member, &me, 0));
+        let (_, public) = with_thread(parent, 11, json!({}));
+        assert!(can_send(Some(&guild), &public, &me, 0), "a public one needs no joining");
+
+        guild.member_flags = IS_GUEST;
+        assert!(can_view(&guild, &private, &me, 0), "guests are let in");
+        guild.member_flags = 0;
+        guild.roles[1].permissions = MANAGE_THREADS;
+        guild.my_roles.push(Snowflake(MOD));
+        assert!(can_send(Some(&guild), &private, &me, 0), "and moderators");
+    }
+
+    #[test]
+    fn media_threads_only_read() {
+        let me = me();
+        let (mut guild, thread) = with_thread(channel(&[]), 19, joined());
+        guild.owner_id = Some(ME);
+        assert_eq!(in_channel(&guild, &thread, &me, 0), VIEW | HISTORY, "even for the owner");
+        assert!(!can_send(Some(&guild), &thread, &me, 0) && !can_unarchive(&guild, &thread, &me, 0));
+    }
+
+    #[test]
+    fn threads_without_a_parent_give_nothing() {
+        let me = me();
+        let (mut guild, thread) = with_thread(channel(&[]), 19, json!({}));
+        guild.channels[0].flags = IS_SCHEDULED_FOR_DELETION;
+        assert_eq!(in_channel(&guild, &thread, &me, 0), Permissions::NONE, "its parent is being deleted");
+        guild.channels.clear();
+        assert_eq!(in_channel(&guild, &thread, &me, 0), Permissions::NONE, "its parent is gone");
+    }
+
+    #[test]
+    fn archived_threads() {
+        let me = me();
+        let archived = json!({"thread_metadata": {"archived": true, "locked": false}});
+        let (guild, thread) = with_thread(channel(&[(GUILD, Permissions::NONE, IN_THREADS)]), 11, archived);
+        assert!(can_send(Some(&guild), &thread, &me, 0), "posting reopens it");
+        assert!(can_unarchive(&guild, &thread, &me, 0) && can_reply(Some(&guild), &thread, &me, 0));
+
+        // Send Messages in Threads only: the box stays, Reply goes.
+        let archived = json!({"thread_metadata": {"archived": true, "locked": false}});
+        let (guild, thread) = with_thread(channel(&[(GUILD, SEND, IN_THREADS)]), 11, archived);
+        assert!(can_send(Some(&guild), &thread, &me, 0));
+        assert!(!can_unarchive(&guild, &thread, &me, 0) && !can_reply(Some(&guild), &thread, &me, 0));
+
+        let locked = json!({"thread_metadata": {"archived": true, "locked": true}});
+        let (mut guild, thread) = with_thread(channel(&[(GUILD, Permissions::NONE, IN_THREADS)]), 11, locked);
+        assert!(!can_send(Some(&guild), &thread, &me, 0) && !can_reply(Some(&guild), &thread, &me, 0));
+        guild.roles[1].permissions = MANAGE_THREADS;
+        guild.my_roles.push(Snowflake(MOD));
+        assert!(can_unarchive(&guild, &thread, &me, 0) && can_reply(Some(&guild), &thread, &me, 0));
+        assert!(!can_unarchive(&guild, guild.channel(Snowflake(9)).unwrap(), &me, 0), "not a thread");
     }
 
     #[test]

@@ -79,6 +79,11 @@ pub struct App {
     notice_bar: gtk::Box,
     /// Counts the notice bar's wait down, while it shows one.
     notice_tick: RefCell<Option<glib::SourceId>>,
+    /// Fires when a thread the sidebar lists would drop out of it.
+    thread_expiry: RefCell<Option<glib::SourceId>>,
+    /// What opening a forum or media channel shows, until #70 lists posts.
+    forum_page: adw::StatusPage,
+    forum_title: widgets::Title,
     composer_error: gtk::Label,
     images: Images,
     /// Mention autocomplete, anchored to the composer.
@@ -183,6 +188,13 @@ impl App {
                 .css_classes(["composer", "card-row", "notice-bar"])
                 .build(),
             notice_tick: RefCell::default(),
+            thread_expiry: RefCell::default(),
+            forum_page: adw::StatusPage::builder()
+                .title("No Posts Shown")
+                .description("Neucord can't list posts yet. Posts you've joined are under the channel in the sidebar.")
+                .vexpand(true)
+                .build(),
+            forum_title: widgets::Title::new(""),
             composer_error: gtk::Label::builder()
                 .xalign(0.0)
                 .wrap(true)
@@ -403,6 +415,9 @@ impl App {
         self.content.add_named(&self.build_chat(), Some("chat"));
         self.content.add_named(&self.build_friends(), Some("friends"));
         self.content.add_named(&self.build_requests(), Some("requests"));
+        let forum = adw::ToolbarView::builder().content(&self.forum_page).build();
+        forum.add_top_bar(&self.forum_title.header_bar(&[self.sidebar_toggle().upcast_ref()]));
+        self.content.add_named(&forum, Some("forum"));
         // The right pane stays empty until the member list (#10) fills it.
         self.right.set_content(Some(&self.content));
         self.split.set_content(Some(&self.right));

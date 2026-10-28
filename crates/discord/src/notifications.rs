@@ -5,13 +5,15 @@
 //! Levels resolve from the most specific setting: channel override, then its
 //! category's override, then the server setting, then the server's default.
 //! DM settings live in the entry whose `guild_id` is null.
+//!
+//! Threads go by our membership instead: see [`NotificationSettings::thread_level`].
 
 use std::collections::HashMap;
 
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{Message, Snowflake};
+use crate::{Channel, Message, Snowflake};
 
 /// `message_notifications` value meaning "inherit from the level above".
 const INHERIT: u8 = 3;
@@ -38,14 +40,15 @@ fn inherit() -> u8 {
     INHERIT
 }
 
+/// How long a mute lasts.
 #[derive(Clone, Debug, Default, Deserialize)]
-struct MuteConfig {
+pub struct MuteConfig {
     #[serde(default)]
     end_time: Option<String>,
 }
 
 /// Muted with no end time, or an end time still in the future.
-fn mute_active(muted: bool, config: Option<&MuteConfig>, now_unix: i64) -> bool {
+pub(crate) fn mute_active(muted: bool, config: Option<&MuteConfig>, now_unix: i64) -> bool {
     if !muted {
         return false;
     }
@@ -163,15 +166,51 @@ impl NotificationSettings {
             .unwrap_or(Level::All)
     }
 
+    /// Which messages in `thread` notify (607508): what we chose for it, and
+    /// otherwise its parent's level, at `parent`, unless anything there is
+    /// muted. A thread we haven't joined notifies nothing.
+    pub fn thread_level(&self, thread: &Channel, parent: &Place, now_unix: i64) -> Level {
+        let Some(member) = &thread.member else { return Level::Nothing };
+        if member.flags & thread_flags::ALL_MESSAGES != 0 {
+            Level::All
+        } else if member.flags & thread_flags::ONLY_MENTIONS != 0 {
+            Level::Mentions
+        } else if member.flags & thread_flags::NO_MESSAGES != 0 || self.muted(parent, now_unix) {
+            Level::Nothing
+        } else {
+            self.level(parent)
+        }
+    }
+
+    /// Should `message`, in `thread`, raise a desktop notification
+    /// (176154)? Not in a thread we muted. Mentions count here whatever
+    /// the server suppresses.
+    pub fn should_notify_in_thread(
+        &self,
+        thread: &Channel,
+        parent: &Place,
+        message: &Message,
+        me: Snowflake,
+        my_roles: &[Snowflake],
+        now_unix: i64,
+    ) -> bool {
+        if thread.member.as_ref().is_none_or(|m| m.is_muted(now_unix)) {
+            return false;
+        }
+        match self.thread_level(thread, parent, now_unix) {
+            Level::Nothing => false,
+            Level::Mentions => mentions(message, me, my_roles, false, false),
+            Level::All => true,
+        }
+    }
+
     /// Whether `message` pings us: directly, via @everyone/@here, or via one
     /// of our roles, unless the server suppresses that kind.
     pub fn mentions_me(&self, message: &Message, me: Snowflake, my_roles: &[Snowflake]) -> bool {
         let settings = self.by_guild.get(&message.guild_id);
         let suppress_everyone = settings.is_some_and(|s| s.suppress_everyone);
         let suppress_roles = settings.is_some_and(|s| s.suppress_roles);
-        message.mentions.iter().any(|u| u.id == me)
-            || (message.mention_everyone && !suppress_everyone)
-            || (!suppress_roles && message.mention_roles.iter().any(|r| my_roles.contains(r)))
+        mentions(message, me, my_roles, suppress_everyone, suppress_roles)
     }
 
     /// Should a message here raise a desktop notification? DMs notify unless
@@ -187,6 +226,19 @@ impl NotificationSettings {
             Level::All => mentioned || !self.muted(place, now_unix),
         }
     }
+}
+
+fn mentions(message: &Message, me: Snowflake, my_roles: &[Snowflake], no_everyone: bool, no_roles: bool) -> bool {
+    message.mentions.iter().any(|u| u.id == me)
+        || (message.mention_everyone && !no_everyone)
+        || (!no_roles && message.mention_roles.iter().any(|r| my_roles.contains(r)))
+}
+
+/// Our thread member's flags: which messages in the thread notify.
+mod thread_flags {
+    pub const ALL_MESSAGES: u64 = 1 << 1;
+    pub const ONLY_MENTIONS: u64 = 1 << 2;
+    pub const NO_MESSAGES: u64 = 1 << 3;
 }
 
 #[cfg(test)]
@@ -250,6 +302,39 @@ mod tests {
         assert!(s.should_notify(&place(Some(2), 5, None), true, NOW), "a mention gets through a mute");
         assert!(s.should_notify(&place(None, 98, None), false, NOW), "DM");
         assert!(!s.should_notify(&place(None, 99, None), false, NOW), "muted DM");
+    }
+
+    #[test]
+    fn threads_go_by_our_membership() {
+        let s = settings();
+        let thread = |member: Value| -> Channel {
+            serde_json::from_value(json!({"id": "30", "type": 11, "parent_id": "12", "member": member})).unwrap()
+        };
+        let member = |flags: u64| json!({"flags": flags, "muted": false, "join_timestamp": "2026-10-28T00:00:00Z"});
+        let parent = place(Some(1), 12, None);
+        assert_eq!(s.thread_level(&thread(Value::Null), &parent, NOW), Level::Nothing, "not joined");
+        assert_eq!(s.thread_level(&thread(member(0)), &parent, NOW), Level::Mentions, "the parent's: the server's");
+        assert_eq!(s.thread_level(&thread(member(0)), &place(Some(1), 10, None), NOW), Level::All);
+        assert_eq!(s.thread_level(&thread(member(1 << 1)), &parent, NOW), Level::All, "our choice wins");
+        assert_eq!(s.thread_level(&thread(member(1 << 3)), &place(Some(1), 10, None), NOW), Level::Nothing);
+        let muted_parent = place(Some(1), 11, None);
+        assert_eq!(s.thread_level(&thread(member(0)), &muted_parent, NOW), Level::Nothing, "muted parent");
+        assert_eq!(s.thread_level(&thread(member(1 << 2)), &muted_parent, NOW), Level::Mentions, "unless we chose");
+
+        let message = |extra: Value| -> Message {
+            let mut m = json!({"id": "1", "channel_id": "30", "guild_id": "1", "author": {"id": "7", "username": "x"},
+                               "content": "", "timestamp": "2026-10-26T00:00:00+00:00"});
+            m.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(m).unwrap()
+        };
+        let me = Snowflake(5);
+        let everyone = message(json!({"mention_everyone": true}));
+        assert!(!s.mentions_me(&everyone, me, &[]), "the server suppresses @everyone");
+        assert!(s.should_notify_in_thread(&thread(member(0)), &parent, &everyone, me, &[], NOW), "not in threads");
+        assert!(!s.should_notify_in_thread(&thread(member(0)), &parent, &message(json!({})), me, &[], NOW));
+        let mut muted = member(1 << 1);
+        muted["muted"] = json!(true);
+        assert!(!s.should_notify_in_thread(&thread(muted), &parent, &everyone, me, &[], NOW), "muted thread");
     }
 
     #[test]

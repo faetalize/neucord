@@ -206,11 +206,11 @@ impl App {
         let first_channel = {
             let mut state = self.state.borrow_mut();
             state.guild = Some(id);
-            state
-                .guilds
-                .iter()
-                .find(|g| g.id == id)
-                .and_then(|g| state.sidebar(g).first().and_then(|(_, chans)| chans.first().map(|c| c.id)))
+            state.guilds.iter().find(|g| g.id == id).and_then(|g| {
+                // A channel with messages first, rather than a forum.
+                let channels: Vec<_> = state.sidebar(g).into_iter().flat_map(|(_, c)| c).collect();
+                channels.iter().find(|c| !c.kind.is_forum_like()).or(channels.first()).map(|c| c.id)
+            })
         };
         self.rebuild_rail();
         match first_channel {

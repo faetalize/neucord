@@ -22,7 +22,7 @@ use crate::read_state::ReadStates;
 use crate::relationships::{Presence, Relationship, Relationships};
 use crate::settings::{self, GuildFolder, MediaPatch, MediaSettings};
 use crate::verification::Account;
-use crate::{Channel, Error, Guild, Member, Message, MessageEdit, Role, Snowflake, User, identity};
+use crate::{Channel, Error, Guild, Member, Message, MessageEdit, Role, Snowflake, ThreadMember, User, identity};
 
 /// Gateway capability bits. 0 asks for the classic payload shapes, which the
 /// model parses directly; the guild parser also accepts the newer shape.
@@ -80,6 +80,28 @@ pub enum Event {
     GuildChannelUpdate {
         guild_id: Snowflake,
         channel: Channel,
+    },
+    /// A thread was created or changed: renamed, archived, locked, reopened.
+    /// It may leave out our membership (see [`Guild::set_thread`]).
+    ThreadUpdate {
+        guild_id: Snowflake,
+        thread: Channel,
+    },
+    ThreadDelete {
+        guild_id: Snowflake,
+        id: Snowflake,
+    },
+    /// Active threads in a server, and our membership of those we've joined.
+    ThreadListSync {
+        guild_id: Snowflake,
+        threads: Vec<Channel>,
+        members: Vec<(Snowflake, ThreadMember)>,
+    },
+    /// We joined a thread (`Some`), changed how it notifies, or left it.
+    ThreadMember {
+        guild_id: Snowflake,
+        thread: Snowflake,
+        member: Option<ThreadMember>,
     },
     /// Our own member in a server changed: roles, a timeout, screening passed.
     MemberUpdate {
@@ -653,6 +675,64 @@ fn dispatch(state: &State, name: &str, data: Value) {
             Some(user_id) => Event::PresenceUpdate { user_id, presence: Presence::from_value(&data) },
             None => return,
         },
+        "THREAD_CREATE" | "THREAD_UPDATE" => match (Channel::deserialize(&data), parse_id(&data["guild_id"])) {
+            (Ok(thread), Some(guild_id)) if thread.kind.is_thread() => Event::ThreadUpdate { guild_id, thread },
+            (Ok(_), _) => return,
+            (Err(e), _) => return eprintln!("gateway: bad {name}: {e}"),
+        },
+        "THREAD_DELETE" => match (parse_id(&data["guild_id"]), parse_id(&data["id"])) {
+            (Some(guild_id), Some(id)) => Event::ThreadDelete { guild_id, id },
+            _ => return,
+        },
+        "THREAD_LIST_SYNC" => {
+            let Some(guild_id) = parse_id(&data["guild_id"]) else { return };
+            let threads = data["threads"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|t| Channel::deserialize(t).ok())
+                .filter(|t| t.kind.is_thread())
+                .collect();
+            let members = data["members"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|m| Some((parse_id(&m["id"])?, ThreadMember::deserialize(m).ok()?)))
+                .collect();
+            Event::ThreadListSync { guild_id, threads, members }
+        }
+        // Only ours: the client keeps no one else's.
+        "THREAD_MEMBER_UPDATE" => {
+            let (Some(guild_id), Some(thread)) = (parse_id(&data["guild_id"]), parse_id(&data["id"])) else { return };
+            if parse_id(&data["user_id"]) != state.me.get() {
+                return;
+            }
+            match ThreadMember::deserialize(&data) {
+                Ok(member) => Event::ThreadMember { guild_id, thread, member: Some(member) },
+                Err(e) => return eprintln!("gateway: bad THREAD_MEMBER_UPDATE: {e}"),
+            }
+        }
+        // Who joined and left; ours, if we're among them.
+        "THREAD_MEMBERS_UPDATE" => {
+            let (Some(guild_id), Some(thread), Some(me)) =
+                (parse_id(&data["guild_id"]), parse_id(&data["id"]), state.me.get())
+            else {
+                return;
+            };
+            let removed =
+                data["removed_member_ids"].as_array().into_iter().flatten().any(|id| parse_id(id) == Some(me));
+            let added = data["added_members"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|m| parse_id(&m["user_id"]) == Some(me))
+                .and_then(|m| ThreadMember::deserialize(m).ok());
+            match added {
+                Some(member) => Event::ThreadMember { guild_id, thread, member: Some(member) },
+                None if removed => Event::ThreadMember { guild_id, thread, member: None },
+                None => return,
+            }
+        }
         "CHANNEL_DELETE" => {
             let is_private = data["guild_id"].is_null();
             match parse_id(&data["id"]) {
@@ -871,6 +951,68 @@ mod tests {
         );
         let Ok(Event::Members { members, not_found, .. }) = rx.try_recv() else { panic!("no chunk") };
         assert_eq!((members, not_found), (vec![(Snowflake(8), vec![Snowflake(40)])], vec![Snowflake(9)]));
+    }
+
+    #[test]
+    fn threads() {
+        let (tx, rx) = async_channel::unbounded();
+        let state = State {
+            token: String::new(),
+            me: Cell::new(Some(Snowflake(5))),
+            session: RefCell::new(None),
+            resuming: Cell::new(false),
+            resumable: Cell::new(true),
+            established: Cell::new(true),
+            seq: Cell::new(None),
+            acked: Cell::new(true),
+            events: tx,
+        };
+        let member = json!({"flags": 2, "muted": false, "mute_config": null, "join_timestamp": "2026-10-28T00:00:00Z"});
+        let thread = json!({"id": "20", "guild_id": "1", "parent_id": "9", "type": 11, "name": "t",
+                            "thread_metadata": {"archived": false, "locked": true, "auto_archive_duration": 1440,
+                                                "archive_timestamp": "2026-10-27T00:00:00Z"},
+                            "member": member, "newly_created": true});
+        dispatch(&state, "THREAD_CREATE", thread);
+        let Ok(Event::ThreadUpdate { guild_id, thread }) = rx.try_recv() else { panic!("no thread") };
+        assert_eq!((guild_id, thread.parent_id), (Snowflake(1), Some(Snowflake(9))));
+        assert!(thread.is_locked() && thread.is_active_thread());
+        assert_eq!(thread.member.map(|m| (m.flags, m.join_timestamp)), Some((2, Some(1_793_145_600_000))));
+
+        dispatch(&state, "THREAD_UPDATE", json!({"id": "9", "guild_id": "1", "type": 0}));
+        assert!(rx.try_recv().is_err(), "not a thread");
+        dispatch(&state, "THREAD_DELETE", json!({"id": "20", "guild_id": "1", "parent_id": "9", "type": 11}));
+        assert!(matches!(rx.try_recv(), Ok(Event::ThreadDelete { id: Snowflake(20), .. })));
+
+        dispatch(
+            &state,
+            "THREAD_LIST_SYNC",
+            json!({"guild_id": "1", "threads": [{"id": "21", "type": 12, "parent_id": "9"}],
+                   "members": [{"id": "21", "user_id": "5", "flags": 0, "join_timestamp": "2026-10-28T00:00:00Z"}]}),
+        );
+        let Ok(Event::ThreadListSync { threads, members, .. }) = rx.try_recv() else { panic!("no sync") };
+        assert_eq!((threads.len(), members[0].0), (1, Snowflake(21)));
+
+        let ours = json!({"id": "20", "guild_id": "1", "user_id": "5", "flags": 8, "muted": true,
+                          "mute_config": {"end_time": null}, "join_timestamp": "2026-10-28T00:00:00Z"});
+        dispatch(&state, "THREAD_MEMBER_UPDATE", ours);
+        let Ok(Event::ThreadMember { member: Some(member), .. }) = rx.try_recv() else { panic!("our member") };
+        assert!(member.flags == 8 && member.is_muted(0));
+        dispatch(&state, "THREAD_MEMBER_UPDATE", json!({"id": "20", "guild_id": "1", "user_id": "6", "flags": 0}));
+        assert!(rx.try_recv().is_err(), "someone else's");
+
+        let members = |added: &str, removed: &str| {
+            dispatch(
+                &state,
+                "THREAD_MEMBERS_UPDATE",
+                json!({"id": "20", "guild_id": "1", "member_count": 2,
+                       "added_members": [{"id": "20", "user_id": added, "flags": 0, "join_timestamp": "2026-10-28T00:00:00Z"}],
+                       "removed_member_ids": [removed]}),
+            );
+            rx.try_recv().ok()
+        };
+        assert!(matches!(members("5", "7"), Some(Event::ThreadMember { member: Some(_), .. })), "we joined");
+        assert!(matches!(members("6", "5"), Some(Event::ThreadMember { member: None, .. })), "we left");
+        assert!(members("6", "7").is_none(), "neither");
     }
 
     #[test]
