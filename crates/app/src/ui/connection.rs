@@ -106,6 +106,16 @@ impl App {
                 Event::PrivateChannelDelete(id) => self.on_private_channel_delete(id),
                 Event::GuildChannelUpdate { guild_id, channel } => self.on_guild_channel(guild_id, channel),
                 Event::MemberUpdate { guild_id, member } => self.on_member(guild_id, member),
+                Event::Members { guild_id, members, not_found } => {
+                    let open = {
+                        let mut state = self.state.borrow_mut();
+                        state.members.add(guild_id, members, &not_found);
+                        state.guild == Some(guild_id)
+                    };
+                    if open {
+                        self.refresh_rows();
+                    }
+                }
                 Event::GuildUpdate(update) => {
                     let id = update.id;
                     if let Some(guild) = self.state.borrow_mut().guilds.iter_mut().find(|g| g.id == id) {
@@ -195,6 +205,8 @@ impl App {
                     self.refresh_badges();
                 }
                 Event::Resumed => {
+                    self.state.borrow_mut().members.resumed();
+                    self.send_member_requests();
                     let name = {
                         let mut state = self.state.borrow_mut();
                         state.reconnect_attempts = 0;
@@ -228,6 +240,7 @@ impl App {
             user,
             account,
             guilds,
+            members,
             private_channels,
             relationships,
             read_states,
@@ -253,6 +266,8 @@ impl App {
             state.ready_seen = true;
             state.reconnect_attempts = 0;
             state.guilds = guilds;
+            // A new session: what we asked for before is forgotten, as in the client.
+            state.members = members;
             state.private_channels = private_channels;
             state.relationships = relationships;
             state.read = read_states;
@@ -420,6 +435,17 @@ impl App {
             guild.set_member(member);
         }
         self.permissions_changed(Some(guild_id));
+    }
+
+    /// Ask the gateway for the members [`discord::members::Members`] lacks.
+    pub(super) fn send_member_requests(&self) {
+        let state = &mut *self.state.borrow_mut();
+        let requests = state.members.flush();
+        if let Some(gateway) = &state.gateway {
+            for (guild, users) in requests {
+                gateway.request_members(guild, &users);
+            }
+        }
     }
 
     /// What our permissions in `guild` (or, with `None`, any server) come

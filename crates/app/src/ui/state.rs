@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use discord::cooldowns::Slowmode;
+use discord::members::{Members, RoleColour};
 use discord::notifications::{NotificationSettings, Place};
 use discord::permissions;
 use discord::read_state::ReadStates;
@@ -87,6 +88,8 @@ pub(super) struct State {
     pub(super) pending_acks: HashMap<Snowflake, Snowflake>,
     /// How long until we may post again in each channel.
     pub(super) slowmode: Slowmode,
+    /// Other people's roles in each server.
+    pub(super) members: Members,
 }
 
 impl State {
@@ -163,6 +166,15 @@ impl State {
             (Some((guild, channel)), Some(me)) => permissions::can_reply(guild, channel, me, now_unix()),
             _ => false,
         }
+    }
+
+    /// The colour of `user`'s name in `channel`: their highest coloured role,
+    /// in a server.
+    pub(super) fn name_colour(&self, channel: Snowflake, user: Snowflake) -> Option<RoleColour> {
+        let guild = self.find_channel(channel)?.0?;
+        let roles =
+            if self.me() == Some(user) { Some(&guild.my_roles[..]) } else { self.members.roles(guild.id, user) };
+        guild.member_colour(roles?)
     }
 
     /// The server's text channels we can view, in sidebar order.

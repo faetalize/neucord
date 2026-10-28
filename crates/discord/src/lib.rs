@@ -14,6 +14,7 @@ mod endpoints;
 pub mod gateway;
 mod identity;
 pub mod markup;
+pub mod members;
 pub mod model;
 pub mod notifications;
 pub mod permissions;

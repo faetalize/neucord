@@ -172,6 +172,9 @@ impl App {
             _ => None,
         };
         self.learn_users(std::iter::once(&message.author).chain(&message.mentions).chain(original));
+        if let (Some(guild), Some(member)) = (message.guild_id, &message.member) {
+            self.state.borrow_mut().members.add(guild, vec![(message.author.id, member.roles.clone())], &[]);
+        }
         let channel = message.channel_id;
         let viewing = self.state.borrow().channel == Some(channel) && self.chat_visible();
         let notify = {
@@ -541,6 +544,15 @@ impl App {
         for message in all {
             self.resolve_mentions(&message.content);
         }
+        // The page's authors and whom they mention, for their colours.
+        let guild = {
+            let state = self.state.borrow();
+            messages.first().and_then(|m| state.find_channel(m.channel_id)).and_then(|(g, _)| g.map(|g| g.id))
+        };
+        if let Some(guild) = guild {
+            self.state.borrow_mut().members.page_loaded(guild, messages);
+            self.send_member_requests();
+        }
     }
 
     /// Fetch the page before the oldest loaded message when the user is within
@@ -804,7 +816,12 @@ impl App {
                 guild.channels.iter().filter_map(|c| c.name.as_ref().map(|name| (c.id.0, name.clone()))).collect()
             })
             .unwrap_or_default();
-        Names { users: state.users.clone(), channels }
+        let roles = state
+            .guild
+            .and_then(|id| state.guilds.iter().find(|g| g.id == id))
+            .map(|guild| guild.roles.iter().map(|r| (r.id.0, (r.name.clone(), guild.role_colour(r)))).collect())
+            .unwrap_or_default();
+        Names { users: state.users.clone(), channels, roles }
     }
 
     /// The line under a channel's name: a server channel's topic, a friend's
@@ -940,6 +957,16 @@ pub(super) fn is_grouped(message: &Message, previous: Option<&Message>) -> bool 
 }
 
 impl App {
+    /// `text` naming `user` in `channel`, in the colour of their highest role.
+    fn name_label(&self, channel: Snowflake, user: &discord::User, text: &str) -> gtk::Label {
+        let label = gtk::Label::builder().css_classes(["heading"]).build();
+        match self.state.borrow().name_colour(channel, user.id) {
+            Some(colour) => label.set_markup(&render::coloured(text, &colour)),
+            None => label.set_label(text),
+        }
+        label
+    }
+
     /// Rows are rebuilt on every bind: simple, and cheap at chat-history sizes.
     /// `messages` is the store the row belongs to.
     fn fill_message_row(
@@ -991,13 +1018,9 @@ impl App {
             }
         } else if !grouped {
             let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            header.append(
-                &gtk::Label::builder()
-                    .label(message.author.display_name())
-                    .ellipsize(gtk::pango::EllipsizeMode::End)
-                    .css_classes(["heading"])
-                    .build(),
-            );
+            let name = self.name_label(message.channel_id, &message.author, message.author.display_name());
+            name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            header.append(&name);
             let time = parse_time(&message.timestamp).map(|t| format_time(&t)).unwrap_or_default();
             header.append(&gtk::Label::builder().label(time).css_classes(["caption", "dimmed"]).build());
             body.append(&header);
@@ -1225,7 +1248,7 @@ impl App {
                 // Discord marks replies that pinged the author with an @.
                 let pinged = message.mentions.iter().any(|u| u.id == original.author.id);
                 let name = format!("{}{}", if pinged { "@" } else { "" }, original.author.display_name());
-                preview.append(&gtk::Label::builder().label(name).css_classes(["heading"]).build());
+                preview.append(&self.name_label(original.channel_id, &original.author, &name));
                 let names = self.message_names(original);
                 // A forward reads as what it forwards.
                 let content = original.forwarded().map_or_else(|| original.content.clone(), |f| f.content);

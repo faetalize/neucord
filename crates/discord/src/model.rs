@@ -184,6 +184,25 @@ pub struct Role {
     /// Given by an integration (a bot, boosting), never by hand.
     #[serde(default, deserialize_with = "null_is_false")]
     pub managed: bool,
+    /// Higher is above; `@everyone` is always at the bottom.
+    #[serde(default, deserialize_with = "null_is_default")]
+    pub position: i32,
+    /// `0xRRGGBB`, or 0 for none.
+    #[serde(default, deserialize_with = "null_is_default")]
+    pub color: u32,
+    /// A gradient, in servers that have them (see [`crate::members`]).
+    #[serde(default)]
+    pub colors: Option<RoleColors>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct RoleColors {
+    #[serde(default, deserialize_with = "null_is_default")]
+    pub primary_color: u32,
+    #[serde(default)]
+    pub secondary_color: Option<u32>,
+    #[serde(default)]
+    pub tertiary_color: Option<u32>,
 }
 
 impl Channel {
@@ -228,6 +247,8 @@ pub struct Guild {
     pub roles: Vec<Role>,
     /// Moderation takes 2FA on the account (`mfa_level` 1).
     pub requires_mfa: bool,
+    /// Roles may be gradients (`ENHANCED_ROLE_COLORS`).
+    pub gradient_roles: bool,
     /// Our roles here. Filled in by the gateway.
     pub my_roles: Vec<Snowflake>,
     /// When our timeout here ends, in seconds since 1970. Filled in by the
@@ -297,6 +318,7 @@ impl Guild {
             self.roles = update.roles;
         }
         self.requires_mfa = update.requires_mfa;
+        self.gradient_roles = update.gradient_roles;
         self.verification = update.verification;
     }
 
@@ -410,6 +432,10 @@ impl<'de> Deserialize<'de> for Guild {
             owner_id,
             roles,
             requires_mfa: mfa_level == Some(1),
+            gradient_roles: {
+                let props = if value["properties"].is_object() { &value["properties"] } else { &value };
+                props["features"].as_array().is_some_and(|f| f.iter().any(|f| f == "ENHANCED_ROLE_COLORS"))
+            },
             my_roles: Vec::new(),
             timed_out_until: None,
             verification: Rules::from_guild(&value),
@@ -571,6 +597,15 @@ pub struct Message {
     /// For a call's system message: who joined it, and when it ended.
     #[serde(default)]
     pub call: Option<Call>,
+    /// The author's member, which a live message in a server carries.
+    #[serde(default)]
+    pub member: Option<MessageMember>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct MessageMember {
+    #[serde(default)]
+    pub roles: Vec<Snowflake>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -651,6 +686,7 @@ impl Message {
             message_snapshots: Vec::new(),
             poll: None,
             call: None,
+            member: None,
             ..self.clone()
         })
     }
