@@ -56,45 +56,36 @@ impl VerificationLevel {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Rules {
     pub level: VerificationLevel,
-    /// A role members need to talk, given out once they verify, and its name.
-    pub role: Option<(Snowflake, String)>,
+    /// A role members need to talk, given out once they verify.
+    pub role: Option<Snowflake>,
     /// Membership screening (`MEMBER_VERIFICATION_GATE_ENABLED`): new
     /// members are held as `pending` until they accept the server's rules.
     pub screening: bool,
     /// `GUILD_ONBOARDING_EVER_ENABLED`: roles picked during onboarding don't
     /// exempt members who joined since it existed.
     pub onboarding: bool,
-    /// Roles not given by an integration, the only ones that exempt their
-    /// members. A role created since we connected is missing, so it doesn't
-    /// count: that errs on the side of not sending.
-    pub plain_roles: Vec<Snowflake>,
 }
 
 impl Rules {
     /// From a guild object in either shape: settings at the top level, or
-    /// inside `properties` (roles stay at the top level).
+    /// inside `properties`.
     pub fn from_guild(guild: &Value) -> Self {
         let props = if guild["properties"].is_object() { &guild["properties"] } else { guild };
-        let roles = guild["roles"].as_array().map(Vec::as_slice).unwrap_or_default();
-        let role_id = parse_id(&props["verification_role_id"]);
         let has_feature = |name: &str| {
             props["features"].as_array().is_some_and(|features| features.iter().any(|f| f.as_str() == Some(name)))
         };
         Rules {
             level: VerificationLevel::from_raw(props["verification_level"].as_u64().unwrap_or(0)),
-            role: role_id.map(|id| {
-                let name = roles.iter().find(|r| parse_id(&r["id"]) == Some(id)).and_then(|r| r["name"].as_str());
-                (id, name.unwrap_or("verified").to_owned())
-            }),
+            role: parse_id(&props["verification_role_id"]),
             screening: has_feature("MEMBER_VERIFICATION_GATE_ENABLED"),
             onboarding: has_feature("GUILD_ONBOARDING_EVER_ENABLED"),
-            plain_roles: roles.iter().filter(|r| r["managed"] != true).filter_map(|r| parse_id(&r["id"])).collect(),
         }
     }
 }
 
-/// What a server's verification asks of the account. Only whether an email
-/// and a phone are set is kept, never the address or the number.
+/// What servers ask of the account: verification, and 2FA for moderation
+/// where they require it. Only whether an email and a phone are set is kept,
+/// never the address or the number.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Account {
     pub id: Snowflake,
@@ -103,6 +94,8 @@ pub struct Account {
     pub email: bool,
     /// Discord only keeps a phone number once it's verified.
     pub phone: bool,
+    /// Two-factor authentication is on.
+    pub mfa: bool,
 }
 
 impl Account {
@@ -113,6 +106,7 @@ impl Account {
             verified: user["verified"] == true,
             email: user["email"].is_string(),
             phone: user["phone"].is_string(),
+            mfa: user["mfa_enabled"] == true,
         })
     }
 }
@@ -180,14 +174,16 @@ pub fn gate(guild: &Guild, account: &Account, now: i64) -> Option<Gate> {
     let exempt = guild.owner_id == Some(account.id) || guild.member_flags & BYPASSES_VERIFICATION != 0;
     let leveled = rules.level != VerificationLevel::None && !exempt;
 
-    let role = rules.role.as_ref().filter(|(id, _)| !exempt && !guild.my_roles.contains(id));
+    let role = rules.role.filter(|id| !exempt && !guild.my_roles.contains(id));
     // A verified phone passes every level, and so, unless the server gives
-    // out a verification role or onboarding picked them, does any role.
+    // out a verification role or onboarding picked them, does any role not
+    // given by an integration.
+    let plain_role = guild.my_roles.iter().any(|&id| guild.role(id).is_some_and(|r| !r.managed));
     let checked = leveled
         && !account.phone
         && (rules.role.is_some()
             || (rules.onboarding && guild.joined_at.is_some_and(|t| t >= ONBOARDING_CUTOFF))
-            || !guild.my_roles.iter().any(|r| rules.plain_roles.contains(r)));
+            || !plain_role);
     let at_least = |level| checked && rules.level >= level;
     // The account's age counts from its id, to the millisecond; round up.
     let account_until = (account.id.unix_ms() + 999) / 1000 + ACCOUNT_AGE_MINUTES * 60;
@@ -197,8 +193,8 @@ pub fn gate(guild: &Guild, account: &Account, now: i64) -> Option<Gate> {
         Some(Gate::Unclaimed)
     } else if screening {
         Some(Gate::Screening)
-    } else if let Some((_, name)) = role {
-        Some(Gate::Role(name.clone()))
+    } else if let Some(id) = role {
+        Some(Gate::Role(guild.role(id).map_or("verified", |r| &r.name).to_owned()))
     } else if at_least(VerificationLevel::VeryHigh) {
         Some(Gate::Phone)
     } else if at_least(VerificationLevel::Low) && !account.verified {
@@ -235,7 +231,7 @@ mod tests {
     }
 
     fn account() -> Account {
-        Account { id: ME, verified: true, email: true, phone: false }
+        Account { id: ME, verified: true, email: true, phone: false, mfa: false }
     }
 
     fn guild(level: u64) -> Guild {
@@ -334,10 +330,11 @@ mod tests {
 
     #[test]
     fn parse_account_and_member() {
-        let user = json!({"id": "5", "verified": true, "email": "someone@example.org", "phone": null});
+        let user =
+            json!({"id": "5", "verified": true, "email": "someone@example.org", "phone": null, "mfa_enabled": true});
         assert_eq!(
             Account::from_user(&user),
-            Some(Account { id: Snowflake(5), verified: true, email: true, phone: false })
+            Some(Account { id: Snowflake(5), verified: true, email: true, phone: false, mfa: true })
         );
         let member = Member::from_value(&json!({"joined_at": "2022-12-02T00:00:00.250000+00:00", "flags": 4}));
         assert_eq!((member.joined_at, member.pending, member.flags), (Some(ONBOARDING_CUTOFF + 1), false, 4));

@@ -20,8 +20,8 @@ use crate::notifications::{GuildSettings, NotificationSettings};
 use crate::read_state::ReadStates;
 use crate::relationships::{Presence, Relationship, Relationships};
 use crate::settings::{self, GuildFolder, MediaPatch, MediaSettings};
-use crate::verification::{Account, Rules};
-use crate::{Channel, Error, Guild, Member, Message, MessageEdit, Snowflake, User, identity};
+use crate::verification::Account;
+use crate::{Channel, Error, Guild, Member, Message, MessageEdit, Role, Snowflake, User, identity};
 
 /// Gateway capability bits. 0 asks for the classic payload shapes, which the
 /// model parses directly; the guild parser also accepts the newer shape.
@@ -83,14 +83,20 @@ pub enum Event {
         guild_id: Snowflake,
         member: Member,
     },
-    /// A server's settings changed; only its owner and what verification
-    /// reads are kept.
-    GuildUpdate {
+    /// A server's settings changed, its roles among them. It has no channels
+    /// and no member of ours: see [`Guild::update`].
+    GuildUpdate(Guild),
+    /// A role was created or changed.
+    RoleUpdate {
         guild_id: Snowflake,
-        owner_id: Option<Snowflake>,
-        rules: Rules,
+        role: Role,
     },
-    /// Our account changed, for instance its email was verified.
+    RoleDelete {
+        guild_id: Snowflake,
+        role_id: Snowflake,
+    },
+    /// Our account changed, for instance its email was verified or 2FA
+    /// turned on.
     AccountUpdate(Account),
     MessageCreate(Box<Message>),
     /// An edit, or link previews arriving for a message.
@@ -525,13 +531,19 @@ fn dispatch(state: &State, name: &str, data: Value) {
             }
             Event::MemberUpdate { guild_id, member: Member::from_value(&data) }
         }
-        "GUILD_UPDATE" => match parse_id(&data["id"]) {
-            Some(guild_id) => Event::GuildUpdate {
-                guild_id,
-                owner_id: parse_id(&data["owner_id"]).or_else(|| parse_id(&data["properties"]["owner_id"])),
-                rules: Rules::from_guild(&data),
-            },
-            None => return,
+        "GUILD_UPDATE" => match Guild::deserialize(&data) {
+            Ok(guild) => Event::GuildUpdate(guild),
+            Err(e) => return eprintln!("gateway: bad GUILD_UPDATE: {e}"),
+        },
+        "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" => {
+            match (parse_id(&data["guild_id"]), Role::deserialize(&data["role"])) {
+                (Some(guild_id), Ok(role)) => Event::RoleUpdate { guild_id, role },
+                _ => return eprintln!("gateway: bad {name}"),
+            }
+        }
+        "GUILD_ROLE_DELETE" => match (parse_id(&data["guild_id"]), parse_id(&data["role_id"])) {
+            (Some(guild_id), Some(role_id)) => Event::RoleDelete { guild_id, role_id },
+            _ => return,
         },
         "USER_UPDATE" => match Account::from_user(&data) {
             Some(account) if Some(account.id) == state.me.get() => Event::AccountUpdate(account),
@@ -622,12 +634,14 @@ mod tests {
 
     #[test]
     fn guild_roles_from_own_member() {
-        let raw = json!({"id": "1", "name": "G", "default_message_notifications": 1, "members": [
+        let raw = json!({"id": "1", "name": "G", "default_message_notifications": 1,
+                         "roles": [{"id": "1", "permissions": "1024"}, {"id": "40", "permissions": "2048"}], "members": [
             {"user": {"id": "8"}, "roles": ["70"], "communication_disabled_until": "2026-10-28T12:00:00+00:00"},
             {"user": {"id": "5"}, "roles": ["40", "41"], "communication_disabled_until": null}
         ]});
         let guild = guild_with_member(&raw, &Value::Null, Snowflake(5)).unwrap();
         assert_eq!(guild.my_roles, vec![Snowflake(40), Snowflake(41)]);
+        assert_eq!(guild.role(Snowflake(40)).map(|r| r.permissions.0), Some(2048));
         assert_eq!(guild.timed_out_until, None, "someone else's timeout");
         assert_eq!(guild.default_message_notifications, 1);
     }
@@ -661,8 +675,9 @@ mod tests {
         let noon = glib::DateTime::from_iso8601("2026-10-28T12:00:00Z", None).unwrap().to_unix();
         let a = &ready.guilds[0];
         assert_eq!((a.my_roles.as_slice(), a.timed_out_until), (&[Snowflake(40)][..], Some(noon + 1)));
-        assert_eq!(a.timeout_left(noon), Some(1), "a part second rounds up, never down");
-        assert_eq!(a.timeout_left(noon + 1), None);
+        let me = Account { id: Snowflake(5), ..Default::default() };
+        assert_eq!(a.timeout_left(&me, noon), Some(1), "a part second rounds up, never down");
+        assert_eq!(a.timeout_left(&me, noon + 1), None);
         assert_eq!(ready.guilds[1].timed_out_until, None);
 
         let update = |user: &str, until: Value| {
@@ -681,18 +696,38 @@ mod tests {
         let Some(Event::MemberUpdate { member, .. }) = update("5", Value::Null) else { panic!("our member") };
         assert_eq!(member.timed_out_until, None, "the timeout lifted early");
 
-        dispatch(&state, "GUILD_UPDATE", json!({"id": "1", "name": "A", "owner_id": "8", "verification_level": 3}));
-        let Ok(Event::GuildUpdate { guild_id, owner_id, rules }) = rx.try_recv() else { panic!("no guild update") };
-        assert_eq!(
-            (guild_id, owner_id, rules.level),
-            (Snowflake(1), Some(Snowflake(8)), crate::verification::VerificationLevel::High),
-            "ownership can move, and with it slowmode and verification exemptions"
+        dispatch(
+            &state,
+            "GUILD_UPDATE",
+            json!({"id": "1", "name": "A", "owner_id": "8", "verification_level": 3, "mfa_level": 1,
+                   "roles": [{"id": "1", "permissions": "1024"}]}),
         );
+        let Ok(Event::GuildUpdate(update)) = rx.try_recv() else { panic!("no guild update") };
+        assert_eq!(
+            (update.id, update.owner_id, update.verification.level, update.requires_mfa, update.roles.len()),
+            (Snowflake(1), Some(Snowflake(8)), crate::verification::VerificationLevel::High, true, 1),
+            "ownership can move, and with it every permission"
+        );
+
+        dispatch(
+            &state,
+            "GUILD_ROLE_UPDATE",
+            json!({"guild_id": "1", "role": {"id": "40", "name": "Mod", "permissions": "8192"}}),
+        );
+        let Ok(Event::RoleUpdate { guild_id, role }) = rx.try_recv() else { panic!("no role update") };
+        assert_eq!((guild_id, role.id, role.permissions.0), (Snowflake(1), Snowflake(40), 8192));
+        dispatch(&state, "GUILD_ROLE_DELETE", json!({"guild_id": "1", "role_id": "40"}));
+        let Ok(Event::RoleDelete { role_id, .. }) = rx.try_recv() else { panic!("no role delete") };
+        assert_eq!(role_id, Snowflake(40));
         dispatch(&state, "USER_UPDATE", json!({"id": "8", "verified": true}));
         assert!(rx.try_recv().is_err(), "someone else");
-        dispatch(&state, "USER_UPDATE", json!({"id": "5", "verified": true, "email": "a@example.org"}));
+        dispatch(
+            &state,
+            "USER_UPDATE",
+            json!({"id": "5", "verified": true, "email": "a@example.org", "mfa_enabled": true}),
+        );
         let Ok(Event::AccountUpdate(account)) = rx.try_recv() else { panic!("no account update") };
-        assert!(account.verified && account.email && !account.phone);
+        assert!(account.verified && account.email && !account.phone && account.mfa);
 
         dispatch(&state, "CHANNEL_UPDATE", json!({"id": "9", "type": 0, "guild_id": "1", "rate_limit_per_user": 30}));
         let Ok(Event::GuildChannelUpdate { guild_id, channel }) = rx.try_recv() else { panic!("no channel update") };

@@ -1007,7 +1007,7 @@ impl App {
         }
         main.append(&body);
 
-        if message.is_replyable() {
+        if message.is_replyable() && self.state.borrow().can_reply(message.channel_id) {
             let reply = gtk::Button::builder()
                 .icon_name("mail-reply-sender-symbolic")
                 .tooltip_text("Reply (Shift: without pinging)")
@@ -1146,7 +1146,7 @@ impl App {
                     let Some(this) = this.upgrade() else { return };
                     if this.state.borrow().channel == Some(channel) {
                         this.jump_to(channel, id);
-                    } else if this.state.borrow().find_channel(channel).is_some() {
+                    } else if this.state.borrow().can_view(channel) {
                         this.open_channel(channel);
                     }
                 }

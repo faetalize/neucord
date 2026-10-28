@@ -60,7 +60,7 @@ impl App {
             return;
         };
         self.guild_name.set(&guild.name, None);
-        for (category, channels) in guild.sidebar() {
+        for (category, channels) in state.sidebar(guild) {
             if let Some(category) = category {
                 let label = gtk::Label::builder()
                     .label(category)

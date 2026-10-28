@@ -106,24 +106,30 @@ impl App {
                 Event::PrivateChannelDelete(id) => self.on_private_channel_delete(id),
                 Event::GuildChannelUpdate { guild_id, channel } => self.on_guild_channel(guild_id, channel),
                 Event::MemberUpdate { guild_id, member } => self.on_member(guild_id, member),
-                Event::GuildUpdate { guild_id, owner_id, rules } => {
-                    let open = {
-                        let mut state = self.state.borrow_mut();
-                        let Some(guild) = state.guilds.iter_mut().find(|g| g.id == guild_id) else { continue };
-                        // A transferred server stops exempting its old owner.
-                        if owner_id.is_some() {
-                            guild.owner_id = owner_id;
-                        }
-                        guild.verification = rules;
-                        state.guild == Some(guild_id)
-                    };
-                    if open {
-                        self.update_notice_bar();
+                Event::GuildUpdate(update) => {
+                    let id = update.id;
+                    if let Some(guild) = self.state.borrow_mut().guilds.iter_mut().find(|g| g.id == id) {
+                        guild.update(update);
                     }
+                    self.rebuild_rail();
+                    self.permissions_changed(Some(id));
+                }
+                Event::RoleUpdate { guild_id, role } => {
+                    if let Some(guild) = self.state.borrow_mut().guilds.iter_mut().find(|g| g.id == guild_id) {
+                        guild.set_role(role);
+                    }
+                    self.permissions_changed(Some(guild_id));
+                }
+                Event::RoleDelete { guild_id, role_id } => {
+                    if let Some(guild) = self.state.borrow_mut().guilds.iter_mut().find(|g| g.id == guild_id) {
+                        guild.roles.retain(|r| r.id != role_id);
+                    }
+                    self.permissions_changed(Some(guild_id));
                 }
                 Event::AccountUpdate(account) => {
                     self.state.borrow_mut().account = Some(account);
-                    self.update_notice_bar();
+                    // 2FA turned on or off changes moderators' permissions.
+                    self.permissions_changed(None);
                 }
                 Event::MessageCreate(message) => self.on_message(*message),
                 Event::MessageUpdate(edit) => self.on_message_update(edit),
@@ -295,7 +301,9 @@ impl App {
         // After a reconnect that could not resume, stay in the open channel.
         let keep = {
             let state = self.state.borrow();
-            state.channel.filter(|&c| was_ready && state.find_channel(c).is_some_and(|(g, _)| g.map(|g| g.id) == open))
+            state.channel.filter(|&c| {
+                was_ready && state.can_view(c) && state.find_channel(c).is_some_and(|(g, _)| g.map(|g| g.id) == open)
+            })
         };
         match (keep, open) {
             (Some(channel), _) => {
@@ -383,42 +391,59 @@ impl App {
         self.rebuild_rail();
         if is_open {
             self.rebuild_sidebar();
-            self.update_notice_bar();
         }
+        self.permissions_changed(Some(id));
     }
 
-    /// A server channel changed: its name, topic, place, slowmode.
+    /// A server channel changed: its name, topic, place, slowmode, or who
+    /// may do what there.
     pub(super) fn on_guild_channel(self: &Rc<Self>, guild_id: Snowflake, channel: Channel) {
-        let (guild_open, channel_open) = {
+        let guild_open = {
             let mut state = self.state.borrow_mut();
             let state = &mut *state;
             let Some(guild) = state.guilds.iter_mut().find(|g| g.id == guild_id) else { return };
             let Some(existing) = guild.channels.iter_mut().find(|c| c.id == channel.id) else { return };
             state.slowmode.update(&channel, now_ms());
-            let id = channel.id;
             *existing = channel;
-            (state.guild == Some(guild_id), state.channel == Some(id))
+            state.guild == Some(guild_id)
         };
         if guild_open {
             self.rebuild_sidebar();
         }
-        if channel_open {
-            self.update_notice_bar();
-        }
+        self.permissions_changed(Some(guild_id));
     }
 
     /// Our member in a server changed: a timeout began or was lifted, our
     /// roles changed, or screening let us in.
     pub(super) fn on_member(self: &Rc<Self>, guild_id: Snowflake, member: Member) {
-        let open = {
-            let mut state = self.state.borrow_mut();
-            let state = &mut *state;
-            let Some(guild) = state.guilds.iter_mut().find(|g| g.id == guild_id) else { return };
+        if let Some(guild) = self.state.borrow_mut().guilds.iter_mut().find(|g| g.id == guild_id) {
             guild.set_member(member);
-            state.guild == Some(guild_id)
-        };
-        if open {
-            self.update_notice_bar();
         }
+        self.permissions_changed(Some(guild_id));
+    }
+
+    /// What our permissions in `guild` (or, with `None`, any server) come
+    /// from changed: its roles or owner, our member, a channel's overwrites,
+    /// our 2FA. Channels we lost sight of go, and with them the open one;
+    /// the message box and Reply follow what we may still do.
+    fn permissions_changed(self: &Rc<Self>, guild: Option<Snowflake>) {
+        self.refresh_badges();
+        let (open, viewable, replyable) = {
+            let state = self.state.borrow();
+            let open = state.guild.filter(|&open| guild.is_none_or(|id| id == open));
+            let channel = state.channel.filter(|_| state.page.is_none());
+            let reply = self.reply.borrow().as_ref().map(|r| r.channel);
+            (open, channel.is_some_and(|c| state.can_view(c)), reply.is_none_or(|c| state.can_reply(c)))
+        };
+        let Some(open) = open else { return };
+        if !replyable {
+            self.set_reply(None);
+        }
+        if !viewable {
+            // Elsewhere, or a first channel we can now see.
+            return self.select_guild(open);
+        }
+        self.update_notice_bar();
+        self.refresh_rows();
     }
 }

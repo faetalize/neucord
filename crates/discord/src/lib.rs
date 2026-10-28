@@ -16,6 +16,7 @@ mod identity;
 pub mod markup;
 pub mod model;
 pub mod notifications;
+pub mod permissions;
 pub mod poll;
 pub mod read_state;
 pub mod relationships;
@@ -29,8 +30,8 @@ pub mod verification;
 
 pub use gateway::{Event, Gateway, Ready, Resume};
 pub use model::{
-    Attachment, Channel, ChannelKind, Guild, Member, Message, MessageEdit, MessageReference, Referenced, Snowflake,
-    Sticker, User,
+    Attachment, Channel, ChannelKind, Guild, Member, Message, MessageEdit, MessageReference, Overwrite, Referenced,
+    Role, Snowflake, Sticker, User,
 };
 pub use rest::{Captcha, CaptchaSolver, Rest};
 

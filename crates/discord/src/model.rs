@@ -5,7 +5,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::embed::Embed;
-use crate::verification::Rules;
+use crate::permissions::{self, Permissions};
+use crate::verification::{Account, Rules};
 
 /// Discord IDs are 64-bit integers sent as JSON strings.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -49,8 +50,8 @@ fn null_is_false<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     Ok(Option::<bool>::deserialize(d)?.unwrap_or(false))
 }
 
-fn null_is_zero<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
-    Ok(Option::<u32>::deserialize(d)?.unwrap_or(0))
+fn null_is_default<'de, D: Deserializer<'de>, T: Deserialize<'de> + Default>(d: D) -> Result<T, D::Error> {
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -153,8 +154,36 @@ pub struct Channel {
     #[serde(default, rename = "is_spam", deserialize_with = "null_is_false")]
     pub spam: bool,
     /// Slowmode: seconds each member must wait between messages; 0 when off.
-    #[serde(default, deserialize_with = "null_is_zero")]
+    #[serde(default, deserialize_with = "null_is_default")]
     pub rate_limit_per_user: u32,
+    /// A server channel's overwrites of its roles' permissions.
+    #[serde(default, deserialize_with = "null_is_default")]
+    pub permission_overwrites: Vec<Overwrite>,
+    #[serde(default, deserialize_with = "null_is_default")]
+    pub flags: u64,
+}
+
+/// Permissions a channel denies and allows a role or a member, which the
+/// official client tells apart by id alone.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Overwrite {
+    pub id: Snowflake,
+    #[serde(default)]
+    pub allow: Permissions,
+    #[serde(default)]
+    pub deny: Permissions,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Role {
+    pub id: Snowflake,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub permissions: Permissions,
+    /// Given by an integration (a bot, boosting), never by hand.
+    #[serde(default, deserialize_with = "null_is_false")]
+    pub managed: bool,
 }
 
 impl Channel {
@@ -195,7 +224,11 @@ pub struct Guild {
     pub default_message_notifications: u8,
     /// The server's owner, who has every permission.
     pub owner_id: Option<Snowflake>,
-    /// Our roles here, for role mentions. Filled in by the gateway.
+    /// Every role, `@everyone`'s (the server's own id) included.
+    pub roles: Vec<Role>,
+    /// Moderation takes 2FA on the account (`mfa_level` 1).
+    pub requires_mfa: bool,
+    /// Our roles here. Filled in by the gateway.
     pub my_roles: Vec<Snowflake>,
     /// When our timeout here ends, in seconds since 1970. Filled in by the
     /// gateway; may lie in the past.
@@ -252,23 +285,55 @@ impl Guild {
         self.member_flags = member.flags;
     }
 
-    /// Seconds left of our timeout here, if we are in one. Then the official
-    /// client lets us read and nothing else. It exempts administrators, whom
-    /// Discord doesn't let anyone time out; we can't tell who they are until
-    /// permissions are computed (#11).
-    pub fn timeout_left(&self, now_unix: i64) -> Option<i64> {
-        self.timed_out_until.map(|until| until - now_unix).filter(|&left| left > 0)
+    /// The server's settings changed (GUILD_UPDATE): take them from `update`,
+    /// keeping the channels and our member.
+    pub fn update(&mut self, update: Guild) {
+        self.name = update.name;
+        self.icon = update.icon;
+        self.default_message_notifications = update.default_message_notifications;
+        // A transferred server stops exempting its old owner.
+        self.owner_id = update.owner_id.or(self.owner_id);
+        if !update.roles.is_empty() {
+            self.roles = update.roles;
+        }
+        self.requires_mfa = update.requires_mfa;
+        self.verification = update.verification;
     }
 
-    /// Text channels in sidebar order: uncategorised first, then each
-    /// category by position, channels by position within it. Returns
+    pub fn role(&self, id: Snowflake) -> Option<&Role> {
+        self.roles.iter().find(|r| r.id == id)
+    }
+
+    /// A role was created or changed.
+    pub fn set_role(&mut self, role: Role) {
+        match self.roles.iter_mut().find(|r| r.id == role.id) {
+            Some(existing) => *existing = role,
+            None => self.roles.push(role),
+        }
+    }
+
+    /// Seconds left of our timeout here, if we are in one. Then the official
+    /// client lets us read and nothing else, and says so where the message box
+    /// would be. Administrators keep every permission and see no notice
+    /// (`renderMessageBanner`); Discord doesn't let anyone time them out.
+    pub fn timeout_left(&self, me: &Account, now_unix: i64) -> Option<i64> {
+        let left = self.timed_out_until.map(|until| until - now_unix).filter(|&left| left > 0)?;
+        let admin = permissions::in_guild(self, me, now_unix).contains(Permissions::ADMINISTRATOR);
+        (!admin).then_some(left)
+    }
+
+    /// Text channels we can view, in sidebar order: uncategorised first, then
+    /// each category by position, channels by position within it. Returns
     /// `(category name, channels)` groups.
-    pub fn sidebar(&self) -> Vec<(Option<&str>, Vec<&Channel>)> {
+    pub fn sidebar(&self, me: &Account, now_unix: i64) -> Vec<(Option<&str>, Vec<&Channel>)> {
         let by_position =
             |a: &&Channel, b: &&Channel| (a.position.unwrap_or(0), a.id).cmp(&(b.position.unwrap_or(0), b.id));
         let text_in = |parent: Option<Snowflake>| {
-            let mut v: Vec<&Channel> =
-                self.channels.iter().filter(|c| c.kind.is_text() && c.parent_id == parent).collect();
+            let mut v: Vec<&Channel> = self
+                .channels
+                .iter()
+                .filter(|c| c.kind.is_text() && c.parent_id == parent && self.can_view(c, me, now_unix))
+                .collect();
             v.sort_by(by_position);
             v
         };
@@ -281,6 +346,12 @@ impl Guild {
         }
         groups.retain(|(_, channels)| !channels.is_empty());
         groups
+    }
+
+    /// Whether `channel` shows at all: what the sidebar lists, unread dots
+    /// count and Neucord opens.
+    pub fn can_view(&self, channel: &Channel, me: &Account, now_unix: i64) -> bool {
+        permissions::in_channel(self, channel, me, now_unix).contains(Permissions::VIEW_CHANNEL)
     }
 }
 
@@ -298,6 +369,8 @@ impl<'de> Deserialize<'de> for Guild {
             default_message_notifications: Option<u8>,
             #[serde(default)]
             owner_id: Option<Snowflake>,
+            #[serde(default)]
+            mfa_level: Option<u8>,
         }
         #[derive(Deserialize)]
         struct Raw {
@@ -314,15 +387,20 @@ impl<'de> Deserialize<'de> for Guild {
             default_message_notifications: Option<u8>,
             #[serde(default)]
             owner_id: Option<Snowflake>,
+            #[serde(default)]
+            mfa_level: Option<u8>,
         }
 
         let value = Value::deserialize(d)?;
         let raw = Raw::deserialize(&value).map_err(serde::de::Error::custom)?;
-        let (name, icon, default, owner_id) = match (raw.name, raw.properties) {
-            (Some(name), _) => (name, raw.icon, raw.default_message_notifications, raw.owner_id),
-            (None, Some(p)) => (p.name, p.icon, p.default_message_notifications, p.owner_id),
+        let (name, icon, default, owner_id, mfa_level) = match (raw.name, raw.properties) {
+            (Some(name), _) => (name, raw.icon, raw.default_message_notifications, raw.owner_id, raw.mfa_level),
+            (None, Some(p)) => (p.name, p.icon, p.default_message_notifications, p.owner_id, p.mfa_level),
             (None, None) => return Err(serde::de::Error::custom("guild has no name (unavailable)")),
         };
+        // Roles stay at the top level in both shapes. One we can't read is
+        // left out, which only ever withholds what it grants.
+        let roles = value["roles"].as_array().into_iter().flatten().filter_map(|r| Role::deserialize(r).ok()).collect();
         Ok(Guild {
             id: raw.id,
             name,
@@ -330,6 +408,8 @@ impl<'de> Deserialize<'de> for Guild {
             channels: raw.channels,
             default_message_notifications: default.unwrap_or(0),
             owner_id,
+            roles,
+            requires_mfa: mfa_level == Some(1),
             my_roles: Vec::new(),
             timed_out_until: None,
             verification: Rules::from_guild(&value),
@@ -732,17 +812,64 @@ mod tests {
                 {"id":"11","type":0,"name":"b","position":1,"parent_id":"10"},
                 {"id":"12","type":0,"name":"a","position":0,"parent_id":"10"},
                 {"id":"13","type":2,"name":"voice","position":2,"parent_id":"10"},
-                {"id":"14","type":0,"name":"top","position":5}
+                {"id":"14","type":0,"name":"top","position":5},
+                {"id":"15","type":0,"name":"staff","position":6,
+                 "permission_overwrites":[{"id":"1","type":0,"allow":"0","deny":"1024"}]}
             ]}"#,
         )
         .unwrap();
         assert_eq!((g.name.as_str(), g.owner_id), ("Legacy", Some(Snowflake(7))));
-        let sidebar = g.sidebar();
+        let sidebar = g.sidebar(&Account { id: Snowflake(5), ..Default::default() }, 0);
         let names: Vec<(Option<&str>, Vec<&str>)> = sidebar
             .iter()
             .map(|(cat, chans)| (*cat, chans.iter().map(|c| c.name.as_deref().unwrap()).collect()))
             .collect();
-        assert_eq!(names, vec![(None, vec!["top"]), (Some("Cat"), vec!["a", "b"])]);
+        assert_eq!(names, vec![(None, vec!["top"]), (Some("Cat"), vec!["a", "b"])], "staff is hidden from us");
+        let owner = g.sidebar(&Account { id: Snowflake(7), ..Default::default() }, 0);
+        assert_eq!(owner[0].1.len(), 2, "but not from the owner");
+    }
+
+    #[test]
+    fn roles_and_settings() {
+        let mut g: Guild = serde_json::from_str(
+            r#"{"id":"1","properties":{"name":"G","owner_id":"7","mfa_level":1},"roles":[
+                {"id":"1","name":"@everyone","permissions":"1024"},
+                {"id":"40","name":"Bot","permissions":8,"managed":true},
+                {"id":"41","permissions":{}}
+            ]}"#,
+        )
+        .unwrap();
+        assert!(g.requires_mfa);
+        let roles: Vec<(u64, &str, u64, bool)> =
+            g.roles.iter().map(|r| (r.id.0, r.name.as_str(), r.permissions.0, r.managed)).collect();
+        assert_eq!(roles, [(1, "@everyone", 1024, false), (40, "Bot", 8, true)], "an unreadable role is left out");
+
+        g.my_roles = vec![Snowflake(40)];
+        let update: Guild = serde_json::from_str(
+            r#"{"id":"1","name":"Renamed","owner_id":"8","mfa_level":0,"roles":[{"id":"1","permissions":"0"}]}"#,
+        )
+        .unwrap();
+        g.update(update);
+        assert_eq!(
+            (g.name.as_str(), g.owner_id, g.requires_mfa, g.roles.len()),
+            ("Renamed", Some(Snowflake(8)), false, 1)
+        );
+        assert_eq!(g.my_roles, [Snowflake(40)], "our member stays");
+    }
+
+    #[test]
+    fn administrators_see_no_timeout() {
+        let mut g: Guild = serde_json::from_str(
+            r#"{"id":"1","name":"G","roles":[{"id":"1","permissions":"3072"},{"id":"40","permissions":"8"}]}"#,
+        )
+        .unwrap();
+        let me = Account { id: Snowflake(5), ..Default::default() };
+        g.timed_out_until = Some(100);
+        assert_eq!(g.timeout_left(&me, 40), Some(60));
+        g.my_roles = vec![Snowflake(40)];
+        assert_eq!(g.timeout_left(&me, 40), None);
+        g.requires_mfa = true;
+        assert_eq!(g.timeout_left(&me, 40), Some(60), "Administrator needs 2FA here, so it doesn't count");
     }
 
     #[test]

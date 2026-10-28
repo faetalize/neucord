@@ -210,7 +210,7 @@ impl App {
                 .guilds
                 .iter()
                 .find(|g| g.id == id)
-                .and_then(|g| g.sidebar().first().and_then(|(_, chans)| chans.first().map(|c| c.id)))
+                .and_then(|g| state.sidebar(g).first().and_then(|(_, chans)| chans.first().map(|c| c.id)))
         };
         self.rebuild_rail();
         match first_channel {

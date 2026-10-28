@@ -6,6 +6,7 @@ use std::hash::{Hash, Hasher};
 
 use discord::cooldowns::Slowmode;
 use discord::notifications::{NotificationSettings, Place};
+use discord::permissions;
 use discord::read_state::ReadStates;
 use discord::relationships::Relationships;
 use discord::settings::{GuildFolder, MediaSettings, RailEntry};
@@ -137,6 +138,47 @@ impl State {
         self.guilds.iter().find_map(|g| g.channels.iter().find(|c| c.id == id).map(|c| (Some(g), c)))
     }
 
+    /// Whether the channel shows at all: DMs always, server channels with
+    /// View Channel. Neucord opens nothing else, since Discord refuses us
+    /// there.
+    pub(super) fn can_view(&self, id: Snowflake) -> bool {
+        match (self.find_channel(id), &self.account) {
+            (Some((None, _)), _) => true,
+            (Some((Some(guild), channel)), Some(me)) => guild.can_view(channel, me, now_unix()),
+            _ => false,
+        }
+    }
+
+    /// Whether we may post in the channel (see [`permissions::can_send`]).
+    pub(super) fn can_send(&self, id: Snowflake) -> bool {
+        match (self.find_channel(id), &self.account) {
+            (Some((guild, channel)), Some(me)) => permissions::can_send(guild, channel, me, now_unix()),
+            _ => false,
+        }
+    }
+
+    /// Whether Reply is offered in the channel (see [`permissions::can_reply`]).
+    pub(super) fn can_reply(&self, id: Snowflake) -> bool {
+        match (self.find_channel(id), &self.account) {
+            (Some((guild, channel)), Some(me)) => permissions::can_reply(guild, channel, me, now_unix()),
+            _ => false,
+        }
+    }
+
+    /// The server's text channels we can view, in sidebar order.
+    pub(super) fn sidebar<'a>(&self, guild: &'a Guild) -> Vec<(Option<&'a str>, Vec<&'a Channel>)> {
+        self.account.as_ref().map(|me| guild.sidebar(me, now_unix())).unwrap_or_default()
+    }
+
+    /// The server's text channels we can view, in no order.
+    fn visible_text<'a>(&'a self, guild: &'a Guild) -> impl Iterator<Item = &'a Channel> {
+        let now = now_unix();
+        guild
+            .channels
+            .iter()
+            .filter(move |c| c.kind.is_text() && self.account.as_ref().is_some_and(|me| guild.can_view(c, me, now)))
+    }
+
     pub(super) fn place(&self, id: Snowflake) -> Option<Place> {
         let (guild, channel) = self.find_channel(id)?;
         Some(Place {
@@ -158,7 +200,8 @@ impl State {
         let guild_muted = self.notifications.guild_muted(guild.id, now);
         let mut unread = false;
         let mut mentions = 0;
-        for channel in guild.channels.iter().filter(|c| c.kind.is_text()) {
+        // Channels we can't view count for nothing, as in the client.
+        for channel in self.visible_text(guild) {
             mentions += self.read.mentions(channel.id);
             if !unread && !guild_muted && self.is_unread(channel) {
                 let place =
@@ -202,10 +245,8 @@ impl State {
         let now = now_unix();
         let mut sig = vec![self.guild.map_or(0, |g| g.0), self.channel.map_or(0, |c| c.0)];
         let channels: Vec<(Place, &Channel)> = match self.guild.and_then(|id| self.guilds.iter().find(|g| g.id == id)) {
-            Some(guild) => guild
-                .channels
-                .iter()
-                .filter(|c| c.kind.is_text())
+            Some(guild) => self
+                .visible_text(guild)
                 .map(|c| (Place { guild: Some(guild.id), guild_default: 0, channel: c.id, parent: c.parent_id }, c))
                 .collect(),
             None => {
