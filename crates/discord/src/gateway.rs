@@ -83,9 +83,11 @@ pub enum Event {
         guild_id: Snowflake,
         member: Member,
     },
-    /// A server's settings changed; only what verification reads is kept.
+    /// A server's settings changed; only its owner and what verification
+    /// reads are kept.
     GuildUpdate {
         guild_id: Snowflake,
+        owner_id: Option<Snowflake>,
         rules: Rules,
     },
     /// Our account changed, for instance its email was verified.
@@ -524,7 +526,11 @@ fn dispatch(state: &State, name: &str, data: Value) {
             Event::MemberUpdate { guild_id, member: Member::from_value(&data) }
         }
         "GUILD_UPDATE" => match parse_id(&data["id"]) {
-            Some(guild_id) => Event::GuildUpdate { guild_id, rules: Rules::from_guild(&data) },
+            Some(guild_id) => Event::GuildUpdate {
+                guild_id,
+                owner_id: parse_id(&data["owner_id"]).or_else(|| parse_id(&data["properties"]["owner_id"])),
+                rules: Rules::from_guild(&data),
+            },
             None => return,
         },
         "USER_UPDATE" => match Account::from_user(&data) {
@@ -675,9 +681,13 @@ mod tests {
         let Some(Event::MemberUpdate { member, .. }) = update("5", Value::Null) else { panic!("our member") };
         assert_eq!(member.timed_out_until, None, "the timeout lifted early");
 
-        dispatch(&state, "GUILD_UPDATE", json!({"id": "1", "name": "A", "verification_level": 3}));
-        let Ok(Event::GuildUpdate { guild_id, rules }) = rx.try_recv() else { panic!("no guild update") };
-        assert_eq!((guild_id, rules.level), (Snowflake(1), crate::verification::VerificationLevel::High));
+        dispatch(&state, "GUILD_UPDATE", json!({"id": "1", "name": "A", "owner_id": "8", "verification_level": 3}));
+        let Ok(Event::GuildUpdate { guild_id, owner_id, rules }) = rx.try_recv() else { panic!("no guild update") };
+        assert_eq!(
+            (guild_id, owner_id, rules.level),
+            (Snowflake(1), Some(Snowflake(8)), crate::verification::VerificationLevel::High),
+            "ownership can move, and with it slowmode and verification exemptions"
+        );
         dispatch(&state, "USER_UPDATE", json!({"id": "8", "verified": true}));
         assert!(rx.try_recv().is_err(), "someone else");
         dispatch(&state, "USER_UPDATE", json!({"id": "5", "verified": true, "email": "a@example.org"}));

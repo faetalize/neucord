@@ -106,10 +106,14 @@ impl App {
                 Event::PrivateChannelDelete(id) => self.on_private_channel_delete(id),
                 Event::GuildChannelUpdate { guild_id, channel } => self.on_guild_channel(guild_id, channel),
                 Event::MemberUpdate { guild_id, member } => self.on_member(guild_id, member),
-                Event::GuildUpdate { guild_id, rules } => {
+                Event::GuildUpdate { guild_id, owner_id, rules } => {
                     let open = {
                         let mut state = self.state.borrow_mut();
                         let Some(guild) = state.guilds.iter_mut().find(|g| g.id == guild_id) else { continue };
+                        // A transferred server stops exempting its old owner.
+                        if owner_id.is_some() {
+                            guild.owner_id = owner_id;
+                        }
                         guild.verification = rules;
                         state.guild == Some(guild_id)
                     };
