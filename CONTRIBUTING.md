@@ -52,8 +52,9 @@ it for three things:
   `tools/discord-watch/MANUAL.md`, which gets checked by hand every week.
 - **Context menus.** Say whether the official client offers the feature in
   a context menu: on which surface, which items, under what conditions. If
-  Neucord has that surface, the pull request adds the entries through the
-  context menu baseline (#78); if not, the issue notes them for when it does.
+  Neucord has that surface, the pull request adds the entries to its table
+  in `crates/app/src/ui/menus.rs`; if not, the issue notes them for when it
+  does.
 
 If you're not comfortable doing so, just mention it in the PR body and I'll
 handle it.
