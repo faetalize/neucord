@@ -142,6 +142,17 @@ impl App {
         if let Some(tick) = self.notice_tick.take() {
             tick.remove();
         }
+        // A forum or media channel has its own page and never a box; the
+        // send guard below trusts the box's visibility, not the page's.
+        let forum = {
+            let state = self.state.borrow();
+            state.channel.and_then(|id| state.find_channel(id)).is_some_and(|(_, c)| c.kind.is_forum_like())
+        };
+        if forum {
+            self.composer_box.set_visible(false);
+            bar.set_visible(false);
+            return;
+        }
         let (system, request, timeout, gate, denied, slowmode) = {
             let state = self.state.borrow();
             let open = state.channel.and_then(|id| state.find_channel(id));

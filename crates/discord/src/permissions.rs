@@ -391,10 +391,13 @@ pub fn can_view(guild: &Guild, channel: &Channel, me: &Account, now: i64) -> boo
 
 /// Whether we may post in `channel`: anywhere but the system DM outside
 /// servers, and in one where we can see it with Send Messages. The client
-/// asks only for the latter, but never opens a channel we can't see.
+/// asks only for the latter, but never opens a channel we can't see. Never
+/// a forum or media channel: Send Messages there starts posts, which are
+/// threads, and the client shows them no message box (527053).
 pub fn can_send(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64) -> bool {
     match guild {
         None => !channel.is_system_dm(),
+        Some(_) if channel.kind.is_forum_like() => false,
         Some(guild) => in_channel(guild, channel, me, now).contains(access(channel) | Permissions::SEND_MESSAGES),
     }
 }
@@ -603,6 +606,19 @@ mod tests {
         )
         .unwrap();
         assert!(!can_send(None, &system, &me, 0) && !can_reply(None, &system, &me, 0));
+    }
+
+    #[test]
+    fn forum_and_media_channels_take_no_message() {
+        let me = me();
+        for kind in [15, 16] {
+            let mut forum = channel(&[]);
+            forum.kind = serde_json::from_value(json!(kind)).unwrap();
+            let mut guild = guild();
+            guild.owner_id = Some(ME);
+            assert!(can_view(&guild, &forum, &me, 0) && can(&guild, &forum, SEND), "type {kind}: posts, yes");
+            assert!(!can_send(Some(&guild), &forum, &me, 0) && !can_reply(Some(&guild), &forum, &me, 0));
+        }
     }
 
     #[test]

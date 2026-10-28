@@ -73,9 +73,11 @@ changed for unrelated reasons only needs a note in the issue.
   (472456), while edits and deletes do, so Neucord needs it once it edits
   or deletes.
 - **Forum and media channels take no message** (the forum page in
-  `select_channel`). Neucord shows no box there and loads nothing. Client:
-  527053 renders a forum view instead of the chat for `isForumLikeChannel`
-  (anchor `"forum channels must exist within a guild"`).
+  `select_channel`, `permissions::can_send`, `update_notice_bar`). Neucord
+  shows no box there, loads nothing and refuses to send, whatever Send
+  Messages says. Client: 527053 renders a forum view instead of the chat
+  for `isForumLikeChannel` (anchor `"forum channels must exist within a
+  guild"`), so no message box.
 - **Asking for members** (`members::Members`, `Gateway::request_members`),
   whose roles colour names. Which members the client asks for, and when
   again, is watched (`GuildMemberRequesterStore`), and so is the payload
