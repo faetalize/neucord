@@ -35,6 +35,15 @@ impl App {
     /// Send an ack after a short delay, folding rapid acks for one channel
     /// (a busy channel we are watching) into a single request.
     pub(super) fn queue_ack(self: &Rc<Self>, channel: Snowflake, message: Snowflake) {
+        // The client acks no archived thread.
+        let ackable = self
+            .state
+            .borrow()
+            .find_channel(channel)
+            .is_none_or(|(_, c)| !c.kind.is_thread() || discord::threads::is_ackable(c));
+        if !ackable {
+            return;
+        }
         let first = self.state.borrow_mut().pending_acks.insert(channel, message).is_none();
         if !first {
             return;

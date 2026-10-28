@@ -198,8 +198,20 @@ impl App {
                 let is_dm = place.is_some_and(|p| p.guild.is_none());
                 let mentioned =
                     is_dm || state.me().is_some_and(|me| state.notifications.mentions_me(&message, me, &roles));
+                let notify = !quiet
+                    && match state.find_channel(channel) {
+                        // A thread goes by our membership, and its parent.
+                        Some((Some(_), thread)) if thread.kind.is_thread() => {
+                            let parent = thread.parent_id.and_then(|id| state.place(id));
+                            parent.zip(state.me()).is_some_and(|(parent, me)| {
+                                let n = &state.notifications;
+                                n.should_notify_in_thread(thread, &parent, &message, me, &roles, now_unix())
+                            })
+                        }
+                        _ => place.is_some_and(|p| state.notifications.should_notify(&p, mentioned, now_unix())),
+                    };
                 state.read.on_message(channel, mentioned);
-                place.filter(|p| !quiet && state.notifications.should_notify(p, mentioned, now_unix()))
+                place.filter(|_| notify)
             }
         };
         if viewing && self.state.borrow().me() != Some(message.author.id) {
@@ -419,35 +431,23 @@ impl App {
     }
 
     pub(super) fn select_channel(self: &Rc<Self>, id: Snowflake) {
-        let (title, rest, left) = {
+        let (title, forum, rest, left) = {
             let mut state = self.state.borrow_mut();
             let left = state.channel.filter(|&c| c != id);
             state.channel = Some(id);
             state.page = None;
-            let title = match state.private_channels.iter().find(|c| c.id == id) {
+            let found = state.find_channel(id).map(|(_, c)| c);
+            let name = found.and_then(|c| c.name.clone()).unwrap_or_default();
+            let title = match found {
                 Some(dm) if dm.kind == discord::ChannelKind::Dm => format!("@ {}", dm.title()),
-                Some(group) => group.title(),
-                None => {
-                    let name = state
-                        .guilds
-                        .iter()
-                        .flat_map(|g| &g.channels)
-                        .find(|c| c.id == id)
-                        .and_then(|c| c.name.clone())
-                        .unwrap_or_default();
-                    format!("# {name}")
-                }
+                Some(group) if group.kind == discord::ChannelKind::GroupDm => group.title(),
+                Some(thread) if thread.kind.is_thread() => name,
+                _ => format!("# {name}"),
             };
-            (title, state.rest.clone(), left)
+            let forum = found.is_some_and(|c| c.kind.is_forum_like());
+            (title, forum, state.rest.clone(), left)
         };
         let subtitle = self.channel_subtitle(id);
-        // What is unread now, before opening the channel reads it.
-        let unread = {
-            let state = self.state.borrow();
-            let acked = state.find_channel(id).filter(|(_, c)| state.is_unread(c)).and_then(|_| state.read.acked(id));
-            acked.map(|acked| Unread { channel: id, acked, seen: false })
-        };
-        self.state.borrow_mut().unread = unread;
         // The channel we left keeps only its newest messages: live events keep
         // those current, and coming back refetches the newest page anyway.
         if let Some(left) = left
@@ -458,6 +458,24 @@ impl App {
         if self.reply.borrow().as_ref().is_some_and(|r| r.channel != id) {
             self.set_reply(None);
         }
+        // A forum or media channel is made of posts, and never takes a
+        // message: nothing to load, and no message box.
+        if forum {
+            self.state.borrow_mut().unread = None;
+            self.content.set_visible_child_name("forum");
+            self.forum_title.set(&title, subtitle.as_deref());
+            self.set_content_title(&title);
+            self.rebuild_sidebar();
+            self.update_notice_bar();
+            return;
+        }
+        // What is unread now, before opening the channel reads it.
+        let unread = {
+            let state = self.state.borrow();
+            let acked = state.find_channel(id).filter(|(_, c)| state.is_unread(c)).and_then(|_| state.read.acked(id));
+            acked.map(|acked| Unread { channel: id, acked, seen: false })
+        };
+        self.state.borrow_mut().unread = unread;
         self.content.set_visible_child_name("chat");
         self.rebuild_sidebar();
         self.header.set(&title, subtitle.as_deref());
@@ -813,7 +831,9 @@ impl App {
             .guild
             .and_then(|id| state.guilds.iter().find(|g| g.id == id))
             .map(|guild| {
-                guild.channels.iter().filter_map(|c| c.name.as_ref().map(|name| (c.id.0, name.clone()))).collect()
+                (guild.channels.iter().chain(&guild.threads))
+                    .filter_map(|c| c.name.as_ref().map(|name| (c.id.0, name.clone())))
+                    .collect()
             })
             .unwrap_or_default();
         let roles = state
@@ -838,7 +858,13 @@ impl App {
                 let presence = state.relationships.presence(user.id);
                 return Some(presence.text.unwrap_or_else(|| presence.status.label().to_owned()));
             }
-            state.guilds.iter().flat_map(|g| &g.channels).find(|c| c.id == id)?.topic.clone()?
+            let (guild, channel) = state.find_channel(id)?;
+            // A thread: the channel it's in.
+            if channel.kind.is_thread() {
+                let parent = guild?.channel(channel.parent_id?)?;
+                return Some(format!("# {}", parent.name.as_deref().unwrap_or("unnamed")));
+            }
+            channel.topic.clone()?
         };
         let text = render::plain_text(&discord::markup::parse(&topic), &self.names());
         text.lines().find(|line| !line.trim().is_empty()).map(str::to_owned)
@@ -1000,16 +1026,18 @@ impl App {
             row.append(&self.reply_preview(message, to, messages));
         }
 
+        // A thread's first message shows the one the thread was started from.
+        let shown = message.thread_starter().unwrap_or(message);
         let main = gtk::Box::builder().spacing(16).css_classes(["message-main"]).build();
         let gutter = gtk::Box::builder().width_request(40).valign(gtk::Align::Start).build();
         if let Kind::System(system) = &kind {
             gutter.append(&gtk::Image::builder().icon_name(system_icon(system.icon)).halign(gtk::Align::End).build());
         } else if !grouped {
-            gutter.append(&avatar_widget(&message.author, 40, Some(&self.images)));
+            gutter.append(&avatar_widget(&shown.author, 40, Some(&self.images)));
         }
         main.append(&gutter);
 
-        let names = self.message_names(message);
+        let names = self.message_names(shown);
         let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).hexpand(true).build();
         if let Kind::System(system) = &kind {
             body.append(&self.system_line(message, system));
@@ -1018,15 +1046,15 @@ impl App {
             }
         } else if !grouped {
             let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            let name = self.name_label(message.channel_id, &message.author, message.author.display_name());
+            let name = self.name_label(shown.channel_id, &shown.author, shown.author.display_name());
             name.set_ellipsize(gtk::pango::EllipsizeMode::End);
             header.append(&name);
-            let time = parse_time(&message.timestamp).map(|t| format_time(&t)).unwrap_or_default();
+            let time = parse_time(&shown.timestamp).map(|t| format_time(&t)).unwrap_or_default();
             header.append(&gtk::Label::builder().label(time).css_classes(["caption", "dimmed"]).build());
             body.append(&header);
         }
         if kind == Kind::Normal {
-            self.message_content(&body, message, &names);
+            self.message_content(&body, shown, &names);
         }
         main.append(&body);
 

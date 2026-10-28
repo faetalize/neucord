@@ -11,6 +11,7 @@ use discord::permissions;
 use discord::read_state::ReadStates;
 use discord::relationships::Relationships;
 use discord::settings::{GuildFolder, MediaSettings, RailEntry};
+use discord::threads;
 use discord::verification::Account;
 use discord::{Channel, Gateway, Guild, Rest, Resume, Snowflake, User};
 use gtk::glib;
@@ -133,12 +134,13 @@ impl State {
         self.me.as_ref().map(|u| u.id)
     }
 
-    /// The guild a channel belongs to and the channel itself; `None` guild for DMs.
+    /// The guild a channel or thread belongs to and the channel itself;
+    /// `None` guild for DMs.
     pub(super) fn find_channel(&self, id: Snowflake) -> Option<(Option<&Guild>, &Channel)> {
         if let Some(dm) = self.private_channels.iter().find(|c| c.id == id) {
             return Some((None, dm));
         }
-        self.guilds.iter().find_map(|g| g.channels.iter().find(|c| c.id == id).map(|c| (Some(g), c)))
+        self.guilds.iter().find_map(|g| g.find(id).map(|c| (Some(g), c)))
     }
 
     /// Whether the channel shows at all: DMs always, server channels with
@@ -177,9 +179,28 @@ impl State {
         guild.member_colour(roles?)
     }
 
-    /// The server's text channels we can view, in sidebar order.
+    /// The server's channels we can view, in sidebar order.
     pub(super) fn sidebar<'a>(&self, guild: &'a Guild) -> Vec<(Option<&'a str>, Vec<&'a Channel>)> {
         self.account.as_ref().map(|me| guild.sidebar(me, now_unix())).unwrap_or_default()
+    }
+
+    /// The threads the sidebar lists under `parent` (see [`threads::listed`]).
+    pub(super) fn sidebar_threads<'a>(&self, guild: &'a Guild, parent: &Channel) -> Vec<&'a Channel> {
+        let Some(me) = &self.account else { return Vec::new() };
+        let place = Place {
+            guild: Some(guild.id),
+            guild_default: guild.default_message_notifications,
+            channel: parent.id,
+            parent: parent.parent_id,
+        };
+        let muted = self.notifications.channel_muted(&place, now_unix());
+        let listed = threads::listed(guild, parent, self.channel, muted, &self.read, now_ms());
+        listed.into_iter().filter(|t| guild.can_view(t, me, now_unix())).collect()
+    }
+
+    /// A thread we muted.
+    pub(super) fn thread_muted(thread: &Channel) -> bool {
+        thread.member.as_ref().is_some_and(|m| m.is_muted(now_unix()))
     }
 
     /// The server's text channels we can view, in no order.
@@ -202,6 +223,10 @@ impl State {
     }
 
     pub(super) fn is_unread(&self, channel: &Channel) -> bool {
+        if channel.kind.is_thread() {
+            let guild = self.guilds.iter().find(|g| g.thread(channel.id).is_some());
+            return guild.is_some_and(|g| threads::is_unread(g, channel, &self.read));
+        }
         self.read.is_unread(channel.id, channel.last_message_id)
     }
 
@@ -220,6 +245,11 @@ impl State {
                     Place { guild: Some(guild.id), guild_default: 0, channel: channel.id, parent: channel.parent_id };
                 unread = !self.notifications.channel_muted(&place, now);
             }
+        }
+        // Threads we've joined count too, unless muted, whatever their parent.
+        for thread in threads::joined_active(guild) {
+            mentions += self.read.mentions(thread.id);
+            unread = unread || (!guild_muted && !Self::thread_muted(thread) && self.is_unread(thread));
         }
         (unread, mentions)
     }
@@ -257,10 +287,26 @@ impl State {
         let now = now_unix();
         let mut sig = vec![self.guild.map_or(0, |g| g.0), self.channel.map_or(0, |c| c.0)];
         let channels: Vec<(Place, &Channel)> = match self.guild.and_then(|id| self.guilds.iter().find(|g| g.id == id)) {
-            Some(guild) => self
-                .visible_text(guild)
-                .map(|c| (Place { guild: Some(guild.id), guild_default: 0, channel: c.id, parent: c.parent_id }, c))
-                .collect(),
+            Some(guild) => {
+                let mut rows = Vec::new();
+                for (_, channels) in self.sidebar(guild) {
+                    for c in channels {
+                        rows.push((
+                            Place { guild: Some(guild.id), guild_default: 0, channel: c.id, parent: c.parent_id },
+                            c,
+                        ));
+                        for t in self.sidebar_threads(guild, c) {
+                            // A muted thread shows as muted; its place stands for that.
+                            sig.extend([t.id.0, Self::thread_muted(t) as u64]);
+                            rows.push((
+                                Place { guild: Some(guild.id), guild_default: 0, channel: t.id, parent: None },
+                                t,
+                            ));
+                        }
+                    }
+                }
+                rows
+            }
             None => {
                 let page = self.page.map_or(0, |p| p as u64 + 1);
                 let (requests, waiting) = (self.requests().len(), self.waiting_requests());
@@ -295,7 +341,7 @@ impl State {
         let slot = self
             .private_channels
             .iter_mut()
-            .chain(self.guilds.iter_mut().flat_map(|g| g.channels.iter_mut()))
+            .chain(self.guilds.iter_mut().flat_map(|g| g.channels.iter_mut().chain(g.threads.iter_mut())))
             .find(|c| c.id == channel);
         if let Some(c) = slot
             && c.last_message_id.is_none_or(|last| message > last)

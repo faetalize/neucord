@@ -54,6 +54,13 @@ fn null_is_default<'de, D: Deserializer<'de>, T: Deserialize<'de> + Default>(d: 
     Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
+/// An ISO 8601 time, in milliseconds since 1970.
+fn iso_ms<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+    let text = Option::<String>::deserialize(d)?;
+    let time = text.and_then(|t| glib::DateTime::from_iso8601(&t, Some(&glib::TimeZone::utc())).ok());
+    Ok(time.map(|t| t.to_unix() * 1000 + i64::from(t.microsecond()) / 1000))
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct User {
     pub id: Snowflake,
@@ -86,8 +93,19 @@ pub enum ChannelKind {
     GroupDm,
     Category,
     Announcement,
+    /// A thread under an announcement channel.
+    AnnouncementThread,
+    /// A thread anyone who sees its parent can open, and a forum or media
+    /// channel's post.
+    PublicThread,
+    /// A thread only its members and moderators see.
+    PrivateThread,
     Stage,
     Forum,
+    /// A forum whose posts show as a grid of media.
+    Media,
+    /// Its own kind of thread (19), which only ever takes reading.
+    MediaThread,
     Other(u8),
 }
 
@@ -100,8 +118,13 @@ impl ChannelKind {
             3 => Self::GroupDm,
             4 => Self::Category,
             5 => Self::Announcement,
+            10 => Self::AnnouncementThread,
+            11 => Self::PublicThread,
+            12 => Self::PrivateThread,
             13 => Self::Stage,
             15 => Self::Forum,
+            16 => Self::Media,
+            19 => Self::MediaThread,
             other => Self::Other(other),
         }
     }
@@ -114,6 +137,18 @@ impl ChannelKind {
     /// DMs and group DMs: channels outside any guild.
     pub fn is_private(self) -> bool {
         matches!(self, Self::Dm | Self::GroupDm)
+    }
+
+    /// The client's thread types (`Le` in 95701), which take their parent's
+    /// permissions.
+    pub fn is_thread(self) -> bool {
+        matches!(self, Self::AnnouncementThread | Self::PublicThread | Self::PrivateThread | Self::MediaThread)
+    }
+
+    /// Channels made of posts, which never take a message: posting starts a
+    /// thread.
+    pub fn is_forum_like(self) -> bool {
+        matches!(self, Self::Forum | Self::Media)
     }
 }
 
@@ -161,6 +196,53 @@ pub struct Channel {
     pub permission_overwrites: Vec<Overwrite>,
     #[serde(default, deserialize_with = "null_is_default")]
     pub flags: u64,
+    /// A thread's state.
+    #[serde(default)]
+    pub thread_metadata: Option<ThreadMetadata>,
+    /// Ours, in a thread we've joined.
+    #[serde(default)]
+    pub member: Option<ThreadMember>,
+    /// When something other than a message last happened in a thread, in
+    /// milliseconds since 1970.
+    #[serde(default, rename = "last_non_message_activity_timestamp", deserialize_with = "iso_ms")]
+    pub last_activity: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ThreadMetadata {
+    #[serde(default, deserialize_with = "null_is_false")]
+    pub archived: bool,
+    /// Only members with Manage Threads may post, or reopen it.
+    #[serde(default, deserialize_with = "null_is_false")]
+    pub locked: bool,
+    /// Minutes without activity before it archives itself.
+    #[serde(default, deserialize_with = "null_is_default")]
+    pub auto_archive_duration: u32,
+    /// When it was last archived or reopened, in milliseconds since 1970.
+    #[serde(default, deserialize_with = "iso_ms")]
+    pub archive_timestamp: Option<i64>,
+}
+
+/// Our membership of a thread.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ThreadMember {
+    /// Which messages notify (see [`crate::notifications`]).
+    #[serde(default, deserialize_with = "null_is_default")]
+    pub flags: u64,
+    #[serde(default, deserialize_with = "null_is_false")]
+    pub muted: bool,
+    #[serde(default)]
+    pub mute_config: Option<crate::notifications::MuteConfig>,
+    /// In milliseconds since 1970.
+    #[serde(default, deserialize_with = "iso_ms")]
+    pub join_timestamp: Option<i64>,
+}
+
+impl ThreadMember {
+    /// Muted, and the mute hasn't run out.
+    pub fn is_muted(&self, now_unix: i64) -> bool {
+        crate::notifications::mute_active(self.muted, self.mute_config.as_ref(), now_unix)
+    }
 }
 
 /// Permissions a channel denies and allows a role or a member, which the
@@ -231,6 +313,29 @@ impl Channel {
     pub fn activity(&self) -> Snowflake {
         self.last_message_id.unwrap_or(self.id)
     }
+
+    /// A thread that is archived: it shows in no list, and reopens when
+    /// someone posts in it.
+    pub fn is_archived(&self) -> bool {
+        self.kind.is_thread() && self.thread_metadata.as_ref().is_some_and(|m| m.archived)
+    }
+
+    /// A thread only moderators may post in.
+    pub fn is_locked(&self) -> bool {
+        self.kind.is_thread() && self.thread_metadata.as_ref().is_some_and(|m| m.locked)
+    }
+
+    /// A thread that isn't archived.
+    pub fn is_active_thread(&self) -> bool {
+        self.kind.is_thread() && !self.is_archived()
+    }
+
+    /// A forum post pinned to the top of its forum.
+    pub fn is_pinned(&self) -> bool {
+        self.flags & Self::PINNED != 0
+    }
+
+    const PINNED: u64 = 1 << 1;
 }
 
 #[derive(Clone, Debug)]
@@ -239,6 +344,9 @@ pub struct Guild {
     pub name: String,
     pub icon: Option<String>,
     pub channels: Vec<Channel>,
+    /// Threads we know of: READY and GUILD_CREATE bring the active ones
+    /// we've joined, `THREAD_*` events the rest.
+    pub threads: Vec<Channel>,
     /// Notification level for members who never changed it: 0 all, 1 mentions.
     pub default_message_notifications: u8,
     /// The server's owner, who has every permission.
@@ -322,6 +430,42 @@ impl Guild {
         self.verification = update.verification;
     }
 
+    /// One of the server's channels, not counting threads.
+    pub fn channel(&self, id: Snowflake) -> Option<&Channel> {
+        self.channels.iter().find(|c| c.id == id)
+    }
+
+    pub fn thread(&self, id: Snowflake) -> Option<&Channel> {
+        self.threads.iter().find(|c| c.id == id)
+    }
+
+    /// A channel or a thread.
+    pub fn find(&self, id: Snowflake) -> Option<&Channel> {
+        self.channel(id).or_else(|| self.thread(id))
+    }
+
+    /// A thread was created or changed. An update leaves out our membership,
+    /// and may know of no newer message than we do.
+    pub fn set_thread(&mut self, mut thread: Channel) {
+        match self.threads.iter_mut().find(|c| c.id == thread.id) {
+            Some(existing) => {
+                if thread.member.is_none() {
+                    thread.member = existing.member.take();
+                }
+                thread.last_message_id = thread.last_message_id.max(existing.last_message_id);
+                *existing = thread;
+            }
+            None => self.threads.push(thread),
+        }
+    }
+
+    /// We joined (`Some`) or left a thread.
+    pub fn set_thread_member(&mut self, thread: Snowflake, member: Option<ThreadMember>) {
+        if let Some(thread) = self.threads.iter_mut().find(|c| c.id == thread) {
+            thread.member = member;
+        }
+    }
+
     pub fn role(&self, id: Snowflake) -> Option<&Role> {
         self.roles.iter().find(|r| r.id == id)
     }
@@ -344,9 +488,9 @@ impl Guild {
         (!admin).then_some(left)
     }
 
-    /// Text channels we can view, in sidebar order: uncategorised first, then
-    /// each category by position, channels by position within it. Returns
-    /// `(category name, channels)` groups.
+    /// Text, announcement, forum and media channels we can view, in sidebar
+    /// order: uncategorised first, then each category by position, channels
+    /// by position within it. Returns `(category name, channels)` groups.
     pub fn sidebar(&self, me: &Account, now_unix: i64) -> Vec<(Option<&str>, Vec<&Channel>)> {
         let by_position =
             |a: &&Channel, b: &&Channel| (a.position.unwrap_or(0), a.id).cmp(&(b.position.unwrap_or(0), b.id));
@@ -354,7 +498,11 @@ impl Guild {
             let mut v: Vec<&Channel> = self
                 .channels
                 .iter()
-                .filter(|c| c.kind.is_text() && c.parent_id == parent && self.can_view(c, me, now_unix))
+                .filter(|c| {
+                    (c.kind.is_text() || c.kind.is_forum_like())
+                        && c.parent_id == parent
+                        && self.can_view(c, me, now_unix)
+                })
                 .collect();
             v.sort_by(by_position);
             v
@@ -422,11 +570,19 @@ impl<'de> Deserialize<'de> for Guild {
         // Roles stay at the top level in both shapes. One we can't read is
         // left out, which only ever withholds what it grants.
         let roles = value["roles"].as_array().into_iter().flatten().filter_map(|r| Role::deserialize(r).ok()).collect();
+        let threads = value["threads"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|t| Channel::deserialize(t).ok())
+            .filter(|t| t.kind.is_thread())
+            .collect();
         Ok(Guild {
             id: raw.id,
             name,
             icon,
             channels: raw.channels,
+            threads,
             default_message_notifications: default.unwrap_or(0),
             owner_id,
             roles,
@@ -658,6 +814,7 @@ impl Message {
     }
 
     const FORWARD: u8 = 1;
+    const THREAD_STARTER: u8 = 21;
 
     /// What this message forwards, as a message of its own: dated by the
     /// original's id, in the place it was sent.
@@ -688,6 +845,16 @@ impl Message {
             member: None,
             ..self.clone()
         })
+    }
+
+    /// The message a thread was started from, which the thread's first
+    /// message stands for (a `THREAD_STARTER_MESSAGE`), when Discord sent
+    /// it along. The client shows it in its place (`nK` in 425812).
+    pub fn thread_starter(&self) -> Option<&Message> {
+        match &self.referenced_message {
+            Referenced::Message(original) if self.kind == Self::THREAD_STARTER => Some(original),
+            _ => None,
+        }
     }
 
     /// The id of the message this one replies to.
@@ -913,6 +1080,35 @@ mod tests {
             serde_json::from_str(r#"{"id":"2","properties":{"name":"New","icon":"abc","owner_id":"7"},"channels":[]}"#)
                 .unwrap();
         assert_eq!((g.name.as_str(), g.icon.as_deref(), g.owner_id), ("New", Some("abc"), Some(Snowflake(7))));
+    }
+
+    #[test]
+    fn guild_threads() {
+        let mut g: Guild = serde_json::from_str(
+            r#"{"id":"1","name":"G","channels":[{"id":"9","type":0},{"id":"15","type":15}],"threads":[
+                {"id":"20","type":11,"parent_id":"9","last_message_id":"30",
+                 "thread_metadata":{"archived":false,"locked":false,"auto_archive_duration":60},
+                 "member":{"flags":0,"muted":false,"mute_config":null,"join_timestamp":"2026-10-28T00:00:00.250000+00:00"}},
+                {"id":"9","type":0}]}"#,
+        )
+        .unwrap();
+        assert_eq!(g.threads.len(), 1, "only threads");
+        assert_eq!(g.find(Snowflake(20)).and_then(|t| t.member.as_ref()?.join_timestamp), Some(1_793_145_600_250));
+        assert!(g.thread(Snowflake(9)).is_none() && g.find(Snowflake(9)).is_some());
+        assert!(g.channel(Snowflake(15)).is_some_and(|c| c.kind.is_forum_like() && !c.kind.is_thread()));
+
+        let update: Channel = serde_json::from_str(
+            r#"{"id":"20","type":11,"parent_id":"9","last_message_id":"25",
+                "thread_metadata":{"archived":true,"locked":true}}"#,
+        )
+        .unwrap();
+        g.set_thread(update);
+        let t = g.thread(Snowflake(20)).unwrap();
+        assert!(t.is_archived() && t.is_locked() && !t.is_active_thread());
+        assert!(t.member.is_some(), "an update leaves our membership out");
+        assert_eq!(t.last_message_id, Some(Snowflake(30)), "and may not know of newer messages");
+        g.set_thread_member(Snowflake(20), None);
+        assert!(g.thread(Snowflake(20)).unwrap().member.is_none(), "we left");
     }
 
     #[test]

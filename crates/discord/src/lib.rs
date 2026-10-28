@@ -27,12 +27,13 @@ pub mod session;
 pub mod settings;
 pub mod shape;
 pub mod system;
+pub mod threads;
 pub mod verification;
 
 pub use gateway::{Event, Gateway, Ready, Resume};
 pub use model::{
     Attachment, Channel, ChannelKind, Guild, Member, Message, MessageEdit, MessageReference, Overwrite, Referenced,
-    Role, Snowflake, Sticker, User,
+    Role, Snowflake, Sticker, ThreadMember, ThreadMetadata, User,
 };
 pub use rest::{Captcha, CaptchaSolver, Rest};
 

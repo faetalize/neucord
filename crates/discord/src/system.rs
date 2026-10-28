@@ -234,6 +234,9 @@ pub fn kind(message: &Message, place: &Place) -> Kind {
             Icon::Thread,
             vec![author(), text(" started a thread: "), Part::Strong(message.content.clone()), text(".")],
         ),
+        // A thread's first message: the one it was started from, as written.
+        21 if message.thread_starter().is_some() => return Kind::Normal,
+        21 => (Icon::Thread, vec![text("Sorry, we couldn't load the first message in this thread")]),
         27 => (Icon::Stage, vec![author(), text(" started "), Part::Strong(message.content.clone())]),
         28 => (Icon::Stage, vec![author(), text(" ended "), Part::Strong(message.content.clone())]),
         29 => (Icon::Stage, vec![author(), text(" is now a speaker.")]),
@@ -360,6 +363,20 @@ mod tests {
             "alice just boosted the server 3 times! Crew has achieved Level 2!"
         );
         assert_eq!(line(kind(&message(r#""type":99"#), &guild)), "alice sent something Neucord can't show yet.");
+    }
+
+    #[test]
+    fn thread_starters() {
+        let original = r#"{"id":"90","channel_id":"9","author":{"id":"6","username":"bob"},"content":"test",
+                           "timestamp":"2026-10-26T12:00:00.000000+00:00"}"#;
+        let starter =
+            message(&format!(r#""type":21,"message_reference":{{"message_id":"90"}},"referenced_message":{original}"#));
+        assert_eq!(kind(&starter, &DM), Kind::Normal, "shows the message it was started from");
+        assert_eq!(starter.thread_starter().map(|m| m.content.as_str()), Some("test"));
+        assert!(!starter.is_replyable());
+        let deleted = message(r#""type":21,"message_reference":{"message_id":"90"},"referenced_message":null"#);
+        assert_eq!(line(kind(&deleted, &DM)), "Sorry, we couldn't load the first message in this thread");
+        assert!(message(r#""type":0,"referenced_message":null"#).thread_starter().is_none());
     }
 
     #[test]

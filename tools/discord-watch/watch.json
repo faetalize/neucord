@@ -4,8 +4,20 @@
     "ActivityType": ["PLAYING", "STREAMING", "LISTENING", "WATCHING", "CUSTOM_STATUS", "COMPETING"],
     "ApiErrorCode": ["UNKNOWN_ACCOUNT", "RELATIONSHIP_INVALID_NO_CONFIRMATION", "SLOWMODE_RATE_LIMITED"],
     "ButtonStyle": ["PRIMARY", "SECONDARY", "SUCCESS", "DESTRUCTIVE", "LINK", "PREMIUM"],
-    "ChannelFlags": ["IS_SCHEDULED_FOR_DELETION"],
-    "ChannelType": ["DM", "GROUP_DM", "GUILD_TEXT", "GUILD_CATEGORY"],
+    "ChannelFlags": ["IS_SCHEDULED_FOR_DELETION", "PINNED"],
+    "ChannelType": [
+      "DM",
+      "GROUP_DM",
+      "GUILD_TEXT",
+      "GUILD_CATEGORY",
+      "GUILD_ANNOUNCEMENT",
+      "ANNOUNCEMENT_THREAD",
+      "PUBLIC_THREAD",
+      "PRIVATE_THREAD",
+      "GUILD_FORUM",
+      "GUILD_MEDIA",
+      "MEDIA_THREAD"
+    ],
     "ComponentType": ["ACTION_ROW", "BUTTON", "STRING_SELECT", "SECTION", "TEXT_DISPLAY", "CONTAINER"],
     "ConsentStatus": ["UNSPECIFIED", "PENDING", "ACCEPTED", "REJECTED"],
     "GatewayOpcode": ["DISPATCH", "HEARTBEAT", "IDENTIFY", "RESUME", "HELLO", "HEARTBEAT_ACK", "REQUEST_GUILD_MEMBERS"],
@@ -22,7 +34,15 @@
     "MessageFlags": ["SUPPRESS_EMBEDS", "IS_VOICE_MESSAGE", "IS_COMPONENTS_V2"],
     "MessageReferenceType": ["DEFAULT", "FORWARD"],
     "MessageType": ["DEFAULT", "REPLY", "CHANNEL_PINNED_MESSAGE"],
-    "Permissions": ["VIEW_CHANNEL", "SEND_MESSAGES", "READ_MESSAGE_HISTORY", "ADMINISTRATOR", "BYPASS_SLOWMODE"],
+    "Permissions": [
+      "VIEW_CHANNEL",
+      "SEND_MESSAGES",
+      "READ_MESSAGE_HISTORY",
+      "ADMINISTRATOR",
+      "BYPASS_SLOWMODE",
+      "MANAGE_THREADS",
+      "SEND_MESSAGES_IN_THREADS"
+    ],
     "RelationshipType": ["FRIEND", "BLOCKED", "PENDING_INCOMING", "PENDING_OUTGOING"],
     "RequiredAction": [
       "AGREEMENTS",
@@ -33,11 +53,14 @@
     ],
     "StatusType": ["ONLINE", "IDLE", "DND", "INVISIBLE", "OFFLINE"],
     "StickerFormat": ["PNG", "APNG", "LOTTIE", "GIF"],
+    "ThreadMemberFlags": ["HAS_INTERACTED", "ALL_MESSAGES", "ONLY_MENTIONS", "NO_MESSAGES"],
     "VerificationLevel": ["NONE", "LOW", "MEDIUM", "HIGH", "VERY_HIGH"]
   },
   "methods": [
+    "canTrackUnreads",
     "createResponseHandler",
     "fetchMessages",
+    "getAckTimestamp",
     "getForwardInfo",
     "getGuildChannelUnreadState",
     "getSystemMessageUserJoin",
@@ -51,9 +74,12 @@
     "requestGuildMembers"
   ],
   "stores": [
+    "ActiveJoinedThreadsStore",
+    "ActiveThreadsStore",
     "GuildMemberRequesterStore",
     "GuildRoleStore",
     "GuildVerificationStore",
+    "JoinedThreadsStore",
     "LoginRequiredActionStore",
     "PendingReplyStore",
     "PermissionStore",
