@@ -22,6 +22,7 @@ async-channel = "2"
 openssl = "0.10"
 qrcodegen = "1.8"
 webkit = { package = "webkit6", version = "0.6" }
+sourceview = { package = "sourceview5", version = "0.11" }
 
 # Keep target/ small: line tables are enough for readable backtraces.
 [profile.dev]

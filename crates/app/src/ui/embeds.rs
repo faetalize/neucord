@@ -8,7 +8,7 @@ use gtk::{glib, pango};
 
 use super::media_frame::MediaFrame;
 use crate::images::Images;
-use crate::render::{self, Names};
+use crate::render::{self, Context, Names};
 
 /// Largest box embed media is scaled into, and its thumbnails (the official
 /// client's sizes).
@@ -261,12 +261,14 @@ fn card(
     // Only bot cards use markup; a website's text shows as it is.
     if let Some(description) = embed.description.as_deref().filter(|d| !d.is_empty() && embed.shows_description()) {
         match embed.is_rich() {
-            true => text.append(&render::render(&discord::markup::parse(description), names, false)),
+            true => {
+                text.append(&render::render(&discord::markup::parse(description), &Context::new(names, images), false))
+            }
             false => text.append(&plain_label(description, "embed-description")),
         }
     }
     if embed.is_rich() && !embed.fields.is_empty() {
-        text.append(&fields(embed, names));
+        text.append(&fields(embed, names, images));
     }
     top.append(&text);
     if let (Some(images), Some(thumbnail)) = (images, thumbnail) {
@@ -294,21 +296,21 @@ fn card(
 }
 
 /// Up to three inline fields share a row, evenly; the others take a row.
-fn fields(embed: &Embed, names: &Names) -> gtk::Grid {
+fn fields(embed: &Embed, names: &Names, images: Option<&Images>) -> gtk::Grid {
     let grid = gtk::Grid::builder().column_spacing(16).row_spacing(8).column_homogeneous(true).build();
     for (row, fields) in field_rows(&embed.fields).into_iter().enumerate() {
         let span = FIELD_COLUMNS / fields.len() as i32;
         for (column, field) in fields.iter().enumerate() {
             let cell = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).build();
             cell.append(&plain_label(&field.name, "embed-field-name"));
-            cell.append(&render::render(&discord::markup::parse(&field.value), names, false));
+            cell.append(&render::render(&discord::markup::parse(&field.value), &Context::new(names, images), false));
             grid.attach(&cell, column as i32 * span, row as i32, span, 1);
         }
     }
     grid
 }
 
-fn colour_bar(colour: u32) -> gtk::DrawingArea {
+pub(super) fn colour_bar(colour: u32) -> gtk::DrawingArea {
     let bar = gtk::DrawingArea::builder().width_request(4).vexpand(true).build();
     let channel = |shift: u32| ((colour >> shift) & 0xFF) as f64 / 255.0;
     let (r, g, b) = (channel(16), channel(8), channel(0));

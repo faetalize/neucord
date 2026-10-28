@@ -12,6 +12,11 @@ pub struct Snowflake(pub u64);
 impl Snowflake {
     const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
 
+    /// When it was made, in milliseconds since 1970.
+    pub fn unix_ms(self) -> i64 {
+        ((self.0 >> 22) + Self::DISCORD_EPOCH_MS) as i64
+    }
+
     /// A snowflake for "now", used as a message nonce.
     pub fn now() -> Self {
         let unix_ms = (glib::real_time() / 1000) as u64;
@@ -269,6 +274,15 @@ pub struct Attachment {
     pub height: Option<u32>,
     #[serde(default)]
     pub flags: u64,
+    /// In bytes.
+    #[serde(default)]
+    pub size: Option<u64>,
+    /// A voice message's length, in seconds.
+    #[serde(default)]
+    pub duration_secs: Option<f64>,
+    /// A voice message's loudness over time: base64, a byte a sample.
+    #[serde(default)]
+    pub waveform: Option<String>,
 }
 
 impl Attachment {
@@ -299,6 +313,51 @@ impl Attachment {
             None => self.width.is_some() && self.height.is_some(),
         }
     }
+
+    /// A video to play inline. The official client goes by the extension,
+    /// and wants dimensions.
+    pub fn is_video(&self) -> bool {
+        let sized = self.width.is_some_and(|w| w > 0) && self.height.is_some_and(|h| h > 0);
+        sized && self.extension_in(&["mp4", "webm", "mov", "qt"])
+    }
+
+    /// Sound to play inline.
+    pub fn is_audio(&self) -> bool {
+        self.extension_in(&["mp3", "m4a", "ogg", "opus", "wav", "flac"])
+    }
+
+    fn extension_in(&self, extensions: &[&str]) -> bool {
+        let extension = self.filename.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+        extension.is_some_and(|e| extensions.contains(&e.as_str()))
+    }
+
+    /// A voice message's loudness, 0 to 1, as `bars` bars: samples averaged
+    /// when there are more, and silence after them when there are fewer.
+    pub fn waveform_bars(&self, bars: usize) -> Vec<f32> {
+        let samples = self.waveform.as_deref().map(glib::base64_decode).unwrap_or_default();
+        (0..bars)
+            .map(|bar| {
+                if samples.len() <= bars {
+                    return samples.get(bar).map_or(0.0, |&s| s as f32 / 255.0);
+                }
+                let range = &samples[bar * samples.len() / bars..(bar + 1) * samples.len() / bars];
+                range.iter().map(|&s| s as f32).sum::<f32>() / range.len().max(1) as f32 / 255.0
+            })
+            .collect()
+    }
+}
+
+/// How many bars a voice message's waveform has: more for longer ones, as
+/// the official client draws it on a 6-pixel pitch.
+pub fn voice_bars(duration: f64) -> usize {
+    let width = if duration <= 0.5 {
+        40.0
+    } else if duration >= 45.0 {
+        294.0
+    } else {
+        (duration - 0.5) / 44.5 * 254.0 + 40.0
+    };
+    ((width + 4.0) / 6.0).floor() as usize
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -334,17 +393,47 @@ pub struct Message {
     /// The message a reply answers, as Discord resolved it.
     #[serde(default, deserialize_with = "referenced")]
     pub referenced_message: Referenced,
-    /// Only counted, to describe a sticker-only message.
     #[serde(default)]
-    pub sticker_items: Vec<serde::de::IgnoredAny>,
+    pub sticker_items: Vec<Sticker>,
     #[serde(default)]
     pub embeds: Vec<Embed>,
     #[serde(default)]
     pub flags: u64,
+    #[serde(default)]
+    pub poll: Option<crate::poll::Poll>,
+    /// What a forward carries.
+    #[serde(default)]
+    pub message_snapshots: Vec<Snapshot>,
+    #[serde(default)]
+    pub components: Vec<crate::component::Component>,
+    /// For a call's system message: who joined it, and when it ended.
+    #[serde(default)]
+    pub call: Option<Call>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Call {
+    #[serde(default)]
+    pub participants: Vec<Snowflake>,
+    /// ISO 8601; `None` while the call goes on.
+    #[serde(default)]
+    pub ended_timestamp: Option<String>,
 }
 
 impl Message {
     const SUPPRESS_EMBEDS: u64 = 1 << 2;
+    const IS_VOICE_MESSAGE: u64 = 1 << 13;
+    const IS_COMPONENTS_V2: u64 = 1 << 15;
+
+    /// Built from components alone: its attachments are what they show.
+    pub fn is_components_v2(&self) -> bool {
+        self.flags & Self::IS_COMPONENTS_V2 != 0
+    }
+
+    /// A recorded voice message: its audio attachment plays with a waveform.
+    pub fn is_voice_message(&self) -> bool {
+        self.flags & Self::IS_VOICE_MESSAGE != 0
+    }
 
     /// The author (or a moderator) removed the embeds.
     pub fn embeds_suppressed(&self) -> bool {
@@ -354,11 +443,54 @@ impl Message {
     /// Discord's message type for a reply.
     const REPLY: u8 = 19;
 
+    /// The message's markup. Headings and lists count only in messages sent
+    /// or edited since Discord added them, as in the official client.
+    pub fn markup(&self) -> Vec<crate::markup::Span> {
+        // The first message after the change, and the time it was sent.
+        const SINCE_ID: Snowflake = Snowflake(1_088_216_706_570_268_682);
+        const SINCE: &str = "2023-03-22T21:44:40";
+        // An edit we saw live has no time, but is recent.
+        let edited = self.edited_timestamp.as_deref().is_some_and(|t| t.is_empty() || t >= SINCE);
+        crate::markup::parse_with(&self.content, self.id >= SINCE_ID || edited)
+    }
+
     /// Whether the official client offers Reply on this message: ordinary
     /// messages and replies, commands, and a few system messages people
     /// answer (boosts, joins, …), but not, say, pins or calls.
     pub fn is_replyable(&self) -> bool {
         matches!(self.kind, 0 | 7 | 19 | 20 | 23 | 24 | 25 | 32..=42 | 45 | 46 | 69)
+    }
+
+    const FORWARD: u8 = 1;
+
+    /// What this message forwards, as a message of its own: dated by the
+    /// original's id, in the place it was sent.
+    pub fn forwarded(&self) -> Option<Message> {
+        let reference = self.message_reference.as_ref().filter(|r| r.kind == Self::FORWARD)?;
+        let snapshot = &self.message_snapshots.first()?.message;
+        Some(Message {
+            id: reference.message_id.unwrap_or(self.id),
+            channel_id: reference.channel_id.unwrap_or(self.channel_id),
+            guild_id: reference.guild_id,
+            kind: snapshot.kind,
+            content: snapshot.content.clone(),
+            timestamp: snapshot.timestamp.clone(),
+            edited_timestamp: snapshot.edited_timestamp.clone(),
+            attachments: snapshot.attachments.clone(),
+            embeds: snapshot.embeds.clone(),
+            sticker_items: snapshot.sticker_items.clone(),
+            components: snapshot.components.clone(),
+            flags: snapshot.flags,
+            mentions: Vec::new(),
+            mention_everyone: false,
+            mention_roles: Vec::new(),
+            message_reference: None,
+            referenced_message: Referenced::Unresolved,
+            message_snapshots: Vec::new(),
+            poll: None,
+            call: None,
+            ..self.clone()
+        })
     }
 
     /// The id of the message this one replies to.
@@ -370,12 +502,83 @@ impl Message {
     }
 }
 
+/// A custom emoji has an id; a Unicode one only its name, the emoji itself.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct Emoji {
+    #[serde(default)]
+    pub id: Option<Snowflake>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub animated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Sticker {
+    pub id: Snowflake,
+    pub name: String,
+    #[serde(default)]
+    pub format_type: u8,
+}
+
+impl Sticker {
+    /// The official client's size for a sticker in a message.
+    pub const SIZE: u32 = 160;
+
+    /// Where the sticker's image is, at `size` pixels, and whether it is
+    /// animated. `None` for Lottie stickers, which are vector animations.
+    pub fn image(&self, size: u32) -> Option<(String, bool)> {
+        let (ext, animated) = match self.format_type {
+            // PNG, and APNG (which shows its first frame).
+            1 | 2 => ("png", false),
+            4 => ("gif", true),
+            _ => return None,
+        };
+        Some((format!("https://media.discordapp.net/stickers/{}.{ext}?size={size}", self.id), animated))
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct MessageReference {
+    /// 0 for a reply (or pin notice, …), 1 for a forward.
+    #[serde(rename = "type", default)]
+    pub kind: u8,
     #[serde(default)]
     pub message_id: Option<Snowflake>,
     #[serde(default)]
     pub channel_id: Option<Snowflake>,
+    #[serde(default)]
+    pub guild_id: Option<Snowflake>,
+}
+
+/// A copy of a forwarded message, as it was when forwarded.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Snapshot {
+    pub message: SnapshotMessage,
+}
+
+/// What a forward copies of the original: not its author, nor whom it
+/// mentions.
+#[derive(Clone, Debug, Deserialize)]
+pub struct SnapshotMessage {
+    #[serde(rename = "type", default)]
+    pub kind: u8,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub timestamp: String,
+    #[serde(default)]
+    pub edited_timestamp: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+    #[serde(default)]
+    pub embeds: Vec<Embed>,
+    #[serde(default)]
+    pub sticker_items: Vec<Sticker>,
+    #[serde(default)]
+    pub components: Vec<crate::component::Component>,
+    #[serde(default)]
+    pub flags: u64,
 }
 
 /// `referenced_message` has three states that matter: absent when Discord
@@ -509,6 +712,33 @@ mod tests {
     }
 
     #[test]
+    fn attachment_kinds() {
+        let attachment = |name: &str, extra: &str| -> Attachment {
+            serde_json::from_str(&format!(r#"{{"id":"1","filename":"{name}","url":"u"{extra}}}"#)).unwrap()
+        };
+        assert!(attachment("clip.MP4", r#","width":640,"height":480"#).is_video());
+        assert!(!attachment("clip.mp4", "").is_video(), "no dimensions");
+        assert!(attachment("song.flac", "").is_audio());
+        assert!(!attachment("notes.txt", "").is_audio());
+    }
+
+    #[test]
+    fn voice_waveforms() {
+        assert_eq!((voice_bars(0.2), voice_bars(10.0), voice_bars(60.0)), (7, 16, 49));
+        // Four samples: 0, 255, 51, 102.
+        let voice: Attachment =
+            serde_json::from_str(r#"{"id":"1","filename":"voice-message.ogg","url":"u","waveform":"AP8zZg=="}"#)
+                .unwrap();
+        assert_eq!(voice.waveform_bars(2), [0.5, 0.3]);
+        assert_eq!(voice.waveform_bars(5), [0.0, 1.0, 0.2, 0.4, 0.0]);
+    }
+
+    #[test]
+    fn snowflake_times() {
+        assert_eq!(Snowflake(1_088_216_706_570_268_682).unix_ms(), 1_679_521_480_935);
+    }
+
+    #[test]
     fn message_parses() {
         let m: Message = serde_json::from_str(
             r#"{"id":"100","channel_id":"11","author":{"id":"5","username":"alice","global_name":null},
@@ -549,6 +779,56 @@ mod tests {
         )
         .unwrap();
         assert!(!pin.is_replyable());
+    }
+
+    #[test]
+    fn headings_only_since_discord_had_them() {
+        let message = |id: &str, edited: &str| -> Message {
+            serde_json::from_str(&format!(
+                r##"{{"id":"{id}","channel_id":"1","author":{{"id":"5","username":"a"}},"content":"# hi",
+                    "timestamp":"t","edited_timestamp":{edited}}}"##
+            ))
+            .unwrap()
+        };
+        let heading = |m: &Message| matches!(m.markup()[0], crate::markup::Span::Heading { .. });
+        assert!(heading(&message("1088216706570268682", "null")));
+        assert!(!heading(&message("1088216706570268681", "null")));
+        assert!(heading(&message("100", r#""2024-01-01T00:00:00.000000+00:00""#)), "edited since");
+        assert!(!heading(&message("100", r#""2022-01-01T00:00:00.000000+00:00""#)));
+    }
+
+    #[test]
+    fn stickers() {
+        let sticker = |format: u8| -> Sticker {
+            serde_json::from_str(&format!(r#"{{"id":"7","name":"wave","format_type":{format}}}"#)).unwrap()
+        };
+        assert_eq!(sticker(1).image(160), Some(("https://media.discordapp.net/stickers/7.png?size=160".into(), false)));
+        assert_eq!(sticker(4).image(320), Some(("https://media.discordapp.net/stickers/7.gif?size=320".into(), true)));
+        assert_eq!(sticker(3).image(160), None, "Lottie");
+    }
+
+    #[test]
+    fn forwards() {
+        let forward: Message = serde_json::from_str(
+            r##"{"id":"200","channel_id":"11","author":{"id":"5","username":"a"},"timestamp":"t","content":"",
+                "message_reference":{"type":1,"message_id":"100","channel_id":"12","guild_id":"3"},
+                "message_snapshots":[{"message":{"type":0,"content":"# hi","timestamp":"2026-01-01T00:00:00+00:00",
+                    "attachments":[],"embeds":[],"flags":0}}]}"##,
+        )
+        .unwrap();
+        let original = forward.forwarded().unwrap();
+        assert_eq!(
+            (original.id, original.channel_id, original.content.as_str()),
+            (Snowflake(100), Snowflake(12), "# hi")
+        );
+        assert!(forward.reply_to().is_none());
+        // A reply's reference is no forward.
+        let reply: Message = serde_json::from_str(
+            r#"{"id":"201","channel_id":"11","author":{"id":"5","username":"a"},"timestamp":"t","type":19,
+                "message_reference":{"message_id":"100"}}"#,
+        )
+        .unwrap();
+        assert!(reply.forwarded().is_none());
     }
 
     #[test]

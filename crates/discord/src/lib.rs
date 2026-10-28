@@ -7,6 +7,7 @@
 pub mod account;
 pub mod auth;
 pub mod cdn;
+pub mod component;
 pub mod embed;
 mod endpoints;
 pub mod gateway;
@@ -14,6 +15,7 @@ mod identity;
 pub mod markup;
 pub mod model;
 pub mod notifications;
+pub mod poll;
 pub mod read_state;
 pub mod relationships;
 pub mod remote_auth;
@@ -21,10 +23,12 @@ pub mod rest;
 pub mod session;
 pub mod settings;
 pub mod shape;
+pub mod system;
 
 pub use gateway::{Event, Gateway, Ready, Resume};
 pub use model::{
-    Attachment, Channel, ChannelKind, Guild, Message, MessageEdit, MessageReference, Referenced, Snowflake, User,
+    Attachment, Channel, ChannelKind, Guild, Message, MessageEdit, MessageReference, Referenced, Snowflake, Sticker,
+    User,
 };
 pub use rest::{Captcha, CaptchaSolver, Rest};
 

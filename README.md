@@ -9,11 +9,12 @@ Another GTK Discord client? Daring today, are we...?
 
 Reactions, editing or deleting your own messages, uploads, emoji and
 sticker pickers, threads and forums, the member list, voice and video.
-Custom emoji show as `:name:` and video attachments as links. Two-factor
-with security keys. Steps Discord sometimes requires, such as verifying a
-phone number, accepting new terms or changing your password: Neucord waits
-while you take them in the official app or at discord.com. Planned work is in
-the issue tracker.
+Polls and bots' buttons show but can't be used, Lottie stickers show only
+their name, and `ansi` code blocks lose their colours. Two-factor with
+security keys. Steps Discord sometimes requires, such as verifying a phone
+number, accepting new terms or changing your password: Neucord waits while
+you take them in the official app or at discord.com. Planned work is in the
+issue tracker.
 
 ## Requirements
 
@@ -21,6 +22,7 @@ the issue tracker.
 - libadwaita 1.7 or newer
 - libsoup 3
 - WebKitGTK 6.0, for captchas
+- GtkSourceView 5, to highlight code
 - libsecret, and a Secret Service provider such as GNOME Keyring or KWallet
 - OpenSSL
 - Rust 1.92 or newer, to build
@@ -28,7 +30,7 @@ the issue tracker.
 On Arch Linux:
 
 ```sh
-sudo pacman -S --needed rust gtk4 libadwaita libsoup3 webkitgtk-6.0 libsecret openssl
+sudo pacman -S --needed rust gtk4 libadwaita libsoup3 webkitgtk-6.0 gtksourceview5 libsecret openssl
 ```
 
 ## Building
@@ -61,7 +63,7 @@ Link previews and GIFs load through Discord's media proxy, never from the
 site they link to, so those sites don't see your IP address.
 
 Your token is stored in the system keyring. Images are cached in
-`~/.cache/neucord/images/`, and embedded videos you play in
+`~/.cache/neucord/images/`, and the videos and sound you play in
 `~/.cache/neucord/videos/` (up to 256 MiB).
 
 ## Contributing

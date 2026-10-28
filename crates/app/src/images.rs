@@ -1,6 +1,6 @@
 //! Async image loading with memory and disk caches, for avatars, guild
-//! icons, custom emoji, inline attachments and embeds, plus the files embed
-//! videos play from.
+//! icons, custom emoji, inline attachments and embeds, plus the files videos
+//! and sound play from.
 //!
 //! Encoded bytes are fetched once (memory → disk → network). Still images
 //! decode once per URL into a shared `gdk::Texture`, so rows rebuilt while
@@ -77,22 +77,36 @@ impl Images {
         self.0.scale.set(scale.max(1));
     }
 
+    /// The window's scale factor.
+    pub fn scale(&self) -> i32 {
+        self.0.scale.get()
+    }
+
     /// Fetch and set an image onto `picture`. `animated` selects the GIF path.
     /// If the picture is dropped before the bytes arrive, nothing happens.
     pub fn set(&self, picture: &gtk::Picture, url: &str, animated: bool) {
-        if !animated && let Some(texture) = self.0.textures.borrow_mut().get(url) {
-            picture.set_paintable(Some(&texture));
-            return;
-        }
         let weak = picture.downgrade();
+        self.load(url, animated, move |paintable| {
+            if let Some(picture) = weak.upgrade() {
+                picture.set_paintable(Some(&paintable));
+            }
+        });
+    }
+
+    /// Fetch an image and hand it to `done`: at once if it is decoded
+    /// already, else once it has loaded, and never if it fails to.
+    /// `animated` selects the GIF path.
+    pub fn load(&self, url: &str, animated: bool, done: impl FnOnce(gdk::Paintable) + 'static) {
+        if !animated && let Some(texture) = self.0.textures.borrow_mut().get(url) {
+            return done(texture.upcast());
+        }
         let url = url.to_owned();
         let this = self.clone();
         glib::spawn_future_local(async move {
             let Some(bytes) = this.load_bytes(&url).await else { return };
-            let Some(picture) = weak.upgrade() else { return };
             // Fall through to a still first frame if animation decoding failed.
             if animated && let Some(paintable) = animated_paintable(&bytes) {
-                return picture.set_paintable(Some(&paintable));
+                return done(paintable);
             }
             // Another picture may have decoded it while we waited.
             let cached = this.0.textures.borrow_mut().get(&url);
@@ -102,7 +116,7 @@ impl Images {
             };
             let size = texture.width() as u64 * texture.height() as u64 * 4;
             this.0.textures.borrow_mut().insert(&url, texture.clone(), size);
-            picture.set_paintable(Some(&texture));
+            done(texture.upcast());
         });
     }
 
@@ -168,7 +182,7 @@ impl Images {
         Some(bytes)
     }
 
-    /// A video as a file GTK can open, kept on disk (within a budget, least
+    /// A video or sound as a file GTK can open, kept on disk (within a budget, least
     /// recently played going first) and never in memory.
     pub async fn file(&self, url: &str) -> Option<PathBuf> {
         let path = self.0.video_dir.join(cache_key(url));

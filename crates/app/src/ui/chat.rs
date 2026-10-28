@@ -3,16 +3,20 @@
 
 use std::rc::Rc;
 
+use discord::read_state::starts_unread;
 use discord::rest::Page;
+use discord::system::{self, Kind};
 use discord::{Message, MessageEdit, Referenced, Snowflake, User};
 use gtk::prelude::*;
 use gtk::{gio, glib};
 
 use super::App;
-use super::embeds::{behind_spoiler, embed_widget, fitted_picture};
-use super::state::now_unix;
+use super::embeds::{behind_spoiler, embed_widget};
+use super::state::{Unread, now_unix};
 use super::widgets::avatar_widget;
-use crate::render::Names;
+use super::{attachments, components, polls};
+use crate::render::{Context, Names, Spoilers};
+use crate::rich_text::RichText;
 use crate::{render, timelines};
 
 /// Messages fetched when a channel opens: enough to fill the view, small so
@@ -41,8 +45,12 @@ impl App {
         factory.connect_setup(|_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
             item.set_activatable(false);
-            // A bar for collapsed blocked messages, then the message itself.
+            // A divider for a new day or the first unread message, a bar for
+            // collapsed blocked messages, then the message itself.
             let cell = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            cell.append(
+                &gtk::Box::builder().visible(false).spacing(8).margin_top(12).margin_start(18).margin_end(18).build(),
+            );
             cell.append(&gtk::Box::builder().visible(false).css_classes(["blocked-bar"]).build());
             cell.append(&gtk::Box::new(gtk::Orientation::Vertical, 2));
             item.set_child(Some(&cell));
@@ -53,12 +61,15 @@ impl App {
                 let Some(this) = this.upgrade() else { return };
                 let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
                 let cell = item.child().expect("cell");
-                let bar = cell.first_child().and_downcast::<gtk::Box>().expect("blocked bar");
+                let divider = cell.first_child().and_downcast::<gtk::Box>().expect("divider");
+                let bar = divider.next_sibling().and_downcast::<gtk::Box>().expect("blocked bar");
                 let row = bar.next_sibling().and_downcast::<gtk::Box>().expect("row box");
                 let Some(message) = item.item().and_downcast::<glib::BoxedAnyObject>() else { return };
                 let message = message.borrow::<Message>().clone();
                 let messages = this.messages();
                 let position = item.position();
+                let previous = position.checked_sub(1).and_then(|p| timelines::message_at(&messages, p));
+                let divided = this.fill_divider(&divider, &message, previous.as_ref());
                 let (run, revealed) = {
                     let state = this.state.borrow();
                     let run = timelines::run_at(&messages, position, |m| state.relationships.is_blocked(m.author.id));
@@ -72,8 +83,7 @@ impl App {
                 if !row.is_visible() {
                     return;
                 }
-                let previous = position.checked_sub(1).and_then(|p| timelines::message_at(&messages, p));
-                this.fill_message_row(&row, &message, previous.as_ref(), &messages);
+                this.fill_message_row(&row, &message, previous.as_ref().filter(|_| !divided), &messages);
             }
         });
         self.list.set_factory(Some(&factory));
@@ -89,6 +99,7 @@ impl App {
                 if let Some(this) = this.upgrade() {
                     this.maybe_load_older();
                     this.maybe_load_newer();
+                    this.check_unread_seen();
                 }
             }
         });
@@ -120,6 +131,15 @@ impl App {
         let header = self.header.header_bar(&[self.sidebar_toggle().upcast_ref()]);
         page.add_top_bar(&header);
         page.add_top_bar(&self.present_bar);
+        page.add_top_bar(&self.unread_bar);
+        self.unread_bar.connect_button_clicked({
+            let this = Rc::downgrade(self);
+            move |_| {
+                if let Some(this) = this.upgrade() {
+                    this.jump_to_unread();
+                }
+            }
+        });
         page.add_bottom_bar(&composer);
 
         // The list scrolls under the bars, and pads its ends to their height
@@ -253,6 +273,95 @@ impl App {
         }
     }
 
+    /// Above a message: the date where a new day starts, and "New" above the
+    /// first unread message. Returns whether there is a divider, which
+    /// starts a new group of messages.
+    fn fill_divider(&self, divider: &gtk::Box, message: &Message, previous: Option<&Message>) -> bool {
+        while let Some(child) = divider.first_child() {
+            divider.remove(&child);
+        }
+        let time = parse_time(&message.timestamp);
+        let day = |m: &Message| parse_time(&m.timestamp).map(|t| t.ymd());
+        let new_day = previous.is_none_or(|p| day(p) != time.as_ref().map(|t| t.ymd()));
+        let unread = self.open_unread().is_some_and(|u| {
+            u.channel == message.channel_id && starts_unread(previous.map(|p| p.id), message.id, u.acked)
+        });
+        // The list keeps many more rows than it shows, so where the first
+        // unread one is decides whether it has been seen, not its binding.
+        if unread {
+            self.unread_divider.set(Some(divider));
+        } else if self.unread_divider.upgrade().as_ref() == Some(divider) {
+            self.unread_divider.set(None);
+        }
+        divider.set_visible(new_day || unread);
+        if !divider.is_visible() {
+            return false;
+        }
+        let line = || gtk::Separator::builder().hexpand(true).valign(gtk::Align::Center).build();
+        divider.append(&line());
+        if let Some(time) = time.filter(|_| new_day) {
+            let date = time.format("%e %B %Y").map(|d| d.trim().to_owned()).unwrap_or_default();
+            divider.append(&gtk::Label::builder().label(date).css_classes(["caption", "dimmed"]).build());
+            divider.append(&line());
+        }
+        if unread {
+            divider.append(&gtk::Label::builder().label("New").css_classes(["caption-heading", "accent"]).build());
+        }
+        true
+    }
+
+    /// Once the first unread message has come into view, stop offering to
+    /// jump to it.
+    fn check_unread_seen(&self) {
+        let Some(divider) = self.unread_divider.upgrade().filter(|d| d.is_mapped()) else { return };
+        let Some(bounds) = divider.compute_bounds(&self.scroller) else { return };
+        let height = self.scroller.height() as f32;
+        if bounds.y() + bounds.height() > 0.0 && bounds.y() < height {
+            self.unread_seen();
+        }
+    }
+
+    fn unread_seen(&self) {
+        if let Some(unread) = self.state.borrow_mut().unread.as_mut() {
+            unread.seen = true;
+        }
+        self.unread_bar.set_revealed(false);
+    }
+
+    /// What was unread in the open channel when it opened.
+    fn open_unread(&self) -> Option<Unread> {
+        let state = self.state.borrow();
+        state.unread.filter(|u| Some(u.channel) == state.channel)
+    }
+
+    /// Offer to jump to the first unread message, until it has been in view:
+    /// how many there are, and since when.
+    pub(super) fn update_unread_bar(&self) {
+        let Some(unread) = self.open_unread().filter(|u| !u.seen) else {
+            return self.unread_bar.set_revealed(false);
+        };
+        let store = self.messages();
+        let (count, mut more) = discord::read_state::unread_count(&timelines::ids(&store), unread.acked);
+        more &= !self.timelines.borrow().get(unread.channel).is_some_and(|t| t.complete);
+        if count == 0 {
+            return self.unread_bar.set_revealed(false);
+        }
+        // Since the first unread message, or if that isn't loaded, about
+        // when the last read one was sent.
+        let first = timelines::ids(&store).iter().position(|&id| id > unread.acked);
+        let since = match first.filter(|_| !more).and_then(|p| timelines::message_at(&store, p as u32)) {
+            Some(first) => parse_time(&first.timestamp),
+            None => glib::DateTime::from_unix_local(unread.acked.unix_ms() / 1000).ok(),
+        };
+        let today = glib::DateTime::now_local().ok().map(|now| now.ymd());
+        let pattern = if since.as_ref().map(|t| t.ymd()) == today { "%H:%M" } else { "%H:%M on %e %B %Y" };
+        let since = since.and_then(|t| t.format(pattern).ok()).unwrap_or_default();
+        let plural = if count == 1 && !more { "" } else { "s" };
+        let plus = if more { "+" } else { "" };
+        self.unread_bar.set_title(&format!("{count}{plus} new message{plural} since {since}"));
+        self.unread_bar.set_revealed(true);
+    }
+
     /// Show the "viewing older messages" bar while the open channel is detached.
     pub(super) fn update_present_bar(&self) {
         let channel = self.state.borrow().channel;
@@ -329,6 +438,13 @@ impl App {
             (title, state.rest.clone(), left)
         };
         let subtitle = self.channel_subtitle(id);
+        // What is unread now, before opening the channel reads it.
+        let unread = {
+            let state = self.state.borrow();
+            let acked = state.find_channel(id).filter(|(_, c)| state.is_unread(c)).and_then(|_| state.read.acked(id));
+            acked.map(|acked| Unread { channel: id, acked, seen: false })
+        };
+        self.state.borrow_mut().unread = unread;
         // The channel we left keeps only its newest messages: live events keep
         // those current, and coming back refetches the newest page anyway.
         if let Some(left) = left
@@ -351,6 +467,7 @@ impl App {
         let store = self.timelines.borrow_mut().open(id).store.clone();
         self.selection.set_model(Some(&store));
         self.update_present_bar();
+        self.update_unread_bar();
         self.scroll_to_end();
 
         if rest.is_some() {
@@ -386,6 +503,7 @@ impl App {
                         }
                     }
                     this.update_present_bar();
+                    this.update_unread_bar();
                     if let Some(newest) = store.n_items().checked_sub(1).and_then(|p| timelines::message_at(&store, p))
                     {
                         // READY's newest-message ids can be stale; history is not.
@@ -466,6 +584,7 @@ impl App {
                     }
                     this.learn_messages(&page);
                     timelines::prepend(&store, page);
+                    this.update_unread_bar();
                     this.load_older_if_short();
                 }
                 Ok(_) => {}
@@ -551,6 +670,42 @@ impl App {
             self.flash(id, position);
             return;
         }
+        self.load_around(channel, id, true, move |this, store| {
+            if let Some((position, _)) = timelines::find(store, id) {
+                this.flash(id, position);
+            }
+        });
+    }
+
+    /// Show the first unread message of the open channel, loading the
+    /// messages around the last one read if need be.
+    fn jump_to_unread(self: &Rc<Self>) {
+        let Some(Unread { channel, acked, .. }) = self.open_unread() else { return };
+        let show = move |this: &Rc<Self>, store: &gio::ListStore| {
+            let first = timelines::ids(store).iter().position(|&id| id > acked).map(|p| p as u32);
+            if let Some(position) = first {
+                this.list.scroll_to(position, gtk::ListScrollFlags::NONE, None);
+                this.unread_seen();
+            }
+        };
+        let store = self.messages();
+        let loaded = timelines::oldest_id(&store).is_some_and(|oldest| oldest <= acked);
+        if loaded {
+            show(self, &store);
+        } else {
+            self.load_around(channel, acked, false, show);
+        }
+    }
+
+    /// Replace the open channel's messages with those around `id`, then
+    /// call `then`. With `must_exist`, a page without `id` is an error.
+    fn load_around(
+        self: &Rc<Self>,
+        channel: Snowflake,
+        id: Snowflake,
+        must_exist: bool,
+        then: impl FnOnce(&Rc<Self>, &gio::ListStore) + 'static,
+    ) {
         let Some(rest) = self.state.borrow().rest.clone() else { return };
         let this = self.clone();
         glib::spawn_future_local(async move {
@@ -561,7 +716,7 @@ impl App {
             if this.state.borrow().channel != Some(channel) {
                 return;
             }
-            if !page.iter().any(|m| m.id == id) {
+            if must_exist && !page.iter().any(|m| m.id == id) {
                 return this.show_composer_error("That message no longer exists.");
             }
             this.learn_messages(&page);
@@ -579,9 +734,8 @@ impl App {
                 return;
             };
             this.update_present_bar();
-            if let Some((position, _)) = timelines::find(&store, id) {
-                this.flash(id, position);
-            }
+            this.update_unread_bar();
+            then(&this, &store);
         });
     }
 
@@ -733,17 +887,17 @@ impl App {
     }
 }
 
-/// User ids referenced by `<@id>` mentions within a parsed span (recursive, so
-/// mentions inside styled/quoted spans count).
+/// User ids referenced by `<@id>` mentions within a parsed span, at any
+/// depth.
 pub(super) fn collect_user_mentions(span: &discord::markup::Span) -> Vec<u64> {
     use discord::markup::{Entity, Span};
-    match span {
-        Span::Entity(Entity::User(id)) => vec![*id],
-        Span::Styled(_, children) | Span::Link { children, .. } => {
-            children.iter().flat_map(collect_user_mentions).collect()
-        }
-        _ => Vec::new(),
-    }
+    std::iter::once(span)
+        .chain(span.descendants())
+        .filter_map(|span| match span {
+            Span::Entity(Entity::User(id)) => Some(*id),
+            _ => None,
+        })
+        .collect()
 }
 
 pub(super) fn parse_time(timestamp: &str) -> Option<glib::DateTime> {
@@ -756,14 +910,31 @@ pub(super) fn format_time(time: &glib::DateTime) -> String {
     time.format(pattern).map(String::from).unwrap_or_default()
 }
 
+/// When a forwarded message was first sent: the time today, the day this
+/// week, else the date.
+fn forward_time(time: &glib::DateTime) -> String {
+    let Ok(now) = glib::DateTime::now_local() else { return String::new() };
+    let days = now.difference(time).as_seconds() / 86_400;
+    let pattern = if now.ymd() == time.ymd() {
+        "%H:%M"
+    } else if now.add_days(-1).is_ok_and(|yesterday| yesterday.ymd() == time.ymd()) {
+        "Yesterday at %H:%M"
+    } else if days < 7 {
+        "%A"
+    } else {
+        "%Y-%m-%d"
+    };
+    time.format(pattern).map(String::from).unwrap_or_default()
+}
+
 pub(super) fn is_grouped(message: &Message, previous: Option<&Message>) -> bool {
-    let Some(previous) = previous else { return false };
+    let Some(previous) = previous.filter(|p| p.is_user_message()) else { return false };
     // A reply always shows what it answers, under a full header.
     if previous.author.id != message.author.id || message.reply_to().is_some() {
         return false;
     }
     match (parse_time(&previous.timestamp), parse_time(&message.timestamp)) {
-        (Some(a), Some(b)) => b.difference(&a).as_seconds() < GROUP_WINDOW_SECS,
+        (Some(a), Some(b)) => b.difference(&a).as_seconds() < GROUP_WINDOW_SECS && a.ymd() == b.ymd(),
         _ => false,
     }
 }
@@ -781,7 +952,12 @@ impl App {
         while let Some(child) = row.first_child() {
             row.remove(&child);
         }
-        let grouped = is_grouped(message, previous);
+        let kind = self.message_kind(message);
+        if kind == Kind::Hidden {
+            row.set_visible(false);
+            return;
+        }
+        let grouped = kind == Kind::Normal && is_grouped(message, previous);
         let mut classes = vec!["message"];
         if !grouped {
             classes.push("first");
@@ -799,14 +975,21 @@ impl App {
 
         let main = gtk::Box::builder().spacing(16).css_classes(["message-main"]).build();
         let gutter = gtk::Box::builder().width_request(40).valign(gtk::Align::Start).build();
-        if !grouped {
+        if let Kind::System(system) = &kind {
+            gutter.append(&gtk::Image::builder().icon_name(system_icon(system.icon)).halign(gtk::Align::End).build());
+        } else if !grouped {
             gutter.append(&avatar_widget(&message.author, 40, Some(&self.images)));
         }
         main.append(&gutter);
 
         let names = self.message_names(message);
         let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).hexpand(true).build();
-        if !grouped {
+        if let Kind::System(system) = &kind {
+            body.append(&self.system_line(message, system));
+            if let Some(outcome) = discord::poll::outcome(message) {
+                body.append(&polls::outcome(&outcome, &self.images));
+            }
+        } else if !grouped {
             let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             header.append(
                 &gtk::Label::builder()
@@ -819,43 +1002,8 @@ impl App {
             header.append(&gtk::Label::builder().label(time).css_classes(["caption", "dimmed"]).build());
             body.append(&header);
         }
-        let media = self.state.borrow().media;
-        let edited = message.edited_timestamp.is_some();
-        let embeds = discord::embed::visible(message, &media);
-        if discord::embed::hides_content(&message.content, &embeds, media.inline_embed_media) {
-            // A bare GIF or image link: the media below stands for it.
-        } else if !message.content.is_empty() {
-            body.append(&render::render(&discord::markup::parse(&message.content), &names, edited));
-        } else if edited {
-            body.append(&render::render(&[], &names, edited));
-        }
-        for attachment in message.attachments.iter().filter(|a| !a.is_hidden()) {
-            if attachment.is_image() && media.inline_attachment_media {
-                let autoplay = media.gif_auto_play;
-                if attachment.is_spoiler() {
-                    let (attachment, images) = (attachment.clone(), self.images.clone());
-                    body.append(&behind_spoiler(move || image_attachment(&attachment, &images, autoplay)));
-                } else {
-                    body.append(&image_attachment(attachment, &self.images, autoplay));
-                }
-                continue;
-            }
-            let markup = format!(
-                "<a href=\"{}\">📎 {}</a>",
-                glib::markup_escape_text(&attachment.url),
-                glib::markup_escape_text(&attachment.filename)
-            );
-            body.append(&gtk::Label::builder().use_markup(true).label(markup).xalign(0.0).build());
-        }
-        // A link in a spoiler covers all the message's embeds, as in Discord.
-        let spoilered = discord::embed::has_spoilered_link(&message.content);
-        for embed in embeds {
-            if spoilered {
-                let (names, images) = (names.clone(), self.images.clone());
-                body.append(&behind_spoiler(move || embed_widget(&embed, &names, Some(&images), &media)));
-            } else {
-                body.append(&embed_widget(&embed, &names, Some(&self.images), &media));
-            }
+        if kind == Kind::Normal {
+            self.message_content(&body, message, &names);
         }
         main.append(&body);
 
@@ -888,6 +1036,156 @@ impl App {
         } else {
             row.append(&main);
         }
+    }
+
+    /// The spoilers revealed in a message's text, remembered while the app
+    /// runs as its row is rebuilt.
+    fn spoilers(self: &Rc<Self>, message: Snowflake) -> Spoilers {
+        let revealed = self.state.borrow().revealed_spoilers.get(&message).cloned().unwrap_or_default();
+        let this = Rc::downgrade(self);
+        let on_reveal = move |n| {
+            if let Some(this) = this.upgrade() {
+                this.state.borrow_mut().revealed_spoilers.entry(message).or_default().insert(n);
+            }
+        };
+        Spoilers { revealed, on_reveal: Rc::new(on_reveal) }
+    }
+
+    /// What a message says, and shows: its text, attachments and embeds.
+    fn message_content(self: &Rc<Self>, body: &gtk::Box, message: &Message, names: &Names) {
+        let media = self.state.borrow().media;
+        let edited = message.edited_timestamp.is_some();
+        let embeds = discord::embed::visible(message, &media);
+        let spans = message.markup();
+        let cx = Context {
+            spoilers: Some(self.spoilers(message.id)),
+            jumbo: discord::markup::is_jumbo(&spans),
+            ..Context::new(names, Some(&self.images))
+        };
+        if discord::embed::hides_content(&message.content, &embeds, media.inline_embed_media) {
+            // A bare GIF or image link: the media below stands for it.
+        } else if !message.content.is_empty() {
+            body.append(&render::render(&spans, &cx, edited));
+        } else if edited {
+            body.append(&render::render(&[], &cx, edited));
+        }
+        if let Some(poll) = &message.poll {
+            body.append(&polls::poll(poll, &self.images));
+        }
+        let voice = message.is_voice_message();
+        // A poll's attachments are its answers' images, which the official
+        // client shows with them, not under it.
+        // Nor do messages built from components show theirs: the components do.
+        let shown = message.poll.is_none() && !message.is_components_v2();
+        let attached = message.attachments.iter().filter(|a| !a.is_hidden() && shown);
+        for attachment in attached {
+            body.append(&attachments::attachment(attachment, voice, &self.images, &media));
+        }
+        for sticker in &message.sticker_items {
+            body.append(&attachments::sticker(sticker, &self.images, media.gif_auto_play));
+        }
+        // A link in a spoiler covers all the message's embeds, as in Discord.
+        let spoilered = discord::embed::has_spoilered_link(&message.content);
+        for embed in embeds {
+            if spoilered {
+                let (names, images) = (names.clone(), self.images.clone());
+                body.append(&behind_spoiler(move || embed_widget(&embed, &names, Some(&images), &media)));
+            } else {
+                body.append(&embed_widget(&embed, names, Some(&self.images), &media));
+            }
+        }
+        if !message.components.is_empty() {
+            body.append(&components::components(&message.components, &cx));
+        }
+        if let Some(original) = message.forwarded() {
+            body.append(&self.forward(message, &original, names));
+        }
+    }
+
+    /// A forwarded message, under a bar as quotes are: what it said, and
+    /// where and when it was first sent. Clicking that goes there.
+    fn forward(self: &Rc<Self>, message: &Message, original: &Message, names: &Names) -> gtk::Widget {
+        let bar = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).css_classes(["quote"]).build();
+        let header = gtk::Box::builder().spacing(4).css_classes(["caption", "dimmed"]).build();
+        header.append(&gtk::Image::from_icon_name("mail-forward-symbolic"));
+        header.append(&gtk::Label::new(Some("Forwarded")));
+        bar.append(&header);
+        self.message_content(&bar, original, names);
+
+        // Where it came from, as the official client names it: the channel
+        // if it is in this server, else the server.
+        let origin = {
+            let state = self.state.borrow();
+            let here = state.find_channel(message.channel_id).and_then(|(guild, _)| guild.map(|g| g.id));
+            match state.find_channel(original.channel_id) {
+                Some((Some(guild), channel)) if Some(guild.id) == here => {
+                    channel.name.as_ref().map(|name| format!("#{name}"))
+                }
+                Some((Some(guild), _)) => Some(guild.name.clone()),
+                Some((None, dm)) => Some(dm.title()),
+                None => {
+                    original.guild_id.and_then(|id| state.guilds.iter().find(|g| g.id == id)).map(|g| g.name.clone())
+                }
+            }
+        };
+        let time = parse_time(&original.timestamp).map(|t| forward_time(&t));
+        let footer: Vec<String> = origin.into_iter().chain(time).collect();
+        if !footer.is_empty() {
+            let label = gtk::Label::builder()
+                .label(footer.join(" • "))
+                .xalign(0.0)
+                .css_classes(["caption", "dimmed"])
+                .tooltip_text("Go to the original message")
+                .build();
+            label.set_cursor_from_name(Some("pointer"));
+            let click = gtk::GestureClick::new();
+            click.connect_released({
+                let this = Rc::downgrade(self);
+                let (channel, id) = (original.channel_id, original.id);
+                move |_, _, _, _| {
+                    let Some(this) = this.upgrade() else { return };
+                    if this.state.borrow().channel == Some(channel) {
+                        this.jump_to(channel, id);
+                    } else if this.state.borrow().find_channel(channel).is_some() {
+                        this.open_channel(channel);
+                    }
+                }
+            });
+            label.add_controller(click);
+            bar.append(&label);
+        }
+        bar.upcast()
+    }
+
+    /// How a message shows: as written, as a system message, or not at all.
+    fn message_kind(&self, message: &Message) -> Kind {
+        let state = self.state.borrow();
+        let channel = state.find_channel(message.channel_id);
+        let place = system::Place {
+            me: state.me(),
+            guild_name: channel.and_then(|(guild, _)| guild).map(|g| g.name.as_str()),
+            group: channel.is_some_and(|(_, c)| c.kind == discord::ChannelKind::GroupDm),
+        };
+        system::kind(message, &place)
+    }
+
+    /// A system message's line, and when it happened. Its link to a message
+    /// jumps there.
+    fn system_line(self: &Rc<Self>, message: &Message, system: &system::System) -> gtk::Widget {
+        let time = parse_time(&message.timestamp).map(|t| format_time(&t)).unwrap_or_default();
+        let text = RichText::new(&render::system_markup(&system.parts, &time), Vec::new(), Vec::new());
+        text.label().connect_activate_link({
+            let this = Rc::downgrade(self);
+            let channel = message.channel_id;
+            move |_, uri| {
+                let Some(to) = render::jump_target(uri) else { return glib::Propagation::Proceed };
+                if let Some(this) = this.upgrade() {
+                    this.jump_to(channel, to);
+                }
+                glib::Propagation::Stop
+            }
+        });
+        text.upcast()
     }
 
     /// The line above a reply: who it answers and the start of what they said.
@@ -929,9 +1227,12 @@ impl App {
                 let name = format!("{}{}", if pinged { "@" } else { "" }, original.author.display_name());
                 preview.append(&gtk::Label::builder().label(name).css_classes(["heading"]).build());
                 let names = self.message_names(original);
-                let text = render::plain_text(&discord::markup::parse(&original.content), &names);
+                // A forward reads as what it forwards.
+                let content = original.forwarded().map_or_else(|| original.content.clone(), |f| f.content);
+                let text = render::plain_text(&discord::markup::parse(&content), &names);
                 let text = match text.lines().find(|line| !line.trim().is_empty()) {
                     _ if blocked => "Blocked message".to_owned(),
+                    _ if let Kind::System(system) = self.message_kind(original) => system.text(),
                     Some(line) => line.to_owned(),
                     // The official client's wording for messages with no text.
                     None if !original.sticker_items.is_empty() => "Click to see sticker".to_owned(),
@@ -965,16 +1266,20 @@ impl App {
     }
 }
 
-/// An inline image attachment, scaled to fit a reasonable box.
-fn image_attachment(attachment: &discord::Attachment, images: &crate::images::Images, autoplay: bool) -> gtk::Widget {
-    // The official client's box for a single image attachment.
-    const MAX_W: f64 = 550.0;
-    const MAX_H: f64 = 350.0;
-    let fitted = fitted_picture(attachment.width, attachment.height, MAX_W, MAX_H);
-    fitted.picture.set_css_classes(&["attachment-image"]);
-    // Through the media proxy when we can, which sends it at the size shown.
-    let url = attachment.proxy_url.as_deref().unwrap_or(&attachment.url);
-    let original = attachment.width.zip(attachment.height);
-    images.set_sized(&fitted.picture, url, fitted.size, original, autoplay && attachment.is_animated());
-    fitted.frame.upcast()
+fn system_icon(icon: system::Icon) -> &'static str {
+    use system::Icon;
+    match icon {
+        Icon::Join => "go-next-symbolic",
+        Icon::Leave => "go-previous-symbolic",
+        Icon::Call => "call-start-symbolic",
+        Icon::MissedCall => "call-missed-symbolic",
+        Icon::Pin => "view-pin-symbolic",
+        Icon::Boost => "starred-symbolic",
+        Icon::Edit => "document-edit-symbolic",
+        Icon::Thread => "chat-message-new-symbolic",
+        Icon::Stage => "audio-speakers-symbolic",
+        Icon::Alert => "dialog-warning-symbolic",
+        Icon::Poll => "view-list-bullet-symbolic",
+        Icon::Other => "dialog-information-symbolic",
+    }
 }

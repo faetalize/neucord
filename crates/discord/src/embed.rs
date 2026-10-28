@@ -34,6 +34,8 @@ pub enum EmbedKind {
     /// component previews…), which the official client doesn't draw as cards
     /// either. Not shown.
     Hidden,
+    /// A closed poll's results, which its system message shows.
+    PollResult,
     /// Anything else (`tweet`, `text`, newer types): a plain card, as in the
     /// official client.
     Other,
@@ -49,6 +51,7 @@ impl<'de> Deserialize<'de> for EmbedKind {
             "article" => Self::Article,
             "link" => Self::Link,
             "audio" => Self::Audio,
+            "poll_result" => Self::PollResult,
             "auto_moderation_message"
             | "auto_moderation_notification"
             | "age_verification_system_notification"
@@ -57,7 +60,6 @@ impl<'de> Deserialize<'de> for EmbedKind {
             | "safety_policy_notice"
             | "safety_system_notification"
             | "voice_channel"
-            | "poll_result"
             | "gift"
             | "components" => Self::Hidden,
             _ => Self::Other,
@@ -337,17 +339,17 @@ pub fn merge(embeds: &[Embed]) -> Vec<Embed> {
     merged
 }
 
-/// Message types people write, the only ones whose embeds show.
-const USER_MESSAGES: [u8; 9] = [0, 19, 20, 23, 26, 41, 45, 47, 68];
-
 /// The embeds of `message` to show, merged, given the viewer's settings.
 /// The `SUPPRESS_EMBEDS` flag is honoured too, though Discord already
 /// removes the embeds of such messages.
 pub fn visible(message: &Message, settings: &MediaSettings) -> Vec<Embed> {
-    if message.embeds_suppressed() || !settings.render_embeds || !USER_MESSAGES.contains(&message.kind) {
+    if message.embeds_suppressed() || !settings.render_embeds || !message.is_user_message() {
         return Vec::new();
     }
-    merge(&message.embeds).into_iter().filter(|e| e.kind != EmbedKind::Hidden).collect()
+    merge(&message.embeds)
+        .into_iter()
+        .filter(|e| !matches!(e.kind, EmbedKind::Hidden | EmbedKind::PollResult))
+        .collect()
 }
 
 /// Whether the content puts any link inside a spoiler. The official client
@@ -357,7 +359,8 @@ pub fn has_spoilered_link(content: &str) -> bool {
         spans.iter().any(|span| match span {
             Span::Styled(style, children) => walk(children, in_spoiler || *style == Style::Spoiler),
             Span::Link { children, .. } => in_spoiler || walk(children, in_spoiler),
-            _ => false,
+            Span::List { items, .. } => items.iter().any(|item| walk(item, in_spoiler)),
+            other => walk(other.children(), in_spoiler),
         })
     }
     walk(&crate::markup::parse(content), false)
@@ -565,7 +568,7 @@ mod tests {
 
     #[test]
     fn kinds() {
-        assert_eq!(embed(json!({"type": "poll_result"})).kind, EmbedKind::Hidden);
+        assert_eq!(embed(json!({"type": "poll_result"})).kind, EmbedKind::PollResult);
         assert_eq!(embed(json!({"type": "tweet"})).kind, EmbedKind::Other);
         assert_eq!(embed(json!({})).kind, EmbedKind::Rich);
     }

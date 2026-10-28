@@ -1,6 +1,7 @@
 // Compare two snapshots and write the report: first what touches Neucord
 // (calls it makes, headers on every request, events it handles, enum values
-// it may rely on, rules it copies), then a summary of everything else.
+// it may rely on, rules and values it copies), then a summary of everything
+// else.
 
 import { endpointsFor } from "./uses.mjs";
 
@@ -85,6 +86,15 @@ export function compare(old, cur, uses) {
     const [before, after] = [old.methods?.[name], cur.methods?.[name]];
     if (!old.methods || same(before, after)) continue;
     affects.push(`- ${code(name)}: the client's rule changed\n  - was: ${rule(before)}\n  - now: ${rule(after)}`);
+  }
+
+  // The constants in watch.json are values Neucord copies, such as how
+  // many emoji a message can be and still show them large.
+  const value = (values) => (values?.length ? values.map((v) => code(JSON.stringify(v))).join(" | ") : "not found");
+  for (const name of Object.keys({ ...old.constants, ...cur.constants }).sort()) {
+    const [before, after] = [old.constants?.[name], cur.constants?.[name]];
+    if (!old.constants || same(before, after)) continue;
+    affects.push(`- ${code(name)}: the client's value changed\n  - was: ${value(before)}\n  - now: ${value(after)}`);
   }
 
   const additions = [];

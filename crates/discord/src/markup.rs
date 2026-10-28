@@ -1,9 +1,9 @@
 //! Parse Discord's message markup into a span tree the UI renders.
 //!
 //! Supports: bold, italic, underline, strikethrough, spoiler, inline code,
-//! fenced/indented code blocks, block quotes, links, and the `<...>` entities
-//! (user / channel / role / custom emoji / timestamp). Headings and lists are
-//! left as plain text for now.
+//! fenced code blocks, block quotes, headings, subtext, lists, links, and
+//! the `<...>` entities (user / channel / role / custom emoji / timestamp).
+//! Block rules follow the official client's.
 
 /// A rendered span. Styles nest, so `Styled` carries children.
 #[derive(Debug, Clone, PartialEq)]
@@ -26,6 +26,50 @@ pub enum Span {
     Entity(Entity),
     /// A hard line break.
     Break,
+    /// `# `, `## ` or `### ` at the start of a line.
+    Heading {
+        level: u8,
+        children: Vec<Span>,
+    },
+    /// `-# ` at the start of a line: small print.
+    Subtext(Vec<Span>),
+    /// Lines starting `- `, `* ` or `1. `. Each item may hold blocks,
+    /// nested lists among them.
+    List {
+        /// The first number of a numbered list.
+        start: Option<u32>,
+        items: Vec<Vec<Span>>,
+    },
+}
+
+impl Span {
+    /// The spans directly inside this one, list items' included.
+    pub fn children(&self) -> &[Span] {
+        match self {
+            Span::Styled(_, children)
+            | Span::Link { children, .. }
+            | Span::Heading { children, .. }
+            | Span::Subtext(children) => children,
+            _ => &[],
+        }
+    }
+
+    /// Every span inside this one, at any depth.
+    pub fn descendants(&self) -> Vec<&Span> {
+        let mut out = Vec::new();
+        let mut stack: Vec<&Span> = vec![self];
+        while let Some(span) = stack.pop() {
+            let children: Box<dyn Iterator<Item = &Span>> = match span {
+                Span::List { items, .. } => Box::new(items.iter().flatten()),
+                other => Box::new(other.children().iter()),
+            };
+            for child in children {
+                out.push(child);
+                stack.push(child);
+            }
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,45 +103,73 @@ pub enum Entity {
 
 /// Parse a whole message body.
 pub fn parse(input: &str) -> Vec<Span> {
-    let mut blocks = Vec::new();
-    let mut rest = input;
-    // Code blocks and quotes are line/region structures, handled before inline.
-    while !rest.is_empty() {
-        if let Some((block, after)) = take_code_block(rest) {
-            blocks.push(block);
-            rest = after;
-        } else if let Some((block, after)) = take_quote(rest) {
-            blocks.push(block);
-            rest = after;
-        } else {
-            // Consume up to the next code fence or quote, inline-parse it.
-            let end = next_block_boundary(rest);
-            let (chunk, after) = rest.split_at(end);
-            blocks.extend(parse_inline(chunk));
-            rest = after;
-        }
-    }
-    blocks
+    parse_with(input, true)
 }
 
-/// Where the next ``` fence or line-start `> ` begins, or the end.
-fn next_block_boundary(s: &str) -> usize {
-    let mut at_line_start = true;
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if at_line_start {
-            if s[i..].starts_with("```") {
-                return i;
-            }
-            if s[i..].starts_with("> ") || s[i..].starts_with(">>> ") {
-                return i;
+/// Parse a message body, with headings and lists only if `headings`:
+/// messages from before Discord had them show them as typed.
+pub fn parse_with(input: &str, headings: bool) -> Vec<Span> {
+    Blocks { headings, lists: headings, quotes: true, depth: 0 }.parse(input)
+}
+
+/// Lists nest at most this deep; deeper, the markers are text.
+const MAX_LIST_DEPTH: u8 = 10;
+
+/// Which block rules apply where: not quotes in quotes, nor headings in lists.
+#[derive(Clone, Copy)]
+struct Blocks {
+    headings: bool,
+    lists: bool,
+    quotes: bool,
+    depth: u8,
+}
+
+impl Blocks {
+    fn parse(self, input: &str) -> Vec<Span> {
+        let mut blocks = Vec::new();
+        let mut rest = input;
+        // Blocks start at the start of a line; the text between is inline.
+        while !rest.is_empty() {
+            if let Some((block, after)) = self.take_block(rest) {
+                blocks.push(block);
+                rest = after;
+            } else {
+                let end = self.next_block(rest);
+                let (chunk, after) = rest.split_at(end);
+                blocks.extend(parse_inline(chunk));
+                rest = after;
             }
         }
-        at_line_start = bytes[i] == b'\n';
-        i += 1;
+        blocks
     }
-    s.len()
+
+    fn take_block(self, s: &str) -> Option<(Span, &str)> {
+        take_code_block(s)
+            .or_else(|| self.quotes.then(|| take_quote(s, self)).flatten())
+            .or_else(|| self.headings.then(|| take_heading(s)).flatten())
+            .or_else(|| take_subtext(s))
+            .or_else(|| self.lists.then(|| take_list(s, self)).flatten())
+    }
+
+    /// Where the next line that starts a block begins, or the end.
+    fn next_block(self, s: &str) -> usize {
+        let mut line_start = s.find('\n').map(|i| i + 1);
+        while let Some(start) = line_start.filter(|&i| i < s.len()) {
+            if self.take_block(&s[start..]).is_some() {
+                return start;
+            }
+            line_start = s[start..].find('\n').map(|i| start + i + 1);
+        }
+        s.len()
+    }
+}
+
+/// The first line of `s`, and what follows its newline.
+fn split_line(s: &str) -> (&str, &str) {
+    match s.split_once('\n') {
+        Some((line, after)) => (line, after),
+        None => (s, ""),
+    }
 }
 
 fn take_code_block(s: &str) -> Option<(Span, &str)> {
@@ -108,8 +180,7 @@ fn take_code_block(s: &str) -> Option<(Span, &str)> {
     // First line is a language tag only if it is a single bare word.
     let (lang, code) = match inner.split_once('\n') {
         Some((first, rest))
-            if !first.is_empty()
-                && first.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '#') =>
+            if !first.is_empty() && first.chars().all(|c| c.is_ascii_alphanumeric() || "+-#._".contains(c)) =>
         {
             (Some(first.to_string()), rest)
         }
@@ -119,10 +190,11 @@ fn take_code_block(s: &str) -> Option<(Span, &str)> {
     Some((Span::CodeBlock { lang, code: code.trim_end_matches('\n').to_string() }, after))
 }
 
-fn take_quote(s: &str) -> Option<(Span, &str)> {
+fn take_quote(s: &str, blocks: Blocks) -> Option<(Span, &str)> {
+    let inner = Blocks { quotes: false, ..blocks };
     if let Some(rest) = s.strip_prefix(">>> ") {
         // Multiline quote: everything to the end.
-        return Some((Span::Styled(Style::Quote, parse_inline(rest)), ""));
+        return Some((Span::Styled(Style::Quote, inner.parse(rest)), ""));
     }
     if !s.starts_with("> ") {
         return None;
@@ -140,7 +212,266 @@ fn take_quote(s: &str) -> Option<(Span, &str)> {
         }
     }
     let after = &s[consumed..];
-    Some((Span::Styled(Style::Quote, parse_inline(quoted.trim_end_matches('\n'))), after))
+    Some((Span::Styled(Style::Quote, inner.parse(quoted.trim_end_matches('\n'))), after))
+}
+
+/// `#`, `##` or `###`, then space, at the start of `s` (after spaces).
+/// Returns the level and what follows the space.
+fn heading_marker(s: &str) -> Option<(u8, &str)> {
+    let hashes = s.bytes().take_while(|&b| b == b'#').count();
+    let rest = &s[hashes..];
+    ((1..=3).contains(&hashes) && rest.starts_with(char::is_whitespace)).then_some((hashes as u8, rest))
+}
+
+fn take_heading(s: &str) -> Option<(Span, &str)> {
+    let (line, after) = split_line(s);
+    let (level, rest) = heading_marker(line.trim_start_matches(' '))?;
+    let text = rest.trim();
+    // `# # x` is not a heading of `# x`.
+    if heading_marker(text).is_some() {
+        return None;
+    }
+    // Closing hashes are dropped, but the text keeps at least a character.
+    let text = match text.trim_end_matches('#') {
+        "" => &text[..1.min(text.len())],
+        trimmed => trimmed.trim_end(),
+    };
+    if text.is_empty() {
+        return None;
+    }
+    Some((Span::Heading { level, children: parse_inline(text) }, after))
+}
+
+fn take_subtext(s: &str) -> Option<(Span, &str)> {
+    let (line, after) = split_line(s);
+    let rest = line.trim_start_matches(' ').strip_prefix("-#")?;
+    let text = rest.strip_prefix(' ')?.trim_start_matches(' ');
+    if text.is_empty() || text.starts_with("-#") {
+        return None;
+    }
+    Some((Span::Subtext(parse_inline(text)), after))
+}
+
+/// A list marker and its space at the start of `s`: its length, and the
+/// number of a numbered one.
+fn list_marker(s: &str) -> Option<(usize, Option<u32>)> {
+    let digits = s.bytes().take_while(u8::is_ascii_digit).count();
+    let (len, number) = if digits > 0 && s[digits..].starts_with('.') {
+        // Numbers past a billion are clamped, as are those below one.
+        let number = s[..digits].parse::<u64>().unwrap_or(u64::MAX).clamp(1, 1_000_000_000) as u32;
+        (digits + 1, Some(number))
+    } else if s.starts_with(['-', '*']) {
+        (1, None)
+    } else {
+        return None;
+    };
+    s[len..].starts_with(' ').then_some((len + 1, number))
+}
+
+fn take_list(s: &str, blocks: Blocks) -> Option<(Span, &str)> {
+    if blocks.depth >= MAX_LIST_DEPTH {
+        return None;
+    }
+    let indent = s.bytes().take_while(|&b| b == b' ').count();
+    let (_, start) = list_marker(&s[indent..])?;
+    // The list runs on through lines that are indented, or that start
+    // another item at its own indent.
+    let at_item = |line: &str| {
+        line.get(..indent).is_some_and(|i| i.bytes().all(|b| b == b' ')) && list_marker(&line[indent..]).is_some()
+    };
+    let mut end = 0;
+    // Each item's text, and how far its text is indented.
+    let mut items: Vec<(String, usize)> = Vec::new();
+    for (n, line) in s.split_inclusive('\n').enumerate() {
+        let item_start = at_item(line);
+        if n > 0 && !line.starts_with(' ') && !item_start {
+            break;
+        }
+        end += line.len();
+        if item_start {
+            let (marker, _) = list_marker(&line[indent..]).expect("checked");
+            items.push((line[indent + marker..].to_owned(), indent + marker));
+        } else if let Some((item, offset)) = items.last_mut() {
+            // Lines under an item belong to it, indented as if it started
+            // at the margin.
+            let spaces = line.len() - line.trim_start_matches(' ').len();
+            item.push_str(&line[spaces.min(*offset)..]);
+        }
+    }
+    let inner = Blocks { headings: false, quotes: false, depth: blocks.depth + 1, ..blocks };
+    let items = items.iter().map(|(item, _)| inner.parse(item.trim_end_matches('\n'))).collect();
+    Some((Span::List { start, items }, &s[end..]))
+}
+
+/// The language a code block's tag names, by the official client's
+/// aliases: `js` is `javascript`, `rs` is `rust`, …. Other tags are
+/// returned lowercased.
+pub fn code_language(tag: &str) -> String {
+    let tag = tag.to_ascii_lowercase();
+    let name = match tag.as_str() {
+        "js" | "mjs" | "cjs" | "jsx" | "node" => "javascript",
+        "ts" | "mts" | "cts" => "typescript",
+        "py" | "gyp" => "python",
+        "rs" => "rust",
+        "cs" | "csharp" | "c#" => "c-sharp",
+        "h" | "hpp" | "cc" | "cxx" | "c++" => "cpp",
+        "yml" => "yaml",
+        "sh" | "shell" | "console" => "bash",
+        "kt" => "kotlin",
+        "rb" => "ruby",
+        "golang" => "go",
+        "md" => "markdown",
+        "jsonc" => "json",
+        "htm" | "xhtml" | "hbs" | "erb" => "html",
+        "svg" | "xsl" | "rss" => "xml",
+        "less" => "css",
+        "ps1" | "pwsh" => "powershell",
+        "tf" => "hcl",
+        "ex" | "exs" => "elixir",
+        "hs" => "haskell",
+        "patch" => "diff",
+        "pgsql" | "postgres" => "sql",
+        _ => return tag,
+    };
+    name.to_owned()
+}
+
+/// The most emoji a message can be and still show them large.
+pub const JUMBO_MAX: usize = 30;
+
+/// Whether a message's spans are nothing but emoji (custom or Unicode) and
+/// whitespace, few enough that the official client shows them large.
+pub fn is_jumbo(spans: &[Span]) -> bool {
+    let mut count = 0;
+    for span in spans {
+        count += match span {
+            Span::Entity(Entity::Emoji { .. }) => 1,
+            Span::Text(text) => match emoji_count(text) {
+                Some(n) => n,
+                None => return false,
+            },
+            Span::Break => 0,
+            _ => return false,
+        };
+    }
+    (1..=JUMBO_MAX).contains(&count)
+}
+
+/// How many emoji `text` is, if it is nothing but emoji and whitespace. A
+/// sequence (a flag, a keycap, skin tones, people joined into a family)
+/// counts once.
+pub fn emoji_count(text: &str) -> Option<usize> {
+    const VS16: char = '\u{FE0F}';
+    const ZWJ: char = '\u{200D}';
+    const KEYCAP: char = '\u{20E3}';
+    let regional = |c: char| ('\u{1F1E6}'..='\u{1F1FF}').contains(&c);
+    let modifier = |c: char| ('\u{1F3FB}'..='\u{1F3FF}').contains(&c) || ('\u{E0020}'..='\u{E007F}').contains(&c);
+    let mut chars = text.chars().peekable();
+    let mut count = 0;
+    while let Some(c) = chars.next() {
+        if c.is_whitespace() {
+            continue;
+        }
+        count += 1;
+        if regional(c) {
+            chars.next_if(|&c| regional(c));
+            continue;
+        }
+        if c.is_ascii_digit() || c == '#' || c == '*' {
+            chars.next_if_eq(&VS16);
+            chars.next_if_eq(&KEYCAP)?;
+            continue;
+        }
+        let mut presentation = !text_default(c);
+        if !pictographic(c) {
+            return None;
+        }
+        loop {
+            if chars.next_if(|&c| c == VS16 || modifier(c)).is_some() {
+                presentation = true;
+            } else if chars.next_if_eq(&ZWJ).is_some() {
+                chars.next_if(|&c| pictographic(c))?;
+            } else {
+                break;
+            }
+        }
+        if !presentation {
+            return None;
+        }
+    }
+    Some(count)
+}
+
+/// Characters that are emoji (close to Unicode's Extended_Pictographic).
+fn pictographic(c: char) -> bool {
+    matches!(c as u32,
+        0xA9 | 0xAE | 0x203C | 0x2049 | 0x2122 | 0x2139 | 0x2194..=0x21AA | 0x231A..=0x23FF | 0x24C2
+        | 0x25AA..=0x25FE | 0x2600..=0x27BF | 0x2934..=0x2935 | 0x2B05..=0x2B55 | 0x3030 | 0x303D | 0x3297
+        | 0x3299 | 0x1F000..=0x1FAFF)
+}
+
+/// Emoji that are text unless a variation selector makes them emoji.
+fn text_default(c: char) -> bool {
+    matches!(
+        c as u32,
+        0xA9 | 0xAE | 0x203C | 0x2049 | 0x2122 | 0x2139 | 0x2194..=0x21AA | 0x24C2 | 0x3030 | 0x303D | 0x3297 | 0x3299
+    )
+}
+
+/// A stretch of an `ansi` code block, and how its escape codes style it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Ansi {
+    pub text: String,
+    pub bold: bool,
+    pub underline: bool,
+    /// One of the eight colours, 0 to 7 (codes 30 to 37 and 40 to 47).
+    pub foreground: Option<u8>,
+    pub background: Option<u8>,
+}
+
+/// Split an `ansi` code block by the escape codes in it (`ESC[1;31m`),
+/// which are dropped. Unknown codes change nothing.
+pub fn ansi(code: &str) -> Vec<Ansi> {
+    let mut out: Vec<Ansi> = Vec::new();
+    let mut current = Ansi::default();
+    let mut rest = code;
+    while !rest.is_empty() {
+        let Some(escape) = rest.find("\u{1b}[") else {
+            current.text.push_str(rest);
+            break;
+        };
+        current.text.push_str(&rest[..escape]);
+        let after = &rest[escape + 2..];
+        let Some(end) = after.find(|c: char| !(c.is_ascii_digit() || c == ';')) else {
+            break;
+        };
+        if !after[end..].starts_with('m') {
+            // Not a style code: keep it as text.
+            current.text.push_str(&rest[escape..escape + 2]);
+            rest = after;
+            continue;
+        }
+        let mut next = Ansi { text: String::new(), ..current.clone() };
+        for code in after[..end].split(';') {
+            match code.parse::<u8>().unwrap_or(0) {
+                0 => next = Ansi::default(),
+                1 => next.bold = true,
+                4 => next.underline = true,
+                n @ 30..=37 => next.foreground = Some(n - 30),
+                n @ 40..=47 => next.background = Some(n - 40),
+                _ => {}
+            }
+        }
+        if !current.text.is_empty() {
+            out.push(std::mem::take(&mut current));
+        }
+        current = next;
+        rest = &after[end + 1..];
+    }
+    if !current.text.is_empty() {
+        out.push(current);
+    }
+    out
 }
 
 /// Inline markup within a block of text.
@@ -380,6 +711,48 @@ mod tests {
     }
 
     #[test]
+    fn code_languages() {
+        assert_eq!(code_language("JS"), "javascript");
+        assert_eq!(code_language("c++"), "cpp");
+        assert_eq!(code_language("Rust"), "rust");
+        assert_eq!(code_language("brainfuck"), "brainfuck");
+    }
+
+    #[test]
+    fn emoji_only() {
+        assert_eq!(emoji_count("😀 👍🏽"), Some(2));
+        assert_eq!(emoji_count("👨‍👩‍👧 🇫🇷 1️⃣ ❤️ ❤"), Some(5), "family, flag, keycap, heart with and without VS16");
+        assert_eq!(emoji_count("😀 a"), None);
+        assert_eq!(emoji_count("1"), None);
+        assert_eq!(emoji_count("©"), None, "text unless asked to be emoji");
+        assert_eq!(emoji_count("©️"), Some(1));
+        assert_eq!(emoji_count("  "), Some(0));
+
+        assert!(is_jumbo(&parse("<:blob:1> 😀\n<a:spin:2>")));
+        assert!(!is_jumbo(&parse("<:blob:1> hi")));
+        assert!(!is_jumbo(&parse("**😀**")));
+        assert!(!is_jumbo(&parse(" ")));
+        assert!(is_jumbo(&parse(&"😀".repeat(JUMBO_MAX))));
+        assert!(!is_jumbo(&parse(&"😀".repeat(JUMBO_MAX + 1))));
+    }
+
+    #[test]
+    fn ansi_codes() {
+        let plain = |text: &str| Ansi { text: text.into(), ..Default::default() };
+        assert_eq!(ansi("plain"), vec![plain("plain")]);
+        assert_eq!(
+            ansi("a\u{1b}[1;31mred\u{1b}[0m b \u{1b}[4;44mc"),
+            vec![
+                plain("a"),
+                Ansi { text: "red".into(), bold: true, foreground: Some(1), ..Default::default() },
+                plain(" b "),
+                Ansi { text: "c".into(), underline: true, background: Some(4), ..Default::default() },
+            ]
+        );
+        assert_eq!(ansi("x\u{1b}[2Jy"), vec![plain("x\u{1b}[2Jy")], "only style codes are read");
+    }
+
+    #[test]
     fn code_block_without_lang() {
         assert_eq!(parse("```\njust text\n```"), vec![Span::CodeBlock { lang: None, code: "just text".into() }]);
     }
@@ -440,5 +813,81 @@ mod tests {
         assert_eq!(spans.len(), 6);
         assert_eq!(spans[0], text("hey "));
         assert_eq!(spans[1], Span::Entity(Entity::User(5)));
+    }
+
+    fn heading(level: u8, s: &str) -> Span {
+        Span::Heading { level, children: vec![text(s)] }
+    }
+
+    #[test]
+    fn headings() {
+        assert_eq!(parse("# Big"), vec![heading(1, "Big")]);
+        assert_eq!(parse("## Mid ##\nafter"), vec![heading(2, "Mid"), text("after")]);
+        assert_eq!(parse("before\n  ### Small"), vec![text("before"), Span::Break, heading(3, "Small")]);
+        assert_eq!(parse("#### four"), vec![text("#### four")]);
+        assert_eq!(parse("#no space"), vec![text("#no space")]);
+        assert_eq!(parse("# # x"), vec![text("# # x")]);
+        assert_eq!(parse("a # b"), vec![text("a # b")], "only at the start of a line");
+        assert_eq!(parse_with("# old", false), vec![text("# old")], "older messages show the hashes");
+    }
+
+    #[test]
+    fn subtext() {
+        assert_eq!(
+            parse("-# small *print*\nnext"),
+            vec![Span::Subtext(vec![text("small "), Span::Styled(Style::Italic, vec![text("print")])]), text("next"),]
+        );
+        assert_eq!(parse("-#nospace"), vec![text("-#nospace")]);
+        assert_eq!(parse("-# -# twice"), vec![text("-# -# twice")]);
+    }
+
+    #[test]
+    fn lists() {
+        assert_eq!(
+            parse("- a\n* b\nafter"),
+            vec![Span::List { start: None, items: vec![vec![text("a")], vec![text("b")]] }, text("after"),]
+        );
+        assert_eq!(
+            parse("3. three\n9. four"),
+            vec![Span::List { start: Some(3), items: vec![vec![text("three")], vec![text("four")]] }]
+        );
+        assert_eq!(parse("0. zero"), vec![Span::List { start: Some(1), items: vec![vec![text("zero")]] }]);
+        assert_eq!(parse("-not a list"), vec![text("-not a list")]);
+        assert_eq!(parse_with("- old", false), vec![text("- old")]);
+    }
+
+    #[test]
+    fn nested_lists() {
+        let list = |items: Vec<Vec<Span>>| Span::List { start: None, items };
+        assert_eq!(
+            parse("- a\n  - b\n  - c\n- d"),
+            vec![list(vec![
+                vec![text("a"), Span::Break, list(vec![vec![text("b")], vec![text("c")]])],
+                vec![text("d")],
+            ])]
+        );
+        // Continued lines stay in their item; headings don't apply inside.
+        assert_eq!(parse("- a\n  # b"), vec![list(vec![vec![text("a"), Span::Break, text("# b")]])]);
+        // Lists stop nesting at some depth.
+        let deep: String = (0..12).map(|depth| format!("{}- x\n", "  ".repeat(depth))).collect();
+        let mut depth = 0;
+        let mut span = &parse(&deep)[0];
+        while let Some(inner) = span.descendants().into_iter().find(|s| matches!(s, Span::List { .. })) {
+            depth += 1;
+            span = inner;
+        }
+        assert_eq!(depth + 1, MAX_LIST_DEPTH as usize);
+    }
+
+    #[test]
+    fn blocks_in_quotes() {
+        assert_eq!(
+            parse("> # title\n> - item"),
+            vec![Span::Styled(
+                Style::Quote,
+                vec![heading(1, "title"), Span::List { start: None, items: vec![vec![text("item")]] }]
+            )]
+        );
+        assert_eq!(parse("> > a"), vec![Span::Styled(Style::Quote, vec![text("> a")])], "no quotes in quotes");
     }
 }

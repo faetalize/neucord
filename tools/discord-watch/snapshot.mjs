@@ -1,9 +1,9 @@
 // Distil a build into what a third-party client depends on: REST endpoint
 // paths, the fields each REST call sends, the headers added to every
 // request, the gateway events the client handles and the payload fields it
-// reads, and the enums and methods named in watch.json. Minified names are
-// dropped, so snapshots of two builds differ only where Discord changed
-// something.
+// reads, and the enums, methods and constants named in watch.json. Minified
+// names are dropped, so snapshots of two builds differ only where Discord
+// changed something.
 
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -170,6 +170,21 @@ function normalized(source, fn) {
   return text.replace(/\s*([^\w\s$])\s*/g, "$1").replace(/\s+/g, " ");
 }
 
+/** A constant's value: a literal, or an array or `new Set([…])` of them
+ * (a set sorted, as its order means nothing). Undefined for anything else. */
+function constantOf(node) {
+  if (node?.type === "Literal") return node.value;
+  const literals = (array) =>
+    array?.type === "ArrayExpression" && array.elements.every((e) => e?.type === "Literal")
+      ? array.elements.map((e) => e.value)
+      : undefined;
+  if (node?.type === "ArrayExpression") return literals(node);
+  if (node?.type === "NewExpression" && node.callee.type === "Identifier" && node.callee.name === "Set") {
+    return literals(node.arguments[0])?.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  }
+  return undefined;
+}
+
 /** Sort object keys recursively, so the JSON is stable across runs. */
 function sorted(value) {
   if (Array.isArray(value)) return value.map(sorted);
@@ -191,6 +206,7 @@ export async function snapshot(dir) {
   const headers = new Set();
   const enums = new Map(Object.keys(WATCH.enums).map((name) => [name, new Set()]));
   const methods = new Map(WATCH.methods.map((name) => [name, new Set()]));
+  const constants = new Map(WATCH.constants.map((name) => [name, new Set()]));
   let modules = 0;
   let unparsed = 0;
 
@@ -208,7 +224,15 @@ export async function snapshot(dir) {
       const body = property.value;
       const text = source.slice(body.start, body.end);
       const isGatewayModule = text.includes('"READY_SUPPLEMENTAL"') && text.includes('"INITIAL_GUILD"');
+      // Constants are named where they are used or exported, and often
+      // defined apart: `MAX: () => c` in the export map, `c = 30` below it.
+      const declared = new Map();
+      const named = [];
       walk(body, (node) => {
+        if (node.type === "VariableDeclarator" && node.id.type === "Identifier" && node.init) {
+          declared.set(node.id.name, node.init);
+        }
+        if (node.type === "Property" && constants.has(keyName(node))) named.push([keyName(node), node.value]);
         if (node.type === "ObjectExpression" && node.properties.length >= 20) {
           const paths = {};
           for (const p of node.properties) {
@@ -284,6 +308,14 @@ export async function snapshot(dir) {
           }
         }
       });
+      for (const [name, value] of named) {
+        const target =
+          value.type === "ArrowFunctionExpression" && value.body.type === "Identifier"
+            ? declared.get(value.body.name)
+            : value;
+        const found = constantOf(target);
+        if (found !== undefined) constants.get(name).add(JSON.stringify(found));
+      }
     }
   }
 
@@ -303,5 +335,6 @@ export async function snapshot(dir) {
     headers: [...headers].sort(),
     enums: Object.fromEntries([...enums].map(([k, v]) => [k, [...v].sort().map((s) => JSON.parse(s))])),
     methods: Object.fromEntries([...methods].map(([k, v]) => [k, [...v].sort()])),
+    constants: Object.fromEntries([...constants].map(([k, v]) => [k, [...v].sort().map((s) => JSON.parse(s))])),
   });
 }

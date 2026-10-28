@@ -66,6 +66,11 @@ impl ReadStates {
         }
     }
 
+    /// The last message we read in `channel`, if we read any.
+    pub fn acked(&self, channel: Snowflake) -> Option<Snowflake> {
+        self.channels.get(&channel)?.acked
+    }
+
     pub fn mentions(&self, channel: Snowflake) -> u32 {
         self.channels.get(&channel).map_or(0, |e| e.mentions)
     }
@@ -90,6 +95,19 @@ impl ReadStates {
     }
 }
 
+/// Whether the message `id` is the first unread one, given the message
+/// before it and the last one read: the "new" divider goes above it.
+pub fn starts_unread(previous: Option<Snowflake>, id: Snowflake, acked: Snowflake) -> bool {
+    id > acked && previous.is_none_or(|previous| previous <= acked)
+}
+
+/// Unread messages among `ids` (oldest first), and whether there may be
+/// more before them: the oldest loaded is unread too.
+pub fn unread_count(ids: &[Snowflake], acked: Snowflake) -> (usize, bool) {
+    let count = ids.iter().filter(|&&id| id > acked).count();
+    (count, ids.first().is_some_and(|&first| first > acked))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +129,20 @@ mod tests {
         assert!(!s.is_unread(Snowflake(3), Some(Snowflake(5))), "no entry counts as read");
         assert!(!s.is_unread(Snowflake(1), None));
         assert_eq!(s.mentions(Snowflake(1)), 2);
+    }
+
+    #[test]
+    fn where_unread_starts() {
+        let acked = Snowflake(10);
+        assert!(starts_unread(Some(Snowflake(10)), Snowflake(11), acked));
+        assert!(starts_unread(None, Snowflake(11), acked), "the oldest loaded");
+        assert!(!starts_unread(Some(Snowflake(11)), Snowflake(12), acked));
+        assert!(!starts_unread(Some(Snowflake(9)), Snowflake(10), acked));
+        let ids = [9, 10, 11, 12].map(Snowflake);
+        assert_eq!(unread_count(&ids, acked), (2, false));
+        assert_eq!(unread_count(&ids[2..], acked), (2, true), "there may be more");
+        assert_eq!(states().acked(Snowflake(1)), Some(Snowflake(100)));
+        assert_eq!(states().acked(Snowflake(2)), None);
     }
 
     #[test]
