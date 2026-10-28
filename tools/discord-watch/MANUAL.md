@@ -84,6 +84,14 @@ changed for unrelated reasons only needs a note in the issue.
   (`requestGuildMembers`). Splitting into 100 users a request and sending
   nothing before the session is established are in the `GUILD_MEMBERS_REQUEST`
   handler of 403010.
+- **How the gateway connects** (`GATEWAY_QUERY` in `identity.rs`,
+  `inflate.rs`). What each compression asks for is watched (`getAlgorithm`,
+  and `usesLegacyCompression` for IDENTIFY's `compress`). Which one the
+  client picks isn't: all in 267041, `F` (anchor
+  `isDiscordGatewayPlaintextSet`) takes the first whose `canUse` holds, and
+  zstd needs the desktop app's `discord_zstd` module (`U` just above), so a
+  browser gets `zlib-stream`. The query is built in `_connect` (anchor
+  `searchParams.append("compress"`): `encoding`, `v`, then `compress`.
 - **A login that must change its password** (`auth::check_required`). The
   login store is watched (`LoginRequiredActionStore`). The forced modal, and
   logging out when it's closed, are in `handleConnectionOpen` in 165685.

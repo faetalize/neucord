@@ -8,8 +8,11 @@ use serde_json::{Value, json};
 /// `tools/discord-watch` reads it from `API_BASE` and reports when the
 /// client moves on.
 pub const API_BASE: &str = "https://discord.com/api/v9";
-pub const GATEWAY_QUERY: &str = "v=9&encoding=json";
-pub const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=9&encoding=json";
+/// The gateway query is the client's too, in its order. It compresses with
+/// `zlib-stream` where it has no zstd, as in every browser; without
+/// `compress` only its debug setting connects (#75).
+pub const GATEWAY_QUERY: &str = "encoding=json&v=9&compress=zlib-stream";
+pub const GATEWAY_URL: &str = "wss://gateway.discord.gg/?encoding=json&v=9&compress=zlib-stream";
 
 const NAME: &str = "Neucord";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -39,7 +42,7 @@ mod tests {
     #[test]
     fn one_api_version_everywhere() {
         let version = API_BASE.rsplit_once("/v").map(|(_, v)| v).unwrap();
-        assert!(GATEWAY_QUERY.starts_with(&format!("v={version}&")));
+        assert!(GATEWAY_QUERY.split('&').any(|param| param == format!("v={version}")));
         assert!(GATEWAY_URL.ends_with(&format!("?{GATEWAY_QUERY}")));
     }
 }
