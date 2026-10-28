@@ -393,9 +393,6 @@ impl App {
             let mut state = self.state.borrow_mut();
             let state = &mut *state;
             let Some(guild) = state.guilds.iter_mut().find(|g| g.id == guild_id) else { return };
-            if guild.my_roles != member.roles {
-                state.slowmode.roles_changed(&guild.channels);
-            }
             guild.set_member(member);
             state.guild == Some(guild_id)
         };

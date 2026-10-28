@@ -191,6 +191,8 @@ pub struct Guild {
     pub channels: Vec<Channel>,
     /// Notification level for members who never changed it: 0 all, 1 mentions.
     pub default_message_notifications: u8,
+    /// The server's owner, who has every permission.
+    pub owner_id: Option<Snowflake>,
     /// Our roles here, for role mentions. Filled in by the gateway.
     pub my_roles: Vec<Snowflake>,
     /// When our timeout here ends, in seconds since 1970. Filled in by the
@@ -228,8 +230,9 @@ impl Guild {
     }
 
     /// Seconds left of our timeout here, if we are in one. Then the official
-    /// client lets us read and nothing else; it makes an exception for
-    /// administrators, which Discord doesn't let anyone time out.
+    /// client lets us read and nothing else. It exempts administrators, whom
+    /// Discord doesn't let anyone time out; we can't tell who they are until
+    /// permissions are computed (#11).
     pub fn timeout_left(&self, now_unix: i64) -> Option<i64> {
         self.timed_out_until.map(|until| until - now_unix).filter(|&left| left > 0)
     }
@@ -270,6 +273,8 @@ impl<'de> Deserialize<'de> for Guild {
             icon: Option<String>,
             #[serde(default)]
             default_message_notifications: Option<u8>,
+            #[serde(default)]
+            owner_id: Option<Snowflake>,
         }
         #[derive(Deserialize)]
         struct Raw {
@@ -284,12 +289,14 @@ impl<'de> Deserialize<'de> for Guild {
             channels: Vec<Channel>,
             #[serde(default)]
             default_message_notifications: Option<u8>,
+            #[serde(default)]
+            owner_id: Option<Snowflake>,
         }
 
         let raw = Raw::deserialize(d)?;
-        let (name, icon, default) = match (raw.name, raw.properties) {
-            (Some(name), _) => (name, raw.icon, raw.default_message_notifications),
-            (None, Some(p)) => (p.name, p.icon, p.default_message_notifications),
+        let (name, icon, default, owner_id) = match (raw.name, raw.properties) {
+            (Some(name), _) => (name, raw.icon, raw.default_message_notifications, raw.owner_id),
+            (None, Some(p)) => (p.name, p.icon, p.default_message_notifications, p.owner_id),
             (None, None) => return Err(serde::de::Error::custom("guild has no name (unavailable)")),
         };
         Ok(Guild {
@@ -298,6 +305,7 @@ impl<'de> Deserialize<'de> for Guild {
             icon,
             channels: raw.channels,
             default_message_notifications: default.unwrap_or(0),
+            owner_id,
             my_roles: Vec::new(),
             timed_out_until: None,
         })
@@ -691,7 +699,7 @@ mod tests {
     #[test]
     fn guild_with_top_level_name() {
         let g: Guild = serde_json::from_str(
-            r#"{"id":"1","name":"Legacy","icon":null,"channels":[
+            r#"{"id":"1","name":"Legacy","icon":null,"owner_id":"7","channels":[
                 {"id":"10","type":4,"name":"Cat","position":0},
                 {"id":"11","type":0,"name":"b","position":1,"parent_id":"10"},
                 {"id":"12","type":0,"name":"a","position":0,"parent_id":"10"},
@@ -700,7 +708,7 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        assert_eq!(g.name, "Legacy");
+        assert_eq!((g.name.as_str(), g.owner_id), ("Legacy", Some(Snowflake(7))));
         let sidebar = g.sidebar();
         let names: Vec<(Option<&str>, Vec<&str>)> = sidebar
             .iter()
@@ -712,8 +720,9 @@ mod tests {
     #[test]
     fn guild_with_properties() {
         let g: Guild =
-            serde_json::from_str(r#"{"id":"2","properties":{"name":"New","icon":"abc"},"channels":[]}"#).unwrap();
-        assert_eq!((g.name.as_str(), g.icon.as_deref()), ("New", Some("abc")));
+            serde_json::from_str(r#"{"id":"2","properties":{"name":"New","icon":"abc","owner_id":"7"},"channels":[]}"#)
+                .unwrap();
+        assert_eq!((g.name.as_str(), g.icon.as_deref(), g.owner_id), ("New", Some("abc"), Some(Snowflake(7))));
     }
 
     #[test]

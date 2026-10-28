@@ -3,7 +3,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use discord::cooldowns::{Slowmode, wait_words};
+use discord::cooldowns::{Slowmode, bypasses_slowmode, wait_words};
 use discord::rest::Reply;
 use discord::{Channel, Message, Snowflake};
 use gtk::glib;
@@ -348,13 +348,17 @@ impl App {
     }
 
     /// Tell the slowmode tracker about a message to `channel`, then show the
-    /// wait if that channel is still open.
-    fn record_slowmode(self: &Rc<Self>, channel: Snowflake, record: impl FnOnce(&mut Slowmode, &Channel)) {
+    /// wait if that channel is still open. `record` is told whether we
+    /// bypass slowmode there.
+    fn record_slowmode(self: &Rc<Self>, channel: Snowflake, record: impl FnOnce(&mut Slowmode, &Channel, bool)) {
         let open = {
             let mut state = self.state.borrow_mut();
             let state = &mut *state;
-            let Some(c) = state.find_channel(channel).map(|(_, c)| c.clone()) else { return };
-            record(&mut state.slowmode, &c);
+            let me = state.me();
+            let Some((guild, c)) = state.find_channel(channel) else { return };
+            let bypass = guild.zip(me).is_some_and(|(guild, me)| bypasses_slowmode(guild, me));
+            let c = c.clone();
+            record(&mut state.slowmode, &c, bypass);
             state.channel == Some(channel)
         };
         if open {
@@ -385,7 +389,7 @@ impl App {
             ping: r.fixed_ping.unwrap_or(self.reply_ping.is_active()),
         });
         let ping = self.reply_ping.is_active();
-        self.record_slowmode(channel, |slowmode, c| slowmode.sent(c, now_ms()));
+        self.record_slowmode(channel, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
         buffer.set_text("");
         self.set_reply(None);
         self.mention_popover.popdown();
@@ -394,7 +398,7 @@ impl App {
             // The gateway echoes our own message back, which is what adds it to the list.
             match rest.send_message(channel, &text, reply).await {
                 Ok(_) => {
-                    this.record_slowmode(channel, |slowmode, c| slowmode.sent(c, now_ms()));
+                    this.record_slowmode(channel, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
                     // Sending from an old stretch of history returns to the present.
                     if this.timelines.borrow().get(channel).is_some_and(|t| t.detached) {
                         this.load_newest(channel);
@@ -403,11 +407,11 @@ impl App {
                 Err(e) => {
                     match e.slowmode_wait() {
                         Some(wait) => {
-                            this.record_slowmode(channel, |slowmode, c| slowmode.refused(c, wait, now_ms()));
+                            this.record_slowmode(channel, |slowmode, c, _| slowmode.refused(c, wait, now_ms()));
                             this.show_composer_error("Not sent: slowmode is enabled in this channel.");
                         }
                         None => {
-                            this.record_slowmode(channel, |slowmode, c| slowmode.failed(c));
+                            this.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c));
                             this.show_composer_error(&format!("Not sent: {e}"));
                         }
                     }

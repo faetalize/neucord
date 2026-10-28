@@ -5,35 +5,40 @@
 //! the Bypass Slowmode permission lets us skip it, or when Discord refuses one
 //! with [`crate::rest::SLOWMODE_RATE_LIMITED`] and says how long is left.
 //!
-//! Neucord can't compute that permission yet (#11), and holding back a
-//! moderator would be wrong, so it waits for Discord to show it: a cooldown
-//! follows our messages only in channels where Discord has refused one. Until
-//! then a member without the permission can meet one refusal per channel.
+//! Neucord can't compute that permission yet, so it holds everyone but the
+//! server's owner (see [`bypasses_slowmode`]). A moderator waits when they
+//! needn't; a message is never refused.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use crate::{Channel, Snowflake};
+use crate::{Channel, Guild, Snowflake};
 
 /// Added to every cooldown, as the official client does, so the wait ends
 /// after Discord's rather than just before it.
 const MARGIN_MS: i64 = 100;
+
+/// Whether we skip slowmode in `guild`. The client asks for Bypass Slowmode;
+/// until permissions are computed (#11), only the owner, who has them all,
+/// is known to.
+pub fn bypasses_slowmode(guild: &Guild, me: Snowflake) -> bool {
+    guild.owner_id == Some(me)
+}
 
 #[derive(Debug, Default)]
 pub struct Slowmode {
     /// When each channel's cooldown ends (ms since 1970), and the channel's
     /// slowmode when it started.
     ends: HashMap<Snowflake, (i64, u32)>,
-    /// Channels where Discord has held us to slowmode, so we don't bypass it there.
-    held: HashSet<Snowflake>,
 }
 
 impl Slowmode {
     /// Our message to `channel` is on its way, so another can't follow before
     /// it is answered. Call it again once it went through: Discord's wait
     /// starts when the message arrives, and so does the official client's.
-    pub fn sent(&mut self, channel: &Channel, now_ms: i64) {
+    /// `bypass` is [`bypasses_slowmode`] for the channel's server.
+    pub fn sent(&mut self, channel: &Channel, bypass: bool, now_ms: i64) {
         let rate = channel.rate_limit_per_user;
-        if rate > 0 && self.held.contains(&channel.id) {
+        if rate > 0 && !bypass {
             self.ends.insert(channel.id, (now_ms + i64::from(rate) * 1000 + MARGIN_MS, rate));
         }
     }
@@ -45,9 +50,9 @@ impl Slowmode {
     }
 
     /// Discord refused a message in `channel` for slowmode, with `retry_after`
-    /// seconds left.
+    /// seconds left. Only a wait we didn't know of, as after a message from
+    /// another device, gets here.
     pub fn refused(&mut self, channel: &Channel, retry_after: f64, now_ms: i64) {
-        self.held.insert(channel.id);
         if retry_after > 0.0 {
             let end = now_ms + (retry_after * 1000.0).ceil() as i64 + MARGIN_MS;
             self.ends.insert(channel.id, (end, channel.rate_limit_per_user));
@@ -55,8 +60,7 @@ impl Slowmode {
     }
 
     /// `channel` changed. A new slowmode can only shorten a running cooldown,
-    /// as in the official client. Its permissions may have changed too, so
-    /// what we learned about bypassing there no longer holds.
+    /// as in the official client.
     pub fn update(&mut self, channel: &Channel, now_ms: i64) {
         let rate = channel.rate_limit_per_user;
         if let Some((end, was)) = self.ends.get_mut(&channel.id)
@@ -64,15 +68,6 @@ impl Slowmode {
         {
             *end = (*end).min(now_ms + i64::from(rate) * 1000);
             *was = rate;
-        }
-        self.held.remove(&channel.id);
-    }
-
-    /// Our roles changed in the server that has these channels, which may
-    /// let us bypass slowmode now.
-    pub fn roles_changed<'a>(&mut self, channels: impl IntoIterator<Item = &'a Channel>) {
-        for channel in channels {
-            self.held.remove(&channel.id);
         }
     }
 
@@ -114,22 +109,36 @@ mod tests {
     }
 
     #[test]
-    fn no_cooldown_until_discord_refuses_one() {
+    fn every_message_starts_a_cooldown() {
         let mut slowmode = Slowmode::default();
         let general = channel(1, 10);
-        slowmode.sent(&general, 0);
-        assert_eq!(slowmode.remaining_ms(&general, 0), 0, "we might bypass slowmode here");
+        slowmode.sent(&general, false, 0);
+        assert_eq!(slowmode.remaining_ms(&general, 0), 10_100, "from the first message, before any refusal");
+        slowmode.sent(&general, false, 300);
+        assert_eq!(slowmode.remaining_ms(&general, 300), 10_100, "restarted when it went through");
+        assert_eq!(slowmode.remaining_ms(&general, 10_400), 0);
+        assert_eq!(slowmode.remaining_ms(&channel(2, 10), 0), 0, "only in that channel");
 
-        slowmode.refused(&general, 4.2, 1_000);
-        assert_eq!(slowmode.remaining_ms(&general, 1_000), 4_300);
-        assert_eq!(slowmode.remaining_ms(&general, 6_000), 0);
+        slowmode.sent(&channel(3, 0), false, 0);
+        assert_eq!(slowmode.remaining_ms(&channel(3, 0), 0), 0, "no slowmode, no wait");
+        slowmode.sent(&channel(4, 10), true, 0);
+        assert_eq!(slowmode.remaining_ms(&channel(4, 10), 0), 0, "bypassed");
 
-        slowmode.sent(&general, 10_000);
-        assert_eq!(slowmode.remaining_ms(&general, 10_000), 10_100, "held to it now, so every send starts one");
-        assert_eq!(slowmode.remaining_ms(&channel(2, 10), 10_000), 0, "only in that channel");
-
+        slowmode.sent(&general, false, 20_000);
         slowmode.failed(&general);
-        assert_eq!(slowmode.remaining_ms(&general, 10_000), 0, "a message that didn't go through starts none");
+        assert_eq!(slowmode.remaining_ms(&general, 20_000), 0, "a message that didn't go through starts none");
+
+        slowmode.refused(&general, 4.2, 30_000);
+        assert_eq!(slowmode.remaining_ms(&general, 30_000), 4_300, "Discord knew of a wait we didn't");
+    }
+
+    #[test]
+    fn only_the_owner_bypasses() {
+        let guild = |owner: &str| -> Guild {
+            serde_json::from_value(serde_json::json!({ "id": "1", "name": "G", "owner_id": owner })).unwrap()
+        };
+        assert!(bypasses_slowmode(&guild("5"), Snowflake(5)));
+        assert!(!bypasses_slowmode(&guild("6"), Snowflake(5)));
     }
 
     #[test]
@@ -145,21 +154,6 @@ mod tests {
         slowmode.update(&channel(1, 120), 1_000);
         assert_eq!(slowmode.remaining_ms(&channel(1, 120), 1_000), 5_000, "never lengthened");
         assert_eq!(slowmode.remaining_ms(&channel(1, 0), 1_000), 0, "off ends it");
-
-        slowmode.sent(&channel(1, 120), 10_000);
-        assert_eq!(slowmode.remaining_ms(&channel(1, 120), 10_000), 0, "a changed channel is learned again");
-    }
-
-    #[test]
-    fn new_roles_are_learned_again() {
-        let mut slowmode = Slowmode::default();
-        let (a, b) = (channel(1, 10), channel(2, 10));
-        slowmode.refused(&a, 1.0, 0);
-        slowmode.refused(&b, 1.0, 0);
-        slowmode.roles_changed([&a]);
-        slowmode.sent(&a, 5_000);
-        slowmode.sent(&b, 5_000);
-        assert_eq!((slowmode.remaining_ms(&a, 5_000), slowmode.remaining_ms(&b, 5_000)), (0, 10_100));
     }
 
     #[test]
