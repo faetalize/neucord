@@ -110,6 +110,8 @@ pub struct App {
     unread_divider: glib::WeakRef<gtk::Box>,
     /// A message flashed after jumping to it.
     highlight: Cell<Option<Snowflake>>,
+    /// When scrolling loads another page.
+    scroll_loader: RefCell<discord::history::ScrollLoader>,
     state: RefCell<state::State>,
     /// What the rail and sidebar last drew, so badge refreshes can skip
     /// rebuilding them when nothing visible changed.
@@ -230,6 +232,7 @@ impl App {
             unread_bar: adw::Banner::builder().button_label("Jump").build(),
             unread_divider: glib::WeakRef::new(),
             highlight: Cell::default(),
+            scroll_loader: RefCell::default(),
             state: RefCell::default(),
             drawn: RefCell::default(),
             rail_items: RefCell::default(),

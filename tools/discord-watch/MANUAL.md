@@ -84,6 +84,17 @@ changed for unrelated reasons only needs a note in the issue.
   (`requestGuildMembers`). Splitting into 100 users a request and sending
   nothing before the session is established are in the `GUILD_MEMBERS_REQUEST`
   handler of 403010.
+- **How much history is fetched** (`discord::history`, `Page::query`). The
+  limits are watched by their minified names, so a name that vanishes is a
+  rename to look up (`EMb`, `d7Q`, `UNo`, `rLJ`, `FONT_SIZES`). The rules
+  aren't.
+  The first page is `o` and `d` in 326337; the rest is in the scroll manager
+  in 425812 (anchor `loadMorePausedUntilUserScroll`): the size in `loadMore`,
+  the distances in `getOffsetToTriggerLoading`, what holds loading back in
+  `isScrollLoadingDisabled`, and what lifts a pause in `handleMouseUp` and
+  `handleUserScrollGesture` with its keys in `l6`. What a page around a
+  message says about the channel's ends, and the query's order, are in
+  `fetchMessages` in 148494.
 - **How the gateway connects** (`GATEWAY_QUERY` in `identity.rs`,
   `inflate.rs`). What each compression asks for is watched (`getAlgorithm`,
   and `usesLegacyCompression` for IDENTIFY's `compress`). Which one the
