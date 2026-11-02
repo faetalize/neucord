@@ -499,7 +499,7 @@ impl App {
     /// from changed: its roles or owner, our member, a channel's overwrites,
     /// our 2FA. Channels we lost sight of go, and with them the open one;
     /// the message box and Reply follow what we may still do.
-    fn permissions_changed(self: &Rc<Self>, guild: Option<Snowflake>) {
+    pub(super) fn permissions_changed(self: &Rc<Self>, guild: Option<Snowflake>) {
         self.refresh_badges();
         let (open, viewable, replyable) = {
             let state = self.state.borrow();

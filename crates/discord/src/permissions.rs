@@ -404,12 +404,16 @@ pub fn can_send(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64
 
 /// Whether the client offers Reply in `channel` (517997), with
 /// [`crate::Message::is_replyable`] for the message itself: not in the
-/// system DM, in a server only with Send Messages and Read Message History,
-/// and in an archived thread only if we [`can_unarchive`] it.
+/// system DM, in a server only with Send Messages and Read Message History
+/// and while we aren't timed out, and in an archived thread only if we
+/// [`can_unarchive`] it. The timeout counts on its own because it only takes
+/// Send Messages from those without Administrator, and the client asks
+/// about the timeout whatever our permissions.
 pub fn can_reply(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64) -> bool {
     can_send(guild, channel, me, now)
         && guild.is_none_or(|g| {
             in_channel(g, channel, me, now).contains(access(channel) | Permissions::READ_MESSAGE_HISTORY)
+                && g.timed_out_until.is_none_or(|until| until <= now)
                 && (!channel.is_archived() || can_unarchive(g, channel, me, now))
         })
 }
@@ -582,6 +586,21 @@ mod tests {
         let mut owned = guild();
         owned.owner_id = Some(ME);
         assert_eq!(in_channel(&owned, &doomed, &me(), 0), Permissions::NONE);
+    }
+
+    #[test]
+    fn a_timeout_stops_replies_even_for_administrators() {
+        let mut guild = guild();
+        guild.timed_out_until = Some(100);
+        guild.roles[2].permissions = Permissions::ADMINISTRATOR;
+        let open = channel(&[]);
+        assert!(can_send(Some(&guild), &open, &me(), 99), "permissions don't stop them");
+        assert!(!can_reply(Some(&guild), &open, &me(), 99));
+        assert!(can_reply(Some(&guild), &open, &me(), 100), "over");
+
+        guild.roles[2].permissions = Permissions::NONE;
+        guild.owner_id = Some(ME);
+        assert!(!can_reply(Some(&guild), &open, &me(), 99), "nor does owning the server");
     }
 
     #[test]

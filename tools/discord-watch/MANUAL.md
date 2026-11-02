@@ -111,10 +111,10 @@ changed for unrelated reasons only needs a note in the issue.
   types. 517997 also needs Send Messages and Read Message History in
   servers, and in an archived thread that we can reopen it (`lK` in 406704,
   `permissions::can_unarchive`: Manage Threads if locked, else Send
-  Messages in Threads and Send Messages, and Send Messages in the parent),
-  which Neucord checks; and a sent and non-ephemeral message and no
-  timeout, which it doesn't yet (#65). The keyboard shortcut uses `Et`
-  there instead, without the Send Messages checks.
+  Messages in Threads and Send Messages, and Send Messages in the parent);
+  and a non-ephemeral message and no timeout, even for administrators.
+  The keyboard shortcut uses `Et` there instead, without the Send Messages
+  checks.
 
 ## Notifications and unread state
 

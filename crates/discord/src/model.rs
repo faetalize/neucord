@@ -774,6 +774,7 @@ pub struct Call {
 
 impl Message {
     const SUPPRESS_EMBEDS: u64 = 1 << 2;
+    const EPHEMERAL: u64 = 1 << 6;
     const IS_VOICE_MESSAGE: u64 = 1 << 13;
     const IS_COMPONENTS_V2: u64 = 1 << 15;
 
@@ -808,9 +809,12 @@ impl Message {
 
     /// Whether the official client offers Reply on this message: ordinary
     /// messages and replies, commands, and a few system messages people
-    /// answer (boosts, joins, …), but not, say, pins or calls.
+    /// answer (boosts, joins, …), but not, say, pins or calls. Never an
+    /// ephemeral one, which only we can see. The client also asks that the
+    /// message was sent, but only what Discord has accepted is ever listed.
     pub fn is_replyable(&self) -> bool {
         matches!(self.kind, 0 | 7 | 19 | 20 | 23 | 24 | 25 | 32..=42 | 45 | 46 | 69)
+            && self.flags & Self::EPHEMERAL == 0
     }
 
     const FORWARD: u8 = 1;
@@ -1251,6 +1255,16 @@ mod tests {
         )
         .unwrap();
         assert!(!pin.is_replyable());
+    }
+
+    #[test]
+    fn ephemeral_messages_take_no_reply() {
+        let ephemeral: Message = serde_json::from_str(
+            r#"{"id":"104","channel_id":"11","author":{"id":"5","username":"a"},"timestamp":"t","type":20,
+                "flags":64}"#,
+        )
+        .unwrap();
+        assert!(!ephemeral.is_replyable());
     }
 
     #[test]

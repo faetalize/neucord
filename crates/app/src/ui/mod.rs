@@ -81,6 +81,8 @@ pub struct App {
     notice_bar: gtk::Box,
     /// Counts the notice bar's wait down, while it shows one.
     notice_tick: RefCell<Option<glib::SourceId>>,
+    /// Fires when our timeout in the open server ends.
+    timeout_end: RefCell<Option<glib::SourceId>>,
     /// Fires when a thread the sidebar lists would drop out of it.
     thread_expiry: RefCell<Option<glib::SourceId>>,
     /// What opening a forum or media channel shows, until #70 lists posts.
@@ -190,6 +192,7 @@ impl App {
                 .css_classes(["composer", "card-row", "notice-bar"])
                 .build(),
             notice_tick: RefCell::default(),
+            timeout_end: RefCell::default(),
             thread_expiry: RefCell::default(),
             forum_page: adw::StatusPage::builder()
                 .title("No Posts Shown")

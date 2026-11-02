@@ -50,6 +50,11 @@ it for three things:
   weekly check notices when Discord changes it. If it can't be snapshotted,
   such as a rule in an unnamed function, add it to
   `tools/discord-watch/MANUAL.md`, which gets checked by hand every week.
+  Important: the existence of MANUAL.md is not an invitation to bloat it 
+  everytime needlessly. Only add an entry in MANUAL.md if it is necessary.
+  LLMs tend to be trigger happy and always find a reason to add something to
+  a file. Make sure any addition to MANUAL.md has to fight for its right to
+  exist.
 - **Context menus.** Say whether the official client offers the feature in
   a context menu: on which surface, which items, under what conditions. If
   Neucord has that surface, the pull request adds the entries to its table
