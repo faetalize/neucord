@@ -12,23 +12,27 @@
 
 use std::collections::HashMap;
 
+use discord::history::Around;
 use discord::{Message, Referenced, Snowflake};
 use gtk::gio;
 use gtk::prelude::*;
 
 /// Channels kept in memory. The open channel is never evicted.
 const CAPACITY: usize = 12;
+/// A channel we left keeps everything up to `MAX_RETAINED` messages, past that the
+/// newest `RETAINED`: the official client's `UNo` and `rLJ`, so going back
+/// asks for no more than it would.
+const MAX_RETAINED: u32 = 120;
+const RETAINED: u32 = 60;
 
 pub struct Timeline {
     pub store: gio::ListStore,
     /// The oldest message of the channel is loaded; there is nothing to page.
     pub complete: bool,
-    /// An older page is being fetched.
-    pub loading_older: bool,
+    /// A page is being fetched. One at a time per channel, as in the client.
+    pub loading: bool,
     /// The store does not reach the newest message (after a jump).
     pub detached: bool,
-    /// A newer page is being fetched.
-    pub loading_newer: bool,
     last_used: u64,
 }
 
@@ -53,9 +57,8 @@ impl Timelines {
         let timeline = self.channels.entry(channel).or_insert_with(|| Timeline {
             store: gio::ListStore::new::<glib::BoxedAnyObject>(),
             complete: false,
-            loading_older: false,
+            loading: false,
             detached: false,
-            loading_newer: false,
             last_used: 0,
         });
         timeline.last_used = clock;
@@ -174,22 +177,23 @@ pub fn merge_newest(store: &gio::ListStore, page: Vec<Message>) -> bool {
     }
 }
 
-/// Drop all but the newest `keep` messages. The timeline can page back again,
-/// and an older page still in flight will no longer line up, so it is dropped.
-pub fn keep_newest(timeline: &mut Timeline, keep: u32) {
+/// Drop all but the newest messages of a channel we left. The timeline can
+/// page back again, and an older page still in flight will no longer line up,
+/// so it is dropped.
+pub fn keep_newest(timeline: &mut Timeline) {
     let n = timeline.store.n_items();
-    if n > keep {
-        timeline.store.splice(0, n - keep, &[] as &[glib::BoxedAnyObject]);
+    if n > MAX_RETAINED {
+        timeline.store.splice(0, n - RETAINED, &[] as &[glib::BoxedAnyObject]);
         timeline.complete = false;
     }
 }
 
 /// Replace everything with a page around a message we jumped to.
-pub fn replace(timeline: &mut Timeline, page: Vec<Message>, detached: bool) {
+pub fn replace(timeline: &mut Timeline, page: Vec<Message>, around: Around) {
     let objects: Vec<glib::BoxedAnyObject> = page.into_iter().map(boxed).collect();
     timeline.store.splice(0, timeline.store.n_items(), &objects);
-    timeline.complete = false;
-    timeline.detached = detached;
+    timeline.complete = !around.more_before;
+    timeline.detached = around.more_after;
 }
 
 /// Append a newer page (oldest first), scrolling down from a jump.
@@ -310,7 +314,8 @@ mod tests {
         for id in 50..=60 {
             timeline.store.append(&boxed(msg(id, "")));
         }
-        replace(timeline, vec![msg(10, ""), msg(11, ""), msg(12, "")], true);
+        let around = Around { more_before: true, more_after: true };
+        replace(timeline, vec![msg(10, ""), msg(11, ""), msg(12, "")], around);
         assert!(timeline.detached && !timeline.complete);
         append(&timeline.store, vec![msg(13, ""), msg(14, "")]);
         assert_eq!(ids(&timeline.store), [10, 11, 12, 13, 14]);
@@ -347,15 +352,28 @@ mod tests {
     fn leaving_a_channel_keeps_the_newest() {
         let mut timelines = Timelines::default();
         let timeline = timelines.open(Snowflake(1));
-        for id in 1..=10 {
+        for id in 1..=121 {
             timeline.store.append(&boxed(msg(id, "")));
         }
         timeline.complete = true;
-        keep_newest(timeline, 4);
-        assert_eq!(ids(&timeline.store), [7, 8, 9, 10]);
+        keep_newest(timeline);
+        assert_eq!(ids(&timeline.store), (62..=121).collect::<Vec<_>>());
         assert!(!timeline.complete, "trimmed history can be paged again");
-        keep_newest(timeline, 40);
-        assert_eq!(timeline.store.n_items(), 4, "nothing to trim");
+    }
+
+    #[test]
+    fn a_channel_within_the_clients_limit_stays_whole() {
+        // Cutting these would ask again for what filled the window, on every
+        // return to the channel.
+        let mut timelines = Timelines::default();
+        let timeline = timelines.open(Snowflake(1));
+        for id in 1..=120 {
+            timeline.store.append(&boxed(msg(id, "")));
+        }
+        timeline.complete = true;
+        keep_newest(timeline);
+        assert_eq!(timeline.store.n_items(), 120);
+        assert!(timeline.complete);
     }
 
     #[test]

@@ -1,8 +1,11 @@
 //! The message list: opening a channel, scrollback, live updates, and
 //! building each message row.
 
+use std::cell::Cell;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
+use discord::history::{AROUND_PAGE, Around, KINETIC_INPUT, Load, Loadable, Position, SCROLL_INPUT, Viewport};
 use discord::read_state::starts_unread;
 use discord::rest::Page;
 use discord::system::{self, Kind};
@@ -20,19 +23,8 @@ use crate::render::{Context, Names, Spoilers};
 use crate::rich_text::RichText;
 use crate::{render, timelines};
 
-/// Messages fetched when a channel opens: enough to fill the view, small so
-/// the channel appears fast. Also what a channel keeps once we leave it.
-const FIRST_PAGE: u8 = 40;
-/// Messages per scrollback request, up or down (Discord's maximum): these
-/// load in the background, so bigger pages just mean fewer round trips.
-const SCROLL_PAGE: u8 = 100;
-/// Messages fetched around one we jump to (the official client's number).
-const JUMP_PAGE: u8 = 30;
 /// How long a message we jumped to stays highlighted.
 const FLASH: std::time::Duration = std::time::Duration::from_secs(2);
-/// Start fetching more messages this many screens before reaching the end,
-/// so they are usually in place before the user gets there.
-const PREFETCH_SCREENS: f64 = 3.0;
 /// Space between the last message and the composer, as around the composer.
 const COMPOSER_GAP: i32 = 12;
 /// Consecutive messages by one author within this window share a header.
@@ -188,18 +180,22 @@ impl App {
         self.scroller.set_child(Some(&self.list));
         self.scroller.add_css_class("messages");
 
-        // Fetch older messages well before the top is reached, and after a
-        // jump, newer ones well before the bottom.
+        // Near an end, fetch more, but only when the user took us there: the
+        // list also moves by itself, and to its very top when its model is
+        // swapped or a page replaces what it held.
         self.scroller.vadjustment().connect_value_changed({
             let this = Rc::downgrade(self);
             move |_| {
                 if let Some(this) = this.upgrade() {
-                    this.maybe_load_older();
-                    this.maybe_load_newer();
+                    let position = this.scroll_position();
+                    if this.scroll_loader.borrow_mut().moved(position, Instant::now()) {
+                        this.maybe_load(true);
+                    }
                     this.check_unread_seen();
                 }
             }
         });
+        self.watch_scroll_input();
 
         // After a jump: say so, with the way back.
         self.present_bar.connect_button_clicked({
@@ -550,7 +546,7 @@ impl App {
         if let Some(left) = left
             && let Some(timeline) = self.timelines.borrow_mut().get_mut(left)
         {
-            timelines::keep_newest(timeline, FIRST_PAGE as u32);
+            timelines::keep_newest(timeline);
         }
         if self.reply.borrow().as_ref().is_some_and(|r| r.channel != id) {
             self.set_reply(None);
@@ -581,14 +577,21 @@ impl App {
         self.update_notice_bar();
 
         // Show what we have at once (instant for a recently viewed channel),
-        // then fetch the newest page and merge it in.
-        let store = self.timelines.borrow_mut().open(id).store.clone();
+        // then fetch the newest page and merge it in. The client doesn't ask
+        // again for a channel it has, but it subscribes to servers and we
+        // don't, so we can't tell that the gateway kept this one current (#90).
+        let (store, loading) = {
+            let mut timelines = self.timelines.borrow_mut();
+            let timeline = timelines.open(id);
+            (timeline.store.clone(), timeline.loading)
+        };
+        self.scroll_loader.borrow_mut().reset();
         self.selection.set_model(Some(&store));
         self.update_present_bar();
         self.update_unread_bar();
-        self.scroll_to_end();
+        self.settle_at_end();
 
-        if rest.is_some() {
+        if rest.is_some() && !loading {
             self.load_newest(id);
         }
     }
@@ -597,16 +600,23 @@ impl App {
     /// also how a jump returns to the present.
     pub(super) fn load_newest(self: &Rc<Self>, id: Snowflake) {
         let Some(rest) = self.state.borrow().rest.clone() else { return };
-        let Some((store, was_detached)) = self.timelines.borrow().get(id).map(|t| (t.store.clone(), t.detached)) else {
-            return;
+        let (store, was_detached) = {
+            let mut timelines = self.timelines.borrow_mut();
+            let Some(timeline) = timelines.get_mut(id) else { return };
+            timeline.loading = true;
+            (timeline.store.clone(), timeline.detached)
         };
+        let limit = self.viewport().first_page();
         let this = self.clone();
         glib::spawn_future_local(async move {
-            let result = rest.messages(id, FIRST_PAGE, Page::Newest).await;
+            let result = rest.messages(id, limit, Page::Newest).await;
+            if let Some(timeline) = this.timelines.borrow_mut().get_mut(id) {
+                timeline.loading = false;
+            }
             match result {
                 Ok(page) => {
                     this.learn_messages(&page);
-                    let full = page.len() == FIRST_PAGE as usize;
+                    let full = page.len() == usize::from(limit);
                     let open = this.state.borrow().channel == Some(id);
                     let at_bottom = !open || was_detached || this.at_bottom();
                     let replaced = timelines::merge_newest(&store, page);
@@ -622,20 +632,15 @@ impl App {
                     }
                     this.update_present_bar();
                     this.update_unread_bar();
-                    if let Some(newest) = store.n_items().checked_sub(1).and_then(|p| timelines::message_at(&store, p))
-                    {
-                        // READY's newest-message ids can be stale; history is not.
-                        this.state.borrow_mut().bump_last_message(id, newest.id);
-                    }
+                    this.reached_present(id, &store);
                     // The user may have switched channels while this was loading.
                     if open && this.state.borrow().channel == Some(id) {
                         if at_bottom {
-                            this.scroll_to_end();
+                            this.settle_at_end();
                         }
                         if this.chat_visible() {
                             this.mark_read(id);
                         }
-                        this.load_older_if_short();
                     }
                 }
                 Err(e) => {
@@ -670,32 +675,138 @@ impl App {
         }
     }
 
-    /// Fetch the page before the oldest loaded message when the user is within
-    /// a few screens of the top. One request per channel at a time.
-    pub(super) fn maybe_load_older(self: &Rc<Self>) {
-        let adjustment = self.scroller.vadjustment();
-        if adjustment.value() > adjustment.page_size() * PREFETCH_SCREENS {
-            return;
+    /// The store holds the channel's newest messages again.
+    fn reached_present(&self, channel: Snowflake, store: &gio::ListStore) {
+        if let Some(newest) = store.n_items().checked_sub(1).and_then(|p| timelines::message_at(store, p)) {
+            // READY's newest-message ids can be stale; history is not.
+            self.state.borrow_mut().bump_last_message(channel, newest.id);
         }
+    }
+
+    /// What page sizes go by.
+    fn viewport(&self) -> Viewport {
+        // In 1024ths of a dot per inch, -1 for the default; 96dpi is scale 1.
+        let dpi = gtk::Settings::default().map_or(-1, |settings| settings.gtk_xft_dpi());
+        Viewport {
+            height: self.window.height(),
+            text_scale: if dpi > 0 { f64::from(dpi) / (96.0 * 1024.0) } else { 1.0 },
+            compact: self.state.borrow().message_display_compact,
+        }
+    }
+
+    /// How tall the messages are. The adjustment's `upper` is no good: it
+    /// stops at the view's height, so a list that doesn't fill the view yet
+    /// would seem not to grow, and pause.
+    fn content_height(&self) -> f64 {
+        let (_, natural, _, _) = self.list.measure(gtk::Orientation::Vertical, self.list.width());
+        f64::from(natural)
+    }
+
+    fn scroll_position(&self) -> Position {
+        let adjustment = self.scroller.vadjustment();
+        Position { above: adjustment.value(), below: adjustment.upper() - adjustment.value() - adjustment.page_size() }
+    }
+
+    /// Listen for what the user does to the list: only that loads history.
+    /// Each of these also lifts a pause, as in the client (`onWheel`,
+    /// `onTouchMove`, `onKeyDown`, `onMouseDown` and `onMouseUp` in 425812).
+    fn watch_scroll_input(self: &Rc<Self>) {
+        let input = gtk::EventControllerLegacy::new();
+        input.set_propagation_phase(gtk::PropagationPhase::Capture);
+        input.connect_event({
+            let this = Rc::downgrade(self);
+            move |_, event| {
+                if let (Some(this), Some(lasts)) = (this.upgrade(), scroll_input(event)) {
+                    this.user_scrolled(lasts);
+                }
+                glib::Propagation::Proceed
+            }
+        });
+        self.scroller.add_controller(input);
+
+        let flings = gtk::EventControllerScroll::new(
+            gtk::EventControllerScrollFlags::VERTICAL | gtk::EventControllerScrollFlags::KINETIC,
+        );
+        flings.set_propagation_phase(gtk::PropagationPhase::Capture);
+        flings.connect_decelerate({
+            let this = Rc::downgrade(self);
+            move |_, _, _| {
+                if let Some(this) = this.upgrade() {
+                    this.user_scrolled(KINETIC_INPUT);
+                }
+            }
+        });
+        self.scroller.add_controller(flings);
+
+        // A drag runs from press to release whatever the pointer does, so
+        // these are events rather than gestures, which others could claim.
+        let drag = gtk::EventControllerLegacy::new();
+        drag.set_propagation_phase(gtk::PropagationPhase::Capture);
+        drag.connect_event({
+            let this = Rc::downgrade(self);
+            move |_, event| {
+                let Some(this) = this.upgrade() else { return glib::Propagation::Proceed };
+                match event.event_type() {
+                    gdk::EventType::ButtonPress | gdk::EventType::TouchBegin => {
+                        this.scroll_loader.borrow_mut().press();
+                    }
+                    gdk::EventType::ButtonRelease | gdk::EventType::TouchEnd => {
+                        this.scroll_loader.borrow_mut().release(Instant::now());
+                        this.maybe_load(true);
+                    }
+                    _ => {}
+                }
+                glib::Propagation::Proceed
+            }
+        });
+        self.scroller.vscrollbar().add_controller(drag);
+    }
+
+    fn user_scrolled(self: &Rc<Self>, lasts: Duration) {
+        self.scroll_loader.borrow_mut().input(Instant::now(), lasts);
+        self.maybe_load(true);
+    }
+
+    /// Fetch the next page if the open channel needs one. `asked` is whether
+    /// the user just scrolled, rather than a page having landed.
+    fn maybe_load(self: &Rc<Self>, asked: bool) {
         let Some(channel) = self.state.borrow().channel else { return };
+        let unread = self.open_unread().is_some_and(|u| !u.seen);
+        let Some(can) = self.timelines.borrow().get(channel).map(|timeline| Loadable {
+            older: !timeline.complete,
+            newer: timeline.detached,
+            loading: timeline.loading,
+            unread,
+        }) else {
+            return;
+        };
+        let page = self.scroll_loader.borrow().next(self.scroll_position(), can, asked);
+        match page {
+            Some(Load::Older) => self.load_older(channel),
+            Some(Load::Newer) => self.load_newer(channel),
+            None => {}
+        }
+    }
+
+    /// Fetch the page before the oldest loaded message.
+    fn load_older(self: &Rc<Self>, channel: Snowflake) {
+        let Some(rest) = self.state.borrow().rest.clone() else { return };
         let (store, before) = {
             let mut timelines = self.timelines.borrow_mut();
             let Some(timeline) = timelines.get_mut(channel) else { return };
-            if timeline.complete || timeline.loading_older {
-                return;
-            }
             // Nothing loaded yet: the newest page is still on its way.
             let Some(before) = timelines::oldest_id(&timeline.store) else { return };
-            timeline.loading_older = true;
+            timeline.loading = true;
             (timeline.store.clone(), before)
         };
-        let Some(rest) = self.state.borrow().rest.clone() else { return };
+        self.scroll_loader.borrow_mut().load_started(self.content_height());
+        let limit = self.viewport().scroll_page();
         let this = self.clone();
         glib::spawn_future_local(async move {
-            let result = rest.messages(channel, SCROLL_PAGE, Page::Before(before)).await;
+            let result = rest.messages(channel, limit, Page::Before(before)).await;
             let still_cached = this.timelines.borrow().get(channel).is_some_and(|t| t.store == store);
             if let Some(timeline) = this.timelines.borrow_mut().get_mut(channel) {
-                timeline.loading_older = false;
+                timeline.loading = false;
             }
             if !still_cached {
                 return;
@@ -704,7 +815,7 @@ impl App {
                 // Only prepend if the store still starts where we asked from;
                 // a merge that replaced it would make this page a gap.
                 Ok(page) if timelines::oldest_id(&store) == Some(before) => {
-                    if page.len() < SCROLL_PAGE as usize
+                    if page.len() < usize::from(limit)
                         && let Some(timeline) = this.timelines.borrow_mut().get_mut(channel)
                     {
                         timeline.complete = true;
@@ -712,7 +823,6 @@ impl App {
                     this.learn_messages(&page);
                     timelines::prepend(&store, page);
                     this.update_unread_bar();
-                    this.load_older_if_short();
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -721,51 +831,51 @@ impl App {
                     }
                 }
             }
+            this.page_landed(channel);
         });
     }
 
-    /// After a jump, fetch the page after the newest loaded message when the
-    /// user nears the bottom, until the store reaches the present again.
-    pub(super) fn maybe_load_newer(self: &Rc<Self>) {
-        let adjustment = self.scroller.vadjustment();
-        let below = adjustment.upper() - adjustment.value() - adjustment.page_size();
-        if below > adjustment.page_size() * PREFETCH_SCREENS {
-            return;
-        }
-        let Some(channel) = self.state.borrow().channel else { return };
+    /// After a jump, fetch the page after the newest loaded message, until
+    /// the store reaches the present again.
+    fn load_newer(self: &Rc<Self>, channel: Snowflake) {
+        let Some(rest) = self.state.borrow().rest.clone() else { return };
         let (store, after) = {
             let mut timelines = self.timelines.borrow_mut();
             let Some(timeline) = timelines.get_mut(channel) else { return };
-            if !timeline.detached || timeline.loading_newer {
-                return;
-            }
             let Some(after) = timelines::newest_id(&timeline.store) else { return };
-            timeline.loading_newer = true;
+            timeline.loading = true;
             (timeline.store.clone(), after)
         };
-        let Some(rest) = self.state.borrow().rest.clone() else { return };
+        self.scroll_loader.borrow_mut().load_started(self.content_height());
+        let limit = self.viewport().scroll_page();
         let this = self.clone();
         glib::spawn_future_local(async move {
-            let result = rest.messages(channel, SCROLL_PAGE, Page::After(after)).await;
+            let result = rest.messages(channel, limit, Page::After(after)).await;
             let still_detached = {
                 let mut timelines = this.timelines.borrow_mut();
                 let timeline = timelines.get_mut(channel).filter(|t| t.store == store);
                 timeline.is_some_and(|t| {
-                    t.loading_newer = false;
+                    t.loading = false;
                     t.detached
                 })
             };
             match result {
                 Ok(page) if still_detached && timelines::newest_id(&store) == Some(after) => {
-                    let reached_newest = page.len() < SCROLL_PAGE as usize;
+                    let reached_newest = page.len() < usize::from(limit);
                     this.learn_messages(&page);
                     timelines::append(&store, page);
+                    // A short page came back to the present by itself, with
+                    // everything sent meanwhile: no need to ask for it again.
                     if reached_newest {
-                        // Merging the newest page also picks up whatever
-                        // arrived live while we were detached.
-                        this.load_newest(channel);
-                    } else {
-                        this.load_newer_if_short();
+                        if let Some(timeline) = this.timelines.borrow_mut().get_mut(channel) {
+                            timeline.detached = false;
+                        }
+                        this.reached_present(channel, &store);
+                        this.update_present_bar();
+                        this.update_unread_bar();
+                        if this.state.borrow().channel == Some(channel) && this.chat_visible() {
+                            this.mark_read(channel);
+                        }
                     }
                 }
                 Ok(_) => {}
@@ -775,15 +885,38 @@ impl App {
                     }
                 }
             }
+            this.page_landed(channel);
         });
     }
 
-    fn load_newer_if_short(self: &Rc<Self>) {
+    /// A page came back, or failed to. Once the list has laid it out, see
+    /// how far it got us and whether another one is due.
+    fn page_landed(self: &Rc<Self>, channel: Snowflake) {
         let this = Rc::downgrade(self);
-        glib::idle_add_local_once(move || {
-            if let Some(this) = this.upgrade() {
-                this.maybe_load_newer();
+        self.after_layout(move || {
+            if let Some(this) = this.upgrade()
+                && this.state.borrow().channel == Some(channel)
+            {
+                this.scroll_loader.borrow_mut().load_finished(this.content_height());
+                this.maybe_load(false);
             }
+        });
+    }
+
+    /// Run `then` once the list has laid out what just changed. A frame runs
+    /// its tick callbacks before its layout, so the second tick comes after
+    /// one; until then the scroll position is the old model's.
+    fn after_layout(&self, then: impl FnOnce() + 'static) {
+        let first = Cell::new(true);
+        let then = Cell::new(Some(then));
+        self.scroller.add_tick_callback(move |_, _| {
+            if first.replace(false) {
+                return glib::ControlFlow::Continue;
+            }
+            if let Some(then) = then.take() {
+                then();
+            }
+            glib::ControlFlow::Break
         });
     }
 
@@ -834,9 +967,16 @@ impl App {
         then: impl FnOnce(&Rc<Self>, &gio::ListStore) + 'static,
     ) {
         let Some(rest) = self.state.borrow().rest.clone() else { return };
+        if let Some(timeline) = self.timelines.borrow_mut().get_mut(channel) {
+            timeline.loading = true;
+        }
         let this = self.clone();
         glib::spawn_future_local(async move {
-            let page = match rest.messages(channel, JUMP_PAGE, Page::Around(id)).await {
+            let result = rest.messages(channel, AROUND_PAGE, Page::Around(id)).await;
+            if let Some(timeline) = this.timelines.borrow_mut().get_mut(channel) {
+                timeline.loading = false;
+            }
+            let page = match result {
                 Ok(page) => page,
                 Err(e) => return this.show_composer_error(&format!("Could not load the message: {e}")),
             };
@@ -849,13 +989,12 @@ impl App {
             this.learn_messages(&page);
             // Like the official client, judge by the page's shape rather than
             // the channel's newest id, which can be stale: a page that comes
-            // back short after the target has reached the present.
+            // back short on one side has reached that end of the channel.
             let newest = this.state.borrow().find_channel(channel).and_then(|(_, c)| c.last_message_id);
-            let after = page.iter().filter(|m| m.id > id).count();
-            let at_newest = page.last().is_some_and(|last| Some(last.id) == newest);
-            let detached = after >= JUMP_PAGE as usize / 2 && !at_newest;
+            let ids: Vec<Snowflake> = page.iter().map(|m| m.id).collect();
+            let around = Around::of(&ids, id, newest);
             let Some(store) = this.timelines.borrow_mut().get_mut(channel).map(|timeline| {
-                timelines::replace(timeline, page, detached);
+                timelines::replace(timeline, page, around);
                 timeline.store.clone()
             }) else {
                 return;
@@ -893,17 +1032,6 @@ impl App {
         if let Some((position, _)) = timelines::find(&messages, id) {
             timelines::rebind(&messages, position, 1);
         }
-    }
-
-    /// After layout, page again if the loaded messages still don't reach far
-    /// enough up (a short page, or a tall window).
-    pub(super) fn load_older_if_short(self: &Rc<Self>) {
-        let this = Rc::downgrade(self);
-        glib::idle_add_local_once(move || {
-            if let Some(this) = this.upgrade() {
-                this.maybe_load_older();
-            }
-        });
     }
 
     /// Resolve the mentions a message can contain: the user cache (plus this
@@ -1012,6 +1140,26 @@ impl App {
     }
 
     pub(super) fn scroll_to_end(&self) {
+        self.scroll_to_end_then(|| {});
+    }
+
+    /// Scroll to the newest messages and load more if a tall window still
+    /// shows the top of what's loaded, as the client does on opening.
+    fn settle_at_end(self: &Rc<Self>) {
+        let this = Rc::downgrade(self);
+        self.scroll_to_end_then(move || {
+            let Some(app) = this.upgrade() else { return };
+            let this = this.clone();
+            app.after_layout(move || {
+                if let Some(this) = this.upgrade() {
+                    this.scroll_loader.borrow_mut().arrived();
+                    this.maybe_load(false);
+                }
+            });
+        });
+    }
+
+    fn scroll_to_end_then(&self, then: impl FnOnce() + 'static) {
         let list = self.list.downgrade();
         let messages = self.messages();
         let adjustment = self.scroller.vadjustment();
@@ -1021,9 +1169,28 @@ impl App {
                 list.scroll_to(last, gtk::ListScrollFlags::NONE, None);
                 // That stops once the row shows, which may be under the
                 // composer; the list's padding below it goes past it.
-                glib::idle_add_local_once(move || adjustment.set_value(adjustment.upper() - adjustment.page_size()));
+                glib::idle_add_local_once(move || {
+                    adjustment.set_value(adjustment.upper() - adjustment.page_size());
+                    then();
+                });
             }
         });
+    }
+}
+
+/// How long the moves after `event` count as the user's, if it's one that
+/// scrolls: the keys are `l6` in 425812.
+fn scroll_input(event: &gdk::Event) -> Option<Duration> {
+    match event.event_type() {
+        gdk::EventType::Scroll | gdk::EventType::TouchUpdate => Some(SCROLL_INPUT),
+        gdk::EventType::TouchEnd => Some(KINETIC_INPUT),
+        gdk::EventType::KeyPress => {
+            let key = event.downcast_ref::<gdk::KeyEvent>()?.keyval();
+            const KEYS: [gdk::Key; 6] =
+                [gdk::Key::Up, gdk::Key::Down, gdk::Key::Page_Up, gdk::Key::Page_Down, gdk::Key::Home, gdk::Key::End];
+            KEYS.contains(&key).then_some(SCROLL_INPUT)
+        }
+        _ => None,
     }
 }
 

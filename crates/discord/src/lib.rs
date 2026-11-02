@@ -12,6 +12,7 @@ pub mod cooldowns;
 pub mod embed;
 mod endpoints;
 pub mod gateway;
+pub mod history;
 mod identity;
 mod inflate;
 pub mod markup;

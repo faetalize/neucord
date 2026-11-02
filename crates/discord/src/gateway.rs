@@ -63,6 +63,7 @@ pub struct Ready {
     pub guild_folders: Vec<GuildFolder>,
     pub media_settings: MediaSettings,
     pub developer_mode: bool,
+    pub message_display_compact: bool,
     /// A step Discord requires before the account can be used, if any
     /// (see [`crate::account`]).
     pub required_action: Option<String>,
@@ -176,6 +177,7 @@ pub enum Event {
     /// The user changed how embeds and media show.
     MediaSettingsUpdate(MediaPatch),
     DeveloperModeUpdate(bool),
+    MessageDisplayCompactUpdate(bool),
     /// Discord started or stopped requiring a step (see [`crate::account`]).
     RequiredActionUpdate(Option<String>),
     /// A resume succeeded; everything missed has been replayed before this.
@@ -581,6 +583,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
                     media
                 },
                 developer_mode: settings::developer_mode(&data["user_settings"]).unwrap_or(false),
+                message_display_compact: settings::message_display_compact(&data["user_settings"]).unwrap_or(false),
                 required_action: data["required_action"].as_str().map(str::to_owned),
                 account,
                 user,
@@ -620,6 +623,9 @@ fn dispatch(state: &State, name: &str, data: Value) {
             }
             if let Some(on) = settings::developer_mode(&data) {
                 let _ = state.events.try_send(Event::DeveloperModeUpdate(on));
+            }
+            if let Some(on) = settings::message_display_compact(&data) {
+                let _ = state.events.try_send(Event::MessageDisplayCompactUpdate(on));
             }
             match settings::guild_folders(&data) {
                 Some(folders) => Event::GuildFoldersUpdate(folders),

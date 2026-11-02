@@ -41,6 +41,18 @@ pub enum Page {
     Around(Snowflake),
 }
 
+impl Page {
+    /// In the order the client's `fetchMessages` builds it (148494).
+    fn query(self, limit: u8) -> String {
+        match self {
+            Page::Newest => format!("limit={limit}"),
+            Page::Before(id) => format!("before={id}&limit={limit}"),
+            Page::After(id) => format!("after={id}&limit={limit}"),
+            Page::Around(id) => format!("limit={limit}&around={id}"),
+        }
+    }
+}
+
 /// Send a message as a reply.
 #[derive(Clone, Copy, Debug)]
 pub struct Reply {
@@ -117,13 +129,7 @@ impl Rest {
 
     /// Up to `limit` (max 100) messages, oldest first, from where `page` says.
     pub async fn messages(&self, channel: Snowflake, limit: u8, page: Page) -> Result<Vec<Message>, Error> {
-        let from = match page {
-            Page::Newest => String::new(),
-            Page::Before(id) => format!("&before={id}"),
-            Page::After(id) => format!("&after={id}"),
-            Page::Around(id) => format!("&around={id}"),
-        };
-        let call = call!(MESSAGES, channel).query(&format!("limit={limit}{from}"));
+        let call = call!(MESSAGES, channel).query(&page.query(limit));
         let mut messages: Vec<Message> = self.request(call, None).await?;
         // Discord sends newest first, whichever way the page goes.
         messages.sort_by_key(|m| m.id);
@@ -315,8 +321,18 @@ pub(crate) fn is_captcha(body: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Captcha, base_headers, rate_limit_wait};
-    use crate::identity;
+    use super::{Captcha, Page, base_headers, rate_limit_wait};
+    use crate::{Snowflake, identity};
+
+    #[test]
+    fn history_queries_read_like_the_clients() {
+        // `fetchMessages` in 148494 passes { before, after, limit, around }.
+        let id = Snowflake(7);
+        assert_eq!(Page::Newest.query(12), "limit=12");
+        assert_eq!(Page::Before(id).query(24), "before=7&limit=24");
+        assert_eq!(Page::After(id).query(24), "after=7&limit=24");
+        assert_eq!(Page::Around(id).query(30), "limit=30&around=7");
+    }
 
     #[test]
     fn logging_in_sends_neucords_properties() {

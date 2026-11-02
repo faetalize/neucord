@@ -1,6 +1,6 @@
 //! The account's client settings that Neucord honours: server folders
 //! (which also define the order of servers in the rail), how media and
-//! embeds show, and Developer Mode.
+//! embeds show, Developer Mode, and compact display.
 //!
 //! They come as JSON in READY's `user_settings` (and in USER_SETTINGS_UPDATE)
 //! while the gateway capabilities are 0. Newer clients get the same data
@@ -49,6 +49,12 @@ pub fn guild_folders(settings: &Value) -> Option<Vec<GuildFolder>> {
 /// copy ids.
 pub fn developer_mode(settings: &Value) -> Option<bool> {
     settings.get("developer_mode")?.as_bool()
+}
+
+/// Compact message display, if a settings object mentions it. Neucord has no
+/// compact layout, but the official client sizes its history pages by this.
+pub fn message_display_compact(settings: &Value) -> Option<bool> {
+    settings.get("message_display_compact")?.as_bool()
 }
 
 /// The "Chat" settings for embeds and media. Discord's defaults are all on.
@@ -199,6 +205,12 @@ mod tests {
     fn developer_mode_when_mentioned() {
         assert_eq!(developer_mode(&json!({"developer_mode": true})), Some(true));
         assert_eq!(developer_mode(&json!({"theme": "dark"})), None);
+    }
+
+    #[test]
+    fn compact_when_mentioned() {
+        assert_eq!(message_display_compact(&json!({"message_display_compact": true})), Some(true));
+        assert_eq!(message_display_compact(&json!({"theme": "dark"})), None);
     }
 
     #[test]
