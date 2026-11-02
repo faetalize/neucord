@@ -9,6 +9,11 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const code = (s) => `\`${s}\``;
 const MAX_LINES = 80;
 
+// A name just added to watch.json has no entry in the last snapshot, which
+// isn't a change in the client. One the client doesn't have is still reported,
+// or a wrong or vanished name would go unwatched for good.
+const newlyWatched = (before, after) => before === undefined && after?.length > 0;
+
 function describeCalls(calls) {
   if (!calls) return "no call in the client";
   return calls
@@ -93,15 +98,16 @@ export function compare(old, cur, uses) {
   const rule = (bodies) => (bodies?.length ? bodies.map(code).join(" | ") : "not found");
   for (const name of Object.keys({ ...old.methods, ...cur.methods }).sort()) {
     const [before, after] = [old.methods?.[name], cur.methods?.[name]];
-    if (!old.methods || same(before, after)) continue;
-    affects.push(`- ${code(name)}: the client's rule changed\n  - was: ${rule(before)}\n  - now: ${rule(after)}`);
+    if (!old.methods || same(before, after) || newlyWatched(before, after)) continue;
+    const change = after?.length ? "the client's rule changed" : "not found";
+    affects.push(`- ${code(name)}: ${change}\n  - was: ${rule(before)}\n  - now: ${rule(after)}`);
   }
 
   // The stores in watch.json hold rules too, spread over a module too long
   // to quote: the full diff shows what changed.
   for (const name of Object.keys({ ...old.stores, ...cur.stores }).sort()) {
     const [before, after] = [old.stores?.[name], cur.stores?.[name]];
-    if (!old.stores || same(before, after)) continue;
+    if (!old.stores || same(before, after) || newlyWatched(before, after)) continue;
     affects.push(`- ${code(name)}: ${after?.length ? "the client's rule changed" : "not found"}`);
   }
 
@@ -110,8 +116,9 @@ export function compare(old, cur, uses) {
   const value = (values) => (values?.length ? values.map((v) => code(JSON.stringify(v))).join(" | ") : "not found");
   for (const name of Object.keys({ ...old.constants, ...cur.constants }).sort()) {
     const [before, after] = [old.constants?.[name], cur.constants?.[name]];
-    if (!old.constants || same(before, after)) continue;
-    affects.push(`- ${code(name)}: the client's value changed\n  - was: ${value(before)}\n  - now: ${value(after)}`);
+    if (!old.constants || same(before, after) || newlyWatched(before, after)) continue;
+    const change = after?.length ? "the client's value changed" : "not found";
+    affects.push(`- ${code(name)}: ${change}\n  - was: ${value(before)}\n  - now: ${value(after)}`);
   }
 
   const additions = [];
