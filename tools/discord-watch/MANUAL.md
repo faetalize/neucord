@@ -9,6 +9,11 @@ Only what has to match is listed: what Neucord sends to Discord or holds
 back, and whether something shows at all. How Neucord words, sizes or lays
 things out is its own design, so none of that is here.
 
+Changing this file means one of two things: a new client rule Neucord copies
+that nothing else tracks, or keeping a module id, anchor or name correct. A
+line that explains a choice in Neucord or warns the next reader is a code
+comment, not an entry. If in doubt, ask FAE!!!
+
 Last checked against: stable 660103.
 
 ## Running a check
