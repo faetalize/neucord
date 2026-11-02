@@ -147,6 +147,37 @@ impl App {
     /// (in a thread, by the thread rule: see `permissions::in_channel`).
     /// While slowmode makes us wait, the box stays and the wait shows above it.
     pub(super) fn update_notice_bar(self: &Rc<Self>) {
+        self.watch_timeout_end();
+        self.show_notice_bar();
+    }
+
+    /// Look at permissions again when our timeout in the open server ends:
+    /// the countdown only redraws the notice bar, and administrators don't
+    /// get one, so Reply would stay off the rows on screen. Not armed from
+    /// the countdown, whose last tick would cancel this just as it's due.
+    fn watch_timeout_end(self: &Rc<Self>) {
+        if let Some(timer) = self.timeout_end.take() {
+            timer.remove();
+        }
+        let timeout = {
+            let state = self.state.borrow();
+            let guild = state.channel.and_then(|id| state.find_channel(id)).and_then(|(guild, _)| guild);
+            guild.and_then(|g| Some((g.id, g.timed_out_until?)))
+        };
+        let Some((guild, until)) = timeout.filter(|&(_, until)| until > now_unix()) else { return };
+        let delay = Duration::from_millis((until * 1000 - now_ms()).max(0) as u64 + 1);
+        let this = Rc::downgrade(self);
+        let timer = glib::timeout_add_local_once(delay, move || {
+            if let Some(this) = this.upgrade() {
+                // The source is spent; there is nothing left to remove.
+                this.timeout_end.take();
+                this.permissions_changed(Some(guild));
+            }
+        });
+        self.timeout_end.replace(Some(timer));
+    }
+
+    fn show_notice_bar(self: &Rc<Self>) {
         let bar = &self.notice_bar;
         while let Some(child) = bar.first_child() {
             bar.remove(&child);
@@ -234,7 +265,7 @@ impl App {
             if let Some(this) = this.upgrade() {
                 // The source is spent; there is nothing left to remove.
                 this.notice_tick.take();
-                this.update_notice_bar();
+                this.show_notice_bar();
             }
         });
         self.notice_tick.replace(Some(tick));

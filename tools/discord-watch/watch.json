@@ -31,7 +31,7 @@
     ],
     "LoginRequiredAction": ["UPDATE_PASSWORD"],
     "MFALevel": ["NONE", "ELEVATED"],
-    "MessageFlags": ["SUPPRESS_EMBEDS", "IS_VOICE_MESSAGE", "IS_COMPONENTS_V2"],
+    "MessageFlags": ["SUPPRESS_EMBEDS", "EPHEMERAL", "IS_VOICE_MESSAGE", "IS_COMPONENTS_V2"],
     "MessageReferenceType": ["DEFAULT", "FORWARD"],
     "MessageType": ["DEFAULT", "REPLY", "CHANNEL_PINNED_MESSAGE"],
     "Permissions": [
