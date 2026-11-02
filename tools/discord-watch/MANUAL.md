@@ -170,9 +170,9 @@ changed for unrelated reasons only needs a note in the issue.
   stage channels, whose text chats a notification or a forward can open.
   Client: 95701 defines them, and the unread state in 458294 skips a
   channel without them.
-- **System messages that show nothing** (`HIDDEN` in `system.rs`). Client:
-  the type-to-renderer map in 64369 (logger `SystemMessage`), where those
-  types map to `void 0`.
+- **System messages that show nothing** (the last arm of `system::kind`).
+  Client: the type-to-renderer map in 64369 (logger `SystemMessage`), where
+  a type that maps to `void 0` or isn't listed draws nothing.
 - **Which embeds draw** (`EmbedKind`, `visible`). The filter is watched
   (`renderEmbeds`). The type sets are in 581619, and the type enum in
   508602.

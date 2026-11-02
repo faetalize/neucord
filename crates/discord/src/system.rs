@@ -67,8 +67,11 @@ pub enum Part {
 
 /// The message types people write; everything else is a system message.
 const USER_MESSAGES: [u8; 9] = [0, 19, 20, 23, 26, 41, 45, 47, 68];
-/// System messages the official client shows nothing for.
-const HIDDEN: [u8; 7] = [22, 40, 42, 55, 56, 57, 63];
+/// System messages the official client draws from data we don't follow yet.
+/// Any other type without a line shows nothing, as there, so a type the client
+/// drops needs no change here.
+const NOT_FOLLOWED: [u8; 24] =
+    [13, 24, 25, 32, 33, 34, 35, 36, 44, 48, 49, 50, 51, 52, 53, 54, 58, 59, 60, 61, 62, 64, 65, 69];
 
 /// The official client picks a welcome by the message's time.
 const JOINS: [(&str, &str); 13] = [
@@ -105,11 +108,18 @@ pub struct Place<'a> {
 
 /// How `message` shows.
 pub fn kind(message: &Message, place: &Place) -> Kind {
+    kind_with(message, place, show_unknown())
+}
+
+/// Debug aid: with `NEUCORD_DEBUG_UNKNOWN_MESSAGES=1`, every type without a
+/// line says so and gives its number, to compare with the official client.
+fn show_unknown() -> bool {
+    std::env::var_os("NEUCORD_DEBUG_UNKNOWN_MESSAGES").is_some_and(|v| v != "0")
+}
+
+fn kind_with(message: &Message, place: &Place, show_unknown: bool) -> Kind {
     if message.is_user_message() {
         return Kind::Normal;
-    }
-    if HIDDEN.contains(&message.kind) {
-        return Kind::Hidden;
     }
     let author = || Part::Name(message.author.display_name().to_owned());
     let text = |s: &str| Part::Text(s.to_owned());
@@ -254,8 +264,13 @@ pub fn kind(message: &Message, place: &Place) -> Kind {
             (Icon::Poll, vec![author(), text("'s poll "), question, text(" has closed.")])
         }
         67 => (Icon::Join, vec![author(), text(" accepted your friend request.")]),
-        // What the official client draws from data we don't follow yet.
-        _ => (Icon::Other, vec![author(), text(" sent something Neucord can't show yet.")]),
+        number if show_unknown => {
+            (Icon::Other, vec![author(), text(&format!(" sent something Neucord can't show yet (type {number})."))])
+        }
+        number if NOT_FOLLOWED.contains(&number) => {
+            (Icon::Other, vec![author(), text(" sent something Neucord can't show yet.")])
+        }
+        _ => return Kind::Hidden,
     };
     Kind::System(System { icon, parts })
 }
@@ -324,6 +339,27 @@ mod tests {
     }
 
     #[test]
+    fn types_the_client_has_no_line_for_show_nothing() {
+        assert_eq!(kind(&message(r#""type":66"#), &DM), Kind::Hidden);
+        assert_eq!(kind(&message(r#""type":99"#), &DM), Kind::Hidden);
+    }
+
+    #[test]
+    fn types_the_client_draws_and_we_dont_say_so() {
+        for kind_of in [r#""type":24"#, r#""type":69"#] {
+            assert_eq!(line(kind(&message(kind_of), &DM)), "alice sent something Neucord can't show yet.");
+        }
+    }
+
+    #[test]
+    fn debugging_shows_what_would_be_hidden() {
+        let shown = |json| line(kind_with(&message(json), &DM, true));
+        assert_eq!(shown(r#""type":66"#), "alice sent something Neucord can't show yet (type 66).");
+        assert_eq!(shown(r#""type":24"#), "alice sent something Neucord can't show yet (type 24).");
+        assert_eq!(kind_with(&message(r#""type":0"#), &DM, true), Kind::Normal);
+    }
+
+    #[test]
     fn group_changes() {
         let bob = r#""mentions":[{"id":"6","username":"bob"}]"#;
         assert_eq!(line(kind(&message(&format!(r#""type":1,{bob}"#)), &DM)), "alice added bob to the group.");
@@ -362,7 +398,6 @@ mod tests {
             line(kind(&message(r#""type":10,"content":"3""#), &guild)),
             "alice just boosted the server 3 times! Crew has achieved Level 2!"
         );
-        assert_eq!(line(kind(&message(r#""type":99"#), &guild)), "alice sent something Neucord can't show yet.");
     }
 
     #[test]
