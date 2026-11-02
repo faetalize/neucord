@@ -874,7 +874,7 @@ impl Message {
 
     /// The message a thread was started from, which the thread's first
     /// message stands for (a `THREAD_STARTER_MESSAGE`), when Discord sent
-    /// it along. The client shows it in its place (`nK` in 425812).
+    /// it along. The client shows it in its place (`nV` in 471533).
     pub fn thread_starter(&self) -> Option<&Message> {
         match &self.referenced_message {
             Referenced::Message(original) if self.kind == Self::THREAD_STARTER => Some(original),
