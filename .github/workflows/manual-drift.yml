@@ -24,6 +24,6 @@ jobs:
           gh label create manual-drift --color 5865F2 \
             --description "Weekly hand check of what discord-watch can't snapshot" --force >/dev/null
           gh issue create --label manual-drift --title "Manual drift check, week of $(date -u +%F)" --body "$(cat <<EOF
-          Check what [MANUAL.md]($MANUAL) lists against the current client, following its steps: diff each module since the build it was last checked against, say here what changed and whether Neucord now acts differently, open an issue for each real difference, then commit the new build number to MANUAL.md and close this.
+          Read [MANUAL.md]($MANUAL) in its entirety and follow its steps.
           EOF
           )"

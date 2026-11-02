@@ -58,7 +58,7 @@ impl Viewport {
     }
 
     /// Messages to fetch per page of scrollback, either way (`loadMore` in
-    /// 425812).
+    /// 471533).
     pub fn scroll_page(&self) -> u8 {
         MAX_SCROLL_PAGE.min(2 * self.first_page())
     }
@@ -101,7 +101,7 @@ pub enum Load {
 }
 
 /// Decides when scrolling loads another page, for the open channel: the
-/// client's `isScrollLoadingDisabled` and `handleScroll` in 425812, plus that
+/// client's `isScrollLoadingDisabled` and `handleScroll` in 471533, plus that
 /// the list moving by itself never counts as scrolling. The client's list
 /// doesn't do that, and GTK's does (#88).
 #[derive(Debug, Default)]

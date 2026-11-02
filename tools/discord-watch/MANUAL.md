@@ -9,7 +9,12 @@ Only what has to match is listed: what Neucord sends to Discord or holds
 back, and whether something shows at all. How Neucord words, sizes or lays
 things out is its own design, so none of that is here.
 
-Last checked against: stable 652418.
+Changing this file means one of two things: a new client rule Neucord copies
+that nothing else tracks, or keeping a module id, anchor or name correct. A
+line that explains a choice in Neucord or warns the next reader is a code
+comment, not an entry. If in doubt, ask FAE!!!
+
+Last checked against: stable 660103.
 
 ## Running a check
 
@@ -75,7 +80,7 @@ changed for unrelated reasons only needs a note in the issue.
 - **Forum and media channels take no message** (the forum page in
   `select_channel`, `permissions::can_send`, `update_notice_bar`). Neucord
   shows no box there, loads nothing and refuses to send, whatever Send
-  Messages says. Client: 527053 renders a forum view instead of the chat
+  Messages says. Client: 646482 renders a forum view instead of the chat
   for `isForumLikeChannel` (anchor `"forum channels must exist within a
   guild"`), so no message box.
 - **Asking for members** (`members::Members`, `Gateway::request_members`),
@@ -89,10 +94,10 @@ changed for unrelated reasons only needs a note in the issue.
   rename to look up (`EMb`, `d7Q`, `UNo`, `rLJ`, `FONT_SIZES`). The rules
   aren't.
   The first page is `o` and `d` in 326337; the rest is in the scroll manager
-  in 425812 (anchor `loadMorePausedUntilUserScroll`): the size in `loadMore`,
+  in 471533 (anchor `loadMorePausedUntilUserScroll`): the size in `loadMore`,
   the distances in `getOffsetToTriggerLoading`, what holds loading back in
   `isScrollLoadingDisabled`, and what lifts a pause in `handleMouseUp` and
-  `handleUserScrollGesture` with its keys in `l6`. What a page around a
+  `handleUserScrollGesture` with its keys in `ie`. What a page around a
   message says about the channel's ends, and the query's order, are in
   `fetchMessages` in 148494.
 - **How the gateway connects** (`GATEWAY_QUERY` in `identity.rs`,
@@ -182,7 +187,7 @@ changed for unrelated reasons only needs a note in the issue.
 - **A spoilered link covers every embed** (`has_spoilered_link`). Client:
   521981 (`hasSpoilerEmbeds`).
 - **Attachments the client hides** (`Attachment::is_hidden`). Client:
-  `renderAttachments` in 91688 drops `IS_THUMBNAIL`.
+  `renderAttachments` in 908239 drops `IS_THUMBNAIL`.
 - **The message menu** (`MESSAGE` in `ui/menus.rs`). Client: 355682
   builds it; Neucord keeps its sections and order. Copy Text copies the
   content of `getContentMessage` (watched), or the text displays of a

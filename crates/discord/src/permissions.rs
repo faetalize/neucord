@@ -393,7 +393,7 @@ pub fn can_view(guild: &Guild, channel: &Channel, me: &Account, now: i64) -> boo
 /// servers, and in one where we can see it with Send Messages. The client
 /// asks only for the latter, but never opens a channel we can't see. Never
 /// a forum or media channel: Send Messages there starts posts, which are
-/// threads, and the client shows them no message box (527053).
+/// threads, and the client shows them no message box (646482).
 pub fn can_send(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64) -> bool {
     match guild {
         None => !channel.is_system_dm(),
