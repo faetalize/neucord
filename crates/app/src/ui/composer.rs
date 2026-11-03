@@ -306,7 +306,7 @@ impl App {
     }
 
     /// Start or stop replying; the reply bar and the highlighted row follow.
-    pub(super) fn set_reply(&self, reply: Option<ReplyCtx>) {
+    pub(super) fn set_reply(self: &Rc<Self>, reply: Option<ReplyCtx>) {
         if let Some(reply) = &reply {
             let name = glib::markup_escape_text(&reply.author);
             self.reply_label.set_markup(&format!("Replying to <b>{name}</b>"));

@@ -13,6 +13,7 @@ mod friends;
 mod login;
 mod media_frame;
 mod menus;
+mod message_row;
 mod notify;
 mod panes;
 mod polls;
@@ -110,6 +111,12 @@ pub struct App {
     unread_divider: glib::WeakRef<gtk::Box>,
     /// A message flashed after jumping to it.
     highlight: Cell<Option<Snowflake>>,
+    /// Counts changes to what every message's content is drawn from (names,
+    /// colours, settings), so rows know to make theirs again.
+    row_epoch: Cell<u64>,
+    /// Every row the message list has made, to fill in again when what
+    /// they show changes.
+    rows: RefCell<Vec<glib::WeakRef<message_row::MessageRow>>>,
     /// When scrolling loads another page.
     scroll_loader: RefCell<discord::history::ScrollLoader>,
     state: RefCell<state::State>,
@@ -232,6 +239,8 @@ impl App {
             unread_bar: adw::Banner::builder().button_label("Jump").build(),
             unread_divider: glib::WeakRef::new(),
             highlight: Cell::default(),
+            row_epoch: Cell::default(),
+            rows: RefCell::default(),
             scroll_loader: RefCell::default(),
             state: RefCell::default(),
             drawn: RefCell::default(),

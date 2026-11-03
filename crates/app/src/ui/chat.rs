@@ -16,6 +16,7 @@ use gtk::{gdk, gio, glib, graphene};
 use super::App;
 use super::embeds::{behind_spoiler, embed_widget};
 use super::menus::{self, At, Entry, Item};
+use super::message_row::{MessageRow, Parts};
 use super::state::{Unread, now_unix};
 use super::widgets::avatar_widget;
 use super::{attachments, components, polls};
@@ -118,23 +119,15 @@ impl App {
             move |_, item| {
                 let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
                 item.set_activatable(false);
-                // A divider for a new day or the first unread message, a bar for
-                // collapsed blocked messages, then the message itself.
-                let cell = gtk::Box::new(gtk::Orientation::Vertical, 0);
-                cell.append(
-                    &gtk::Box::builder()
-                        .visible(false)
-                        .spacing(8)
-                        .margin_top(12)
-                        .margin_start(18)
-                        .margin_end(18)
-                        .build(),
-                );
-                cell.append(&gtk::Box::builder().visible(false).css_classes(["blocked-bar"]).build());
-                let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
-                cell.append(&row);
+                let cell = MessageRow::new(item);
                 item.set_child(Some(&cell));
-                attach_message_menu(&this, item, &cell, &row);
+                attach_message_menu(&this, item, &cell);
+                attach_message_actions(&this, &cell);
+                if let Some(this) = this.upgrade() {
+                    let mut rows = this.rows.borrow_mut();
+                    rows.retain(|row| row.upgrade().is_some());
+                    rows.push(cell.downgrade());
+                }
             }
         });
         factory.connect_bind({
@@ -142,30 +135,7 @@ impl App {
             move |_, item| {
                 let Some(this) = this.upgrade() else { return };
                 let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
-                let cell = item.child().expect("cell");
-                let divider = cell.first_child().and_downcast::<gtk::Box>().expect("divider");
-                let bar = divider.next_sibling().and_downcast::<gtk::Box>().expect("blocked bar");
-                let row = bar.next_sibling().and_downcast::<gtk::Box>().expect("row box");
-                let Some(message) = item.item().and_downcast::<glib::BoxedAnyObject>() else { return };
-                let message = message.borrow::<Message>().clone();
-                let messages = this.messages();
-                let position = item.position();
-                let previous = position.checked_sub(1).and_then(|p| timelines::message_at(&messages, p));
-                let divided = this.fill_divider(&divider, &message, previous.as_ref());
-                let (run, revealed) = {
-                    let state = this.state.borrow();
-                    let run = timelines::run_at(&messages, position, |m| state.relationships.is_blocked(m.author.id));
-                    (run, run.is_some_and(|r| state.revealed_blocked.contains(&r.first)))
-                };
-                match run {
-                    Some(run) if run.start == position => this.fill_blocked_bar(&bar, &messages, run, revealed),
-                    _ => bar.set_visible(false),
-                }
-                row.set_visible(run.is_none() || revealed);
-                if !row.is_visible() {
-                    return;
-                }
-                this.fill_message_row(&row, &message, previous.as_ref().filter(|_| !divided), &messages);
+                this.bind_row(item);
             }
         });
         self.list.set_factory(Some(&factory));
@@ -344,50 +314,95 @@ impl App {
         adjustment.value() + adjustment.page_size() >= adjustment.upper() - 80.0
     }
 
-    pub(super) fn on_message_update(&self, edit: MessageEdit) {
+    pub(super) fn on_message_update(self: &Rc<Self>, edit: MessageEdit) {
         let Some(store) = self.timelines.borrow().get(edit.channel_id).map(|t| t.store.clone()) else { return };
         let (id, content) = (edit.id, edit.content.clone());
-        if let Some((position, mut message)) = timelines::find(&store, id) {
-            edit.apply(&mut message);
-            store.splice(position, 1, &[timelines::boxed(message)]);
+        // In place: a new object would get a new row, rather than this one
+        // changed.
+        if let Some(position) = timelines::edit(&store, id, |message| edit.apply(message)) {
+            self.rebind(&store, position, 1);
         }
         // Replies show the start of what they answer; keep it current.
         if let Some(content) = content {
-            timelines::update_replies(&store, id, |original| {
+            let replies = timelines::update_replies(&store, id, |original| {
                 if let Referenced::Message(original) = original {
                     original.content = content.clone();
                 }
             });
+            for position in replies {
+                self.rebind(&store, position, 1);
+            }
         }
     }
 
-    pub(super) fn on_message_delete(&self, id: Snowflake, channel_id: Snowflake) {
+    pub(super) fn on_message_delete(self: &Rc<Self>, id: Snowflake, channel_id: Snowflake) {
         let Some(store) = self.timelines.borrow().get(channel_id).map(|t| t.store.clone()) else { return };
         if let Some((position, _)) = timelines::find(&store, id) {
             store.remove(position);
             // The message after it may now group with the one before.
-            if position < store.n_items() {
-                timelines::rebind(&store, position, 1);
-            }
+            self.rebind(&store, position, 1);
             // A collapsed run it belonged to now counts one less.
             if let Some(before) = position.checked_sub(1) {
                 self.rebind_blocked_run(&store, before);
             }
         }
-        timelines::update_replies(&store, id, |original| *original = Referenced::Deleted);
+        for position in timelines::update_replies(&store, id, |original| *original = Referenced::Deleted) {
+            self.rebind(&store, position, 1);
+        }
         // Nothing left to reply to, as in the official client.
         if self.reply.borrow().as_ref().is_some_and(|r| r.to == id) {
             self.set_reply(None);
         }
     }
 
+    /// Fill `item`'s row in for the message it holds now.
+    fn bind_row(self: &Rc<Self>, item: &gtk::ListItem) {
+        let cell = item.child().and_downcast::<MessageRow>().expect("message row");
+        let parts = cell.parts();
+        let Some(message) = item.item().and_downcast::<glib::BoxedAnyObject>() else { return };
+        let message = message.borrow::<Message>().clone();
+        let messages = self.messages();
+        let position = item.position();
+        let previous = position.checked_sub(1).and_then(|p| timelines::message_at(&messages, p));
+        let divided = self.fill_divider(parts, &message, previous.as_ref());
+        let (run, revealed) = {
+            let state = self.state.borrow();
+            let run = timelines::run_at(&messages, position, |m| state.relationships.is_blocked(m.author.id));
+            (run, run.is_some_and(|r| state.revealed_blocked.contains(&r.first)))
+        };
+        match run {
+            Some(run) if run.start == position => self.fill_blocked_bar(&cell, run, revealed),
+            _ => parts.bar.set_visible(false),
+        }
+        parts.row.set_visible(run.is_none() || revealed);
+        if !parts.row.is_visible() {
+            return;
+        }
+        self.fill_message_row(parts, &message, previous.as_ref().filter(|_| !divided), &messages);
+    }
+
+    /// Fill in again the rows showing `len` messages of `store` from `start`,
+    /// if it is the open channel's, from the messages and state as they are
+    /// now. Splicing in a fresh object would do it too, but the list then
+    /// makes a new row for it rather than reuse the one it had.
+    fn rebind(self: &Rc<Self>, store: &gio::ListStore, start: u32, len: u32) {
+        if *store != self.messages() {
+            return;
+        }
+        let rows: Vec<MessageRow> = self.rows.borrow().iter().filter_map(|row| row.upgrade()).collect();
+        for row in rows {
+            let Some(item) = row.parts().item.upgrade() else { continue };
+            if item.item().is_some() && (start..start.saturating_add(len)).contains(&item.position()) {
+                self.bind_row(&item);
+            }
+        }
+    }
+
     /// Above a message: the date where a new day starts, and "New" above the
     /// first unread message. Returns whether there is a divider, which
     /// starts a new group of messages.
-    fn fill_divider(&self, divider: &gtk::Box, message: &Message, previous: Option<&Message>) -> bool {
-        while let Some(child) = divider.first_child() {
-            divider.remove(&child);
-        }
+    fn fill_divider(&self, parts: &Parts, message: &Message, previous: Option<&Message>) -> bool {
+        let divider = &parts.divider;
         let time = parse_time(&message.timestamp);
         let day = |m: &Message| parse_time(&m.timestamp).map(|t| t.ymd());
         let new_day = previous.is_none_or(|p| day(p) != time.as_ref().map(|t| t.ymd()));
@@ -401,21 +416,11 @@ impl App {
         } else if self.unread_divider.upgrade().as_ref() == Some(divider) {
             self.unread_divider.set(None);
         }
-        divider.set_visible(new_day || unread);
-        if !divider.is_visible() {
-            return false;
-        }
-        let line = || gtk::Separator::builder().hexpand(true).valign(gtk::Align::Center).build();
-        divider.append(&line());
-        if let Some(time) = time.filter(|_| new_day) {
-            let date = time.format("%e %B %Y").map(|d| d.trim().to_owned()).unwrap_or_default();
-            divider.append(&gtk::Label::builder().label(date).css_classes(["caption", "dimmed"]).build());
-            divider.append(&line());
-        }
-        if unread {
-            divider.append(&gtk::Label::builder().label("New").css_classes(["caption-heading", "accent"]).build());
-        }
-        true
+        // A new day whose time doesn't parse gets the line without a date.
+        let date =
+            time.filter(|_| new_day).map(|t| t.format("%e %B %Y").map(|d| d.trim().to_owned()).unwrap_or_default());
+        parts.set_divider(new_day, date.as_deref(), unread);
+        new_day || unread
     }
 
     /// Once the first unread message has come into view, stop offering to
@@ -479,38 +484,45 @@ impl App {
 
     /// The bar that stands in for a run of blocked users' messages: how many
     /// there are, and a button to show or hide them.
-    fn fill_blocked_bar(self: &Rc<Self>, bar: &gtk::Box, store: &gio::ListStore, run: timelines::Run, revealed: bool) {
-        while let Some(child) = bar.first_child() {
-            bar.remove(&child);
-        }
-        let count = if run.len == 1 { "1 blocked message".to_owned() } else { format!("{} blocked messages", run.len) };
-        bar.append(&gtk::Label::builder().label(count).xalign(0.0).build());
-        let button = gtk::Button::builder().label(if revealed { "Hide" } else { "Show" }).css_classes(["link"]).build();
-        let this = Rc::downgrade(self);
-        let store = store.downgrade();
-        button.connect_clicked(move |_| {
-            let (Some(this), Some(store)) = (this.upgrade(), store.upgrade()) else { return };
-            {
-                let mut state = this.state.borrow_mut();
-                if !state.revealed_blocked.remove(&run.first) {
-                    state.revealed_blocked.insert(run.first);
+    fn fill_blocked_bar(self: &Rc<Self>, cell: &MessageRow, run: timelines::Run, revealed: bool) {
+        let parts = cell.parts();
+        let (label, button) = parts.bar_parts.get_or_init(|| {
+            let label = gtk::Label::builder().xalign(0.0).build();
+            let button = gtk::Button::builder().css_classes(["link"]).build();
+            let (this, cell) = (Rc::downgrade(self), cell.downgrade());
+            button.connect_clicked(move |_| {
+                let (Some(this), Some(cell)) = (this.upgrade(), cell.upgrade()) else { return };
+                let Some(run) = cell.parts().run.get() else { return };
+                {
+                    let mut state = this.state.borrow_mut();
+                    if !state.revealed_blocked.remove(&run.first) {
+                        state.revealed_blocked.insert(run.first);
+                    }
                 }
-            }
-            timelines::rebind(&store, run.start, run.len);
+                this.rebind(&this.messages(), run.start, run.len);
+            });
+            parts.bar.append(&label);
+            parts.bar.append(&button);
+            (label, button)
         });
-        bar.append(&button);
-        bar.set_visible(true);
+        parts.run.set(Some(run));
+        label.set_label(&match run.len {
+            1 => "1 blocked message".to_owned(),
+            n => format!("{n} blocked messages"),
+        });
+        button.set_label(if revealed { "Hide" } else { "Show" });
+        parts.bar.set_visible(true);
     }
 
     /// Re-bind the first row of the blocked run at `position`, if any, so its
     /// bar shows the current count.
-    fn rebind_blocked_run(&self, store: &gio::ListStore, position: u32) {
+    fn rebind_blocked_run(self: &Rc<Self>, store: &gio::ListStore, position: u32) {
         let run = {
             let state = self.state.borrow();
             timelines::run_at(store, position, |m| state.relationships.is_blocked(m.author.id))
         };
         if let Some(run) = run {
-            timelines::rebind(store, run.start, 1);
+            self.rebind(store, run.start, 1);
         }
     }
 
@@ -821,7 +833,10 @@ impl App {
                         timeline.complete = true;
                     }
                     this.learn_messages(&page);
+                    let count = page.len() as u32;
                     timelines::prepend(&store, page);
+                    // What was first has one before it now, to group with.
+                    this.rebind(&store, count, 1);
                     this.update_unread_bar();
                 }
                 Ok(_) => {}
@@ -1027,10 +1042,10 @@ impl App {
     }
 
     /// Re-bind one message's row, if it is in the open channel.
-    pub(super) fn refresh_message(&self, id: Snowflake) {
+    pub(super) fn refresh_message(self: &Rc<Self>, id: Snowflake) {
         let messages = self.messages();
         if let Some((position, _)) = timelines::find(&messages, id) {
-            timelines::rebind(&messages, position, 1);
+            self.rebind(&messages, position, 1);
         }
     }
 
@@ -1133,10 +1148,12 @@ impl App {
         }
     }
 
-    /// Re-bind visible rows so newly resolved names appear.
-    pub(super) fn refresh_rows(&self) {
+    /// Fill every row in again so newly resolved names appear, making their
+    /// content again too, which [`Self::rebind`] alone leaves as it was.
+    pub(super) fn refresh_rows(self: &Rc<Self>) {
+        self.row_epoch.set(self.row_epoch.get() + 1);
         let messages = self.messages();
-        timelines::rebind(&messages, 0, messages.n_items());
+        self.rebind(&messages, 0, messages.n_items());
     }
 
     pub(super) fn scroll_to_end(&self) {
@@ -1194,10 +1211,11 @@ fn scroll_input(event: &gdk::Event) -> Option<Duration> {
     }
 }
 
-/// Open the menu of the message `row` shows, from a right-click or
+/// Open the menu of the message `cell` shows, from a right-click or
 /// long-press on it, or from the keys for a menu through `cell`'s
 /// `message.menu`, at its top left corner.
-fn attach_message_menu(this: &std::rc::Weak<App>, item: &gtk::ListItem, cell: &gtk::Box, row: &gtk::Box) {
+fn attach_message_menu(this: &std::rc::Weak<App>, item: &gtk::ListItem, cell: &MessageRow) {
+    let row = &cell.parts().row;
     let open = Rc::new({
         let (this, item, row) = (this.clone(), item.downgrade(), row.downgrade());
         move |at: At, link: Option<String>| {
@@ -1222,6 +1240,33 @@ fn attach_message_menu(this: &std::rc::Weak<App>, item: &gtk::ListItem, cell: &g
     let actions = gio::SimpleActionGroup::new();
     actions.add_action(&action);
     cell.insert_action_group("message", Some(&actions));
+}
+
+/// Make the Reply and More buttons act on whichever message `cell` shows.
+fn attach_message_actions(this: &std::rc::Weak<App>, cell: &MessageRow) {
+    let parts = cell.parts();
+    let shown = |cell: &glib::WeakRef<MessageRow>| {
+        let cell = cell.upgrade()?;
+        let message = cell.parts().shown.borrow().as_ref().map(|(message, _)| message.clone());
+        message.map(|message| (cell, message))
+    };
+    parts.reply_button.connect_clicked({
+        let (this, cell) = (this.clone(), cell.downgrade());
+        move |_| {
+            let (Some(this), Some((_, message))) = (this.upgrade(), shown(&cell)) else { return };
+            this.start_reply(&message, this.shift_held());
+        }
+    });
+    parts.more.connect_clicked({
+        let (this, cell) = (this.clone(), cell.downgrade());
+        move |button| {
+            let (Some(this), Some((cell, message))) = (this.upgrade(), shown(&cell)) else { return };
+            let row = &cell.parts().row;
+            let Some(b) = button.compute_bounds(row) else { return };
+            let rect = gdk::Rectangle::new(b.x() as i32, b.y() as i32, b.width() as i32, b.height() as i32);
+            this.message_menu(row, message, At::Below(rect), None);
+        }
+    });
 }
 
 /// The text selected in `row`, in the label with the focus, as Ctrl+C would
@@ -1313,25 +1358,31 @@ impl App {
     /// `text` naming `user` in `channel`, in the colour of their highest role.
     fn name_label(&self, channel: Snowflake, user: &discord::User, text: &str) -> gtk::Label {
         let label = gtk::Label::builder().css_classes(["heading"]).build();
-        match self.state.borrow().name_colour(channel, user.id) {
-            Some(colour) => label.set_markup(&render::coloured(text, &colour)),
-            None => label.set_label(text),
-        }
+        self.set_name(&label, channel, user, text);
         label
     }
 
-    /// Rows are rebuilt on every bind: simple, and cheap at chat-history sizes.
+    /// Put `text` on `label` as [`Self::name_label`] makes it.
+    fn set_name(&self, label: &gtk::Label, channel: Snowflake, user: &discord::User, text: &str) {
+        match self.state.borrow().name_colour(channel, user.id) {
+            Some(colour) => label.set_markup(&render::coloured(text, &colour)),
+            // Unlike `set_label`, this drops the markup a colour left on.
+            None => label.set_text(text),
+        }
+    }
+
+    /// Fill a row in for `message`. Its content and reply line are made again
+    /// only when the message or `row_epoch` has changed since they were
+    /// made: a re-bind for a highlight or new neighbours changes the rest.
     /// `messages` is the store the row belongs to.
     fn fill_message_row(
         self: &Rc<Self>,
-        row: &gtk::Box,
+        parts: &Parts,
         message: &Message,
         previous: Option<&Message>,
         messages: &gio::ListStore,
     ) {
-        while let Some(child) = row.first_child() {
-            row.remove(&child);
-        }
+        let row = &parts.row;
         let kind = self.message_kind(message);
         if kind == Kind::Hidden {
             row.set_visible(false);
@@ -1349,83 +1400,58 @@ impl App {
             classes.push("replying");
         }
         row.set_css_classes(&classes);
-        if let Some(to) = message.reply_to() {
-            row.append(&self.reply_preview(message, to, messages));
-        }
 
         // A thread's first message shows the one the thread was started from.
         let shown = message.thread_starter().unwrap_or(message);
-        let main = gtk::Box::builder().spacing(16).css_classes(["message-main"]).build();
-        let gutter = gtk::Box::builder().width_request(40).valign(gtk::Align::Start).build();
-        if let Kind::System(system) = &kind {
-            gutter.append(&gtk::Image::builder().icon_name(system_icon(system.icon)).halign(gtk::Align::End).build());
-        } else if !grouped {
-            gutter.append(&avatar_widget(&shown.author, 40, Some(&self.images)));
+        let system = match &kind {
+            Kind::System(system) => Some(system),
+            _ => None,
+        };
+        match system {
+            Some(system) => parts.show_icon(system_icon(system.icon)),
+            None if grouped => parts.hide_gutter(),
+            None => parts.show_avatar(&shown.author, || avatar_widget(&shown.author, 40, Some(&self.images))),
         }
-        main.append(&gutter);
+        parts.header.set_visible(system.is_none() && !grouped);
+        if parts.header.is_visible() {
+            self.set_name(&parts.name, shown.channel_id, &shown.author, shown.author.display_name());
+            parts.time.set_label(&parse_time(&shown.timestamp).map(|t| format_time(&t)).unwrap_or_default());
+        }
+        parts.reply_button.set_visible(self.offers_reply(message));
 
-        let names = self.message_names(shown);
-        let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).hexpand(true).build();
-        if let Kind::System(system) = &kind {
-            body.append(&self.system_line(message, system));
+        let epoch = self.row_epoch.get();
+        let changed = parts.shown.borrow().as_ref().is_none_or(|(was, at)| *at != epoch || was != message);
+        let reply_to = message.reply_to();
+        // Discord didn't resolve what this answers, but it may have loaded since.
+        let unresolved = reply_to.is_some() && matches!(message.referenced_message, Referenced::Unresolved);
+        if changed || unresolved {
+            if let Some(old) = parts.reply.take() {
+                row.remove(&old);
+            }
+            if let Some(to) = reply_to {
+                let preview = self.reply_preview(message, to, messages);
+                row.prepend(&preview);
+                parts.reply.replace(Some(preview));
+            }
+        }
+        if !changed {
+            return;
+        }
+        let content = &parts.content;
+        while let Some(child) = content.first_child() {
+            content.remove(&child);
+        }
+        if let Some(system) = system {
+            content.append(&self.system_line(message, system));
             if let Some(outcome) = discord::poll::outcome(message) {
-                body.append(&polls::outcome(&outcome, &self.images));
+                content.append(&polls::outcome(&outcome, &self.images));
             }
-        } else if !grouped {
-            let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            let name = self.name_label(shown.channel_id, &shown.author, shown.author.display_name());
-            name.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            header.append(&name);
-            let time = parse_time(&shown.timestamp).map(|t| format_time(&t)).unwrap_or_default();
-            header.append(&gtk::Label::builder().label(time).css_classes(["caption", "dimmed"]).build());
-            body.append(&header);
+        } else {
+            self.message_content(content, shown, &self.message_names(shown));
         }
-        if kind == Kind::Normal {
-            self.message_content(&body, shown, &names);
-        }
-        main.append(&body);
-
-        // Over the row, not in it: as part of the layout they would make
-        // every one-line message as tall as the buttons.
-        let actions = gtk::Box::builder().halign(gtk::Align::End).valign(gtk::Align::Start).build();
-        if self.offers_reply(message) {
-            let reply = gtk::Button::builder()
-                .icon_name("mail-reply-sender-symbolic")
-                .tooltip_text("Reply (Shift: without pinging)")
-                .css_classes(["flat", "message-action"])
-                .build();
-            reply.connect_clicked({
-                let this = Rc::downgrade(self);
-                let message = message.clone();
-                move |_| {
-                    if let Some(this) = this.upgrade() {
-                        this.start_reply(&message, this.shift_held());
-                    }
-                }
-            });
-            actions.append(&reply);
-        }
-        let more = gtk::Button::builder()
-            .icon_name("view-more-symbolic")
-            .tooltip_text("More")
-            // Leaving the focus where it is keeps a selection to copy.
-            .focus_on_click(false)
-            .css_classes(["flat", "message-action"])
-            .build();
-        more.connect_clicked({
-            let this = Rc::downgrade(self);
-            let (message, row) = (message.clone(), row.downgrade());
-            move |button| {
-                let (Some(this), Some(row)) = (this.upgrade(), row.upgrade()) else { return };
-                let Some(b) = button.compute_bounds(&row) else { return };
-                let rect = gdk::Rectangle::new(b.x() as i32, b.y() as i32, b.width() as i32, b.height() as i32);
-                this.message_menu(&row, message.clone(), At::Below(rect), None);
-            }
-        });
-        actions.append(&more);
-        let overlay = gtk::Overlay::builder().child(&main).build();
-        overlay.add_overlay(&actions);
-        row.append(&overlay);
+        // Empty, it would still take the body's spacing.
+        content.set_visible(content.first_child().is_some());
+        parts.shown.replace(Some((message.clone(), epoch)));
     }
 
     /// Open the menu for `message`, whose row is `row`, at `at` there.
