@@ -61,7 +61,7 @@ fn iso_ms<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
     Ok(time.map(|t| t.to_unix() * 1000 + i64::from(t.microsecond()) / 1000))
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct User {
     pub id: Snowflake,
     pub username: String,
@@ -601,7 +601,7 @@ impl<'de> Deserialize<'de> for Guild {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Attachment {
     pub id: Snowflake,
     pub filename: String,
@@ -703,7 +703,7 @@ pub fn voice_bars(duration: f64) -> usize {
     ((width + 4.0) / 6.0).floor() as usize
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Message {
     pub id: Snowflake,
     pub channel_id: Snowflake,
@@ -757,13 +757,13 @@ pub struct Message {
     pub member: Option<MessageMember>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct MessageMember {
     #[serde(default)]
     pub roles: Vec<Snowflake>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Call {
     #[serde(default)]
     pub participants: Vec<Snowflake>,
@@ -902,7 +902,7 @@ pub struct Emoji {
     pub animated: bool,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Sticker {
     pub id: Snowflake,
     pub name: String,
@@ -927,7 +927,7 @@ impl Sticker {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct MessageReference {
     /// 0 for a reply (or pin notice, …), 1 for a forward.
     #[serde(rename = "type", default)]
@@ -941,14 +941,14 @@ pub struct MessageReference {
 }
 
 /// A copy of a forwarded message, as it was when forwarded.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Snapshot {
     pub message: SnapshotMessage,
 }
 
 /// What a forward copies of the original: not its author, nor whom it
 /// mentions.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct SnapshotMessage {
     #[serde(rename = "type", default)]
     pub kind: u8,
@@ -972,7 +972,7 @@ pub struct SnapshotMessage {
 
 /// `referenced_message` has three states that matter: absent when Discord
 /// did not resolve it, null when the original was deleted.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub enum Referenced {
     #[default]
     Unresolved,

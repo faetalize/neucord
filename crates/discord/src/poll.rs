@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use crate::model::{Emoji, Message, Snowflake};
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Poll {
     pub question: PollMedia,
     #[serde(default)]
@@ -21,7 +21,7 @@ pub struct Poll {
 }
 
 /// A question's or an answer's text and emoji.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Default, Deserialize)]
 pub struct PollMedia {
     #[serde(default)]
     pub text: Option<String>,
@@ -29,14 +29,14 @@ pub struct PollMedia {
     pub emoji: Option<Emoji>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Answer {
     pub answer_id: u32,
     #[serde(default)]
     pub poll_media: PollMedia,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Default, Deserialize)]
 pub struct Results {
     #[serde(default)]
     pub is_finalized: bool,
@@ -44,7 +44,7 @@ pub struct Results {
     pub answer_counts: Vec<Count>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Count {
     pub id: u32,
     #[serde(default)]

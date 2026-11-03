@@ -67,7 +67,7 @@ impl<'de> Deserialize<'de> for EmbedKind {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Default, Deserialize)]
 pub struct Embed {
     #[serde(rename = "type", default)]
     pub kind: EmbedKind,
@@ -105,7 +105,7 @@ pub struct Embed {
     pub gallery: Vec<EmbedMedia>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Default, Deserialize)]
 pub struct EmbedAuthor {
     #[serde(default)]
     pub name: String,
@@ -115,7 +115,7 @@ pub struct EmbedAuthor {
     pub proxy_icon_url: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Default, Deserialize)]
 pub struct EmbedProvider {
     #[serde(default)]
     pub name: Option<String>,
@@ -123,7 +123,7 @@ pub struct EmbedProvider {
     pub url: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Default, Deserialize)]
 pub struct EmbedFooter {
     #[serde(default)]
     pub text: String,
@@ -131,7 +131,7 @@ pub struct EmbedFooter {
     pub proxy_icon_url: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Default, Deserialize)]
 pub struct EmbedField {
     #[serde(default)]
     pub name: String,
@@ -142,7 +142,7 @@ pub struct EmbedField {
     pub inline: bool,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Default, Deserialize)]
 pub struct EmbedMedia {
     /// The original. Never loaded: see the module docs.
     #[serde(default)]
