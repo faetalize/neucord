@@ -95,24 +95,21 @@ pub fn ids(store: &gio::ListStore) -> Vec<Snowflake> {
     (0..store.n_items()).filter_map(|position| id_at(store, position)).collect()
 }
 
+/// Change the message `id` where it is, and say where that is. The list
+/// doesn't see this: the caller fills its row in again.
+pub fn edit(store: &gio::ListStore, id: Snowflake, change: impl FnOnce(&mut Message)) -> Option<u32> {
+    let position = (0..store.n_items()).rev().find(|&position| id_at(store, position) == Some(id))?;
+    let object = store.item(position).and_downcast::<glib::BoxedAnyObject>()?;
+    change(&mut object.borrow_mut::<Message>());
+    Some(position)
+}
+
 pub fn find(store: &gio::ListStore, id: Snowflake) -> Option<(u32, Message)> {
     // Recent messages are the likely targets of edits and deletes: search from the end.
     (0..store.n_items()).rev().find_map(|position| {
         let message = message_at(store, position)?;
         (message.id == id).then_some((position, message))
     })
-}
-
-/// Make the list re-bind `len` rows from `start`, so they redraw from current
-/// state. `items_changed` alone is not enough: the list view keeps rows whose
-/// item is the same object, so each message gets a fresh box. One at a time,
-/// so the view's scroll anchor never falls inside a replaced range.
-pub fn rebind(store: &gio::ListStore, start: u32, len: u32) {
-    for position in start..(start + len).min(store.n_items()) {
-        if let Some(message) = message_at(store, position) {
-            store.splice(position, 1, &[boxed(message)]);
-        }
-    }
 }
 
 /// Consecutive messages matching `pred` (say, from blocked users), which the
@@ -163,9 +160,14 @@ pub fn merge_newest(store: &gio::ListStore, page: Vec<Message>) -> bool {
     };
     match overlap_from {
         Some(from) => {
-            store.splice(from, n - from, &objects);
+            // Messages that haven't changed keep their objects, and so their
+            // rows. Only up to the first that has: past it, one may group
+            // differently now, and a new object gets bound afresh.
+            let same = (from..n).zip(&page).take_while(|&(p, m)| message_at(store, p).as_ref() == Some(m)).count();
+            let from = from + same as u32;
+            store.splice(from, n - from, &objects[same..]);
             // The message before the splice may now group differently.
-            if from > 0 && !objects.is_empty() {
+            if from > 0 && same < objects.len() {
                 store.items_changed(from, 1, 1);
             }
             false
@@ -203,29 +205,25 @@ pub fn append(store: &gio::ListStore, page: Vec<Message>) {
 }
 
 /// Apply `change` to the copy of `original` that each reply to it carries,
-/// so replies follow edits and deletes of what they answer.
-pub fn update_replies(store: &gio::ListStore, original: Snowflake, change: impl Fn(&mut Referenced)) {
+/// so replies follow edits and deletes of what they answer. Returns where
+/// the replies are, as [`edit`] does.
+pub fn update_replies(store: &gio::ListStore, original: Snowflake, change: impl Fn(&mut Referenced)) -> Vec<u32> {
+    let mut replies = Vec::new();
     for position in 0..store.n_items() {
         let Some(object) = store.item(position).and_downcast::<glib::BoxedAnyObject>() else { continue };
-        if object.borrow::<Message>().reply_to() != Some(original) {
-            continue;
+        let mut message = object.borrow_mut::<Message>();
+        if message.reply_to() == Some(original) {
+            change(&mut message.referenced_message);
+            replies.push(position);
         }
-        let mut message = object.borrow::<Message>().clone();
-        change(&mut message.referenced_message);
-        store.splice(position, 1, &[boxed(message)]);
     }
+    replies
 }
 
 /// Prepend an older page (oldest first).
 pub fn prepend(store: &gio::ListStore, page: Vec<Message>) {
-    let count = page.len() as u32;
     let objects: Vec<glib::BoxedAnyObject> = page.into_iter().map(boxed).collect();
     store.splice(0, 0, &objects);
-    // The previous first message now has one before it: re-bind it so its
-    // header groups with the page's last message when it should.
-    if count > 0 && store.n_items() > count {
-        rebind(store, count, 1);
-    }
 }
 
 #[cfg(test)]
@@ -252,13 +250,14 @@ mod tests {
     }
 
     #[test]
-    fn rebind_swaps_in_fresh_objects() {
+    fn edits_keep_the_object() {
+        // A new object would get a new row from the list.
         let store = store_with(&[1, 2, 3]);
-        let before: Vec<_> = (0..3).map(|p| store.item(p).unwrap()).collect();
-        rebind(&store, 1, 5);
-        assert_eq!(ids(&store), [1, 2, 3], "same messages, same order; the range is clamped");
-        assert_eq!(store.item(0).unwrap(), before[0]);
-        assert!(store.item(1).unwrap() != before[1] && store.item(2).unwrap() != before[2]);
+        let before = store.item(1).unwrap();
+        assert_eq!(edit(&store, Snowflake(2), |m| m.content = "edited".into()), Some(1));
+        assert_eq!(store.item(1).unwrap(), before);
+        assert_eq!(find(&store, Snowflake(2)).unwrap().1.content, "edited");
+        assert_eq!(edit(&store, Snowflake(4), |_| unreachable!()), None);
     }
 
     fn ids(store: &gio::ListStore) -> Vec<u64> {
@@ -281,6 +280,19 @@ mod tests {
         assert!(!replaced);
         assert_eq!(ids(&store), [1, 2, 3, 5, 6, 7]);
         assert_eq!(find(&store, Snowflake(5)).unwrap().1.content, "edited");
+    }
+
+    #[test]
+    fn merge_keeps_unchanged_messages() {
+        // The list makes a new row for a new object, so those of messages
+        // that haven't changed stay.
+        let store = store_with(&[1, 2, 3, 4]);
+        let before: Vec<_> = (0..4).map(|p| store.item(p).unwrap()).collect();
+        merge_newest(&store, vec![msg(2, ""), msg(3, "edited"), msg(4, ""), msg(5, "")]);
+        assert_eq!(ids(&store), [1, 2, 3, 4, 5]);
+        assert_eq!(store.item(1).unwrap(), before[1]);
+        assert!(store.item(2).unwrap() != before[2], "edited");
+        assert_eq!(find(&store, Snowflake(3)).unwrap().1.content, "edited");
     }
 
     #[test]
@@ -337,11 +349,14 @@ mod tests {
         store.append(&boxed(reply));
         let original = || find(&store, Snowflake(3)).unwrap().1.referenced_message;
 
-        update_replies(&store, Snowflake(2), |r| {
+        let reply_object = store.item(2).unwrap();
+        let replies = update_replies(&store, Snowflake(2), |r| {
             if let Referenced::Message(m) = r {
                 m.content = "after".into();
             }
         });
+        assert_eq!(replies, [2]);
+        assert_eq!(store.item(2).unwrap(), reply_object, "changed in place");
         assert!(matches!(original(), Referenced::Message(m) if m.content == "after"));
         update_replies(&store, Snowflake(2), |r| *r = Referenced::Deleted);
         assert!(matches!(original(), Referenced::Deleted));
