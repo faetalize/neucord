@@ -5,15 +5,18 @@ Another GTK Discord client? Daring today, are we...?
 > [!WARNING]
 > Neucord is a third-party client. Use it at your own risk.
 
-This project intends to be a drop in replacement for the official Discord client,
-optimized first and foremost for Linux users,
-with best-in-class Wayland support, 
-and a performance footprint that makes you think "8GB of RAM isn't so bad in 2026",
+This project intends to be a drop in replacement for the official Discord client,\
+optimized first and foremost for Linux users,\
+with best-in-class Wayland support,\
+a performance footprint that makes you think "8GB of RAM isn't so bad in 2026",\
 and tasteful extra features.
 
-This will never support plugins, nor will it ever introduce any features meant to bypass or grant premium features.
-Spoofing or falsely identifying the client to Discord is NOT planned,
-as such, Neucord will keep announcing itself authentically as 'Neucord'.
+Neucord does not currently plan to ship a plugin system,\
+nor will it ever introduce any ways meant to bypass or grant premium features.
+
+Spoofing or falsely identifying the client to Discord's servers is NOT planned,\
+as such, Neucord will keep announcing itself authentically as 'Neucord'.\
+
 Staying on Discord's good side, is one of the pillars of this project, capisce?
 
 ## What doesn't work yet
