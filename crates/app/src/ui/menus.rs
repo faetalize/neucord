@@ -15,7 +15,7 @@ use gtk::{gdk, gio, glib};
 
 use super::App;
 use super::chat::{self, MessageTarget};
-use super::composer;
+use super::{composer, edits};
 
 /// One entry of a menu, for what it was opened on: a `T`. `C` is what
 /// entries read and act through: the app, or a stand-in in tests.
@@ -83,8 +83,9 @@ pub(super) type Table<T, C = App> = &'static [&'static [Entry<T, C>]];
 /// in its order.
 pub(super) const MESSAGE: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
-    &[composer::REPLY],
+    &[edits::EDIT, composer::REPLY],
     &[chat::COPY_TEXT, chat::COPY_MESSAGE_LINK],
+    &[edits::DELETE],
     &[chat::COPY_LINK, chat::OPEN_LINK],
     &[chat::COPY_MESSAGE_ID],
 ];

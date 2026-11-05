@@ -10,7 +10,10 @@ use std::fmt::Display;
 
 pub(crate) const MESSAGES: Endpoint = Endpoint::get("/channels/{channel}/messages");
 pub(crate) const SEND_MESSAGE: Endpoint = Endpoint::post("/channels/{channel}/messages");
+pub(crate) const EDIT_MESSAGE: Endpoint = Endpoint::patch("/channels/{channel}/messages/{message}");
+pub(crate) const DELETE_MESSAGE: Endpoint = Endpoint::delete("/channels/{channel}/messages/{message}");
 pub(crate) const ACK: Endpoint = Endpoint::post("/channels/{channel}/messages/{message}/ack");
+pub(crate) const EDIT_CHANNEL: Endpoint = Endpoint::patch("/channels/{channel}");
 pub(crate) const USER: Endpoint = Endpoint::get("/users/{user}");
 pub(crate) const OPEN_DM: Endpoint = Endpoint::post("/users/@me/channels");
 pub(crate) const SEND_FRIEND_REQUEST: Endpoint = Endpoint::post("/users/@me/relationships");
@@ -43,6 +46,10 @@ impl Endpoint {
 
     const fn put(path: &'static str) -> Self {
         Endpoint { method: "PUT", path }
+    }
+
+    const fn patch(path: &'static str) -> Self {
+        Endpoint { method: "PATCH", path }
     }
 
     const fn delete(path: &'static str) -> Self {

@@ -167,6 +167,25 @@ impl Rest {
         self.request(call!(SEND_MESSAGE, channel), Some(body)).await
     }
 
+    /// Change the text of `message`, ours, to `content`.
+    pub async fn edit_message(&self, message: &Message, content: &str) -> Result<Message, Error> {
+        let call = call!(EDIT_MESSAGE, channel = message.channel_id, message = message.id);
+        self.request(call, Some(edit_body(message, content))).await
+    }
+
+    /// Delete `message`, ours or, with Manage Messages, anyone's.
+    pub async fn delete_message(&self, channel: Snowflake, message: Snowflake) -> Result<(), Error> {
+        self.request(call!(DELETE_MESSAGE, channel, message), None).await
+    }
+
+    /// Reopen an archived thread, as the official client does before an
+    /// edit or delete there.
+    pub async fn unarchive_thread(&self, thread: Snowflake) -> Result<(), Error> {
+        let call = call!(EDIT_CHANNEL, channel = thread);
+        let _: serde_json::Value = self.request(call, Some(json!({ "archived": false }))).await?;
+        Ok(())
+    }
+
     /// Mark everything in `channel` up to `message` as read, for all our clients.
     pub async fn ack(&self, channel: Snowflake, message: Snowflake) -> Result<(), Error> {
         let body = json!({ "token": null });
@@ -291,6 +310,18 @@ impl Rest {
     }
 }
 
+/// What editing `message` to say `content` sends, as `editMessage` in 148494
+/// builds it.
+fn edit_body(message: &Message, content: &str) -> Value {
+    let mut body = json!({ "content": content });
+    if message.is_quiet_reply() {
+        // Mentions are worked out again from the new text, which would
+        // otherwise ping the author of what it answers.
+        body["allowed_mentions"] = json!({ "parse": ["users", "roles", "everyone"], "replied_user": false });
+    }
+    body
+}
+
 /// How long to wait before retrying a request Discord rate limited, or
 /// `None` to fail at once. Like the official client's message queue, a
 /// slowmode refusal is never retried: the cooldown is the user's to wait out.
@@ -321,8 +352,10 @@ pub(crate) fn is_captcha(body: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Captcha, Page, base_headers, rate_limit_wait};
-    use crate::{Snowflake, identity};
+    use serde_json::json;
+
+    use super::{Captcha, Page, base_headers, edit_body, rate_limit_wait};
+    use crate::{Message, Snowflake, identity};
 
     #[test]
     fn history_queries_read_like_the_clients() {
@@ -332,6 +365,24 @@ mod tests {
         assert_eq!(Page::Before(id).query(24), "before=7&limit=24");
         assert_eq!(Page::After(id).query(24), "after=7&limit=24");
         assert_eq!(Page::Around(id).query(30), "limit=30&around=7");
+    }
+
+    #[test]
+    fn edits_keep_a_quiet_reply_quiet() {
+        let message = |mentions: &str| -> Message {
+            let original = r#"{"id":"1","channel_id":"9","author":{"id":"2","username":"a"},"timestamp":""}"#;
+            serde_json::from_str(&format!(
+                r#"{{"id":"3","channel_id":"9","type":19,"author":{{"id":"5","username":"me"}},"timestamp":"",
+                "message_reference":{{"message_id":"1"}},"referenced_message":{original},"mentions":{mentions}}}"#
+            ))
+            .unwrap()
+        };
+        assert_eq!(edit_body(&message(r#"[{"id":"2","username":"a"}]"#), "hi"), json!({ "content": "hi" }));
+        let quiet = json!({
+            "content": "hi",
+            "allowed_mentions": { "parse": ["users", "roles", "everyone"], "replied_user": false },
+        });
+        assert_eq!(edit_body(&message("[]"), "hi"), quiet);
     }
 
     #[test]

@@ -338,6 +338,7 @@ impl App {
     pub(super) fn on_message_delete(self: &Rc<Self>, id: Snowflake, channel_id: Snowflake) {
         let Some(store) = self.timelines.borrow().get(channel_id).map(|t| t.store.clone()) else { return };
         if let Some((position, _)) = timelines::find(&store, id) {
+            self.hand_off_focus(&store, position);
             store.remove(position);
             // The message after it may now group with the one before.
             self.rebind(&store, position, 1);
@@ -349,9 +350,35 @@ impl App {
         for position in timelines::update_replies(&store, id, |original| *original = Referenced::Deleted) {
             self.rebind(&store, position, 1);
         }
-        // Nothing left to reply to, as in the official client.
+        // Nothing left to reply to, or edit, as in the official client.
         if self.reply.borrow().as_ref().is_some_and(|r| r.to == id) {
             self.set_reply(None);
+        }
+        if self.editing() == Some(id) {
+            self.end_edit();
+        }
+    }
+
+    /// Move the focus to a neighbour of the row at `position` in `store`, if
+    /// that row has it and is about to go. The list scrolls to follow its
+    /// focus, and GTK would move it to the first row, taking the view to
+    /// the top of the channel.
+    fn hand_off_focus(self: &Rc<Self>, store: &gio::ListStore, position: u32) {
+        if *store != self.messages() {
+            return;
+        }
+        let focused = self.rows.borrow().iter().filter_map(|row| row.upgrade()).any(|row| {
+            let item = row.parts().item.upgrade();
+            item.is_some_and(|item| item.item().is_some() && item.position() == position)
+                && row.parent().is_some_and(|widget| widget.has_focus() || widget.focus_child().is_some())
+        });
+        if !focused {
+            return;
+        }
+        let neighbour = (position + 1 < store.n_items()).then_some(position + 1).or(position.checked_sub(1));
+        match neighbour {
+            Some(neighbour) => self.list.scroll_to(neighbour, gtk::ListScrollFlags::FOCUS, None),
+            None => _ = self.composer.grab_focus(),
         }
     }
 
@@ -385,7 +412,7 @@ impl App {
     /// if it is the open channel's, from the messages and state as they are
     /// now. Splicing in a fresh object would do it too, but the list then
     /// makes a new row for it rather than reuse the one it had.
-    fn rebind(self: &Rc<Self>, store: &gio::ListStore, start: u32, len: u32) {
+    pub(super) fn rebind(self: &Rc<Self>, store: &gio::ListStore, start: u32, len: u32) {
         if *store != self.messages() {
             return;
         }
@@ -562,6 +589,9 @@ impl App {
         }
         if self.reply.borrow().as_ref().is_some_and(|r| r.channel != id) {
             self.set_reply(None);
+        }
+        if self.editing.borrow().as_ref().is_some_and(|e| e.message.channel_id != id) {
+            self.end_edit();
         }
         // A forum or media channel is made of posts, and never takes a
         // message: nothing to load, and no message box.
@@ -1242,7 +1272,7 @@ fn attach_message_menu(this: &std::rc::Weak<App>, item: &gtk::ListItem, cell: &M
     cell.insert_action_group("message", Some(&actions));
 }
 
-/// Make the Reply and More buttons act on whichever message `cell` shows.
+/// Make the Edit, Reply and More buttons act on whichever message `cell` shows.
 fn attach_message_actions(this: &std::rc::Weak<App>, cell: &MessageRow) {
     let parts = cell.parts();
     let shown = |cell: &glib::WeakRef<MessageRow>| {
@@ -1250,6 +1280,13 @@ fn attach_message_actions(this: &std::rc::Weak<App>, cell: &MessageRow) {
         let message = cell.parts().shown.borrow().as_ref().map(|(message, _)| message.clone());
         message.map(|message| (cell, message))
     };
+    parts.edit_button.connect_clicked({
+        let (this, cell) = (this.clone(), cell.downgrade());
+        move |_| {
+            let (Some(this), Some((_, message))) = (this.upgrade(), shown(&cell)) else { return };
+            this.start_edit(&message, None);
+        }
+    });
     parts.reply_button.connect_clicked({
         let (this, cell) = (this.clone(), cell.downgrade());
         move |_| {
@@ -1399,6 +1436,13 @@ impl App {
         if self.reply.borrow().as_ref().is_some_and(|r| r.to == message.id) {
             classes.push("replying");
         }
+        if self.editing() == Some(message.id) {
+            classes.push("editing");
+        }
+        let editable = self.offers_edit(message);
+        if editable {
+            classes.push("editable");
+        }
         row.set_css_classes(&classes);
 
         // A thread's first message shows the one the thread was started from.
@@ -1417,6 +1461,7 @@ impl App {
             self.set_name(&parts.name, shown.channel_id, &shown.author, shown.author.display_name());
             parts.time.set_label(&parse_time(&shown.timestamp).map(|t| format_time(&t)).unwrap_or_default());
         }
+        parts.edit_button.set_visible(editable);
         parts.reply_button.set_visible(self.offers_reply(message));
 
         let epoch = self.row_epoch.get();

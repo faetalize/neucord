@@ -13,7 +13,7 @@ use discord::relationships::Relationships;
 use discord::settings::{GuildFolder, MediaSettings, RailEntry};
 use discord::threads;
 use discord::verification::Account;
-use discord::{Channel, Gateway, Guild, Rest, Resume, Snowflake, User};
+use discord::{Channel, Gateway, Guild, Message, Rest, Resume, Snowflake, User};
 use gtk::glib;
 
 use super::friends::Tab;
@@ -170,6 +170,31 @@ impl State {
     pub(super) fn can_reply(&self, id: Snowflake) -> bool {
         match (self.find_channel(id), &self.account) {
             (Some((guild, channel)), Some(me)) => permissions::can_reply(guild, channel, me, now_unix()),
+            _ => false,
+        }
+    }
+
+    /// Whether we may edit `message` (see [`permissions::can_edit`]).
+    pub(super) fn can_edit(&self, message: &Message) -> bool {
+        match (self.find_channel(message.channel_id), &self.account) {
+            (Some((guild, channel)), Some(me)) => permissions::can_edit(guild, channel, message, me, now_unix()),
+            _ => false,
+        }
+    }
+
+    /// Whether we may delete `message` (see [`permissions::can_delete`]).
+    pub(super) fn can_delete(&self, message: &Message) -> bool {
+        match (self.find_channel(message.channel_id), &self.account) {
+            (Some((guild, channel)), Some(me)) => permissions::can_delete(guild, channel, message, me, now_unix()),
+            _ => false,
+        }
+    }
+
+    /// Whether an edit or delete in the channel reopens it first (see
+    /// [`permissions::unarchives_first`]).
+    pub(super) fn unarchives_first(&self, id: Snowflake) -> bool {
+        match (self.find_channel(id), &self.account) {
+            (Some((guild, channel)), Some(me)) => permissions::unarchives_first(guild, channel, me, now_unix()),
             _ => false,
         }
     }

@@ -1,4 +1,5 @@
-//! The message box: sending, replying, and `@` mention autocomplete.
+//! The message box: sending, replying, and `@` mention autocomplete. Editing
+//! happens here too, in `edits`.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -74,6 +75,7 @@ impl App {
         });
         self.reply_bar.append(&cancel);
         area.append(&self.reply_bar);
+        self.build_edit_bar(area);
         self.composer_box.append(&self.composer);
         area.append(&self.composer_box);
 
@@ -125,6 +127,15 @@ impl App {
                         }
                         _ => {}
                     }
+                }
+                if key == Key::Escape && this.editing().is_some() {
+                    this.end_edit();
+                    return glib::Propagation::Stop;
+                }
+                // Up alone in an empty box edits our last message, as in the official client.
+                let alone = !modifiers.intersects(gtk::accelerator_get_default_mod_mask());
+                if key == Key::Up && alone && this.composer.buffer().char_count() == 0 && this.edit_last() {
+                    return glib::Propagation::Stop;
                 }
                 if key == Key::Escape && this.reply.borrow().is_some() {
                     this.set_reply(None);
@@ -192,7 +203,7 @@ impl App {
             state.channel.and_then(|id| state.find_channel(id)).is_some_and(|(_, c)| c.kind.is_forum_like())
         };
         if forum {
-            self.composer_box.set_visible(false);
+            self.show_composer(false);
             bar.set_visible(false);
             return;
         }
@@ -230,7 +241,7 @@ impl App {
                 (Some(gate), _) => gate_notice(gate, now_unix()),
                 (None, Some(denied)) => denied.to_owned(),
                 (None, None) => {
-                    self.composer_box.set_visible(true);
+                    self.show_composer(true);
                     bar.set_visible(slowmode > 0);
                     if slowmode > 0 {
                         let seconds = (slowmode + 999) / 1000;
@@ -244,7 +255,7 @@ impl App {
                 }
             },
         };
-        self.composer_box.set_visible(false);
+        self.show_composer(false);
         bar.set_visible(true);
         bar.append(&label(text));
         if timeout.is_some() || gate.as_ref().and_then(Gate::until).is_some() {
@@ -271,6 +282,20 @@ impl App {
         self.notice_tick.replace(Some(tick));
     }
 
+    /// Show or hide the message box. Hiding it ends an edit, and the rows
+    /// on screen follow, since Edit is only offered with the box.
+    fn show_composer(self: &Rc<Self>, shown: bool) {
+        if self.composer_box.is_visible() == shown {
+            return;
+        }
+        self.composer_box.set_visible(shown);
+        if !shown {
+            self.end_edit();
+        }
+        let messages = self.messages();
+        self.rebind(&messages, 0, messages.n_items());
+    }
+
     /// Whether Reply shows for `message`: what the official client replies
     /// to, where it lets us.
     pub(super) fn offers_reply(&self, message: &Message) -> bool {
@@ -284,6 +309,7 @@ impl App {
         if !self.composer_box.is_visible() || !self.state.borrow().can_reply(message.channel_id) {
             return;
         }
+        self.end_edit();
         let (own, guild) = {
             let state = self.state.borrow();
             let guild = state.find_channel(message.channel_id).and_then(|(guild, _)| guild.map(|g| g.id));
@@ -443,6 +469,9 @@ impl App {
     }
 
     pub(super) fn send_composer(self: &Rc<Self>) {
+        if self.editing().is_some() {
+            return self.save_edit();
+        }
         let buffer = self.composer.buffer();
         let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).trim().to_owned();
         let (channel, rest) = {
