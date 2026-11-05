@@ -63,6 +63,7 @@ pub(super) struct Parts {
     pub(super) time: gtk::Label,
     /// What the message says and shows.
     pub(super) content: gtk::Box,
+    pub(super) edit_button: gtk::Button,
     pub(super) reply_button: gtk::Button,
     pub(super) more: gtk::Button,
     /// The message the content and reply line were made from, and the
@@ -105,6 +106,11 @@ impl MessageRow {
         // Over the row, not in it: as part of the layout they would make
         // every one-line message as tall as the buttons.
         let actions = gtk::Box::builder().halign(gtk::Align::End).valign(gtk::Align::Start).build();
+        let edit_button = gtk::Button::builder()
+            .icon_name("document-edit-symbolic")
+            .tooltip_text("Edit")
+            .css_classes(["flat", "message-action"])
+            .build();
         let reply_button = gtk::Button::builder()
             .icon_name("mail-reply-sender-symbolic")
             .tooltip_text("Reply (Shift: without pinging)")
@@ -117,6 +123,7 @@ impl MessageRow {
             .focus_on_click(false)
             .css_classes(["flat", "message-action"])
             .build();
+        actions.append(&edit_button);
         actions.append(&reply_button);
         actions.append(&more);
         let overlay = gtk::Overlay::builder().child(&main).build();
@@ -139,6 +146,7 @@ impl MessageRow {
             name,
             time,
             content,
+            edit_button,
             reply_button,
             more,
             shown: RefCell::new(None),

@@ -75,8 +75,16 @@ changed for unrelated reasons only needs a note in the issue.
   for `UJ` in 406704 (anchor `isArchivedLockedThread`), which `x` already
   covers. Posting in an archived thread sends nothing first:
   `sendMessage` in 148494 doesn't call `unarchiveThreadIfNecessary`
-  (472456), while edits and deletes do, so Neucord needs it once it edits
-  or deletes.
+  (472456), while edits and deletes do.
+- **Editing and deleting** (`permissions::can_edit`, `can_delete`;
+  `ui/edits.rs`). The requests are watched (`editMessage`, `deleteMessage`,
+  `unarchiveThreadIfNecessary`), as are `canDeleteOwnMessage` and
+  `UNDELETABLE`. When each is offered isn't: Edit in 697470 (anchor
+  `referralTrialOfferId`), Delete in 483768 (anchor
+  `isModeratorReportChannel`), both only where `Id` in 406704 holds, and
+  Edit not under `s5` there. An emptied edit asks to delete instead, an
+  unchanged one sends nothing (205120, anchor `onConfirmDelete`), and a
+  crossposted one asks first (91624).
 - **Forum and media channels take no message** (the forum page in
   `select_channel`, `permissions::can_send`, `update_notice_bar`). Neucord
   shows no box there, loads nothing and refuses to send, whatever Send

@@ -504,16 +504,20 @@ impl App {
     /// the message box and Reply follow what we may still do.
     pub(super) fn permissions_changed(self: &Rc<Self>, guild: Option<Snowflake>) {
         self.refresh_badges();
-        let (open, viewable, replyable) = {
+        let (open, viewable, replyable, editable) = {
             let state = self.state.borrow();
             let open = state.guild.filter(|&open| guild.is_none_or(|id| id == open));
             let channel = state.channel.filter(|_| state.page.is_none());
             let reply = self.reply.borrow().as_ref().map(|r| r.channel);
-            (open, channel.is_some_and(|c| state.can_view(c)), reply.is_none_or(|c| state.can_reply(c)))
+            let editable = self.editing.borrow().as_ref().is_none_or(|e| state.can_edit(&e.message));
+            (open, channel.is_some_and(|c| state.can_view(c)), reply.is_none_or(|c| state.can_reply(c)), editable)
         };
         let Some(open) = open else { return };
         if !replyable {
             self.set_reply(None);
+        }
+        if !editable {
+            self.end_edit();
         }
         if !viewable {
             // Elsewhere, or a first channel we can now see.

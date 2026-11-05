@@ -8,6 +8,7 @@ mod chat;
 mod components;
 mod composer;
 mod connection;
+mod edits;
 mod embeds;
 mod friends;
 mod login;
@@ -102,6 +103,10 @@ pub struct App {
     reply_ping: gtk::ToggleButton,
     /// The message the composer replies to, if any.
     reply: RefCell<Option<composer::ReplyCtx>>,
+    /// "Editing message" above the composer.
+    edit_bar: gtk::Box,
+    /// The message the composer is editing, if any.
+    editing: RefCell<Option<edits::EditCtx>>,
     /// "You're viewing older messages", while the open channel is detached.
     present_bar: adw::Banner,
     /// How many messages are new since the channel was last read, with a
@@ -232,6 +237,9 @@ impl App {
                 .css_classes(["reply-ping", "flat"])
                 .build(),
             reply: RefCell::default(),
+            // Styled as the reply bar, which takes its place while editing.
+            edit_bar: gtk::Box::builder().spacing(8).visible(false).css_classes(["reply-bar"]).build(),
+            editing: RefCell::default(),
             present_bar: adw::Banner::builder()
                 .title("You're viewing older messages")
                 .button_label("Jump to Present")

@@ -3,8 +3,9 @@
     "AccountStanding": ["ALL_GOOD", "LIMITED", "VERY_LIMITED", "AT_RISK", "SUSPENDED"],
     "ActivityType": ["PLAYING", "STREAMING", "LISTENING", "WATCHING", "CUSTOM_STATUS", "COMPETING"],
     "ApiErrorCode": ["UNKNOWN_ACCOUNT", "RELATIONSHIP_INVALID_NO_CONFIRMATION", "SLOWMODE_RATE_LIMITED"],
+    "ApplicationIntegrationType": ["GUILD_INSTALL", "USER_INSTALL"],
     "ButtonStyle": ["PRIMARY", "SECONDARY", "SUCCESS", "DESTRUCTIVE", "LINK", "PREMIUM"],
-    "ChannelFlags": ["IS_SCHEDULED_FOR_DELETION", "PINNED"],
+    "ChannelFlags": ["IS_SCHEDULED_FOR_DELETION", "PINNED", "IS_MODERATOR_REPORT_CHANNEL"],
     "ChannelType": [
       "DM",
       "GROUP_DM",
@@ -31,13 +32,20 @@
     ],
     "LoginRequiredAction": ["UPDATE_PASSWORD"],
     "MFALevel": ["NONE", "ELEVATED"],
-    "MessageFlags": ["SUPPRESS_EMBEDS", "EPHEMERAL", "IS_VOICE_MESSAGE", "IS_COMPONENTS_V2"],
+    "MessageFlags": ["CROSSPOSTED", "SUPPRESS_EMBEDS", "EPHEMERAL", "IS_VOICE_MESSAGE", "IS_COMPONENTS_V2"],
     "MessageReferenceType": ["DEFAULT", "FORWARD"],
-    "MessageType": ["DEFAULT", "REPLY", "CHANNEL_PINNED_MESSAGE"],
+    "MessageType": [
+      "DEFAULT",
+      "REPLY",
+      "CHANNEL_PINNED_MESSAGE",
+      "AUTO_MODERATION_ACTION",
+      "MEDIA_MENTION_MESSAGE"
+    ],
     "Permissions": [
       "VIEW_CHANNEL",
       "SEND_MESSAGES",
       "READ_MESSAGE_HISTORY",
+      "MANAGE_MESSAGES",
       "ADMINISTRATOR",
       "BYPASS_SLOWMODE",
       "MANAGE_THREADS",
@@ -57,14 +65,18 @@
     "VerificationLevel": ["NONE", "LOW", "MEDIUM", "HIGH", "VERY_HIGH"]
   },
   "methods": [
+    "canDeleteOwnMessage",
     "canTrackUnreads",
     "createResponseHandler",
+    "deleteMessage",
+    "editMessage",
     "fetchMessages",
     "getAckTimestamp",
     "getAlgorithm",
     "getContentMessage",
     "getForwardInfo",
     "getGuildChannelUnreadState",
+    "getLastEditableMessage",
     "getSystemMessageUserJoin",
     "handleRequiredAction",
     "interceptResponse",
@@ -75,6 +87,7 @@
     "isSystemUser",
     "renderEmbeds",
     "requestGuildMembers",
+    "unarchiveThreadIfNecessary",
     "usesLegacyCompression"
   ],
   "stores": [
@@ -91,5 +104,5 @@
     "SafetyHubStore",
     "SlowmodeStore"
   ],
-  "constants": ["ACCOUNT_AGE", "EMb", "FONT_SIZES", "MAX_EMOJI_TO_BE_JUMBO", "MEMBER_AGE", "REPLYABLE", "UNo", "USER_MESSAGE", "d7Q", "rLJ"]
+  "constants": ["ACCOUNT_AGE", "EMb", "FONT_SIZES", "MAX_EMOJI_TO_BE_JUMBO", "MEMBER_AGE", "REPLYABLE", "UNDELETABLE", "UNo", "USER_MESSAGE", "d7Q", "rLJ"]
 }

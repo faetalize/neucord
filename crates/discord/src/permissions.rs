@@ -23,7 +23,7 @@ use std::ops::{BitAnd, BitOr};
 use serde::{Deserialize, Deserializer};
 
 use crate::verification::Account;
-use crate::{Channel, ChannelKind, Guild};
+use crate::{Channel, ChannelKind, Guild, Message};
 
 /// A set of Discord's permission bits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -278,6 +278,8 @@ const AUTOMOD_QUARANTINED: u64 = (1 << 7) | (1 << 8) | (1 << 10);
 /// Channel flag: the channel is about to be deleted, and nobody may do
 /// anything there.
 const IS_SCHEDULED_FOR_DELETION: u64 = 1 << 9;
+/// Channel flag: where members' reports reach a server's moderators.
+const IS_MODERATOR_REPORT_CHANNEL: u64 = 1 << 19;
 
 /// Ours in `guild` as a whole, at `now` (seconds since 1970).
 pub fn in_guild(guild: &Guild, me: &Account, now: i64) -> Permissions {
@@ -432,6 +434,45 @@ pub fn can_unarchive(guild: &Guild, thread: &Channel, me: &Account, now: i64) ->
     let parent = thread.parent_id.and_then(|id| guild.channel(id));
     here.contains(Permissions::SEND_MESSAGES_IN_THREADS | Permissions::SEND_MESSAGES)
         && parent.is_some_and(|p| in_channel(guild, p, me, now).contains(Permissions::SEND_MESSAGES))
+}
+
+/// Whether `me` may edit `message` in `channel`, as the client offers it:
+/// [`Message::is_editable_by`], where messages [`can_change`], and not in a
+/// locked thread without Manage Threads (`s5` in 406704).
+pub fn can_edit(guild: Option<&Guild>, channel: &Channel, message: &Message, me: &Account, now: i64) -> bool {
+    let locked_out = |g| channel.is_locked() && !in_channel(g, channel, me, now).contains(Permissions::MANAGE_THREADS);
+    message.is_editable_by(me.id) && can_change(guild, channel, me, now) && !guild.is_some_and(locked_out)
+}
+
+/// Whether `me` may delete `message` in `channel` (483768):
+/// [`Message::is_deletable_by`], with Manage Messages there, where messages
+/// [`can_change`]. In a moderator report channel, the report itself and
+/// system messages stay.
+pub fn can_delete(guild: Option<&Guild>, channel: &Channel, message: &Message, me: &Account, now: i64) -> bool {
+    let manage = guild.is_some_and(|g| in_channel(g, channel, me, now).contains(Permissions::MANAGE_MESSAGES));
+    // The report is the post's first message, which shares the post's id.
+    let report =
+        channel.flags & IS_MODERATOR_REPORT_CHANNEL != 0 && (message.id == channel.id || !message.is_user_message());
+    message.is_deletable_by(me.id, manage) && can_change(guild, channel, me, now) && !report
+}
+
+/// Whether messages in `channel` can be edited or deleted at all (`Id` in
+/// 406704): anywhere but an archived thread, unless it's unlocked and we
+/// [`can_unarchive`] it, as an edit or delete there reopens it first
+/// ([`unarchives_first`]).
+fn can_change(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64) -> bool {
+    match guild {
+        Some(g) if channel.is_archived() => !channel.is_locked() && can_unarchive(g, channel, me, now),
+        _ => true,
+    }
+}
+
+/// Whether an edit or delete in `channel` reopens it first
+/// (`unarchiveThreadIfNecessary` in 472456): an archived thread, unless
+/// it's locked and we lack Manage Threads. Sending doesn't.
+pub fn unarchives_first(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64) -> bool {
+    let manage = |g| in_channel(g, channel, me, now).contains(Permissions::MANAGE_THREADS);
+    channel.is_archived() && (!channel.is_locked() || guild.is_some_and(manage))
 }
 
 #[cfg(test)]
@@ -763,6 +804,67 @@ mod tests {
         guild.my_roles.push(Snowflake(MOD));
         assert!(can_unarchive(&guild, &thread, &me, 0) && can_reply(Some(&guild), &thread, &me, 0));
         assert!(!can_unarchive(&guild, guild.channel(Snowflake(9)).unwrap(), &me, 0), "not a thread");
+    }
+
+    /// A message by `author` in channel `channel`, of `kind`.
+    fn message(id: u64, channel: u64, author: Snowflake, kind: u8) -> Message {
+        serde_json::from_value(json!({"id": id.to_string(), "channel_id": channel.to_string(), "type": kind,
+                                      "author": {"id": author.to_string(), "username": "u"}, "timestamp": ""}))
+        .unwrap()
+    }
+
+    #[test]
+    fn deleting_others_takes_manage_messages() {
+        let (me, mut guild, open) = (me(), guild(), channel(&[]));
+        let (ours, theirs) = (message(30, 9, ME, 0), message(31, 9, Snowflake(2), 0));
+        assert!(can_delete(Some(&guild), &open, &ours, &me, 0) && can_edit(Some(&guild), &open, &ours, &me, 0));
+        assert!(!can_delete(Some(&guild), &open, &theirs, &me, 0) && !can_edit(Some(&guild), &open, &theirs, &me, 0));
+        guild.my_roles.push(Snowflake(MOD));
+        assert!(can_delete(Some(&guild), &open, &theirs, &me, 0), "a moderator's");
+        assert!(!can_edit(Some(&guild), &open, &theirs, &me, 0), "but never edited");
+        let mut report = channel(&[]);
+        report.flags = IS_MODERATOR_REPORT_CHANNEL;
+        report.id = Snowflake(31);
+        assert!(!can_delete(Some(&guild), &report, &theirs, &me, 0), "the report itself");
+        assert!(!can_delete(Some(&guild), &report, &message(32, 31, Snowflake(2), 7), &me, 0), "a system message");
+        assert!(can_delete(Some(&guild), &report, &message(33, 31, Snowflake(2), 0), &me, 0), "a reply to it");
+        // DMs have no Manage Messages.
+        let dm: Channel = serde_json::from_value(json!({"id": "9", "type": 1})).unwrap();
+        assert!(can_delete(None, &dm, &ours, &me, 0) && !can_delete(None, &dm, &theirs, &me, 0));
+    }
+
+    #[test]
+    fn editing_and_deleting_in_threads() {
+        let me = me();
+        let parent = channel(&[(GUILD, Permissions::NONE, IN_THREADS)]);
+        let ours = message(30, 20, ME, 0);
+        let archived = json!({"thread_metadata": {"archived": true, "locked": false}});
+        let (guild, thread) = with_thread(parent.clone(), 11, archived);
+        assert!(can_edit(Some(&guild), &thread, &ours, &me, 0) && can_delete(Some(&guild), &thread, &ours, &me, 0));
+        assert!(unarchives_first(Some(&guild), &thread, &me, 0), "reopened first");
+        let (guild, thread) = with_thread(parent.clone(), 11, json!({}));
+        assert!(!unarchives_first(Some(&guild), &thread, &me, 0), "already open");
+
+        // Archived where we couldn't reopen it.
+        let archived = json!({"thread_metadata": {"archived": true, "locked": false}});
+        let (guild, thread) = with_thread(channel(&[(GUILD, SEND, IN_THREADS)]), 11, archived);
+        assert!(!can_edit(Some(&guild), &thread, &ours, &me, 0) && !can_delete(Some(&guild), &thread, &ours, &me, 0));
+
+        // Locked and open: deleting ours still works, editing takes Manage Threads.
+        let locked = json!({"thread_metadata": {"archived": false, "locked": true}});
+        let (mut guild, thread) = with_thread(parent.clone(), 11, locked);
+        assert!(!can_edit(Some(&guild), &thread, &ours, &me, 0) && can_delete(Some(&guild), &thread, &ours, &me, 0));
+        guild.roles[1].permissions = MANAGE_THREADS;
+        guild.my_roles.push(Snowflake(MOD));
+        assert!(can_edit(Some(&guild), &thread, &ours, &me, 0));
+
+        // Locked and archived: nothing, even for moderators, who could reopen it.
+        let locked = json!({"thread_metadata": {"archived": true, "locked": true}});
+        let (mut guild, thread) = with_thread(parent, 11, locked);
+        guild.roles[1].permissions = MANAGE_THREADS;
+        guild.my_roles.push(Snowflake(MOD));
+        assert!(!can_edit(Some(&guild), &thread, &ours, &me, 0) && !can_delete(Some(&guild), &thread, &ours, &me, 0));
+        assert!(unarchives_first(Some(&guild), &thread, &me, 0), "a moderator's other changes reopen it");
     }
 
     #[test]

@@ -755,6 +755,21 @@ pub struct Message {
     /// The author's member, which a live message in a server carries.
     #[serde(default)]
     pub member: Option<MessageMember>,
+    /// For an app's answer to a command: who ran it, and how the app was
+    /// installed.
+    #[serde(default)]
+    pub interaction_metadata: Option<InteractionMetadata>,
+    /// A Nitro trial offered to a friend, which can't be edited.
+    #[serde(default)]
+    pub referral_trial_offer_id: Option<Snowflake>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct InteractionMetadata {
+    pub user: User,
+    /// Keyed by how the app was installed: `"0"` to a server, `"1"` to a user.
+    #[serde(default)]
+    pub authorizing_integration_owners: std::collections::BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -773,6 +788,7 @@ pub struct Call {
 }
 
 impl Message {
+    const CROSSPOSTED: u64 = 1 << 0;
     const SUPPRESS_EMBEDS: u64 = 1 << 2;
     const EPHEMERAL: u64 = 1 << 6;
     const IS_VOICE_MESSAGE: u64 = 1 << 13;
@@ -786,6 +802,12 @@ impl Message {
     /// A recorded voice message: its audio attachment plays with a waveform.
     pub fn is_voice_message(&self) -> bool {
         self.flags & Self::IS_VOICE_MESSAGE != 0
+    }
+
+    /// Published from an announcement channel to the servers following it,
+    /// where editing or deleting it changes every copy.
+    pub fn is_crossposted(&self) -> bool {
+        self.flags & Self::CROSSPOSTED != 0
     }
 
     /// The author (or a moderator) removed the embeds.
@@ -819,6 +841,56 @@ impl Message {
 
     const FORWARD: u8 = 1;
     const THREAD_STARTER: u8 = 21;
+    const AUTO_MODERATION_ACTION: u8 = 24;
+    const MEDIA_MENTION: u8 = 68;
+    /// Types nobody may delete (`UNDELETABLE` in 448761): calls, changes to
+    /// a group DM, a thread's starter and a few other system messages.
+    const UNDELETABLE: [u8; 11] = [1, 2, 3, 4, 5, 21, 35, 56, 57, 64, 68];
+
+    /// Whether the official client offers `me` to edit this message (697470):
+    /// our own text, not a forward, poll, voice message or Nitro trial
+    /// offer, and not a sticker with nothing written. The client also asks
+    /// that it was sent, but only what Discord has accepted is ever listed.
+    /// Neucord leaves out what's built from components, which it couldn't
+    /// send back as the client does.
+    pub fn is_editable_by(&self, me: Snowflake) -> bool {
+        self.author.id == me
+            && self.is_user_message()
+            && self.kind != Self::MEDIA_MENTION
+            && (self.sticker_items.is_empty() || !self.content.is_empty())
+            && !self.is_voice_message()
+            && self.referral_trial_offer_id.is_none()
+            && self.poll.is_none()
+            && self.message_reference.as_ref().is_none_or(|r| r.kind != Self::FORWARD)
+            && !self.is_components_v2()
+    }
+
+    /// Whether `me` may delete this message (483768), given whether we have
+    /// Manage Messages where it is: our own, an app's answer to a command
+    /// we ran with an app installed only to us (`canDeleteOwnMessage`), or
+    /// anyone's with Manage Messages. AutoMod's notices take Manage
+    /// Messages even when they're about us, and some types nobody deletes.
+    pub fn is_deletable_by(&self, me: Snowflake, manage_messages: bool) -> bool {
+        let user_installed = self
+            .interaction_metadata
+            .as_ref()
+            .is_some_and(|i| i.user.id == me && i.authorizing_integration_owners.keys().eq(["1"]));
+        let own = self.author.id == me || user_installed;
+        (own || manage_messages)
+            && (self.kind != Self::AUTO_MODERATION_ACTION || manage_messages)
+            && !Self::UNDELETABLE.contains(&self.kind)
+    }
+
+    /// A reply that didn't ping the author of what it answers, as far as we
+    /// know. Editing it keeps it so: an edit's mentions are worked out again.
+    pub fn is_quiet_reply(&self) -> bool {
+        match &self.referenced_message {
+            Referenced::Message(original) if self.kind == Self::REPLY => {
+                !self.mentions.iter().any(|u| u.id == original.author.id)
+            }
+            _ => false,
+        }
+    }
 
     /// What this message forwards, as a message of its own: dated by the
     /// original's id, in the place it was sent.
@@ -1020,6 +1092,57 @@ impl MessageEdit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One of ours (5), changed by `extra`.
+    fn ours(extra: Value) -> Message {
+        let mut message = serde_json::json!({"id": "3", "channel_id": "9", "type": 0, "content": "hi",
+                                             "author": {"id": "5", "username": "me"}, "timestamp": ""});
+        message.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(message).unwrap()
+    }
+
+    #[test]
+    fn what_we_can_edit() {
+        use serde_json::json;
+        let me = Snowflake(5);
+        assert!(ours(json!({})).is_editable_by(me));
+        assert!(ours(json!({"type": 19})).is_editable_by(me), "a reply");
+        assert!(!ours(json!({})).is_editable_by(Snowflake(6)), "someone else's");
+        assert!(!ours(json!({"type": 7})).is_editable_by(me), "a system message");
+        assert!(!ours(json!({"type": 68})).is_editable_by(me), "a media mention");
+        let sticker = json!([{"id": "8", "name": "s"}]);
+        assert!(!ours(json!({"content": "", "sticker_items": sticker})).is_editable_by(me), "a bare sticker");
+        assert!(ours(json!({"sticker_items": sticker})).is_editable_by(me), "a sticker with text");
+        assert!(!ours(json!({"flags": 1 << 13})).is_editable_by(me), "a voice message");
+        assert!(!ours(json!({"flags": 1 << 15})).is_editable_by(me), "built from components");
+        assert!(!ours(json!({"referral_trial_offer_id": "4"})).is_editable_by(me));
+        assert!(!ours(json!({"poll": {"question": {"text": "?"}, "answers": []}})).is_editable_by(me));
+        let forward = json!({"type": 1, "message_id": "1"});
+        assert!(!ours(json!({"message_reference": forward})).is_editable_by(me));
+    }
+
+    #[test]
+    fn what_we_can_delete() {
+        use serde_json::json;
+        let (me, them) = (Snowflake(5), Snowflake(6));
+        assert!(ours(json!({})).is_deletable_by(me, false));
+        assert!(!ours(json!({})).is_deletable_by(them, false) && ours(json!({})).is_deletable_by(them, true));
+        assert!(!ours(json!({"type": 3})).is_deletable_by(me, true), "a call, by anyone");
+        assert!(ours(json!({"type": 7})).is_deletable_by(them, true), "a join, by moderators");
+        assert!(!ours(json!({"type": 21})).is_deletable_by(me, true), "a thread's starter");
+        let automod = ours(json!({"type": 24}));
+        assert!(!automod.is_deletable_by(me, false) && automod.is_deletable_by(me, true));
+
+        // An app's answer to our command, deletable if the app is only ours.
+        let answer = |owners: Value| {
+            let metadata = json!({"user": {"id": "5", "username": "me"}, "authorizing_integration_owners": owners});
+            ours(json!({"type": 20, "author": {"id": "7", "username": "app"}, "interaction_metadata": metadata}))
+        };
+        assert!(answer(json!({"1": "5"})).is_deletable_by(me, false));
+        assert!(!answer(json!({"1": "5"})).is_deletable_by(them, false), "someone else's command");
+        assert!(!answer(json!({"0": "1"})).is_deletable_by(me, false), "installed to the server");
+        assert!(!answer(json!({"0": "1", "1": "5"})).is_deletable_by(me, false), "to both");
+    }
 
     #[test]
     fn slowmode_off() {
