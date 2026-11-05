@@ -195,6 +195,7 @@ impl App {
         page.add_top_bar(&header);
         page.add_top_bar(&self.present_bar);
         page.add_top_bar(&self.unread_bar);
+        page.add_top_bar(&self.paused_bar);
         self.unread_bar.connect_button_clicked({
             let this = Rc::downgrade(self);
             move |_| {
@@ -503,6 +504,28 @@ impl App {
     }
 
     /// Show the "viewing older messages" bar while the open channel is detached.
+    /// Requests are held back for `wait` ([`discord::Error::Paused`]): say
+    /// so until it is over, rather than leave the window to stall silently.
+    pub(super) fn show_paused(self: &Rc<Self>, wait: Duration) {
+        if let Some(timer) = self.paused_end.take() {
+            timer.remove();
+        }
+        let minutes = wait.as_secs().div_ceil(60).max(1);
+        let plural = if minutes == 1 { "" } else { "s" };
+        self.paused_bar
+            .set_title(&format!("Discord refused too many requests, so none are sent for {minutes} minute{plural}"));
+        self.paused_bar.set_revealed(true);
+        let this = Rc::downgrade(self);
+        let timer = glib::timeout_add_local_once(wait, move || {
+            if let Some(this) = this.upgrade() {
+                // The source is spent; there is nothing left to remove.
+                this.paused_end.take();
+                this.paused_bar.set_revealed(false);
+            }
+        });
+        self.paused_end.replace(Some(timer));
+    }
+
     pub(super) fn update_present_bar(&self) {
         let channel = self.state.borrow().channel;
         let detached = channel.and_then(|c| self.timelines.borrow().get(c).map(|t| t.detached)).unwrap_or(false);

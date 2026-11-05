@@ -15,6 +15,7 @@ pub mod gateway;
 pub mod history;
 mod identity;
 mod inflate;
+mod invalid;
 pub mod markup;
 pub mod members;
 pub mod model;
@@ -61,6 +62,9 @@ pub enum Error {
     /// Discord wanted a captcha solved first, and it wasn't: there was no
     /// [`rest::CaptchaSolver`], or the user closed it.
     Captcha,
+    /// Discord refused too many of our requests lately, so none are sent
+    /// for this long, to keep the IP from being cut off.
+    Paused(std::time::Duration),
 }
 
 impl std::fmt::Display for Error {
@@ -81,6 +85,9 @@ impl std::fmt::Display for Error {
             Error::Crypto(e) => write!(f, "encryption error: {e}"),
             Error::Keyring(e) => write!(f, "keyring error: {e}"),
             Error::Captcha => write!(f, "Discord asked for a captcha, and it wasn't solved"),
+            Error::Paused(wait) => {
+                write!(f, "Discord refused too many requests; not sending any for {}s", wait.as_secs().max(1))
+            }
         }
     }
 }

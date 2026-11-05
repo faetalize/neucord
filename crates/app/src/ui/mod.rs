@@ -112,6 +112,10 @@ pub struct App {
     /// How many messages are new since the channel was last read, with a
     /// way to jump to the first.
     unread_bar: adw::Banner,
+    /// That Discord refused too many requests and none are being sent.
+    paused_bar: adw::Banner,
+    /// Hides the paused bar when the pause is over.
+    paused_end: RefCell<Option<glib::SourceId>>,
     /// The divider above the first unread message, while it has a row.
     unread_divider: glib::WeakRef<gtk::Box>,
     /// A message flashed after jumping to it.
@@ -245,6 +249,8 @@ impl App {
                 .button_label("Jump to Present")
                 .build(),
             unread_bar: adw::Banner::builder().button_label("Jump").build(),
+            paused_bar: adw::Banner::new(""),
+            paused_end: RefCell::default(),
             unread_divider: glib::WeakRef::new(),
             highlight: Cell::default(),
             row_epoch: Cell::default(),
