@@ -1,14 +1,17 @@
 //! Discord's HTTP API over libsoup, on the GLib main loop.
 
+use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use soup::prelude::*;
 
 use crate::endpoints::{Call, call};
+use crate::invalid::{Change, InvalidRequests};
 use crate::{Channel, Error, Message, Snowflake, identity};
 
 /// Error code for accepting a stranger's friend request without confirming.
@@ -101,11 +104,20 @@ impl Captcha {
 /// unsolved.
 pub type CaptchaSolver = Rc<dyn Fn(Captcha) -> Pin<Box<dyn Future<Output = Option<String>>>>>;
 
+/// Told how long requests are held back for, each time one is.
+pub type PauseHandler = Rc<dyn Fn(Duration)>;
+
+thread_local! {
+    /// One for every [`Rest`]: Discord counts refusals per IP, not per token.
+    static INVALID: RefCell<InvalidRequests> = RefCell::default();
+}
+
 #[derive(Clone)]
 pub struct Rest {
     session: soup::Session,
     token: Option<String>,
     captchas: Option<CaptchaSolver>,
+    pauses: Option<PauseHandler>,
 }
 
 impl Rest {
@@ -118,13 +130,19 @@ impl Rest {
         let session = soup::Session::new();
         session.set_user_agent(&identity::user_agent());
         session.set_timeout(30);
-        Rest { session, token: None, captchas: None }
+        Rest { session, token: None, captchas: None, pauses: None }
     }
 
     /// Have `solver` answer captchas, and send the request again with the
     /// answer, instead of failing with [`Error::Captcha`].
     pub fn solving_captchas(self, solver: CaptchaSolver) -> Self {
         Rest { captchas: Some(solver), ..self }
+    }
+
+    /// Have `handler` told when Discord has refused so many requests that
+    /// they are held back, failing with [`Error::Paused`].
+    pub fn reporting_pauses(self, handler: PauseHandler) -> Self {
+        Rest { pauses: Some(handler), ..self }
     }
 
     /// Up to `limit` (max 100) messages, oldest first, from where `page` says.
@@ -258,12 +276,18 @@ impl Rest {
     }
 
     /// The status and body of a request, retrying once on a rate limit and
-    /// after each captcha solved.
+    /// after each captcha solved. Fails without sending while too many
+    /// requests have been refused, rather than wait: requests queued for
+    /// minutes would all go at once when the pause ends.
     pub(crate) async fn send(&self, call: Call, body: Option<Value>) -> Result<(u32, glib::Bytes), Error> {
         let mut retries = 0;
         let mut captchas = 0;
         let mut answer: Option<(String, Captcha)> = None;
         loop {
+            if let Some(wait) = INVALID.with_borrow_mut(|invalid| invalid.paused(Instant::now())) {
+                self.report_pause(wait);
+                return Err(Error::Paused(wait));
+            }
             let msg = soup::Message::new(call.method(), &format!("{}{}", identity::API_BASE, call.path()))
                 .expect("API URL is valid");
             let headers = msg.request_headers().expect("request has headers");
@@ -287,6 +311,17 @@ impl Rest {
             let response =
                 self.session.send_and_read_future(&msg, glib::Priority::DEFAULT).await.map_err(Error::Transport)?;
             let status = msg.status_code();
+            let scope = msg.response_headers().and_then(|h| h.one("X-RateLimit-Scope"));
+            if InvalidRequests::counts(status, scope.as_deref()) {
+                match INVALID.with_borrow_mut(|invalid| invalid.record(Instant::now())) {
+                    Some(Change::Warn(count)) => eprintln!("rest: Discord refused {count} requests in 10 minutes"),
+                    Some(Change::Pause(wait)) => {
+                        eprintln!("rest: Discord refused too many requests; holding back for {}s", wait.as_secs());
+                        self.report_pause(wait);
+                    }
+                    None => {}
+                }
+            }
             if status == 429
                 && retries < MAX_RATE_LIMIT_RETRIES
                 && let Some(wait) = rate_limit_wait(&response)
@@ -306,6 +341,12 @@ impl Rest {
                 continue;
             }
             return Ok((status, response));
+        }
+    }
+
+    fn report_pause(&self, wait: Duration) {
+        if let Some(handler) = &self.pauses {
+            handler(wait);
         }
     }
 }
