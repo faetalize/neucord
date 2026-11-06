@@ -11,6 +11,7 @@ pub mod component;
 pub mod cooldowns;
 pub mod embed;
 mod endpoints;
+pub mod experiments;
 pub mod gateway;
 pub mod history;
 mod identity;

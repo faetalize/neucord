@@ -121,6 +121,27 @@ export function compare(old, cur, uses) {
     affects.push(`- ${code(name)}: ${change}\n  - was: ${value(before)}\n  - now: ${value(after)}`);
   }
 
+  // Experiments Neucord reads: a variant that means something else now, or
+  // an experiment gone, which leaves every account on one behaviour.
+  // Snapshots from before experiments were recorded have none to compare.
+  const json = (v) => code(JSON.stringify(v));
+  for (const name of old.experiments ? uses.experiments : []) {
+    const [before, after] = [old.experiments[name], cur.experiments?.[name]];
+    if (same(before, after) || newlyWatched(before, after && [after])) continue;
+    affects.push(
+      after
+        ? `- Experiment ${code(name)} changed\n  - was: ${json(before)}\n  - now: ${json(after)}`
+        : `- Experiment ${code(name)}: **removed** from the client`,
+    );
+  }
+
+  // Code holding a rule Neucord copies that starts or stops reading an
+  // experiment: the rule may now differ per account.
+  for (const key of old.reached ? Object.keys({ ...old.reached, ...cur.reached }).sort() : []) {
+    const change = listChange(old.reached[key], cur.reached?.[key]);
+    if (change) affects.push(`- ${code(key)}, which holds a rule Neucord copies, reads experiments: ${change}`);
+  }
+
   const additions = [];
   for (const name of Object.keys({ ...old.enums, ...cur.enums }).sort()) {
     const merge = (variants = []) => Object.assign({}, ...variants);
@@ -169,6 +190,27 @@ export function compare(old, cur, uses) {
     events.filter((e) => !(e in cur.gateway)).map((e) => `- ${code(e)}`),
   );
   section("Enum members added", additions);
+  // What Discord is building and shipping: an experiment that goes away
+  // usually means its feature reached everyone, or was dropped.
+  if (old.experiments) {
+    const names = Object.keys({ ...old.experiments, ...cur.experiments }).sort();
+    const variants = (e) => Object.keys(e.variants).join(", ") || "none";
+    const describe = (e) => `${e.kind}${e.label ? ` (${e.label})` : ""}, variants ${variants(e)}`;
+    section(
+      "Experiments added",
+      names.filter((n) => !(n in old.experiments)).map((n) => `- ${code(n)}: ${describe(cur.experiments[n])}`),
+    );
+    section(
+      "Experiments removed",
+      names.filter((n) => !(n in cur.experiments)).map((n) => `- ${code(n)}`),
+    );
+    section(
+      "Experiments changed",
+      names
+        .filter((n) => n in old.experiments && n in cur.experiments && !same(old.experiments[n], cur.experiments[n]))
+        .map((n) => `- ${code(n)}: ${json(old.experiments[n].variants)} → ${json(cur.experiments[n].variants)}`),
+    );
+  }
 
   return { affects, other };
 }

@@ -2,9 +2,9 @@
 // discord-watch: follow changes in Discord's official client that matter to
 // Neucord. See README.md.
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -20,7 +20,9 @@ const USAGE = `usage:
   cli.mjs compare <old.json> <new.json> [--repo <neucord>] [--report <file>]
                                                        print {"affects", "other"} counts
   cli.mjs unpack <dir> <out>                           one formatted file per module
-  cli.mjs update <decomp> [--channel …] [--force]      fetch, unpack and commit into a git repo`;
+  cli.mjs update <decomp> [--channel …] [--force]      fetch, unpack and commit into a git repo
+  cli.mjs account <decomp> <neucord>                   run Neucord logged in until READY, commit what
+                                                       it was sent about experiments into <decomp>/account`;
 
 const log = (message) => console.error(message);
 const { positionals, values } = parseArgs({
@@ -61,6 +63,9 @@ switch (command) {
     for (const [name, values] of Object.entries(cur.constants ?? {})) {
       if (values.length === 0) log(`no constant ${name} in the client`);
     }
+    for (const name of uses.experiments) {
+      if (!cur.experiments?.[name]) log(`no experiment ${name} in the client`);
+    }
     const result = compare(old, cur, uses);
     if (values.report) await writeFile(values.report, report(old, cur, result));
     console.log(JSON.stringify({ affects: result.affects.length, other: result.other.length }));
@@ -93,6 +98,54 @@ switch (command) {
     git("add", "-A");
     if (git("status", "--porcelain").trim()) git("commit", "-q", "-m", `${values.channel} build ${build}`);
     log(`${decomp} is at ${values.channel} build ${build}`);
+    break;
+  }
+  case "account": {
+    // What Discord sends this account, which no build shows: experiment
+    // assignments and rollouts, named from the decomp's build, and READY's
+    // shape. Neucord writes them on READY (NEUCORD_DEBUG_EXPERIMENTS) and is
+    // stopped right after. Kept in the decomp, which never gets a remote.
+    const decomp = resolve(args[0]);
+    const snapshot = JSON.parse(await readFile(join(decomp, "snapshot.json"), "utf8"));
+    if (!snapshot.experiments) throw new Error(`${decomp}/snapshot.json has no experiments; run update first`);
+    const dir = await mkdtemp(join(tmpdir(), "discord-watch-account-"));
+    try {
+      await writeFile(join(dir, "names.txt"), Object.keys(snapshot.experiments).join("\n") + "\n");
+      const neucord = spawn(resolve(args[1]), [], {
+        env: { ...process.env, NEUCORD_DEBUG_EXPERIMENTS: dir },
+        stdio: ["ignore", "ignore", "inherit"],
+      });
+      const exited = new Promise((done) => neucord.once("exit", done));
+      const deadline = Date.now() + 120_000;
+      // The shape is written last.
+      while (!existsSync(join(dir, "ready-shape.txt")) && Date.now() < deadline && neucord.exitCode === null) {
+        await new Promise((wait) => setTimeout(wait, 500));
+      }
+      neucord.kill();
+      await exited;
+      if (!existsSync(join(dir, "ready-shape.txt"))) {
+        throw new Error("no READY: Neucord must be logged in, and not already running");
+      }
+      await mkdir(join(decomp, "account"), { recursive: true });
+      for (const file of ["experiments.txt", "ready-shape.txt"])
+        await copyFile(join(dir, file), join(decomp, "account", file));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+    const git = (...a) =>
+      execFileSync("git", ["-C", decomp, ...a], { stdio: ["ignore", "pipe", "inherit"] }).toString();
+    git("add", "account");
+    // What moved since the last check, for whoever runs it to report.
+    process.stdout.write(git("diff", "--cached", "--", "account"));
+    if (git("status", "--porcelain", "--", "account").trim()) {
+      git(
+        "commit",
+        "-q",
+        "-m",
+        `account, ${new Date().toISOString().slice(0, 10)}, ${snapshot.channel} build ${snapshot.build}`,
+      );
+    }
+    log(`${decomp}/account is up to date`);
     break;
   }
   default:

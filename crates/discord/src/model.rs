@@ -370,6 +370,12 @@ pub struct Guild {
     pub pending: bool,
     /// Our member flags here.
     pub member_flags: u64,
+    /// What the server has unlocked or opted into, such as `COMMUNITY`.
+    pub features: Vec<String>,
+    /// From READY or GUILD_CREATE; updates don't carry it.
+    pub member_count: Option<u64>,
+    pub hub_type: Option<u8>,
+    pub vanity_url_code: Option<String>,
 }
 
 /// What Neucord uses of our own member in a server, which READY, GUILD_CREATE
@@ -428,6 +434,10 @@ impl Guild {
         self.requires_mfa = update.requires_mfa;
         self.gradient_roles = update.gradient_roles;
         self.verification = update.verification;
+        self.features = update.features;
+        self.member_count = update.member_count.or(self.member_count);
+        self.hub_type = update.hub_type;
+        self.vanity_url_code = update.vanity_url_code;
     }
 
     /// One of the server's channels, not counting threads.
@@ -567,6 +577,9 @@ impl<'de> Deserialize<'de> for Guild {
             (None, Some(p)) => (p.name, p.icon, p.default_message_notifications, p.owner_id, p.mfa_level),
             (None, None) => return Err(serde::de::Error::custom("guild has no name (unavailable)")),
         };
+        let props = if value["properties"].is_object() { &value["properties"] } else { &value };
+        let features: Vec<String> =
+            props["features"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
         // Roles stay at the top level in both shapes. One we can't read is
         // left out, which only ever withholds what it grants.
         let roles = value["roles"].as_array().into_iter().flatten().filter_map(|r| Role::deserialize(r).ok()).collect();
@@ -587,16 +600,17 @@ impl<'de> Deserialize<'de> for Guild {
             owner_id,
             roles,
             requires_mfa: mfa_level == Some(1),
-            gradient_roles: {
-                let props = if value["properties"].is_object() { &value["properties"] } else { &value };
-                props["features"].as_array().is_some_and(|f| f.iter().any(|f| f == "ENHANCED_ROLE_COLORS"))
-            },
+            gradient_roles: features.iter().any(|f| f == "ENHANCED_ROLE_COLORS"),
             my_roles: Vec::new(),
             timed_out_until: None,
             verification: Rules::from_guild(&value),
             joined_at: unix_rounded_up(&value["joined_at"]),
             pending: false,
             member_flags: 0,
+            features,
+            member_count: value["member_count"].as_u64(),
+            hub_type: props["hub_type"].as_u64().and_then(|t| u8::try_from(t).ok()),
+            vanity_url_code: props["vanity_url_code"].as_str().map(String::from),
         })
     }
 }
