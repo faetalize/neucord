@@ -28,6 +28,21 @@ async function get(url, attempts = 3) {
   }
 }
 
+/** What a function body returns for `env`: an expression, or a block of
+ * `if (…) return …;` statements. Webpack writes the chunk-URL function
+ * either way. Throws on anything else. */
+function returned(body, env) {
+  if (body.type !== "BlockStatement") return evaluate(body, env);
+  for (const statement of body.body) {
+    if (statement.type === "ReturnStatement") return evaluate(statement.argument, env);
+    if (statement.type !== "IfStatement") throw new Error(`cannot run ${statement.type}`);
+    const branch = evaluate(statement.test, env) ? statement.consequent : statement.alternate;
+    if (branch)
+      return returned(branch.type === "BlockStatement" ? branch : { type: "BlockStatement", body: [branch] }, env);
+  }
+  return undefined;
+}
+
 /** Chunk file names from webpack's `__webpack_require__.u`, a function of
  * the chunk id made of id comparisons and an id → hash table. */
 export function chunkFiles(source) {
@@ -38,8 +53,7 @@ export function chunkFiles(source) {
       node.left.type !== "MemberExpression" ||
       node.left.property.name !== "u" ||
       !isFunction(node.right) ||
-      node.right.params.length !== 1 ||
-      node.right.body.type === "BlockStatement"
+      node.right.params.length !== 1
     ) {
       return;
     }
@@ -53,7 +67,7 @@ export function chunkFiles(source) {
     });
     for (const id of ids) {
       try {
-        const file = evaluate(node.right.body, { [param]: id });
+        const file = returned(node.right.body, { [param]: id });
         if (typeof file === "string" && /^[\w.-]+\.js$/.test(file)) files.add(file);
       } catch {
         // Not this function's kind of expression; skip the id.
