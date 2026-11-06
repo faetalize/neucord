@@ -272,6 +272,8 @@ impl App {
             developer_mode,
             message_display_compact,
             required_action,
+            // Nothing the app shows depends on an experiment yet.
+            experiments: _,
         } = ready;
         self.learn_users(private_channels.iter().flat_map(|c| &c.recipients));
         self.learn_users(
