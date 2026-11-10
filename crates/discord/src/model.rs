@@ -196,6 +196,9 @@ pub struct Channel {
     pub permission_overwrites: Vec<Overwrite>,
     #[serde(default, deserialize_with = "null_is_default")]
     pub flags: u64,
+    /// Age-restricted.
+    #[serde(default, deserialize_with = "null_is_false")]
+    pub nsfw: bool,
     /// A thread's state.
     #[serde(default)]
     pub thread_metadata: Option<ThreadMetadata>,
@@ -378,6 +381,8 @@ pub struct Guild {
     pub vanity_url_code: Option<String>,
     /// Boost level, 0 to 3.
     pub premium_tier: u8,
+    /// The channel with the server's rules.
+    pub rules_channel_id: Option<Snowflake>,
 }
 
 /// What Neucord uses of our own member in a server, which READY, GUILD_CREATE
@@ -441,6 +446,7 @@ impl Guild {
         self.hub_type = update.hub_type;
         self.vanity_url_code = update.vanity_url_code;
         self.premium_tier = update.premium_tier;
+        self.rules_channel_id = update.rules_channel_id;
     }
 
     /// One of the server's channels, not counting threads.
@@ -615,6 +621,7 @@ impl<'de> Deserialize<'de> for Guild {
             hub_type: props["hub_type"].as_u64().and_then(|t| u8::try_from(t).ok()),
             vanity_url_code: props["vanity_url_code"].as_str().map(String::from),
             premium_tier: props["premium_tier"].as_u64().and_then(|t| u8::try_from(t).ok()).unwrap_or(0),
+            rules_channel_id: props["rules_channel_id"].as_str().and_then(|id| id.parse().ok()).map(Snowflake),
         })
     }
 }
@@ -1246,6 +1253,22 @@ mod tests {
             serde_json::from_str(r#"{"id":"2","properties":{"name":"New","icon":"abc","owner_id":"7"},"channels":[]}"#)
                 .unwrap();
         assert_eq!((g.name.as_str(), g.icon.as_deref(), g.owner_id), ("New", Some("abc"), Some(Snowflake(7))));
+    }
+
+    #[test]
+    fn rules_channel_in_either_guild_shape() {
+        let nested: Guild =
+            serde_json::from_str(r#"{"id":"2","properties":{"name":"N","rules_channel_id":"30"},"channels":[]}"#)
+                .unwrap();
+        let flat: Guild =
+            serde_json::from_str(r#"{"id":"2","name":"N","rules_channel_id":"30","channels":[]}"#).unwrap();
+        let none: Guild =
+            serde_json::from_str(r#"{"id":"2","name":"N","rules_channel_id":null,"channels":[]}"#).unwrap();
+        assert_eq!((nested.rules_channel_id, flat.rules_channel_id), (Some(Snowflake(30)), Some(Snowflake(30))));
+        assert_eq!(none.rules_channel_id, None);
+        let mut kept = nested;
+        kept.update(none);
+        assert_eq!(kept.rules_channel_id, None, "GUILD_UPDATE clears it too");
     }
 
     #[test]

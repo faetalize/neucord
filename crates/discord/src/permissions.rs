@@ -391,6 +391,29 @@ pub fn can_view(guild: &Guild, channel: &Channel, me: &Account, now: i64) -> boo
     in_channel(guild, channel, me, now).contains(access(channel))
 }
 
+/// Whether `@everyone` can't see `channel`, so only some roles or members do:
+/// the client's test for the lock on a channel's icon (module 148719, with the
+/// icon choice in 713654). It looks at `@everyone` alone, never at us. A voice
+/// or stage channel also counts when `@everyone` can't connect.
+pub fn hidden_from_everyone(guild: &Guild, channel: &Channel) -> bool {
+    let kind = channel.kind;
+    let lockable = kind.is_forum_like()
+        || matches!(kind, ChannelKind::Text | ChannelKind::Announcement | ChannelKind::Voice | ChannelKind::Stage);
+    if !lockable {
+        return false;
+    }
+    // Overwrites are keyed by id, so a repeat of `@everyone`'s replaces the first.
+    let overwrite = channel.permission_overwrites.iter().rfind(|o| o.id == guild.id);
+    if matches!(kind, ChannelKind::Voice | ChannelKind::Stage) {
+        let everyone = guild.role(guild.id).map_or(Permissions::DEFAULT_EVERYONE, |r| r.permissions);
+        let everyone = overwrite.map_or(everyone, |o| everyone.overwritten(o.deny, o.allow));
+        if !everyone.contains(Permissions::CONNECT) {
+            return true;
+        }
+    }
+    overwrite.is_some_and(|o| o.deny.contains(Permissions::VIEW_CHANNEL))
+}
+
 /// Whether we may post in `channel`: anywhere but the system DM outside
 /// servers, and in one where we can see it with Send Messages. The client
 /// asks only for the latter, but never opens a channel we can't see. Never
