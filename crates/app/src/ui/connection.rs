@@ -164,6 +164,8 @@ impl App {
                     }
                     // 2FA turned on or off changes moderators' permissions.
                     self.permissions_changed(None);
+                    // Nitro changes the length limit.
+                    self.update_length_indicator();
                 }
                 Event::MessageCreate(message) => self.on_message(*message),
                 Event::MessageUpdate(edit) => self.on_message_update(edit),

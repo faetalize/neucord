@@ -144,11 +144,15 @@ changed for unrelated reasons only needs a note in the issue.
   and a non-ephemeral message and no timeout, even for administrators.
   The keyboard shortcut uses `Et` there instead, without the Send Messages
   checks.
-- **What Nitro, boosts and experiments allow** (`limits.rs`). `R` in
+- **What Nitro, boosts and experiments allow** (`limits.rs`, and its message
+  length in `ui/composer.rs`, `ui/edits.rs`). `R` in
   722178, below the perks each premium type includes (anchor
   `ProductCatalog.tsx`), asks the `perks` bitmask when the user has one,
   else that table. A message takes 4000 characters with the perk, else
-  2000 (135621, anchor `? 4e3 : 2e3`). A file takes at least 20 MiB
+  2000 (135621, anchor `? 4e3 : 2e3`). A longer one is turned back, sending
+  trimmed and an edit as it stands (710272, anchor `MESSAGE_LENGTH_UPSELL`);
+  the counter shows from a tenth of the limit left, and past 2000 with the
+  perk (263582). A file takes at least 20 MiB
   (409481), a server gives 10 MiB unless its features raise it (`o2` in
   453771, anchor `uploadSumTooLarge`), premium types give `f5` in 682901
   (anchor `{ 3: { fileSize:`), and a message's total is `jS` in 292348

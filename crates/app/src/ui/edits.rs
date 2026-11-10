@@ -122,7 +122,14 @@ impl App {
     pub(super) fn save_edit(self: &Rc<Self>) {
         let Some(message) = self.editing.borrow().as_ref().map(|e| e.message.clone()) else { return };
         let buffer = self.composer.buffer();
-        let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).trim().to_owned();
+        let raw = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+        // As the box holds it, untrimmed, and before the unchanged check; a
+        // refused edit stays open.
+        let too_long = self.state.borrow().limits().check_length(&raw);
+        if let Err(too_long) = too_long {
+            return self.show_too_long(too_long);
+        }
+        let text = raw.trim().to_owned();
         self.end_edit();
         let bare = message.attachments.is_empty() && message.components.is_empty() && message.sticker_items.is_empty();
         if text.is_empty() && bare {
