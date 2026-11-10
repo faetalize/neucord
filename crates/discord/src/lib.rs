@@ -9,6 +9,7 @@ pub mod auth;
 pub mod cdn;
 pub mod component;
 pub mod cooldowns;
+pub mod edits;
 pub mod embed;
 mod endpoints;
 pub mod experiments;

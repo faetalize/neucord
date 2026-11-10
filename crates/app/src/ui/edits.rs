@@ -5,6 +5,7 @@
 use std::rc::Rc;
 
 use adw::prelude::*;
+use discord::edits::{self, Edit};
 use discord::{ChannelKind, Message, Rest, Snowflake};
 use gtk::glib;
 
@@ -116,28 +117,32 @@ impl App {
         self.refresh_message(edit.message.id);
     }
 
-    /// Save the edit with what the message box says. Emptied, it offers to
-    /// delete the message instead, and unchanged, it sends nothing, as in
-    /// the official client.
+    /// Save the edit with what the message box says, untrimmed (see
+    /// [`edits::decide`]). Emptied, it offers to delete the message instead,
+    /// and unchanged, it sends nothing, as in the official client.
     pub(super) fn save_edit(self: &Rc<Self>) {
         let Some(message) = self.editing.borrow().as_ref().map(|e| e.message.clone()) else { return };
         let buffer = self.composer.buffer();
-        let raw = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
-        // As the box holds it, untrimmed, and before the unchanged check; a
-        // refused edit stays open.
-        let too_long = self.state.borrow().limits().check_length(&raw);
-        if let Err(too_long) = too_long {
-            return self.show_too_long(too_long);
-        }
-        let text = raw.trim().to_owned();
-        self.end_edit();
+        let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
         let bare = message.attachments.is_empty() && message.components.is_empty() && message.sticker_items.is_empty();
-        if text.is_empty() && bare {
-            return self.confirm_delete(&message, false);
-        }
+        let decision = edits::decide(&self.state.borrow().limits(), &text, &message.content, bare);
+        // A refused edit stays open.
+        let text = match decision {
+            Edit::Refuse(too_long) => return self.show_too_long(too_long),
+            Edit::Delete => {
+                self.end_edit();
+                return self.confirm_delete(&message, false);
+            }
+            Edit::Unchanged => {
+                self.end_edit();
+                return;
+            }
+            Edit::Save(text) => text.to_owned(),
+        };
+        self.end_edit();
         let Some(rest) = self.state.borrow().rest.clone() else { return };
         // Our permissions may have changed since the edit started.
-        if text == message.content || !self.state.borrow().can_edit(&message) {
+        if !self.state.borrow().can_edit(&message) {
             return;
         }
         let announced = self.announced(&message);
