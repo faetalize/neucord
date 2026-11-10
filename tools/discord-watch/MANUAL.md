@@ -194,7 +194,7 @@ changed for unrelated reasons only needs a note in the issue.
 - **Which embeds draw** (`EmbedKind`, `visible`). The filter is watched
   (`renderEmbeds`). The type sets are in 581619, and the type enum in
   508602. Which links count as Conjure projects (`is_conjure_project_link`)
-  is the matcher in 729160 (anchor `conjure.town`).
+  is the matcher in 729160 (anchor `[0-9]{17,20}`).
 - **Embed media without a size is dropped, and embeds sharing a URL merge**
   (`EmbedMedia::sized`, `merge` in `embed.rs`). Client: 659674 (anchor
   `uniqueId("embed_")`).

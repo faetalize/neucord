@@ -357,8 +357,9 @@ pub fn visible(message: &Message, settings: &MediaSettings) -> Vec<Embed> {
 /// Whether `url` is a Conjure project link: `http(s)` on `conjure.town` or
 /// `conjure.city` (`www.` dropped), at `/{application id}/{slug}` with an
 /// optional `/{ticket}` and trailing slash. Parsed by hand, as the crate has
-/// no URL parser; WHATWG path normalisation (dot segments, stripped
-/// whitespace) isn't replicated.
+/// no WHATWG URL parser. Its normalisation (dot segments, stripped
+/// whitespace, encoded or IDNA hosts, odd ports and schemes) isn't
+/// replicated: such links stay drawn.
 fn is_conjure_project_link(url: &str) -> bool {
     let word = |s: &str, min: usize, max: usize| {
         (min..=max).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
