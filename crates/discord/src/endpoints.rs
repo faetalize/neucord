@@ -90,7 +90,8 @@ impl Endpoint {
             let value = value.to_string();
             let plain = glib::uri_escape_string(&value, None::<&str>, false);
             path = path.replace(&format!("{{{name}}}"), &plain);
-            let nested = glib::uri_escape_string(&value, Some("/"), false);
+            // Whatever a path may hold, as a browser leaves it.
+            let nested = glib::uri_escape_string(&value, Some("/!$&'()*+,;=:@"), false);
             path = path.replace(&format!("{{+{name}}}"), &nested);
         }
         Call { method: self.method, path }
@@ -177,6 +178,8 @@ mod tests {
     fn plus_keeps_slashes() {
         let call = call!(DELETE_UPLOAD, uploaded_filename = "a-1/my file.png");
         assert_eq!((call.method(), call.path()), ("DELETE", "/attachments/a-1/my%20file.png"));
+        let odd = call!(DELETE_UPLOAD, uploaded_filename = "u/a+(1)=b.png");
+        assert_eq!(odd.path(), "/attachments/u/a+(1)=b.png", "a browser leaves these as they are");
         assert_eq!(call!(USER, user = "a/b").path(), "/users/a%2Fb", "plain parameters still escape it");
     }
 

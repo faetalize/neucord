@@ -36,7 +36,8 @@ pub(super) const UPLOAD_TEXT: Entry<()> = Entry::Item(Item {
 enum Status {
     /// With the bytes sent so far.
     Uploading(u64),
-    Failed(String),
+    /// With the words for it, and whether sending the message tries again.
+    Failed(String, bool),
     /// With the name Discord keeps the file by.
     Done(String),
     Canceled,
@@ -51,6 +52,8 @@ pub(super) struct Upload {
     spoiler: Cell<bool>,
     description: RefCell<Option<String>>,
     status: RefCell<Status>,
+    /// How many times it has been tried, which a send doesn't reset.
+    attempts: Rc<Cell<u32>>,
     task: RefCell<Option<glib::JoinHandle<()>>>,
     waiting: RefCell<Vec<async_channel::Sender<()>>>,
     row: Row,
@@ -71,10 +74,10 @@ impl Upload {
             Status::Uploading(sent) if self.file.size > 0 => format!("{}%", (sent * 100 / self.file.size).min(100)),
             Status::Uploading(_) => String::new(),
             Status::Done(_) => "Uploaded".to_owned(),
-            Status::Failed(why) => why.clone(),
+            Status::Failed(why, _) => why.clone(),
             Status::Canceled => "Canceled".to_owned(),
         };
-        let failed = matches!(status, Status::Failed(_));
+        let failed = matches!(status, Status::Failed(..));
         let finished = !matches!(status, Status::Uploading(_));
         let size = uploads::size_words(self.file.size);
         let shown = if words.is_empty() { size } else { format!("{size} · {words}") };
@@ -100,7 +103,7 @@ impl Upload {
         loop {
             match &*self.status.borrow() {
                 Status::Done(uploaded) => return Ok(uploaded.clone()),
-                Status::Failed(why) => return Err(why.clone()),
+                Status::Failed(why, _) => return Err(why.clone()),
                 Status::Canceled => return Err(String::new()),
                 Status::Uploading(_) => {}
             }
@@ -133,12 +136,26 @@ impl Upload {
     }
 }
 
+/// A message waiting on its files.
+struct Sending {
+    /// The files it takes. Others may be added meanwhile, for the next one.
+    files: Vec<Rc<Upload>>,
+    /// Whether the message itself has gone out, after which there is no
+    /// taking the files back.
+    posting: Cell<bool>,
+}
+
+impl Sending {
+    fn has(&self, upload: &Rc<Upload>) -> bool {
+        self.files.iter().any(|u| Rc::ptr_eq(u, upload))
+    }
+}
+
 /// What the message box has attached, by channel, and the tray showing it.
 pub(super) struct Drafts {
     files: RefCell<HashMap<Snowflake, Vec<Rc<Upload>>>>,
-    /// Channels whose files are being sent, with whether the message itself
-    /// has gone out, after which there is no taking the files back.
-    sending: RefCell<HashMap<Snowflake, Rc<Cell<bool>>>>,
+    /// Channels with a message waiting on its files.
+    sending: RefCell<HashMap<Snowflake, Rc<Sending>>>,
     tray: gtk::Box,
     attach: gtk::Button,
     /// The tray's top row while sending.
@@ -171,10 +188,12 @@ impl Drafts {
         self.files.borrow().get(&channel).cloned().unwrap_or_default()
     }
 
-    /// What a new message would take: nothing while the files are on their
-    /// way in another.
+    /// What a new message would take: not the files on their way in another.
     fn for_new_message(&self, channel: Snowflake) -> Vec<Rc<Upload>> {
-        if self.sending.borrow().contains_key(&channel) { Vec::new() } else { self.of(channel) }
+        let sending = self.sending.borrow().get(&channel).cloned();
+        let mut files = self.of(channel);
+        files.retain(|u| sending.as_ref().is_none_or(|s| !s.has(u)));
+        files
     }
 }
 
@@ -206,13 +225,13 @@ impl App {
             drafts.tray.remove(&child);
         }
         let files = channel.map(|c| drafts.of(c)).unwrap_or_default();
-        if let Some(channel) = channel.filter(|c| drafts.sending.borrow().contains_key(c)) {
+        let sending = channel.and_then(|c| drafts.sending.borrow().get(&c).cloned());
+        if let Some(sending) = &sending {
             drafts.tray.append(&drafts.sending_bar);
-            drafts.cancel.set_sensitive(!drafts.sending.borrow()[&channel].get());
+            drafts.cancel.set_sensitive(!sending.posting.get());
         }
-        let locked = channel.is_some_and(|c| drafts.sending.borrow().contains_key(&c));
         for upload in &files {
-            upload.lock(locked);
+            upload.lock(sending.as_ref().is_some_and(|s| s.has(upload)));
             drafts.tray.append(&upload.row.root);
         }
         drafts.tray.set_visible(!files.is_empty());
@@ -422,6 +441,7 @@ impl App {
             spoiler: Cell::new(false),
             description: RefCell::default(),
             status: RefCell::new(Status::Uploading(0)),
+            attempts: Rc::default(),
             task: RefCell::default(),
             waiting: RefCell::default(),
             row: Row { root, name, state, spoiler, edit, remove },
@@ -462,6 +482,7 @@ impl App {
         upload.set_status(Status::Uploading(0));
         let weak = Rc::downgrade(upload);
         let file = upload.file.clone();
+        let attempts = upload.attempts.clone();
         let task = glib::spawn_future_local(async move {
             let progress: Rc<dyn Fn(u64)> = Rc::new({
                 let weak = weak.clone();
@@ -471,12 +492,12 @@ impl App {
                     }
                 }
             });
-            let result = uploads::upload(&rest, channel, &file, progress).await;
+            let result = uploads::upload(&rest, channel, &file, &attempts, progress).await;
             if let Some(upload) = weak.upgrade() {
                 upload.task.take();
                 upload.set_status(match result {
                     Ok(uploaded) => Status::Done(uploaded),
-                    Err(failure) => Status::Failed(failure.words()),
+                    Err(failure) => Status::Failed(failure.words(), failure.restarts()),
                 });
             }
         });
@@ -521,9 +542,9 @@ impl App {
                     upload.name.replace(name.text().into());
                     upload.row.name.set_label(&name.text());
                 }
-                if alt {
-                    upload.description.replace(Some(description.text().into()));
-                }
+                // The client's dialog hands over its alt text for any file,
+                // empty when the field isn't there (507536).
+                upload.description.replace(Some(description.text().into()));
             }
             this.composer.grab_focus();
         });
@@ -566,13 +587,13 @@ impl App {
         if files.is_empty() {
             return rest.send_message(channel, text, reply, &[]).await.map_err(Stopped::Send);
         }
-        let posting = Rc::new(Cell::new(false));
-        self.drafts.sending.borrow_mut().insert(channel, posting.clone());
+        let sending = Rc::new(Sending { files: files.clone(), posting: Cell::new(false) });
+        self.drafts.sending.borrow_mut().insert(channel, sending.clone());
         self.refresh_attach();
-        let result = self.upload_and_post(rest, channel, text, reply, &files, &posting).await;
+        let result = self.upload_and_post(rest, channel, text, reply, &sending).await;
         self.drafts.sending.borrow_mut().remove(&channel);
         if result.is_ok() {
-            self.drafts.files.borrow_mut().remove(&channel);
+            self.forget(channel, &sending);
         }
         self.refresh_attach();
         result
@@ -584,12 +605,18 @@ impl App {
         channel: Snowflake,
         text: &str,
         reply: Option<discord::rest::Reply>,
-        files: &[Rc<Upload>],
-        posting: &Cell<bool>,
+        sending: &Sending,
     ) -> Result<Message, Stopped> {
+        let files = &sending.files;
         for upload in files {
-            if matches!(*upload.status.borrow(), Status::Failed(_)) {
-                self.start_upload(upload);
+            let failed = match &*upload.status.borrow() {
+                Status::Failed(why, restarts) => Some((why.clone(), *restarts)),
+                _ => None,
+            };
+            match failed {
+                Some((why, false)) => return Err(Stopped::Upload(format!("{}: {why}", upload.name.borrow()))),
+                Some((_, true)) => self.start_upload(upload),
+                None => {}
             }
         }
         let mut uploaded = Vec::new();
@@ -600,7 +627,7 @@ impl App {
                 Err(why) => return Err(Stopped::Upload(format!("{}: {why}", upload.name.borrow()))),
             }
         }
-        posting.set(true);
+        sending.posting.set(true);
         self.refresh_attach();
         let (names, descriptions): (Vec<String>, Vec<Option<String>>) =
             files.iter().map(|u| (u.name.borrow().clone(), u.description.borrow().clone())).unzip();
@@ -622,19 +649,40 @@ impl App {
     /// the uploads that finished are deleted.
     fn cancel_sending(self: &Rc<Self>) {
         let Some(channel) = self.state.borrow().channel else { return };
-        if self.drafts.sending.borrow().get(&channel).is_none_or(|posting| posting.get()) {
-            return;
-        }
+        let sending = self.drafts.sending.borrow().get(&channel).cloned();
+        let Some(sending) = sending.filter(|s| !s.posting.get()) else { return };
         let rest = self.state.borrow().rest.clone();
-        for upload in self.drafts.of(channel) {
+        for upload in &sending.files {
             upload.cancel(rest.clone());
         }
-        self.drafts.files.borrow_mut().remove(&channel);
+        self.forget(channel, &sending);
         self.refresh_attach();
     }
 
-    /// What a message sent now from `channel` takes along.
+    /// Drop the files a message took from the draft, and keep any added
+    /// since.
+    fn forget(&self, channel: Snowflake, sending: &Sending) {
+        if let Some(files) = self.drafts.files.borrow_mut().get_mut(&channel) {
+            files.retain(|u| !sending.has(u));
+        }
+    }
+
+    /// Drop every draft without telling Discord, once the token that made the
+    /// uploads is gone.
+    pub(super) fn discard_drafts(&self) {
+        for upload in self.drafts.files.borrow().values().flatten() {
+            upload.cancel(None);
+        }
+        self.drafts.files.borrow_mut().clear();
+        self.drafts.sending.borrow_mut().clear();
+    }
+
+    /// What a message sent now from `channel` takes along: nothing where the
+    /// client wouldn't offer attaching, which also hides the draft.
     pub(super) fn files_for_message(&self, channel: Snowflake) -> Vec<Rc<Upload>> {
+        if !self.state.borrow().can_attach(channel) {
+            return Vec::new();
+        }
         self.drafts.for_new_message(channel)
     }
 

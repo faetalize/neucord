@@ -155,17 +155,21 @@ changed for unrelated reasons only needs a note in the issue.
 - **Sending files** (`uploads.rs`, `ui/uploads.rs`). The requests, their
   order and the resumable upload are watched (`getUploadPayload`,
   `uploadFileToCloud`, `UploadAttachmentStore`, whose add starts each
-  upload). Not watched: the message's attachment, `OW` in 292348 (anchor
-  `uploaded_filename`), which names `id` by position, `description` once
-  set, `is_spoiler` only when on, `original_content_type` always; and
-  what is checked when files are added, `R` in 518960 (anchor
+  upload), and so are the conversions Neucord doesn't do
+  (`tryConvertToWebP`, `tryConvertToJpeg`). Not watched: the message's
+  attachment, `OW` in 292348 (anchor `uploaded_filename`), which names
+  `id` by position, `description` once set (the edit dialog hands it over
+  for any file), `is_spoiler` only when on, `original_content_type`
+  always; what is checked when files are added, `R` in 518960 (anchor
   `FILE_SIZE_LIMIT_EXCEEDED`: an empty file, then a file or the new
-  files' total over the limit, then the count) and at send, 433777
-  (`compressAndCheckFileSize`). The attach menu is 316576 (anchor
-  `channel-attach`, shown with Attach Files and Send Messages): Upload
-  Text as File needs text in the box and sends only a fenced block's code
-  with its language as the extension (anchor `message.${n}`); alt text is
-  for images and videos, up to 1024 characters (507536).
+  files' total over the limit, then the count); and at send, where 358579
+  starts failed uploads again except those Discord called too large. The
+  attach menu is 316576 (anchor `channel-attach`, shown with Attach Files
+  and Send Messages): Upload Text as File needs text in the box and sends
+  only a fenced block's code with its language as the extension (anchor
+  `upload-text-as-file`); the picker takes one file in a channel with
+  slowmode (`multiple`); alt text is for images and videos, up to 1024
+  characters (507536).
 - **What Nitro, boosts and experiments allow** (`limits.rs`, and its message
   length in `ui/composer.rs`). `R` in 722178, below the perks each premium
   type includes (anchor `ProductCatalog.tsx`), asks the `perks` bitmask when

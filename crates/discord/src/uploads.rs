@@ -17,7 +17,7 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -28,8 +28,13 @@ use crate::{Error, Snowflake};
 /// How many times a request or upload is retried (`retryOpts`, 48325).
 const RETRIES: u32 = 12;
 
-/// Past this, an upload URL is asked for again (`isResponseUrlStale`).
-const URL_LIFETIME: Duration = Duration::from_secs(12 * 60 * 60);
+/// Past this, an upload URL is asked for again (`isResponseUrlStale`), in
+/// microseconds of wall-clock time, which a suspended machine still counts.
+const URL_LIFETIME: i64 = 12 * 60 * 60 * 1_000_000;
+
+fn url_stale(set_at: i64, now: i64) -> bool {
+    now - set_at > URL_LIFETIME
+}
 
 /// Statuses the client's HTTP layer retries a request on (620632), before
 /// giving up on it.
@@ -340,6 +345,9 @@ fn resume_from(range: Option<&str>) -> u64 {
     range.and_then(parse).map_or(0, |last| last + 1)
 }
 
+/// Discord's error code for a file over what we may upload.
+const ENTITY_TOO_LARGE: u64 = 40005;
+
 /// Why an upload failed.
 #[derive(Debug)]
 pub enum Failure {
@@ -358,8 +366,13 @@ impl Failure {
         }
     }
 
+    /// Whether sending the message tries the upload again: for every failure
+    /// but a file Discord called too large (358579).
+    pub fn restarts(&self) -> bool {
+        self.code() != Some(ENTITY_TOO_LARGE)
+    }
+
     pub fn words(&self) -> String {
-        const ENTITY_TOO_LARGE: u64 = 40005;
         match (self.code(), self) {
             (Some(ENTITY_TOO_LARGE), _) => "The file is too large.".to_owned(),
             (_, Failure::GaveUp { attempts }) => format!("Gave up after {attempts} attempts."),
@@ -371,19 +384,27 @@ impl Failure {
 /// Upload `file` to `channel`'s message attachments and give back the name
 /// Discord keeps it by, as `CloudUpload.upload` does after the size checks
 /// (those are [`check_added`]). `sent` is told how many bytes have gone.
+/// `attempts` counts the tries of this file across sends, as the client's
+/// `uploadAttempts` does: one that used them all gets no more.
 /// Dropping the future cancels it.
-pub async fn upload(rest: &Rest, channel: Snowflake, file: &File, sent: Rc<dyn Fn(u64)>) -> Result<String, Failure> {
+pub async fn upload(
+    rest: &Rest,
+    channel: Snowflake,
+    file: &File,
+    attempts: &Cell<u32>,
+    sent: Rc<dyn Fn(u64)>,
+) -> Result<String, Failure> {
     let mut slot = rest.create_upload(channel, create_body(&unique_id(), file)).await.map_err(Failure::Request)?;
-    let mut slot_at = Instant::now();
+    let mut slot_at = glib::real_time();
     let mut backoff = Backoff::new();
-    let (mut attempts, mut from) = (0, 0);
-    while attempts <= RETRIES {
-        attempts += 1;
+    let mut from = 0;
+    while attempts.get() <= RETRIES {
+        attempts.set(attempts.get() + 1);
         let step = async {
-            if slot_at.elapsed() > URL_LIFETIME {
+            if url_stale(slot_at, glib::real_time()) {
                 let fresh = rest.create_upload(channel, create_body(&unique_id(), file)).await?;
-                (slot, slot_at, from) = (fresh, Instant::now(), 0);
-            } else if attempts > 1 {
+                (slot, slot_at, from) = (fresh, glib::real_time(), 0);
+            } else if attempts.get() > 1 {
                 from = rest.upload_position(&slot.url, file.size).await?;
             }
             let (at, sent) = (from, sent.clone());
@@ -395,7 +416,7 @@ pub async fn upload(rest: &Rest, channel: Snowflake, file: &File, sent: Rc<dyn F
             Err(e) => return Err(Failure::Request(e)),
         }
     }
-    Err(Failure::GaveUp { attempts })
+    Err(Failure::GaveUp { attempts: attempts.get() })
 }
 
 /// Take an upload back, once it has been made: the file stays on Discord's
@@ -587,6 +608,12 @@ mod tests {
     }
 
     #[test]
+    fn an_upload_url_lasts_twelve_hours() {
+        let hour = 3_600_000_000;
+        assert!(!url_stale(0, 12 * hour) && url_stale(0, 12 * hour + 1));
+    }
+
+    #[test]
     fn waits_longer_after_each_failure_up_to_five_seconds() {
         let mut backoff = Backoff::new();
         let waits: Vec<_> = (0..5).map(|_| backoff.fail_with(0.5).as_secs_f64()).collect();
@@ -617,6 +644,14 @@ mod tests {
     fn ids_count_up() {
         let (a, b) = (unique_id().parse::<u64>().unwrap(), unique_id().parse::<u64>().unwrap());
         assert_eq!(b, a + 1);
+    }
+
+    #[test]
+    fn a_file_discord_called_too_large_is_not_tried_again_at_send() {
+        let http = |body: &str| Failure::Request(Error::Http { status: 413, body: body.to_owned() });
+        assert!(!http(r#"{"code": 40005}"#).restarts(), "358579 skips ENTITY_TOO_LARGE");
+        assert!(http(r#"{"code": 50035}"#).restarts());
+        assert!(Failure::GaveUp { attempts: 13 }.restarts());
     }
 
     #[test]
