@@ -79,7 +79,7 @@ pub(super) enum Style {
 /// A menu's sections, top to bottom, each with its entries in order.
 pub(super) type Table<T, C = App> = &'static [&'static [Entry<T, C>]];
 
-/// A message's menu: what Neucord has of the official client's (355682),
+/// A message's menu: what Neucord has of the official client's (761304),
 /// in its order.
 pub(super) const MESSAGE: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
@@ -91,7 +91,7 @@ pub(super) const MESSAGE: Table<MessageTarget> = &[
 ];
 
 /// Added below the message box's own menu (GTK's cut, copy, paste and
-/// emoji). The official client's (258360) also has spellcheck and more.
+/// emoji). The official client's (194400) also has spellcheck and more.
 pub(super) const COMPOSER: Table<()> = &[];
 
 /// Where menu items find their actions.

@@ -14,7 +14,7 @@ that nothing else tracks, or keeping a module id, anchor or name correct. A
 line that explains a choice in Neucord or warns the next reader is a code
 comment, not an entry. If in doubt, ask FAE!!!
 
-Last checked against: stable 660103.
+Last checked against: stable 668923.
 
 ## Running a check
 
@@ -49,23 +49,23 @@ changed for unrelated reasons only needs a note in the issue.
   (`verification::gate`, in the watched `GuildVerificationStore`).
 - **A timeout leaves only reading**, and administrators see no notice
   (`Guild::timeout_left`). Client: 316031 (the `communicationDisabledUntil`
-  check), 488926 (the cut), `renderMessageBanner` in 688606 (the notice
+  check), 488926 (the cut), `renderMessageBanner` in 699344 (the notice
   unless `can(ADMINISTRATOR, guild)`), and the 10-second expiry sweep in
   592713 (`clearGuildMemberTimeout`).
 - **When a slowmode cooldown starts** (`Slowmode` in `cooldowns.rs`). The
   store itself is watched (`SlowmodeStore`). Who skips it is in 960850:
   Bypass Slowmode in the channel (`cooldowns::bypasses_slowmode`). What
-  feeds it isn't watched either: 148494
+  feeds it isn't watched either: 138399
   resets the cooldown only after a send succeeds and reads `retry_after` on
   `SLOWMODE_RATE_LIMITED`, and 741961 reads `message_send_cooldown_ms` from
   the typing endpoint's answer, which Neucord doesn't send for yet (#8).
 - **What replaces the message box** (`update_notice_bar`). Client:
-  `renderMessageBanner` in 688606 picks the banners. Otherwise the box is
-  wrapped by 578434 in DMs (the system DM, a blocked user) and by 80683 in
+  `renderMessageBanner` in 699344 picks the banners. Otherwise the box is
+  wrapped by 544990 in DMs (the system DM, a blocked user) and by 678655 in
   servers, where membership screening shows for a `pending` member when the
   server has `MEMBER_VERIFICATION_GATE_ENABLED` (anchor
   `missingVerificationRole`). In a server the box is disabled without Send
-  Messages in the channel, or while pending (845207, anchor
+  Messages in the channel, or while pending (989161, anchor
   `canEveryoneSendMessages`; `permissions::can_send`). The order and wording
   of Neucord's notices are its own.
 - **Who may post in a thread** (`permissions::in_thread`, through
@@ -78,8 +78,8 @@ changed for unrelated reasons only needs a note in the issue.
   and cleared in a locked thread without Manage Threads. The box also goes
   for `UJ` in 406704 (anchor `isArchivedLockedThread`), which `x` already
   covers. Posting in an archived thread sends nothing first:
-  `sendMessage` in 148494 doesn't call `unarchiveThreadIfNecessary`
-  (472456), while edits and deletes do.
+  `sendMessage` in 138399 doesn't call `unarchiveThreadIfNecessary`
+  (7909), while edits and deletes do.
 - **Editing and deleting** (`permissions::can_edit`, `can_delete`;
   `ui/edits.rs`). The requests are watched (`editMessage`, `deleteMessage`,
   `unarchiveThreadIfNecessary`), as are `canDeleteOwnMessage` and
@@ -92,7 +92,7 @@ changed for unrelated reasons only needs a note in the issue.
 - **Forum and media channels take no message** (the forum page in
   `select_channel`, `permissions::can_send`, `update_notice_bar`). Neucord
   shows no box there, loads nothing and refuses to send, whatever Send
-  Messages says. Client: 646482 renders a forum view instead of the chat
+  Messages says. Client: 289287 renders a forum view instead of the chat
   for `isForumLikeChannel` (anchor `"forum channels must exist within a
   guild"`), so no message box.
 - **Asking for members** (`members::Members`, `Gateway::request_members`),
@@ -100,22 +100,22 @@ changed for unrelated reasons only needs a note in the issue.
   again, is watched (`GuildMemberRequesterStore`), and so is the payload
   (`requestGuildMembers`). Splitting into 100 users a request and sending
   nothing before the session is established are in the `GUILD_MEMBERS_REQUEST`
-  handler of 403010.
-- **How much history is fetched** (`discord::history`, `Page::query`). The
-  limits are watched by their minified names, so a name that vanishes is a
-  rename to look up (`EMb`, `d7Q`, `UNo`, `rLJ`, `FONT_SIZES`). The rules
-  aren't.
-  The first page is `o` and `d` in 326337; the rest is in the scroll manager
-  in 471533 (anchor `loadMorePausedUntilUserScroll`): the size in `loadMore`,
-  the distances in `getOffsetToTriggerLoading`, what holds loading back in
+  handler of 225123.
+- **How much history is fetched** (`discord::history`, `Page::query`).
+  `FONT_SIZES`, the page around a message (`focusMessage`) and how many
+  messages stay loaded (`truncate`) are watched. The rest isn't, and its
+  limits are numbers written into the code: the first page is `o` and `h`
+  in 326337; the rest is in the scroll manager in 567008 (anchor
+  `loadMorePausedUntilUserScroll`): the size in `loadMore`, the distances in
+  `getOffsetToTriggerLoading`, what holds loading back in
   `isScrollLoadingDisabled`, and what lifts a pause in `handleMouseUp` and
-  `handleUserScrollGesture` with its keys in `ie`. What a page around a
+  `handleUserScrollGesture` with its keys in `il`. What a page around a
   message says about the channel's ends, and the query's order, are in
-  `fetchMessages` in 148494.
+  `fetchMessages` in 138399.
 - **How the gateway connects** (`GATEWAY_QUERY` in `identity.rs`,
   `inflate.rs`). What each compression asks for is watched (`getAlgorithm`,
   and `usesLegacyCompression` for IDENTIFY's `compress`). Which one the
-  client picks isn't: all in 267041, `F` (anchor
+  client picks isn't: all in 868, `F` (anchor
   `isDiscordGatewayPlaintextSet`) takes the first whose `canUse` holds, and
   zstd needs the desktop app's `discord_zstd` module (`U` just above), so a
   browser gets `zlib-stream`. The query is built in `_connect` (anchor
@@ -125,14 +125,14 @@ changed for unrelated reasons only needs a note in the issue.
   logging out when it's closed, are in `handleConnectionOpen` in 165685.
 - **Confirming a friend request from a stranger** (`accept_friend`,
   `confirm_stranger` in `ui/friends.rs`). Client:
-  `maybeConfirmFriendRequestAccept` in 725663, and the stranger state in
+  `maybeConfirmFriendRequestAccept` in 393426, and the stranger state in
   994500 (`isStranger`).
 - **Captchas** (`Captcha` in `rest.rs`, `ui/captcha.rs`). The retry is
-  watched (`interceptResponse`). The fields read are in 888548, and the
+  watched (`interceptResponse`). The fields read are in 295562, and the
   services in 319400 (hCaptcha, reCAPTCHA, reCAPTCHA Enterprise, Turnstile).
 - **QR login retries** (`on_qr`, `qr_failed` in `ui/login.rs`;
   `remote_auth.rs`). How often Neucord reconnects to the remote auth
-  gateway. Client: 52423 (logger `useAuthWebsocket`), with the backoff in
+  gateway. Client: 785161 (logger `useAuthWebsocket`), with the backoff in
   158390.
 - **When Reply is offered** (`Message::is_replyable`,
   `permissions::can_reply`). `REPLYABLE` is watched, but only covers message
@@ -161,10 +161,10 @@ changed for unrelated reasons only needs a note in the issue.
   (`getActiveJoinedThreadsForGuild`): their mentions, and a dot unless the
   thread or the server is muted, whatever their parent.
 - **What counts as read** (`read_state.rs`), since acks go to Discord. Own
-  messages are marked read on MESSAGE_CREATE in 573163 (`ReadStateStore`).
+  messages are marked read on MESSAGE_CREATE in 218461 (`ReadStateStore`).
   `getAckTimestamp` there falls back to the join or creation time, where
   Neucord deliberately counts a channel without an entry as read, except
-  in threads (`threads::is_unread`), where it copies `eF` (anchor
+  in threads (`threads::is_unread`), where it copies `ek` (anchor
   `- 5e3`): when we joined the thread less five seconds, or its last
   archiving, never before we joined the server unless it's a forum post.
   `canTrackUnreads` (watched) keeps archived threads from being acked
@@ -175,7 +175,7 @@ changed for unrelated reasons only needs a note in the issue.
 - **Which threads the sidebar lists** (`threads::listed`). The stores are
   watched (`ActiveJoinedThreadsStore`, with `k` deciding unread and
   relevant; `ActiveThreadsStore`; `JoinedThreadsStore`). The list itself is
-  `eC` in 297469 (anchor `-e.joinTimestamp`): relevant threads, newest
+  `eT` in 791513 (anchor `-e.joinTimestamp`): relevant threads, newest
   joined first, the open one added in front; under a muted parent that
   isn't open, only unread ones (`computeState` just above). How long a
   thread stays relevant is in 826767 (anchor
@@ -188,7 +188,7 @@ changed for unrelated reasons only needs a note in the issue.
   Client: 95701 defines them, and the unread state in 458294 skips a
   channel without them.
 - **System messages that show nothing** (the last arm of `system::kind`).
-  Client: the type-to-renderer map in 64369 (logger `SystemMessage`), where
+  Client: the type-to-renderer map in 117096 (logger `SystemMessage`), where
   a type that maps to `void 0` or isn't listed draws nothing.
 - **Which embeds draw** (`EmbedKind`, `visible`). The filter is watched
   (`renderEmbeds`). The type sets are in 581619, and the type enum in
@@ -197,19 +197,21 @@ changed for unrelated reasons only needs a note in the issue.
   (`EmbedMedia::sized`, `merge` in `embed.rs`). Client: 659674 (anchor
   `uniqueId("embed_")`).
 - **A spoilered link covers every embed** (`has_spoilered_link`). Client:
-  521981 (`hasSpoilerEmbeds`).
+  354777 (`hasSpoilerEmbeds`).
 - **Attachments the client hides** (`Attachment::is_hidden`). Client:
-  `renderAttachments` in 908239 drops `IS_THUMBNAIL`.
-- **The message menu** (`MESSAGE` in `ui/menus.rs`). Client: 355682
-  builds it; Neucord keeps its sections and order. Copy Text copies the
+  `renderAttachments` in 679636 drops `IS_THUMBNAIL`.
+- **The message menu** (`MESSAGE` in `ui/menus.rs`). Client: 761304
+  builds it; Neucord keeps its sections and order. The order differs where
+  READY's `regional_feature_config` sets `media_takedown_regulation` (anchor
+  `isMediaTakedownRegulation`). Copy Text copies the
   content of `getContentMessage` (watched), or the text displays of a
-  components message joined by newlines (`N` in 437517), and shows only if
+  components message joined by newlines (`kC` in 257249), and shows only if
   that isn't empty. Copy Message Link is 345254, with the path from
   `CHANNEL` in 901123. Copy Message ID is 50268, only in Developer Mode
   (`developer_mode` in the JSON user settings). Copy for the selection
   (373963) and Copy Link and Open Link (777933) are desktop-only there.
   Neucord leaves out the analytics these send (`MESSAGE_LINK_COPIED`,
   `CONTEXT_MENU_LINK_COPIED`).
-- **Poll vote counts and shares** (`poll.rs`). Client: 320095 and 969632
+- **Poll vote counts and shares** (`poll.rs`). Client: 432005 and 969632
   count the votes, and 951727 works out shares, the leader and when counts
   show.

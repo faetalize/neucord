@@ -183,7 +183,7 @@ impl NotificationSettings {
     }
 
     /// Should `message`, in `thread`, raise a desktop notification
-    /// (176154)? Not in a thread we muted. Mentions count here whatever
+    /// (411238)? Not in a thread we muted. Mentions count here whatever
     /// the server suppresses.
     pub fn should_notify_in_thread(
         &self,
