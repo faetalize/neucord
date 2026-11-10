@@ -228,6 +228,7 @@ impl App {
                 self.header.set("No text channels you can see here", None);
                 self.set_content_title("Neucord");
                 self.rebuild_sidebar();
+                self.sync_members();
             }
         }
     }

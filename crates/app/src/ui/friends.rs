@@ -198,6 +198,7 @@ impl App {
         self.set_content_title("Friends");
         self.rebuild_rail();
         self.rebuild_sidebar();
+        self.sync_members();
         self.rebuild_friends();
     }
 
@@ -470,7 +471,7 @@ pub(super) fn confirm(heading: &str, body: &str, verb: &str, appearance: adw::Re
 }
 
 /// The coloured dot at the corner of an avatar.
-fn presence_dot(status: Status) -> gtk::Widget {
+pub(super) fn presence_dot(status: Status) -> gtk::Widget {
     let class = match status {
         Status::Online => "online",
         Status::Idle => "idle",

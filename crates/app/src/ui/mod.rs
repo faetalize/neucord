@@ -13,6 +13,7 @@ mod embeds;
 mod friends;
 mod login;
 mod media_frame;
+mod members;
 mod menus;
 mod message_row;
 mod notify;
@@ -141,6 +142,8 @@ pub struct App {
     /// When scrolling loads another page.
     scroll_loader: RefCell<discord::history::ScrollLoader>,
     state: RefCell<state::State>,
+    /// The member list pane, in the right pane of the chat.
+    members: members::Pane,
     /// What the rail and sidebar last drew, so badge refreshes can skip
     /// rebuilding them when nothing visible changed.
     drawn: RefCell<(Vec<u64>, Vec<u64>)>,
@@ -279,6 +282,7 @@ impl App {
             rows: RefCell::default(),
             scroll_loader: RefCell::default(),
             state: RefCell::default(),
+            members: members::Pane::new(),
             drawn: RefCell::default(),
             rail_items: RefCell::default(),
             rail_shape: RefCell::new(0),
@@ -469,9 +473,11 @@ impl App {
         self.content.add_named(&self.build_friends(), Some("friends"));
         self.content.add_named(&self.build_requests(), Some("requests"));
         let forum = adw::ToolbarView::builder().content(&self.forum_page).build();
-        forum.add_top_bar(&self.forum_title.header_bar(&[self.sidebar_toggle().upcast_ref()]));
+        let forum_header = self.forum_title.header_bar(&[self.sidebar_toggle().upcast_ref()]);
+        forum_header.pack_end(&self.members_toggle());
+        forum.add_top_bar(&forum_header);
         self.content.add_named(&forum, Some("forum"));
-        // The right pane stays empty until the member list (#10) fills it.
+        self.right.set_sidebar(Some(&self.build_members()));
         self.right.set_content(Some(&self.content));
         self.split.set_content(Some(&self.right));
 

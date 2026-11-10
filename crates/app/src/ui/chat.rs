@@ -195,6 +195,7 @@ impl App {
             .build();
         page.add_controller(self.drop_target());
         let header = self.header.header_bar(&[self.sidebar_toggle().upcast_ref()]);
+        header.pack_end(&self.members_toggle());
         page.add_top_bar(&header);
         page.add_top_bar(&self.present_bar);
         page.add_top_bar(&self.unread_bar);
@@ -679,6 +680,7 @@ impl App {
             self.set_content_title(&title);
             self.rebuild_sidebar();
             self.update_notice_bar();
+            self.sync_members();
             return;
         }
         // What is unread now, before opening the channel reads it.
@@ -694,6 +696,7 @@ impl App {
         self.set_content_title(&title);
         self.composer_error.set_visible(false);
         self.update_notice_bar();
+        self.sync_members();
 
         // Show what we have at once (instant for a recently viewed channel),
         // and ask for the newest page, to merge in, unless it's a DM we hold,

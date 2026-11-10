@@ -20,6 +20,7 @@ use crate::embed::Embed;
 use crate::experiments::Experiments;
 use crate::inflate::Inflater;
 use crate::limits::Nitro;
+use crate::member_list::Update as MemberListUpdate;
 use crate::members::Members;
 use crate::notifications::{GuildSettings, NotificationSettings};
 use crate::read_state::ReadStates;
@@ -195,10 +196,15 @@ pub enum Event {
     },
     /// Unfriended, unblocked, or a request withdrawn or ignored.
     RelationshipRemove(Snowflake),
+    /// A presence changed. With a server, it came with our subscription to
+    /// it (see [`crate::subscriptions`]).
     PresenceUpdate {
         user_id: Snowflake,
+        guild_id: Option<Snowflake>,
         presence: Presence,
     },
+    /// Rows of a server's member list (see [`crate::member_list`]).
+    MemberList(Box<MemberListUpdate>),
     /// Our notification settings for one server (or DMs) changed.
     NotificationSettingsUpdate(GuildSettings),
     /// The user rearranged servers or folders (on any client).
@@ -367,6 +373,17 @@ impl Gateway {
             send_text(&self.conn, &request_text(8, &MemberRequest::new(guild, users)));
         }
     }
+
+    /// Send what [`crate::subscriptions::Subscriptions`] says to, the op 37
+    /// messages the client sends. Like the client, nothing is sent before
+    /// the session is established.
+    pub fn send_subscriptions(&self, messages: &[String]) {
+        if self.state.established.get() {
+            for message in messages {
+                send_text(&self.conn, message);
+            }
+        }
+    }
 }
 
 /// Op 8's payload, in the client's field order.
@@ -384,7 +401,7 @@ impl<'a> MemberRequest<'a> {
 }
 
 /// A payload as the client packs it: `{"op":…,"d":…}`.
-fn request_text(op: u8, d: &impl serde::Serialize) -> String {
+pub(crate) fn request_text(op: u8, d: &impl serde::Serialize) -> String {
     #[derive(serde::Serialize)]
     struct Payload<'a, D> {
         op: u8,
@@ -734,9 +751,22 @@ fn dispatch(state: &State, name: &str, data: Value) {
         },
         // Friends' presences, and per-server ones; only `user.id` is certain.
         "PRESENCE_UPDATE" => match parse_id(&data["user"]["id"]) {
-            Some(user_id) => Event::PresenceUpdate { user_id, presence: Presence::from_value(&data) },
+            Some(user_id) => Event::PresenceUpdate {
+                user_id,
+                guild_id: parse_id(&data["guild_id"]),
+                presence: Presence::from_value(&data),
+            },
             None => return,
         },
+        // The members in it also colour names in the chat, as in the client.
+        "GUILD_MEMBER_LIST_UPDATE" => {
+            let Some(update) = MemberListUpdate::from_value(&data) else {
+                return eprintln!("gateway: bad GUILD_MEMBER_LIST_UPDATE");
+            };
+            let members = update.members().iter().map(|m| (m.user.id, m.roles.clone())).collect();
+            send_event(state, Event::Members { guild_id: update.guild, members, not_found: Vec::new() });
+            Event::MemberList(Box::new(update))
+        }
         "THREAD_CREATE" | "THREAD_UPDATE" => match (Channel::deserialize(&data), parse_id(&data["guild_id"])) {
             (Ok(thread), Some(guild_id)) if thread.kind.is_thread() => Event::ThreadUpdate { guild_id, thread },
             (Ok(_), _) => return,
@@ -1127,6 +1157,38 @@ mod tests {
         assert!(matches!(members("5", "7"), Some(Event::ThreadMember { member: Some(_), .. })), "we joined");
         assert!(matches!(members("6", "5"), Some(Event::ThreadMember { member: None, .. })), "we left");
         assert!(members("6", "7").is_none(), "neither");
+    }
+
+    #[test]
+    fn member_lists_and_presences_of_a_server() {
+        let (state, rx) = fresh_state();
+        dispatch(
+            &state,
+            "GUILD_MEMBER_LIST_UPDATE",
+            json!({
+                "guild_id": "1", "id": "everyone", "member_count": 2, "online_count": 1,
+                "groups": [{"id": "online", "count": 1}],
+                "ops": [{"op": "SYNC", "range": [0, 1], "items": [
+                    {"group": {"id": "online", "count": 1}},
+                    {"member": {"user": {"id": "6", "username": "u"}, "roles": ["40"], "presence": {"status": "online"}}},
+                ]}],
+            }),
+        );
+        // Their roles colour names in the chat, as the client's member store takes them.
+        let Ok(Event::Members { guild_id, members, .. }) = rx.try_recv() else { panic!("no members") };
+        assert_eq!((guild_id, members), (Snowflake(1), vec![(Snowflake(6), vec![Snowflake(40)])]));
+        let Ok(Event::MemberList(update)) = rx.try_recv() else { panic!("no list") };
+        assert_eq!((update.guild, update.list.as_str(), update.ops.len()), (Snowflake(1), "everyone", 1));
+
+        dispatch(&state, "PRESENCE_UPDATE", json!({"user": {"id": "6"}, "guild_id": "1", "status": "idle"}));
+        let Ok(Event::PresenceUpdate { user_id, guild_id, presence }) = rx.try_recv() else { panic!("no presence") };
+        assert_eq!(
+            (user_id, guild_id, presence.status),
+            (Snowflake(6), Some(Snowflake(1)), crate::relationships::Status::Idle)
+        );
+        dispatch(&state, "PRESENCE_UPDATE", json!({"user": {"id": "6"}, "status": "online"}));
+        let Ok(Event::PresenceUpdate { guild_id, .. }) = rx.try_recv() else { panic!("no presence") };
+        assert_eq!(guild_id, None);
     }
 
     #[test]

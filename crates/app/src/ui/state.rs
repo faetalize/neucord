@@ -8,12 +8,14 @@ use discord::channel_icon;
 use discord::cooldowns::Slowmode;
 use discord::experiments::Experiments;
 use discord::limits::{Limits, Nitro};
+use discord::member_list::{self, MemberLists};
 use discord::members::{Members, RoleColour};
 use discord::notifications::{NotificationSettings, Place};
 use discord::permissions;
 use discord::read_state::ReadStates;
 use discord::relationships::Relationships;
 use discord::settings::{GuildFolder, MediaSettings, RailEntry};
+use discord::subscriptions::Subscriptions;
 use discord::threads;
 use discord::typing::Typing;
 use discord::verification::Account;
@@ -27,6 +29,16 @@ use super::friends::Tab;
 pub(super) enum Page {
     Friends,
     MessageRequests,
+}
+
+/// Whose list the member list pane shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Target {
+    /// The server's members, from the list `list` of `channel` (see
+    /// [`member_list::list_id`]).
+    Server { guild: Snowflake, channel: Snowflake, list: String },
+    /// A group DM's, which its channel holds.
+    Group(Snowflake),
 }
 
 /// Where the unread messages of a channel started when it was opened, for
@@ -107,6 +119,13 @@ pub(super) struct State {
     pub(super) typing: Typing,
     /// Other people's roles in each server.
     pub(super) members: Members,
+    /// What the gateway is subscribed to for each server.
+    pub(super) subscriptions: Subscriptions,
+    /// The rows of the member lists we asked for.
+    pub(super) member_lists: MemberLists,
+    /// The user closed the member list pane beside the chat, which is open
+    /// until they do.
+    pub(super) members_closed: bool,
 }
 
 impl State {
@@ -236,6 +255,30 @@ impl State {
         let roles =
             if self.me() == Some(user) { Some(&guild.my_roles[..]) } else { self.members.roles(guild.id, user) };
         guild.member_colour(roles?)
+    }
+
+    /// Whose member list the open channel has, as the client chooses
+    /// (`renderSidebar`, 289287): a server's text, announcement, forum and
+    /// media channels, and an announcement thread's parent, which show the
+    /// server's members; and a group DM. Other threads show those in them,
+    /// which Neucord doesn't list yet.
+    pub(super) fn member_target(&self) -> Option<Target> {
+        let id = self.channel.filter(|_| self.page.is_none())?;
+        let (guild, channel) = self.find_channel(id)?;
+        let Some(guild) = guild else {
+            return (channel.kind == discord::ChannelKind::GroupDm).then_some(Target::Group(id));
+        };
+        let channel = match channel.kind {
+            discord::ChannelKind::AnnouncementThread => guild.channel(channel.parent_id?)?,
+            kind if kind.is_thread() => return None,
+            _ => channel,
+        };
+        let shows = channel.kind.is_text() || channel.kind.is_forum_like();
+        shows.then(|| Target::Server {
+            guild: guild.id,
+            channel: channel.id,
+            list: member_list::list_id(guild, channel),
+        })
     }
 
     /// The server's channels we can view, in sidebar order.
@@ -444,6 +487,50 @@ mod tests {
             guilds: vec![guild],
             ..State::default()
         }
+    }
+
+    #[test]
+    fn which_channels_have_a_member_list() {
+        let mut state = open_server(None, json!({}));
+        let guild: Snowflake = Snowflake(1);
+        let with = |state: &mut State, channel: &str, kind: serde_json::Value| {
+            let channel: Channel =
+                serde_json::from_value(json!({"id": channel, "type": kind, "parent_id": "9"})).unwrap();
+            let id = channel.id;
+            state.guilds[0].channels.push(channel);
+            state.channel = Some(id);
+        };
+        state.channel = Some(Snowflake(9));
+        let shown = Target::Server { guild, channel: Snowflake(9), list: "everyone".into() };
+        // `@everyone` here has no View Channel, so the list is named by the hash.
+        assert!(matches!(state.member_target(), Some(Target::Server { channel: Snowflake(9), .. })));
+        state.guilds[0].roles.push(serde_json::from_value(json!({"id": "1", "permissions": "1024"})).unwrap());
+        assert_eq!(state.member_target(), Some(shown.clone()));
+
+        state.page = Some(Page::Friends);
+        assert_eq!(state.member_target(), None, "Home's pages have none");
+        state.page = None;
+
+        with(&mut state, "20", json!(5));
+        assert!(matches!(state.member_target(), Some(Target::Server { channel: Snowflake(20), .. })), "announcements");
+        with(&mut state, "21", json!(15));
+        assert!(matches!(state.member_target(), Some(Target::Server { channel: Snowflake(21), .. })), "forums");
+        with(&mut state, "22", json!(2));
+        assert_eq!(state.member_target(), None, "voice");
+        with(&mut state, "23", json!(11));
+        assert_eq!(state.member_target(), None, "a public thread has its own list");
+        with(&mut state, "24", json!(10));
+        assert_eq!(state.member_target(), Some(shown), "an announcement thread shows its parent's");
+
+        state.guild = None;
+        state.private_channels = vec![
+            serde_json::from_value(json!({"id": "30", "type": 1})).unwrap(),
+            serde_json::from_value(json!({"id": "31", "type": 3})).unwrap(),
+        ];
+        state.channel = Some(Snowflake(30));
+        assert_eq!(state.member_target(), None, "a DM shows a profile, not a list");
+        state.channel = Some(Snowflake(31));
+        assert_eq!(state.member_target(), Some(Target::Group(Snowflake(31))));
     }
 
     #[test]

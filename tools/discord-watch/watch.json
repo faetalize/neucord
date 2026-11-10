@@ -21,7 +21,7 @@
     ],
     "ComponentType": ["ACTION_ROW", "BUTTON", "STRING_SELECT", "SECTION", "TEXT_DISPLAY", "CONTAINER"],
     "ConsentStatus": ["UNSPECIFIED", "PENDING", "ACCEPTED", "REJECTED"],
-    "GatewayOpcode": ["DISPATCH", "HEARTBEAT", "IDENTIFY", "RESUME", "HELLO", "HEARTBEAT_ACK", "REQUEST_GUILD_MEMBERS"],
+    "GatewayOpcode": ["DISPATCH", "HEARTBEAT", "IDENTIFY", "RESUME", "HELLO", "HEARTBEAT_ACK", "REQUEST_GUILD_MEMBERS", "GUILD_SUBSCRIPTIONS_BULK"],
     "GuildMemberFlags": [
       "DID_REJOIN",
       "BYPASSES_VERIFICATION",
@@ -140,6 +140,7 @@
     "tryConvertToJpeg",
     "tryConvertToWebP",
     "unarchiveThreadIfNecessary",
+    "updateGuildSubscriptions",
     "uploadFileToCloud",
     "uploadFileWithResumption",
     "usesLegacyCompression"
@@ -147,8 +148,10 @@
   "stores": [
     "ActiveJoinedThreadsStore",
     "ActiveThreadsStore",
+    "ChannelMemberStore",
     "GuildMemberRequesterStore",
     "GuildRoleStore",
+    "GuildSubscriptionsStore",
     "GuildVerificationStore",
     "JoinedThreadsStore",
     "LoginRequiredActionStore",

@@ -129,15 +129,18 @@ impl App {
                 }
                 Event::MemberUpdate { guild_id, member } => self.on_member(guild_id, member),
                 Event::Members { guild_id, members, not_found } => {
-                    let open = {
+                    let (open, changed) = {
                         let mut state = self.state.borrow_mut();
-                        state.members.add(guild_id, members, &not_found);
-                        state.guild == Some(guild_id)
+                        let changed = state.members.add(guild_id, members, &not_found);
+                        (state.guild == Some(guild_id), changed)
                     };
-                    if open {
+                    // Member lists carry members all the time, mostly as we know them.
+                    if open && changed {
                         self.refresh_rows();
+                        self.refresh_member_rows();
                     }
                 }
+                Event::MemberList(update) => self.on_member_list(*update),
                 Event::GuildUpdate(update) => {
                     let id = update.id;
                     if let Some(guild) = self.state.borrow_mut().guilds.iter_mut().find(|g| g.id == id) {
@@ -226,9 +229,12 @@ impl App {
                     self.state.borrow_mut().relationships.remove(user_id);
                     self.relationships_changed(was_blocked);
                 }
-                Event::PresenceUpdate { user_id, presence } => {
+                Event::PresenceUpdate { user_id, guild_id, presence } => {
+                    self.on_list_presence(guild_id, user_id, &presence);
                     if self.state.borrow_mut().relationships.set_presence(user_id, presence) {
                         self.queue_friends_refresh();
+                        // A group DM's friends.
+                        self.refresh_member_rows();
                     }
                 }
                 Event::GuildFoldersUpdate(folders) => {
@@ -243,6 +249,7 @@ impl App {
                     self.timelines.borrow_mut().held.resumed();
                     self.state.borrow_mut().members.resumed();
                     self.send_member_requests();
+                    self.subscribe_session(false);
                     let name = {
                         let mut state = self.state.borrow_mut();
                         state.reconnect_attempts = 0;
@@ -253,7 +260,12 @@ impl App {
                 }
                 Event::Closed { code, reason, resume } => {
                     self.timelines.borrow_mut().held.closed();
-                    self.state.borrow_mut().resume = resume;
+                    {
+                        let mut state = self.state.borrow_mut();
+                        let open = state.guild;
+                        state.subscriptions.closed(open);
+                        state.resume = resume;
+                    }
                     if Event::is_fatal_close(code) {
                         *self.state.borrow_mut() = State::default();
                         glib::spawn_future_local(async {
@@ -347,6 +359,8 @@ impl App {
         self.refresh_typing();
         self.stack.set_visible_child_name("main");
         self.apply_required_action();
+        // A new session subscribes to nothing: say again what we look at.
+        self.subscribe_session(true);
 
         // Stay on a Home page across reconnects.
         let page = self.state.borrow().page.filter(|_| was_ready);
@@ -403,6 +417,9 @@ impl App {
             (state.guild.is_none(), open)
         };
         self.refresh_home(home, open);
+        if open {
+            self.refresh_member_rows();
+        }
     }
 
     pub(super) fn on_private_channel_delete(self: &Rc<Self>, id: Snowflake) {
@@ -460,6 +477,8 @@ impl App {
         self.rebuild_rail();
         if is_open {
             self.rebuild_sidebar();
+            // As the client does when the open server arrives (`GUILD_CREATE`).
+            self.subscribe_open();
         }
         self.permissions_changed(Some(id));
     }
@@ -560,5 +579,7 @@ impl App {
         }
         self.update_notice_bar();
         self.refresh_rows();
+        self.sync_members();
+        self.refresh_member_rows();
     }
 }

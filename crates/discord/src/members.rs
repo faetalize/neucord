@@ -92,16 +92,24 @@ impl Members {
     }
 
     /// Members Discord sent, asked for or not, and the users it says aren't
-    /// members: both answer a request.
-    pub fn add(&mut self, guild: Snowflake, members: Vec<(Snowflake, Vec<Snowflake>)>, not_found: &[Snowflake]) {
+    /// members: both answer a request. Whether any member's roles are new
+    /// to us, which is how a name's colour can change.
+    pub fn add(
+        &mut self,
+        guild: Snowflake,
+        members: Vec<(Snowflake, Vec<Snowflake>)>,
+        not_found: &[Snowflake],
+    ) -> bool {
         let requests = self.requests.entry(guild).or_default();
         for user in members.iter().map(|(user, _)| user).chain(not_found) {
             requests.unanswered.remove(user);
             requests.pending.remove(user);
         }
+        let mut changed = false;
         for (user, roles) in members {
-            self.roles.insert((guild, user), roles);
+            changed |= self.roles.insert((guild, user), roles.clone()).as_ref() != Some(&roles);
         }
+        changed
     }
 
     /// A page of `guild`'s messages loaded: ask for the authors and the
@@ -214,7 +222,8 @@ mod tests {
         members.page_loaded(G, &[message(7, &[])]);
         assert!(members.flush().is_empty(), "asked already");
 
-        members.add(G, vec![(Snowflake(6), vec![Snowflake(40)])], &[]);
+        assert!(members.add(G, vec![(Snowflake(6), vec![Snowflake(40)])], &[]), "new roles");
+        assert!(!members.add(G, vec![(Snowflake(6), vec![Snowflake(40)])], &[]), "the same");
         assert_eq!(members.roles(G, Snowflake(6)), Some(&[Snowflake(40)][..]));
         members.resumed();
         assert_eq!(members.flush(), [(G, vec![Snowflake(7)])], "unanswered, asked again after a resume");
