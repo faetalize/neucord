@@ -10,6 +10,7 @@ mod composer;
 mod connection;
 mod edits;
 mod embeds;
+mod emoji;
 mod friends;
 mod login;
 mod media_frame;
@@ -81,6 +82,8 @@ pub struct App {
     scroller: gtk::ScrolledWindow,
     composer: gtk::TextView,
     composer_box: gtk::Box,
+    /// Opens the emoji picker.
+    emoji_button: gtk::Button,
     /// Who is typing in the open channel. It keeps its line when empty, so
     /// the bar's height, which pads the message list, doesn't change as people start and stop.
     typing_line: gtk::Label,
@@ -103,10 +106,11 @@ pub struct App {
     forum_title: widgets::Title,
     composer_error: gtk::Label,
     images: Images,
-    /// Mention autocomplete, anchored to the composer.
+    /// Autocomplete for mentions and emoji, anchored to the composer.
     mention_popover: gtk::Popover,
     mention_list: gtk::ListBox,
-    /// `@`-token start (char offset) and the candidates shown, row-aligned.
+    /// The token being completed (char offset of its start) and the
+    /// candidates shown, row-aligned.
     mention: RefCell<composer::MentionCtx>,
     /// "Replying to …" above the composer, with the ping toggle.
     reply_bar: gtk::Box,
@@ -219,6 +223,12 @@ impl App {
                 .css_classes(["composer-input"])
                 .build(),
             composer_box: gtk::Box::builder().css_classes(["composer", "card-row"]).build(),
+            emoji_button: gtk::Button::builder()
+                .icon_name("face-smile-symbolic")
+                .tooltip_text("Emoji")
+                .valign(gtk::Align::Center)
+                .css_classes(["flat", "circular"])
+                .build(),
             typing_line: gtk::Label::builder()
                 .xalign(0.0)
                 .margin_start(12)

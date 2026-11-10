@@ -139,7 +139,15 @@ impl App {
                 self.end_edit();
                 return;
             }
-            Edit::Save(text) => text.to_owned(),
+            Edit::Save(text) => {
+                // The same `:name:`s go out as emoji as in a new message.
+                let library = self.emoji_library(message.channel_id);
+                let translated = library.translate(text);
+                if !translated.locked.is_empty() {
+                    self.show_composer_error(discord::emoji::locked_notice(&translated.locked, library.place.external));
+                }
+                translated.text
+            }
         };
         self.end_edit();
         let Some(rest) = self.state.borrow().rest.clone() else { return };

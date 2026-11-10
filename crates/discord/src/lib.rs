@@ -12,6 +12,7 @@ pub mod component;
 pub mod cooldowns;
 pub mod edits;
 pub mod embed;
+pub mod emoji;
 mod endpoints;
 pub mod experiments;
 pub mod gateway;

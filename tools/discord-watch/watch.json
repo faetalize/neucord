@@ -21,6 +21,7 @@
     ],
     "ComponentType": ["ACTION_ROW", "BUTTON", "STRING_SELECT", "SECTION", "TEXT_DISPLAY", "CONTAINER"],
     "ConsentStatus": ["UNSPECIFIED", "PENDING", "ACCEPTED", "REJECTED"],
+    "EmojiUnavailableReason": ["DISALLOW_EXTERNAL", "GUILD_SUBSCRIPTION_UNAVAILABLE", "PREMIUM_LOCKED"],
     "GatewayOpcode": ["DISPATCH", "HEARTBEAT", "IDENTIFY", "RESUME", "HELLO", "HEARTBEAT_ACK", "REQUEST_GUILD_MEMBERS", "GUILD_SUBSCRIPTIONS_BULK"],
     "GuildMemberFlags": [
       "DID_REJOIN",
@@ -51,7 +52,8 @@
       "BYPASS_SLOWMODE",
       "MANAGE_THREADS",
       "SEND_MESSAGES_IN_THREADS",
-      "ATTACH_FILES"
+      "ATTACH_FILES",
+      "USE_EXTERNAL_EMOJIS"
     ],
     "PremiumPerk": [
       "ANIMATED_EMOJIS",
@@ -101,6 +103,7 @@
     "getAckTimestamp",
     "getAlgorithm",
     "getContentMessage",
+    "getEmojiUnavailableReason",
     "getErrorKind",
     "getForwardInfo",
     "getGuildChannelUnreadState",
@@ -120,6 +123,9 @@
     "isCategoryMuted",
     "isChannelMuted",
     "isChannelOnCooldown",
+    "isEmojiDisabled",
+    "isEmojiFiltered",
+    "isEmojiPremiumLocked",
     "isForumLikeChannel",
     "isGuildOrCategoryOrChannelMuted",
     "isResponseUrlStale",
@@ -136,6 +142,7 @@
     "resolvedMessageNotifications",
     "retryOpts",
     "startOrResumeUpload",
+    "translateInlineEmojiToSurrogates",
     "truncate",
     "tryConvertToJpeg",
     "tryConvertToWebP",
@@ -143,12 +150,14 @@
     "updateGuildSubscriptions",
     "uploadFileToCloud",
     "uploadFileWithResumption",
-    "usesLegacyCompression"
+    "usesLegacyCompression",
+    "validateMessage"
   ],
   "stores": [
     "ActiveJoinedThreadsStore",
     "ActiveThreadsStore",
     "ChannelMemberStore",
+    "EmojiStore",
     "GuildMemberRequesterStore",
     "GuildRoleStore",
     "GuildSubscriptionsStore",
@@ -158,6 +167,7 @@
     "MessageStore",
     "PendingReplyStore",
     "PermissionStore",
+    "RawGuildEmojiStore",
     "RegionalFeatureConfigStore",
     "RpcNotificationSettingsStore",
     "SafetyHubStore",

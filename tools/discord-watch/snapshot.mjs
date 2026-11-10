@@ -516,6 +516,10 @@ export async function snapshot(dir) {
       // defined apart: `MAX: () => c` in the export map, `c = 30` below it.
       const declared = new Map();
       const named = [];
+      // A method exported by name from a function declared apart:
+      // `getEmojiUnavailableReason: N` in the export map, `function N(e)` above.
+      const functions = new Map();
+      const aliased = [];
       walk(body, (node) => {
         if (node.type === "VariableDeclarator" && node.id.type === "Identifier" && node.init) {
           declared.set(node.id.name, node.init);
@@ -585,6 +589,10 @@ export async function snapshot(dir) {
             }
           }
         }
+        if (node.type === "FunctionDeclaration" && node.id) functions.set(node.id.name, node);
+        if (node.type === "Property" && node.value.type === "Identifier" && methods.has(keyName(node))) {
+          aliased.push([keyName(node), node.value.name]);
+        }
         // Class methods and object methods alike: `isSystemDM() { … }`.
         if ((node.type === "MethodDefinition" || node.type === "Property") && isFunction(node.value)) {
           const name = !node.computed && node.key.type === "Identifier" ? node.key.name : null;
@@ -623,6 +631,13 @@ export async function snapshot(dir) {
           }
         }
       });
+      for (const [name, id] of aliased) {
+        const target = functions.get(id);
+        if (target) {
+          methods.get(name).add(normalized(source, target));
+          copy(target, name);
+        }
+      }
       for (const [name, value] of named) {
         const target =
           value.type === "ArrowFunctionExpression" && value.body.type === "Identifier"
