@@ -74,6 +74,7 @@
     "VerificationLevel": ["NONE", "LOW", "MEDIUM", "HIGH", "VERY_HIGH"]
   },
   "methods": [
+    "allowNoMessages",
     "canDeleteOwnMessage",
     "canStreamQuality",
     "canTrackUnreads",

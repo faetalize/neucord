@@ -183,8 +183,11 @@ impl NotificationSettings {
     }
 
     /// Should `message`, in `thread`, raise a desktop notification
-    /// (411238)? Not in a thread we muted. Mentions count here whatever
-    /// the server suppresses.
+    /// (411238)? Not in a thread we muted, and not where `allowNoMessages`
+    /// (543465) blocks it first: it asks about the thread as a channel,
+    /// whose "category" is the parent channel, so it sees the server's mute
+    /// and the parent's own mute and level, never the category above it.
+    /// Mentions count here whatever the server suppresses.
     pub fn should_notify_in_thread(
         &self,
         thread: &Channel,
@@ -195,6 +198,10 @@ impl NotificationSettings {
         now_unix: i64,
     ) -> bool {
         if thread.member.as_ref().is_none_or(|m| m.is_muted(now_unix)) {
+            return false;
+        }
+        let as_channel = Place { parent: None, ..*parent };
+        if self.muted(&as_channel, now_unix) || self.level(&as_channel) == Level::Nothing {
             return false;
         }
         match self.thread_level(thread, parent, now_unix) {
@@ -231,16 +238,21 @@ impl NotificationSettings {
     }
 
     /// Should a message here raise a desktop notification? DMs notify unless
-    /// muted. In servers, a mention gets through a mute (as in Discord), but
-    /// not a level of "nothing".
+    /// muted. In servers, `allowNoMessages` (543465) comes first: a mute on
+    /// the server, category or channel, or a level of "nothing", silences
+    /// everything, mentions included. Then `mentioned` (`mentions_me`, so
+    /// what the server suppresses is already out) decides under "mentions".
     pub fn should_notify(&self, place: &Place, mentioned: bool, now_unix: i64) -> bool {
         if place.guild.is_none() {
             return !self.channel_muted(place, now_unix);
         }
+        if self.muted(place, now_unix) {
+            return false;
+        }
         match self.level(place) {
             Level::Nothing => false,
             Level::Mentions => mentioned,
-            Level::All => mentioned || !self.muted(place, now_unix),
+            Level::All => true,
         }
     }
 }
@@ -367,7 +379,11 @@ mod tests {
         assert!(!s.should_notify(&place(Some(1), 12, None), false, NOW), "mentions only, not mentioned");
         assert!(s.should_notify(&place(Some(1), 12, None), true, NOW));
         assert!(!s.should_notify(&place(Some(2), 5, None), false, NOW), "muted server");
-        assert!(s.should_notify(&place(Some(2), 5, None), true, NOW), "a mention gets through a mute");
+        assert!(!s.should_notify(&place(Some(2), 5, None), true, NOW), "a mute silences mentions too");
+        assert!(!s.should_notify(&place(Some(1), 11, None), true, NOW), "muted channel, mentions level");
+        assert!(!s.should_notify(&place(Some(1), 12, Some(11)), true, NOW), "muted category");
+        assert!(s.should_notify(&place(Some(1), 20, None), true, NOW), "an expired mute no longer silences");
+        assert!(!s.should_notify(&place(Some(1), 20, None), false, NOW), "but the level still applies");
         assert!(s.should_notify(&place(None, 98, None), false, NOW), "DM");
         assert!(!s.should_notify(&place(None, 99, None), false, NOW), "muted DM");
     }
@@ -403,6 +419,17 @@ mod tests {
         let mut muted = member(1 << 1);
         muted["muted"] = json!(true);
         assert!(!s.should_notify_in_thread(&thread(muted), &parent, &everyone, me, &[], NOW), "muted thread");
+
+        // The client's mute check sees the server and the parent channel itself, whatever our thread flags
+        // say; a category above the parent is only looked at when we chose nothing for the thread.
+        let notify = |flags: u64, parent: &Place| {
+            s.should_notify_in_thread(&thread(member(flags)), parent, &everyone, me, &[], NOW)
+        };
+        assert!(!notify(1 << 1, &place(Some(2), 5, None)), "muted server, thread set to all messages");
+        assert!(!notify(1 << 2, &place(Some(2), 5, None)), "muted server, thread set to mentions");
+        assert!(!notify(1 << 1, &place(Some(1), 11, None)), "muted parent channel");
+        assert!(notify(1 << 1, &place(Some(1), 12, Some(11))), "muted category: not looked at");
+        assert!(!notify(0, &place(Some(1), 12, Some(11))), "muted category, nothing chosen");
     }
 
     #[test]
