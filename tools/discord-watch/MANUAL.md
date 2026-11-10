@@ -19,7 +19,8 @@ Last checked against: stable 668923.
 ## Running a check
 
 1. `node tools/discord-watch/cli.mjs update ~/Source/Discord-Decomp`. The
-   decomp keeps one commit per build, and module ids survive across builds.
+   decomp keeps one commit per build. Most module ids survive a build, but a
+   build can renumber thousands, and an old id can then hold other code.
 2. For each module below, diff it between the build above and the new one:
    `git -C ~/Source/Discord-Decomp diff <old> <new> -- modules/<id>.js`.
 3. If a module is gone or the anchors no longer find the code, search the new

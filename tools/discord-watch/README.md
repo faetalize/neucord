@@ -68,8 +68,9 @@ names our servers, so it stays in the decomp, which has no remote.
 ## Reading the client
 
 `node cli.mjs update <dir>` fetches the current build into a git repo, one
-formatted file per webpack module. Module ids survive across builds, so
-`git diff` between two commits shows what changed in each module. Run
+formatted file per webpack module. Most module ids survive a build, so
+`git diff` between two commits shows what changed in each module; a build
+that renumbers modules shows them as files gone and added. Run
 `npm install` first; formatting needs Prettier.
 
 The client is Discord's code: keep unpacked builds local, never commit them
