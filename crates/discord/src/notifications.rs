@@ -213,6 +213,14 @@ impl NotificationSettings {
         mentions(message, me, my_roles, suppress_everyone, suppress_roles)
     }
 
+    /// Does a message add to the channel's mention count (the read state's
+    /// MESSAGE_CREATE, 218461)? `pinged` is `mentions_me`. Never from a
+    /// blocked author. Otherwise a ping, or any message in a DM that isn't
+    /// muted: a DM is a mention by itself.
+    pub fn counts_mention(&self, place: Option<&Place>, pinged: bool, blocked: bool, now_unix: i64) -> bool {
+        !blocked && (pinged || place.is_some_and(|p| p.guild.is_none() && !self.channel_muted(p, now_unix)))
+    }
+
     /// Should a message here raise a desktop notification? DMs notify unless
     /// muted. In servers, a mention gets through a mute (as in Discord), but
     /// not a level of "nothing".
@@ -290,6 +298,24 @@ mod tests {
         assert!(!s.channel_muted(&place(Some(1), 20, None), NOW), "mute expired");
         assert!(s.guild_muted(Snowflake(2), NOW));
         assert!(s.muted(&place(Some(2), 5, None), NOW));
+    }
+
+    #[test]
+    fn mention_counts() {
+        let s = settings();
+        let dm = place(None, 5, None);
+        let muted_dm = place(None, 99, None);
+        let guild = place(Some(1), 10, None);
+        assert!(s.counts_mention(Some(&dm), false, false, NOW), "a DM is a mention");
+        assert!(!s.counts_mention(Some(&muted_dm), false, false, NOW), "not in a muted DM");
+        assert!(s.counts_mention(Some(&muted_dm), true, false, NOW), "unless it pings us");
+        assert!(!s.counts_mention(Some(&guild), false, false, NOW), "a server message needs a ping");
+        assert!(s.counts_mention(Some(&guild), true, false, NOW));
+        for place in [&dm, &guild] {
+            assert!(!s.counts_mention(Some(place), true, true, NOW), "never from a blocked author");
+        }
+        assert!(!s.counts_mention(None, false, false, NOW), "an unknown channel isn't a DM");
+        assert!(s.counts_mention(None, true, false, NOW));
     }
 
     #[test]

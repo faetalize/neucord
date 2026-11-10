@@ -246,8 +246,8 @@ impl App {
             state.bump_last_message(channel, message.id);
             let own = state.me() == Some(message.author.id);
             // No notifications for message requests (as in Discord) or from blocked users.
-            let quiet = state.find_channel(channel).is_some_and(|(_, c)| c.is_request())
-                || state.relationships.is_blocked(message.author.id);
+            let blocked = state.relationships.is_blocked(message.author.id);
+            let quiet = state.find_channel(channel).is_some_and(|(_, c)| c.is_request()) || blocked;
             if own || viewing {
                 // Discord marks what we send as read; what we watch arrive, we ack.
                 state.read.ack(channel, message.id);
@@ -259,9 +259,7 @@ impl App {
                     .and_then(|g| state.guilds.iter().find(|guild| guild.id == g))
                     .map(|g| g.my_roles.clone())
                     .unwrap_or_default();
-                let is_dm = place.is_some_and(|p| p.guild.is_none());
-                let mentioned =
-                    is_dm || state.me().is_some_and(|me| state.notifications.mentions_me(&message, me, &roles));
+                let pinged = state.me().is_some_and(|me| state.notifications.mentions_me(&message, me, &roles));
                 let notify = !quiet
                     && match state.find_channel(channel) {
                         // A thread goes by our membership, and its parent.
@@ -272,9 +270,10 @@ impl App {
                                 n.should_notify_in_thread(thread, &parent, &message, me, &roles, now_unix())
                             })
                         }
-                        _ => place.is_some_and(|p| state.notifications.should_notify(&p, mentioned, now_unix())),
+                        _ => place.is_some_and(|p| state.notifications.should_notify(&p, pinged, now_unix())),
                     };
-                state.read.on_message(channel, mentioned);
+                let counted = state.notifications.counts_mention(place.as_ref(), pinged, blocked, now_unix());
+                state.read.on_message(channel, counted);
                 place.filter(|_| notify)
             }
         };
