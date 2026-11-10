@@ -5,14 +5,16 @@
 //!
 //! The client draws each combination as its own glyph, so a locked
 //! announcement channel is one icon. Here the kind and the mark are apart,
-//! for the UI to draw as it likes. Not copied: spoiler channels, game invite
-//! forums, and the voice states (video, streams, people connected).
+//! for the UI to draw as it likes. Not copied: moderator report channels (a flag
+//! icon ahead of the rules), text channels linked to a lobby, spoiler
+//! channels, game invite forums, and the voice states (video, streams, people
+//! connected).
 
 use crate::{Channel, ChannelKind, Guild, permissions};
 
 /// The kind of channel, or the rules channel, which the client draws apart
 /// from the kind it is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Glyph {
     Text,
     Announcement,
@@ -24,7 +26,7 @@ pub enum Glyph {
 }
 
 /// What the client swaps a channel's glyph for, only one at a time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Mark {
     /// Age-restricted (`nsfw`).
     Nsfw,
@@ -32,7 +34,7 @@ pub enum Mark {
     Locked,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Icon {
     pub glyph: Glyph,
     pub mark: Option<Mark>,

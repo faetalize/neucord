@@ -62,8 +62,6 @@ impl App {
             return;
         };
         self.guild_name.set(&guild.name, None);
-        // The glyphs differ in width; this keeps the names in one column.
-        let glyph_slot = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
         for (category, channels) in state.sidebar(guild) {
             if let Some(category) = category {
                 let label = gtk::Label::builder()
@@ -79,7 +77,6 @@ impl App {
                 let icon = channel_icon::of(guild, channel);
                 // A listed channel always has an icon; a server never holds a DM.
                 let glyph = glyph_widget(icon.map_or(Glyph::Text, |i| i.glyph));
-                glyph_slot.add_widget(&glyph);
                 row.append(&glyph);
                 row.append(
                     &gtk::Label::builder()
@@ -193,12 +190,21 @@ impl App {
     }
 }
 
-/// The kind of channel, in front of its name. Text channels keep their `#`,
-/// which the theme has no icon for.
+/// The width of a symbolic icon at the default size.
+const GLYPH_WIDTH: i32 = 16;
+
+/// The kind of channel, in front of its name. Text channels show a `#`, which
+/// the theme has no icon for. Every glyph is as wide as an icon, so the names
+/// line up; a size group would measure every row on each rebuild.
 fn glyph_widget(glyph: Glyph) -> gtk::Widget {
     let (icon, tooltip) = match glyph {
         Glyph::Text => {
-            return gtk::Label::builder().label("#").halign(gtk::Align::Center).build().upcast();
+            return gtk::Label::builder()
+                .label("#")
+                .halign(gtk::Align::Center)
+                .width_request(GLYPH_WIDTH)
+                .build()
+                .upcast();
         }
         Glyph::Announcement => ("application-rss+xml-symbolic", "Announcement channel"),
         Glyph::Voice => ("audio-volume-high-symbolic", "Voice channel"),
@@ -207,14 +213,20 @@ fn glyph_widget(glyph: Glyph) -> gtk::Widget {
         Glyph::Media => ("image-x-generic-symbolic", "Media channel"),
         Glyph::Rules => ("text-x-generic-symbolic", "Rules channel"),
     };
-    gtk::Image::builder().icon_name(icon).tooltip_text(tooltip).halign(gtk::Align::Center).build().upcast()
+    gtk::Image::builder()
+        .icon_name(icon)
+        .tooltip_text(tooltip)
+        .halign(gtk::Align::Center)
+        .width_request(GLYPH_WIDTH)
+        .build()
+        .upcast()
 }
 
 /// After a channel's name, for what sets it apart.
 fn mark_widget(mark: Mark) -> gtk::Image {
     let (icon, tooltip) = match mark {
         Mark::Nsfw => ("dialog-warning-symbolic", "Age-restricted"),
-        Mark::Locked => ("channel-secure-symbolic", "Private"),
+        Mark::Locked => ("channel-secure-symbolic", "Limited"),
     };
     gtk::Image::builder().icon_name(icon).tooltip_text(tooltip).build()
 }

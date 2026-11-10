@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
+use discord::channel_icon;
 use discord::cooldowns::Slowmode;
 use discord::experiments::Experiments;
 use discord::limits::{Limits, Nitro};
@@ -342,6 +343,9 @@ impl State {
                             Place { guild: Some(guild.id), guild_default: 0, channel: c.id, parent: c.parent_id },
                             c,
                         ));
+                        let mut icon = std::collections::hash_map::DefaultHasher::new();
+                        channel_icon::of(guild, c).hash(&mut icon);
+                        sig.push(icon.finish());
                         for t in self.sidebar_threads(guild, c) {
                             // A muted thread shows as muted; its place stands for that.
                             sig.extend([t.id.0, Self::thread_muted(t) as u64]);
@@ -404,4 +408,44 @@ pub(super) fn now_unix() -> i64 {
 
 pub(super) fn now_ms() -> i64 {
     glib::real_time() / 1_000
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    /// An open server with one text channel, `rules` naming its rules channel.
+    fn open_server(rules: Option<u64>, channel: serde_json::Value) -> State {
+        let mut channel_json = json!({"id": "9", "type": 0, "name": "general"});
+        channel_json.as_object_mut().unwrap().extend(channel.as_object().unwrap().clone());
+        let mut guild: Guild = serde_json::from_value(json!({
+            "id": "1", "name": "G", "rules_channel_id": rules.map(|id| id.to_string()),
+            "roles": [{"id": "40", "name": "Member", "permissions": "0"}],
+            "channels": [channel_json],
+        }))
+        .unwrap();
+        guild.my_roles = vec![Snowflake(40)];
+        State {
+            account: Some(Account { id: Snowflake(5), ..Account::default() }),
+            guild: Some(guild.id),
+            guilds: vec![guild],
+            ..State::default()
+        }
+    }
+
+    #[test]
+    fn the_sidebar_is_drawn_again_when_a_channels_icon_changes() {
+        let plain = open_server(None, json!({})).sidebar_signature();
+        assert_ne!(plain, open_server(Some(9), json!({})).sidebar_signature(), "it became the rules channel");
+        assert_ne!(plain, open_server(None, json!({"nsfw": true})).sidebar_signature(), "it was age-restricted");
+        // Our role sees it, `@everyone` doesn't.
+        let hidden = json!({"permission_overwrites": [
+            {"id": "1", "type": 0, "deny": "1024", "allow": "0"},
+            {"id": "40", "type": 0, "deny": "0", "allow": "1024"},
+        ]});
+        assert_ne!(plain, open_server(None, hidden).sidebar_signature(), "it was hidden from @everyone");
+        assert_eq!(plain, open_server(None, json!({})).sidebar_signature(), "nothing changed");
+    }
 }
