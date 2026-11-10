@@ -155,11 +155,14 @@ pub enum Event {
         channel_id: Snowflake,
     },
     /// Votes on a poll's answers, as `(answer_id, user_id)`: added, or taken back.
+    /// `many` is a `MESSAGE_POLL_VOTE_ADD_MANY`, which the client counts
+    /// without its DM rule.
     PollVote {
         channel_id: Snowflake,
         message_id: Snowflake,
         votes: Vec<(u32, Snowflake)>,
         added: bool,
+        many: bool,
     },
     /// One of our clients (maybe this one) marked `channel_id` read up to `message_id`.
     MessageAck {
@@ -833,7 +836,13 @@ fn dispatch(state: &State, name: &str, data: Value) {
             ) else {
                 return;
             };
-            Event::PollVote { channel_id, message_id, votes: vec![(answer, user)], added: name.ends_with("ADD") }
+            Event::PollVote {
+                channel_id,
+                message_id,
+                votes: vec![(answer, user)],
+                added: name.ends_with("ADD"),
+                many: false,
+            }
         }
         "MESSAGE_POLL_VOTE_ADD_MANY" => {
             let (Some(channel_id), Some(message_id)) = (parse_id(&data["channel_id"]), parse_id(&data["message_id"]))
@@ -847,7 +856,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 .filter_map(|v| Some((u32::try_from(v["answer_id"].as_u64()?).ok()?, v["users"].as_array()?)))
                 .flat_map(|(answer, users)| users.iter().filter_map(parse_id).map(move |user| (answer, user)))
                 .collect();
-            Event::PollVote { channel_id, message_id, votes, added: true }
+            Event::PollVote { channel_id, message_id, votes, added: true, many: true }
         }
         "MESSAGE_DELETE_BULK" => {
             let Some(channel_id) = parse_id(&data["channel_id"]) else { return };
@@ -1164,8 +1173,13 @@ mod tests {
         let (state, rx) = fresh_state();
         let one = json!({"channel_id": "3", "message_id": "9", "user_id": "5", "answer_id": 2, "guild_id": "1"});
         dispatch(&state, "MESSAGE_POLL_VOTE_ADD", one.clone());
-        let Ok(Event::PollVote { channel_id, message_id, votes, added }) = rx.try_recv() else { panic!("no vote") };
-        assert_eq!((channel_id, message_id, votes, added), (Snowflake(3), Snowflake(9), vec![(2, Snowflake(5))], true));
+        let Ok(Event::PollVote { channel_id, message_id, votes, added, many }) = rx.try_recv() else {
+            panic!("no vote")
+        };
+        assert_eq!(
+            (channel_id, message_id, votes, added, many),
+            (Snowflake(3), Snowflake(9), vec![(2, Snowflake(5))], true, false)
+        );
         dispatch(&state, "MESSAGE_POLL_VOTE_REMOVE", one);
         let Ok(Event::PollVote { added, .. }) = rx.try_recv() else { panic!("no vote taken back") };
         assert!(!added);
@@ -1175,8 +1189,8 @@ mod tests {
             json!({"channel_id": "3", "message_id": "9", "votes": [
                 {"answer_id": 1, "users": ["5", "6"]}, {"answer_id": 2, "users": ["7"]}]}),
         );
-        let Ok(Event::PollVote { votes, added, .. }) = rx.try_recv() else { panic!("no votes") };
+        let Ok(Event::PollVote { votes, added, many, .. }) = rx.try_recv() else { panic!("no votes") };
         let all = [(1, Snowflake(5)), (1, Snowflake(6)), (2, Snowflake(7))];
-        assert_eq!((votes, added), (all.to_vec(), true));
+        assert_eq!((votes, added, many), (all.to_vec(), true, true));
     }
 }

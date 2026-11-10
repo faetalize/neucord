@@ -86,6 +86,17 @@ impl Timelines {
         self.held = Held::default();
     }
 
+    /// A page of `channel` arrived for a request that `started`. Says whether
+    /// it was stale. A channel evicted or cleared while it was on its way has
+    /// no messages to trust.
+    pub fn landed(&mut self, channel: Snowflake, started: discord::held::Started) -> bool {
+        let stale = self.held.loaded(channel, started);
+        if !self.channels.contains_key(&channel) {
+            self.held.forget(channel);
+        }
+        stale
+    }
+
     /// [`open`](Self::open) for showing the channel. Like the client, a
     /// channel with a link that has expired (or soon will) is emptied, not
     /// shown: its images would be dead, so it is asked for again.
@@ -453,6 +464,21 @@ mod tests {
         assert!(!timeline.complete, "an emptied channel is a new one");
         let opening = discord::held::Opening::default();
         assert!(timelines.held.fetch_on_open(Snowflake(1), opening));
+    }
+
+    #[test]
+    fn a_page_for_a_channel_evicted_meanwhile_trusts_nothing() {
+        let mut timelines = Timelines::default();
+        timelines.held.opened();
+        timelines.open(Snowflake(1));
+        let started = timelines.held.started();
+        for id in 100..100 + CAPACITY as u64 {
+            timelines.open(Snowflake(id));
+        }
+        assert!(timelines.get(Snowflake(1)).is_none());
+        timelines.landed(Snowflake(1), started);
+        let opening = discord::held::Opening { private: true, ..Default::default() };
+        assert!(timelines.held.fetch_on_open(Snowflake(1), opening), "its page went nowhere");
     }
 
     #[test]

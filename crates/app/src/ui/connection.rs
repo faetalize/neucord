@@ -149,14 +149,12 @@ impl App {
                     if let Some(guild) = self.state.borrow_mut().guilds.iter_mut().find(|g| g.id == guild_id) {
                         guild.set_role(role);
                     }
-                    self.lost_sight(guild_id);
                     self.permissions_changed(Some(guild_id));
                 }
                 Event::RoleDelete { guild_id, role_id } => {
                     if let Some(guild) = self.state.borrow_mut().guilds.iter_mut().find(|g| g.id == guild_id) {
                         guild.roles.retain(|r| r.id != role_id);
                     }
-                    self.lost_sight(guild_id);
                     self.permissions_changed(Some(guild_id));
                 }
                 Event::AccountUpdate(account, nitro) => {
@@ -174,8 +172,8 @@ impl App {
                 Event::MessageUpdate(edit) => self.on_message_update(edit),
                 Event::MessageDelete { id, channel_id } => self.on_message_delete(id, channel_id),
                 Event::MessageDeleteBulk { ids, channel_id } => self.on_message_delete_bulk(ids, channel_id),
-                Event::PollVote { channel_id, message_id, votes, added } => {
-                    self.on_poll_vote(channel_id, message_id, votes, added)
+                Event::PollVote { channel_id, message_id, votes, added, many } => {
+                    self.on_poll_vote(channel_id, message_id, votes, added, many)
                 }
                 Event::MessageAck { channel_id, message_id } => {
                     self.state.borrow_mut().read.ack(channel_id, message_id);
@@ -476,7 +474,6 @@ impl App {
         if guild_open {
             self.rebuild_sidebar();
         }
-        self.lost_sight(guild_id);
         self.permissions_changed(Some(guild_id));
     }
 
@@ -517,7 +514,6 @@ impl App {
         if let Some(guild) = self.state.borrow_mut().guilds.iter_mut().find(|g| g.id == guild_id) {
             guild.set_member(member);
         }
-        self.lost_sight(guild_id);
         self.permissions_changed(Some(guild_id));
     }
 
@@ -530,19 +526,6 @@ impl App {
                 gateway.request_members(guild, &users);
             }
         }
-    }
-
-    /// Our roles, our member or a channel changed in `guild`: a channel we
-    /// can no longer view missed what happened there meanwhile, so what we
-    /// hold of it is asked for again, as the client does for these events
-    /// (`GUILD_ROLE_UPDATE`, `GUILD_ROLE_DELETE`, `GUILD_MEMBER_UPDATE` for
-    /// us, `CHANNEL_UPDATE`).
-    fn lost_sight(&self, guild: Snowflake) {
-        let state = self.state.borrow();
-        self.timelines.borrow_mut().held.lost_sight(|channel| {
-            state.find_channel(channel).is_some_and(|(g, _)| g.is_some_and(|g| g.id == guild))
-                && !state.can_view(channel)
-        });
     }
 
     /// What our permissions in `guild` (or, with `None`, any server) come

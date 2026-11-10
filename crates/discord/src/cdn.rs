@@ -116,8 +116,8 @@ fn attachment_expired(url: &str, now_ms: u64) -> bool {
 }
 
 /// Media of the CDN that is signed, or is an attachment and so should be.
-fn media_expired(media: &Option<crate::embed::EmbedMedia>, now_ms: u64) -> bool {
-    let Some(url) = media.as_ref().and_then(|media| media.url.as_deref()).and_then(parse) else { return false };
+fn media_expired(media: Option<&crate::embed::EmbedMedia>, now_ms: u64) -> bool {
+    let Some(url) = media.and_then(|media| media.url.as_deref()).and_then(parse) else { return false };
     let signed = url.query.split('&').any(|param| param.starts_with("ex="));
     let attachment = ["/attachments/", "/ephemeral-attachments/"].iter().any(|prefix| url.path.starts_with(prefix));
     is_cdn_host(&url.host)
@@ -142,7 +142,8 @@ pub fn links_expired(message: &crate::Message, now_ms: u64) -> bool {
             seen.push(url);
             first
         });
-        media_expired(&embed.image, now_ms) || (first && media_expired(&embed.video, now_ms))
+        let (image, video) = embed.client_media();
+        media_expired(image, now_ms) || (first && media_expired(video, now_ms))
     })
 }
 
@@ -231,7 +232,7 @@ mod tests {
     }
 
     fn image(url: &str) -> serde_json::Value {
-        serde_json::json!({"type": "image", "url": "https://e.com/p", "image": {"url": url}})
+        serde_json::json!({"type": "rich", "url": "https://e.com/p", "image": {"url": url, "width": 8, "height": 8}})
     }
 
     #[test]
@@ -257,14 +258,20 @@ mod tests {
 
     #[test]
     fn embeds_of_one_link_keep_the_first_ones_video_and_all_the_images() {
-        let video = |url| serde_json::json!({"type": "video", "url": "https://e.com/p", "video": {"url": url}});
+        let video = |url| {
+            serde_json::json!({"type": "video", "url": "https://e.com/p", "thumbnail": {"url": "https://e.com/t.png", "width": 8, "height": 8},
+                "video": {"url": url, "width": 8, "height": 8}})
+        };
         let old = "https://cdn.discordapp.com/attachments/1/2/a.mp4?ex=1";
         let first = message(&[], serde_json::json!([video(old)]));
         assert!(links_expired(&first, 2_000));
         let second = message(&[], serde_json::json!([image("https://e.com/a.png"), video(old)]));
         assert!(!links_expired(&second, 2_000), "merged into the first, which has no video");
-        let separate =
-            message(&[], serde_json::json!([{"type": "video", "url": "https://e.com/q", "video": {"url": old}}]));
+        let separate = message(
+            &[],
+            serde_json::json!([{"type": "video", "url": "https://e.com/q", "video": {"url": old, "width": 8, "height": 8},
+                "thumbnail": {"url": "https://e.com/t.png", "width": 8, "height": 8}}]),
+        );
         assert!(links_expired(&separate, 2_000));
         let later_image = message(
             &[],
@@ -274,5 +281,34 @@ mod tests {
             ]),
         );
         assert!(links_expired(&later_image, 2_000));
+    }
+
+    #[test]
+    fn a_pasted_attachment_link_expires_through_its_thumbnail() {
+        // The client takes an image or article embed's picture from its thumbnail
+        // (`fK` in 659674), which is where Discord puts it for a pasted link.
+        let embed = |kind: &str, size: u32| {
+            serde_json::json!([{"type": kind, "url": "https://cdn.discordapp.com/attachments/1/2/a.png?ex=1",
+                "thumbnail": {"url": "https://cdn.discordapp.com/attachments/1/2/a.png?ex=1", "width": size, "height": size}}])
+        };
+        assert!(links_expired(&message(&[], embed("image", 8)), 2_000));
+        assert!(links_expired(&message(&[], embed("article", 8)), 2_000));
+        assert!(!links_expired(&message(&[], embed("rich", 8)), 2_000), "a small picture of a rich embed, not media");
+        assert!(!links_expired(&message(&[], embed("image", 0)), 2_000), "without a size the client drops it");
+    }
+
+    #[test]
+    fn a_video_needs_its_still_and_isnt_sketchfabs() {
+        let old = "https://cdn.discordapp.com/attachments/1/2/a.mp4?ex=1";
+        let video = |extra: serde_json::Value| {
+            let mut embed = serde_json::json!({"type": "video", "url": "https://e.com/p", "video": {"url": old, "width": 8, "height": 8}});
+            embed.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            message(&[], serde_json::json!([embed]))
+        };
+        let still = serde_json::json!({"thumbnail": {"url": "https://e.com/t.png", "width": 8, "height": 8}});
+        assert!(!links_expired(&video(serde_json::json!({})), 2_000), "no still, no video");
+        assert!(links_expired(&video(still.clone()), 2_000));
+        let sketchfab = serde_json::json!({"thumbnail": still["thumbnail"], "provider": {"name": "Sketchfab"}});
+        assert!(!links_expired(&video(sketchfab), 2_000), "never shown");
     }
 }

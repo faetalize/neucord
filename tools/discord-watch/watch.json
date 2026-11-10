@@ -77,6 +77,7 @@
   },
   "methods": [
     "addReaction",
+    "addReactionBatch",
     "allowAllMessages",
     "allowNoMessages",
     "canDeleteOwnMessage",
@@ -123,8 +124,10 @@
     "isGuildOrCategoryOrChannelMuted",
     "isResponseUrlStale",
     "isScheduledForDeletion",
+    "isSessionEstablished",
     "isSystemDM",
     "isSystemUser",
+    "loadComplete",
     "parseRangeHeader",
     "removeReaction",
     "renderEmbeds",

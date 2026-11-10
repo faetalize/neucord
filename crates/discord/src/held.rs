@@ -6,9 +6,16 @@
 //! (`ChannelMessages`, 755364). It fetches the newest page when a channel
 //! opens unless the channel is `ready` and not `cached`, and trusts the
 //! gateway to keep what it holds current. Neucord's `fresh` is both flags:
-//! set when a page arrives that no connection change crossed, cleared for
-//! every channel by READY (`CONNECTION_OPEN`) and for one that we lose View
-//! Channel on. A resume clears nothing: Discord replays what was missed.
+//! set when a page arrives that no new session crossed, cleared for every
+//! channel by READY (`CONNECTION_OPEN`). A resume clears nothing: Discord
+//! replays what was missed.
+//!
+//! Only DMs and group DMs are held. The client is subscribed to every server
+//! it has held channels of (`threads` stays on even when it goes idle,
+//! 661670), and we subscribe to none, so what the gateway sends a server's
+//! channels to us isn't known to match. A DM has no subscription on either
+//! side. With subscriptions (#10) the client's rule can cover servers too,
+//! with the channels we lose View Channel on marked stale (`Y` in 596344).
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -16,8 +23,11 @@ use std::time::{Duration, Instant};
 use crate::Snowflake;
 
 /// The gateway connection as `GatewayConnectionStore` keeps it: whether a
-/// session is established, and `lastTimeConnectedChanged`, which READY and
-/// every close move. A counter does for a timestamp, as nothing else reads it.
+/// session is established, and `lastTimeConnectedChanged`, which READY moves,
+/// and a reset (`CONNECTION_CLOSED`: a rejected token, or the fifth failed
+/// reconnect in a row), which ends the session, so the READY after it moves
+/// it anyway. An ordinary close is `CONNECTION_INTERRUPTED`, which doesn't
+/// move it. A counter does for a timestamp, as nothing else reads it.
 #[derive(Debug, Default)]
 struct Link {
     established: bool,
@@ -39,6 +49,8 @@ pub struct Opening {
     /// The channel is the DM with Discord's own account, and has unread
     /// messages.
     pub system_dm_unread: bool,
+    /// A DM or group DM, the only channels held.
+    pub private: bool,
 }
 
 /// How soon after a page a stale one is asked for again (`b` in 123363).
@@ -66,10 +78,11 @@ impl Held {
         self.link.established = true;
     }
 
-    /// The connection closed, whether or not it can resume.
+    /// The connection closed. The client counts the stretch between
+    /// reconnecting and RESUMED as established; we can't see it, so a request
+    /// sent then counts as made without a session.
     pub fn closed(&mut self) {
         self.link.established = false;
-        self.link.changed += 1;
     }
 
     /// A request is about to be sent.
@@ -77,10 +90,10 @@ impl Held {
         Started { established: self.link.established, changed: self.link.changed }
     }
 
-    /// The newest page of `channel` arrived for a request that `started`. A
-    /// page asked for without a session, or across a connection change, may
-    /// have missed what came while the connection was down: `isStale` in
-    /// `fetchMessages` (138399).
+    /// A page of `channel` arrived for a request that `started`. One asked
+    /// for without a session, or across a new one, may have missed what came
+    /// meanwhile: `isStale` in `fetchMessages` (138399). Any page does this in
+    /// the client (`loadComplete`, 755364), scrollback too.
     pub fn loaded(&mut self, channel: Snowflake, started: Started) -> bool {
         let stale = self.is_stale(started);
         if stale {
@@ -89,17 +102,6 @@ impl Held {
             self.fresh.insert(channel);
         }
         stale
-    }
-
-    /// An older or newer page arrived. A stale one takes the trust in the
-    /// channel away, as it does in the client; a current one gives none to a
-    /// channel whose newest page hasn't been asked for. Says whether it was
-    /// stale.
-    pub fn paged(&mut self, channel: Snowflake, started: Started) -> bool {
-        if self.fresh.contains(&channel) {
-            return self.loaded(channel, started);
-        }
-        self.is_stale(started)
     }
 
     fn is_stale(&self, started: Started) -> bool {
@@ -118,11 +120,13 @@ impl Held {
         stale && open && self.link.established
     }
 
-    /// We may no longer see the channels that `lost` picks out. Nothing tells
-    /// us what they miss meanwhile, so the client marks them `cached` (`Y` in
-    /// 596344).
-    pub fn lost_sight(&mut self, mut lost: impl FnMut(Snowflake) -> bool) {
-        self.fresh.retain(|&channel| !lost(channel));
+    /// Whether a message that arrived live goes into the channel's held
+    /// messages. Not into one that missed events: the client skips
+    /// `MESSAGE_CREATE` for a channel that isn't `ready` (596344), and kept
+    /// apart from the messages before it, the one would hide the gap between
+    /// them. The open channel is being asked for, and merges.
+    pub fn live_messages(&self, channel: Snowflake, open: bool) -> bool {
+        open || self.fresh.contains(&channel)
     }
 
     /// The channel's messages are gone.
@@ -130,11 +134,11 @@ impl Held {
         self.fresh.remove(&channel);
     }
 
-    /// Whether opening `channel` asks for its newest page (`M` in 123363).
+    /// Whether opening `channel` asks for its newest page (`P` in 123363).
     /// A load in flight is never doubled, which the client's system DM case
     /// would.
     pub fn fetch_on_open(&self, channel: Snowflake, opening: Opening) -> bool {
-        !opening.loading && (opening.system_dm_unread || !self.fresh.contains(&channel))
+        !opening.loading && (opening.system_dm_unread || !opening.private || !self.fresh.contains(&channel))
     }
 }
 
@@ -144,7 +148,7 @@ mod tests {
 
     const A: Snowflake = Snowflake(1);
     const B: Snowflake = Snowflake(2);
-    const OPEN: Opening = Opening { loading: false, system_dm_unread: false };
+    const OPEN: Opening = Opening { loading: false, system_dm_unread: false, private: true };
 
     /// A session whose READY arrived, with `channels` loaded in it.
     fn session(channels: &[Snowflake]) -> Held {
@@ -190,14 +194,16 @@ mod tests {
     }
 
     #[test]
-    fn a_page_that_crossed_a_connection_change_is_cached() {
+    fn an_ordinary_close_moves_nothing() {
+        // A close that resumes is `CONNECTION_INTERRUPTED`, which the client's
+        // clock doesn't see: only READY and a reset do.
         let mut held = Held::default();
         held.opened();
         let started = held.started();
         held.closed();
         held.resumed();
-        held.loaded(A, started);
-        assert!(held.fetch_on_open(A, OPEN), "it may have missed what came while the connection was down");
+        assert!(!held.loaded(A, started), "the gateway replayed what the page missed");
+        assert!(!held.fetch_on_open(A, OPEN));
     }
 
     #[test]
@@ -224,41 +230,11 @@ mod tests {
         let mut held = Held::default();
         held.opened();
         let stale = held.started();
-        held.closed();
-        held.resumed();
+        held.opened();
         held.loaded(A, stale);
         let started = held.started();
         held.loaded(A, started);
         assert!(!held.fetch_on_open(A, OPEN));
-    }
-
-    #[test]
-    fn a_stale_older_page_takes_the_trust_away() {
-        let mut held = session(&[A]);
-        let started = held.started();
-        held.closed();
-        held.resumed();
-        held.paged(A, started);
-        assert!(held.fetch_on_open(A, OPEN));
-    }
-
-    #[test]
-    fn a_current_older_page_trusts_nothing_new() {
-        let mut held = session(&[]);
-        let started = held.started();
-        held.paged(A, started);
-        assert!(held.fetch_on_open(A, OPEN), "its newest page was never asked for");
-        held.loaded(A, started);
-        held.paged(A, started);
-        assert!(!held.fetch_on_open(A, OPEN));
-    }
-
-    #[test]
-    fn a_channel_we_lose_sight_of_is_cached() {
-        let mut held = session(&[A, B]);
-        held.lost_sight(|channel| channel == A);
-        assert!(held.fetch_on_open(A, OPEN), "nothing told us what it missed");
-        assert!(!held.fetch_on_open(B, OPEN));
     }
 
     #[test]
@@ -280,11 +256,10 @@ mod tests {
         assert!(!held.fetch_on_open(A, Opening { loading: true, ..OPEN }));
     }
 
-    /// A page for `A` that crossed a connection change, which is stale.
+    /// A page for `A` that crossed a new session, which is stale.
     fn stale_page(held: &mut Held) -> bool {
         let started = held.started();
-        held.closed();
-        held.resumed();
+        held.opened();
         held.loaded(A, started)
     }
 
@@ -309,10 +284,10 @@ mod tests {
     #[test]
     fn nothing_is_asked_for_while_disconnected() {
         let mut held = session(&[]);
-        let started = held.started();
         held.closed();
+        let started = held.started();
         let stale = held.loaded(A, started);
-        assert!(!held.refetch(A, stale, true, Instant::now()));
+        assert!(stale && !held.refetch(A, stale, true, Instant::now()));
     }
 
     #[test]
@@ -328,5 +303,26 @@ mod tests {
         assert!(!held.refetch(A, stale, true, now + Duration::from_secs(9)));
         assert!(held.refetch(A, stale, true, now + Duration::from_secs(19)), "ten seconds after the one before");
         assert!(!held.refetch(A, stale, true, now + Duration::from_secs(20)), "and that one counts too");
+    }
+
+    #[test]
+    fn only_the_gateways_own_channels_are_held() {
+        // A server's channels sit under subscriptions we don't make.
+        let held = session(&[A]);
+        assert!(!held.fetch_on_open(A, OPEN));
+        assert!(held.fetch_on_open(A, Opening { private: false, ..OPEN }));
+    }
+
+    #[test]
+    fn a_channel_that_missed_events_takes_no_live_message_unless_open() {
+        // The client ignores `MESSAGE_CREATE` for a channel that isn't `ready`: a message
+        // kept apart from the ones before it would hide the gap in between.
+        let mut held = session(&[A, B]);
+        held.opened();
+        let started = held.started();
+        held.loaded(B, started);
+        assert!(!held.live_messages(A, false), "not asked for since READY");
+        assert!(held.live_messages(A, true), "the open one is being asked for, and merges");
+        assert!(held.live_messages(B, false));
     }
 }

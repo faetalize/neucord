@@ -301,6 +301,9 @@ impl App {
             return;
         }
         let open = self.state.borrow().channel == Some(channel);
+        if !self.timelines.borrow().held.live_messages(channel, open) {
+            return;
+        }
         let at_bottom = open && self.at_bottom();
         if open {
             self.resolve_mentions(&message.content);
@@ -312,6 +315,11 @@ impl App {
         }
         if at_bottom {
             self.scroll_to_end();
+        }
+        // The client cuts a channel as messages arrive too: one we aren't
+        // looking at doesn't grow without end.
+        if !open && let Some(timeline) = self.timelines.borrow_mut().get_mut(channel) {
+            timelines::keep_newest(timeline);
         }
     }
 
@@ -380,6 +388,7 @@ impl App {
         message: Snowflake,
         votes: Vec<(u32, Snowflake)>,
         added: bool,
+        many: bool,
     ) {
         let Some(store) = self.timelines.borrow().get(channel).map(|t| t.store.clone()) else { return };
         let (me, dm) = {
@@ -391,7 +400,7 @@ impl App {
             let mine = me == Some(user);
             let at = timelines::edit(&store, message, |m| {
                 if let Some(poll) = &mut m.poll {
-                    if added { poll.vote(answer, mine, dm) } else { poll.unvote(answer, mine) }
+                    if added { poll.vote(answer, mine, dm && !many) } else { poll.unvote(answer, mine) }
                 }
             });
             changed = at.or(changed);
@@ -684,17 +693,21 @@ impl App {
         self.update_notice_bar();
 
         // Show what we have at once (instant for a recently viewed channel),
-        // and ask for the newest page, to merge in, only where the client
-        // would: not for a channel it holds, which the gateway keeps current.
-        let system_dm_unread = {
+        // and ask for the newest page, to merge in, unless it's a DM we hold,
+        // which the gateway keeps current as the client trusts it to.
+        let (system_dm_unread, private) = {
             let state = self.state.borrow();
-            state.find_channel(id).is_some_and(|(_, c)| c.is_system_dm() && state.is_unread(c))
+            let found = state.find_channel(id);
+            (
+                found.is_some_and(|(_, c)| c.is_system_dm() && state.is_unread(c)),
+                found.is_some_and(|(g, _)| g.is_none()),
+            )
         };
         let (store, loading, detached, fetch) = {
             let mut timelines = self.timelines.borrow_mut();
             let timeline = timelines.reopen(id, u64::try_from(now_ms()).unwrap_or_default());
             let (store, loading, detached) = (timeline.store.clone(), timeline.loading, timeline.detached);
-            let fetch = timelines.held.fetch_on_open(id, Opening { loading, system_dm_unread });
+            let fetch = timelines.held.fetch_on_open(id, Opening { loading, system_dm_unread, private });
             (store, loading, detached, fetch)
         };
         self.scroll_loader.borrow_mut().reset();
@@ -732,7 +745,7 @@ impl App {
             }
             match result {
                 Ok(page) => {
-                    let stale = this.timelines.borrow_mut().held.loaded(id, started);
+                    let stale = this.timelines.borrow_mut().landed(id, started);
                     this.learn_messages(&page);
                     let full = page.len() == usize::from(limit);
                     let open = this.state.borrow().channel == Some(id);
@@ -934,7 +947,7 @@ impl App {
         let this = self.clone();
         glib::spawn_future_local(async move {
             let result = rest.messages(channel, limit, Page::Before(before)).await;
-            let stale = result.is_ok() && this.timelines.borrow_mut().held.paged(channel, started);
+            let stale = result.is_ok() && this.timelines.borrow_mut().landed(channel, started);
             let still_cached = this.timelines.borrow().get(channel).is_some_and(|t| t.store == store);
             if let Some(timeline) = this.timelines.borrow_mut().get_mut(channel) {
                 timeline.loading = false;
@@ -990,7 +1003,7 @@ impl App {
         let this = self.clone();
         glib::spawn_future_local(async move {
             let result = rest.messages(channel, limit, Page::After(after)).await;
-            let stale = result.is_ok() && this.timelines.borrow_mut().held.paged(channel, started);
+            let stale = result.is_ok() && this.timelines.borrow_mut().landed(channel, started);
             let landed = result.is_ok();
             let still_detached = {
                 let mut timelines = this.timelines.borrow_mut();
@@ -1144,7 +1157,7 @@ impl App {
             }) else {
                 return;
             };
-            let stale = this.timelines.borrow_mut().held.loaded(channel, started);
+            let stale = this.timelines.borrow_mut().landed(channel, started);
             // The client asks for the page around the message again when it
             // lands stale; we don't, but its ten seconds still run.
             let open = this.state.borrow().channel == Some(channel);
