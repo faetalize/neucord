@@ -6,10 +6,11 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use discord::history::{AROUND_PAGE, Around, KINETIC_INPUT, Load, Loadable, Position, SCROLL_INPUT, Viewport};
+use discord::notifications;
 use discord::read_state::starts_unread;
 use discord::rest::Page;
 use discord::system::{self, Kind};
-use discord::{Message, MessageEdit, Referenced, Snowflake, User};
+use discord::{ChannelKind, Message, MessageEdit, Referenced, Snowflake, User};
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib, graphene};
 
@@ -245,9 +246,11 @@ impl App {
             let mut state = self.state.borrow_mut();
             state.bump_last_message(channel, message.id);
             let own = state.me() == Some(message.author.id);
-            // No notifications for message requests (as in Discord) or from blocked users.
-            let blocked = state.relationships.is_blocked(message.author.id);
-            let quiet = state.find_channel(channel).is_some_and(|(_, c)| c.is_request()) || blocked;
+            // No notifications for message requests, or for what `is_dropped` drops (as in Discord).
+            let group_dm = state.find_channel(channel).is_some_and(|(_, c)| c.kind == ChannelKind::GroupDm);
+            let blocked = |id| state.relationships.is_blocked(id);
+            let quiet = state.find_channel(channel).is_some_and(|(_, c)| c.is_request())
+                || notifications::is_dropped(&message, group_dm, blocked);
             if own || viewing {
                 // Discord marks what we send as read; what we watch arrive, we ack.
                 state.read.ack(channel, message.id);
@@ -272,7 +275,8 @@ impl App {
                         }
                         _ => place.is_some_and(|p| state.notifications.should_notify(&p, pinged, now_unix())),
                     };
-                let counted = state.notifications.counts_mention(place.as_ref(), pinged, blocked, now_unix());
+                let counted =
+                    state.notifications.counts_mention(place.as_ref(), group_dm, &message, pinged, blocked, now_unix());
                 state.read.on_message(channel, counted);
                 place.filter(|_| notify)
             }
