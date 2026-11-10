@@ -47,7 +47,8 @@ pub struct MuteConfig {
     end_time: Option<String>,
 }
 
-/// Muted with no end time, or an end time still in the future.
+/// Muted with no end time, or an end time not yet past (`tG`, 544743: the
+/// client still mutes at the very second the mute ends).
 pub(crate) fn mute_active(muted: bool, config: Option<&MuteConfig>, now_unix: i64) -> bool {
     if !muted {
         return false;
@@ -55,7 +56,7 @@ pub(crate) fn mute_active(muted: bool, config: Option<&MuteConfig>, now_unix: i6
     match config.and_then(|c| c.end_time.as_deref()) {
         None => true,
         Some(end) => glib::DateTime::from_iso8601(end, Some(&glib::TimeZone::utc()))
-            .map(|t| t.to_unix() > now_unix)
+            .map(|t| t.to_unix() >= now_unix)
             // Unparseable: trust the flag.
             .unwrap_or(true),
     }
@@ -147,9 +148,11 @@ impl NotificationSettings {
             .any(|o| mute_active(o.muted, o.mute_config.as_ref(), now_unix))
     }
 
-    /// Anything here is muted: the server, the category or the channel.
+    /// Anything here is muted: the server (for DMs, their own settings
+    /// entry: `isMuted(null)`), the category or the channel.
     pub fn muted(&self, place: &Place, now_unix: i64) -> bool {
-        place.guild.is_some_and(|g| self.guild_muted(g, now_unix)) || self.channel_muted(place, now_unix)
+        self.by_guild.get(&place.guild).is_some_and(|s| mute_active(s.muted, s.mute_config.as_ref(), now_unix))
+            || self.channel_muted(place, now_unix)
     }
 
     pub fn level(&self, place: &Place) -> Level {
@@ -234,18 +237,16 @@ impl NotificationSettings {
         now_unix: i64,
     ) -> bool {
         !is_dropped(message, group_dm, blocked)
-            && (pinged || place.is_some_and(|p| p.guild.is_none() && !self.channel_muted(p, now_unix)))
+            && (pinged || place.is_some_and(|p| p.guild.is_none() && !self.muted(p, now_unix)))
     }
 
-    /// Should a message here raise a desktop notification? DMs notify unless
-    /// muted. In servers, `allowNoMessages` (543465) comes first: a mute on
-    /// the server, category or channel, or a level of "nothing", silences
+    /// Should a message here raise a desktop notification? `allowNoMessages`
+    /// (543465) comes first: a mute on the server (for DMs, their settings
+    /// entry), category or channel, or a level of "nothing", silences
     /// everything, mentions included. Then `mentioned` (`mentions_me`, so
-    /// what the server suppresses is already out) decides under "mentions".
+    /// what the server suppresses is already out) decides under "mentions";
+    /// a DM is no mention for that, so a DM level of "mentions" needs a ping.
     pub fn should_notify(&self, place: &Place, mentioned: bool, now_unix: i64) -> bool {
-        if place.guild.is_none() {
-            return !self.channel_muted(place, now_unix);
-        }
         if self.muted(place, now_unix) {
             return false;
         }
@@ -331,6 +332,46 @@ mod tests {
         assert!(!s.channel_muted(&place(Some(1), 20, None), NOW), "mute expired");
         assert!(s.guild_muted(Snowflake(2), NOW));
         assert!(s.muted(&place(Some(2), 5, None), NOW));
+    }
+
+    #[test]
+    fn a_mute_ending_now_still_holds() {
+        let s = NotificationSettings::from_ready(&json!([
+            {"guild_id": "1", "muted": true, "mute_config": {"end_time": "2027-01-15T08:00:00Z"}}
+        ]));
+        let end = 1_800_000_000;
+        assert_eq!(glib::DateTime::from_iso8601("2027-01-15T08:00:00Z", None).unwrap().to_unix(), end);
+        assert!(s.guild_muted(Snowflake(1), end - 1));
+        assert!(s.guild_muted(Snowflake(1), end), "the client mutes while the end is not before now");
+        assert!(!s.guild_muted(Snowflake(1), end + 1));
+    }
+
+    #[test]
+    fn dms_go_by_their_settings_entry() {
+        let dm = place(None, 5, None);
+        let entry = |extra: Value| {
+            let mut e =
+                json!({"guild_id": null, "channel_overrides": [{"channel_id": "6", "message_notifications": 0}]});
+            e.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            NotificationSettings::from_ready(&json!([e]))
+        };
+        let muted = entry(json!({"muted": true, "mute_config": null}));
+        assert!(!muted.should_notify(&dm, false, NOW), "all DMs muted");
+        assert!(!muted.should_notify(&dm, true, NOW), "mentions too");
+        let expired = entry(json!({"muted": true, "mute_config": {"end_time": "2020-01-01T00:00:00Z"}}));
+        assert!(expired.should_notify(&dm, false, NOW), "an expired mute");
+        let nothing = entry(json!({"message_notifications": 2}));
+        assert!(!nothing.should_notify(&dm, true, NOW), "level nothing");
+        assert!(nothing.should_notify(&place(None, 6, None), false, NOW), "a DM's own level wins");
+        let mentions = entry(json!({"message_notifications": 1}));
+        assert!(!mentions.should_notify(&dm, false, NOW), "level mentions");
+        assert!(mentions.should_notify(&dm, true, NOW));
+        // A mention count follows the same mute.
+        let message: Message = serde_json::from_value(json!({"id": "1", "channel_id": "5",
+            "author": {"id": "7", "username": "x"}, "content": "", "timestamp": "2026-10-26T00:00:00+00:00"}))
+        .unwrap();
+        assert!(!muted.counts_mention(Some(&dm), false, &message, false, |_| false, NOW));
+        assert!(nothing.counts_mention(Some(&dm), false, &message, false, |_| false, NOW), "a level doesn't");
     }
 
     #[test]
