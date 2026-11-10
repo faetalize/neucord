@@ -247,7 +247,8 @@ impl NotificationSettings {
 
 /// Messages the client neither counts nor notifies (218461, 411238): from
 /// a blocked author, or answering a command a blocked user ran
-/// (`isBlockedOrIgnoredForMessage`), and a group DM's notice that someone left.
+/// (`isBlockedOrIgnoredForMessage`), and a group DM's notice that someone
+/// left. Ignored users and a guild space's leaderboard aren't modelled.
 pub fn is_dropped(message: &Message, group_dm: bool, blocked: impl Fn(Snowflake) -> bool) -> bool {
     (group_dm && message.kind == RECIPIENT_REMOVE)
         || blocked(message.author.id)

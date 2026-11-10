@@ -163,11 +163,10 @@ changed for unrelated reasons only needs a note in the issue.
   thread or the server is muted, whatever their parent.
 - **What adds a mention** (`counts_mention`, `is_dropped`).
   `MESSAGE_CREATE` in 218461 (anchor `mentionCount++`): nothing from a
-  blocked or ignored author or command user (`isBlockedOrIgnoredForMessage`,
-  watched; Neucord has no ignoring, and skips its guild leaderboard check),
-  nor a group DM's `RECIPIENT_REMOVE`, else a ping, or any message in a DM
-  that isn't muted (`eb`, beside `isGuildOrCategoryOrChannelMuted`, watched).
-  411238 drops the same messages from notifications.
+  blocked author or command user (`isBlockedOrIgnoredForMessage`, watched
+  with `isBlockedForMessage`), nor a group DM's `RECIPIENT_REMOVE`, else a
+  ping, or any message in a DM that isn't muted (`eb`, which calls the
+  watched `isGuildOrCategoryOrChannelMuted` and `isChannelMuted`).
 - **What counts as read** (`read_state.rs`), since acks go to Discord. Own
   messages are marked read on MESSAGE_CREATE in 218461 (`ReadStateStore`).
   `getAckTimestamp` there falls back to the join or creation time, where
