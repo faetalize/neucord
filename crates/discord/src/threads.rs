@@ -10,7 +10,7 @@ use crate::read_state::ReadStates;
 use crate::{Channel, ChannelKind, Guild, Snowflake};
 
 /// The threads the sidebar lists under `parent`, as the client lists them
-/// (`eC` in 297469, from `ActiveJoinedThreadsStore` in 863005): active
+/// (`eT` in 791513, from `ActiveJoinedThreadsStore` in 863005): active
 /// threads we've joined, newest joined first, that are relevant. Under a
 /// muted parent, unless it or one of its threads is open, only those that
 /// are unread. The open thread comes first, listed or not.
@@ -55,7 +55,7 @@ pub fn joined_active(guild: &Guild) -> impl Iterator<Item = &Channel> {
 }
 
 /// Whether `thread` has messages newer than the last we read, by the
-/// client's rule for threads (`getAckTimestamp` in 573163): without a read
+/// client's rule for threads (`getAckTimestamp` in 218461): without a read
 /// message, the time we joined, less five seconds, or when it was last
 /// archived or reopened, whichever is later; and never before we joined
 /// the server, except in a forum post.
@@ -87,7 +87,7 @@ fn ack_fallback(guild: &Guild, thread: &Channel) -> i64 {
 }
 
 /// Whether the client acks what we read in `thread` (`canTrackUnreads` in
-/// 573163): not in an archived thread.
+/// 218461): not in an archived thread.
 pub fn is_ackable(thread: &Channel) -> bool {
     !thread.is_archived()
 }

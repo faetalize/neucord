@@ -3,10 +3,10 @@
 //! from the client's code, so the client's own definitions say what a
 //! variant means, and only READY says which one applies.
 //!
-//! READY carries three kinds. Apex experiments (710195) are assigned by
+//! READY carries three kinds. Apex experiments (50258) are assigned by
 //! Discord per user, install or server, keyed by murmur3 of the name. Older
-//! user experiments (736056) are assigned buckets. Older server experiments
-//! (736056) arrive as rollout rules, which the client evaluates itself for
+//! user experiments (343446) are assigned buckets. Older server experiments
+//! (343446) arrive as rollout rules, which the client evaluates itself for
 //! each server; so does this.
 
 use crate::model::{Guild, Snowflake};
@@ -375,7 +375,7 @@ impl Experiments {
     }
 
     /// A server's Apex assignment for a server experiment: only for a user
-    /// Discord made eligible, unless forced (710195's
+    /// Discord made eligible, unless forced (50258's
     /// `getEvaluationAndAssignment`).
     pub fn apex_guild(&self, me: Snowflake, guild: Snowflake, name: &str) -> Option<&Assignment> {
         let user = self.apex_assignment(Self::USER, &me.0.to_string(), name)?;
@@ -397,7 +397,7 @@ impl Experiments {
         self.user.get(&murmur3(name)).copied().unwrap_or(NOT_ELIGIBLE)
     }
 
-    /// A server's bucket in an older server experiment: 736056's
+    /// A server's bucket in an older server experiment: 343446's
     /// `getGuildExperimentDescriptor`.
     pub fn guild(&self, name: &str, guild: &GuildFacts) -> i64 {
         self.guild_at(name, guild, glib::real_time() / 1000).unwrap_or(NOT_ELIGIBLE)

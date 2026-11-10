@@ -71,6 +71,7 @@
     "deleteMessage",
     "editMessage",
     "fetchMessages",
+    "focusMessage",
     "getAckTimestamp",
     "getAlgorithm",
     "getContentMessage",
@@ -87,6 +88,7 @@
     "isSystemUser",
     "renderEmbeds",
     "requestGuildMembers",
+    "truncate",
     "unarchiveThreadIfNecessary",
     "usesLegacyCompression"
   ],
@@ -104,5 +106,5 @@
     "SafetyHubStore",
     "SlowmodeStore"
   ],
-  "constants": ["ACCOUNT_AGE", "EMb", "FONT_SIZES", "MAX_EMOJI_TO_BE_JUMBO", "MEMBER_AGE", "REPLYABLE", "UNDELETABLE", "UNo", "USER_MESSAGE", "d7Q", "rLJ"]
+  "constants": ["ACCOUNT_AGE", "FONT_SIZES", "MEMBER_AGE", "REPLYABLE", "UNDELETABLE", "USER_MESSAGE"]
 }

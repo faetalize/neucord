@@ -45,7 +45,7 @@ pub enum Page {
 }
 
 impl Page {
-    /// In the order the client's `fetchMessages` builds it (148494).
+    /// In the order the client's `fetchMessages` builds it (138399).
     fn query(self, limit: u8) -> String {
         match self {
             Page::Newest => format!("limit={limit}"),
@@ -351,7 +351,7 @@ impl Rest {
     }
 }
 
-/// What editing `message` to say `content` sends, as `editMessage` in 148494
+/// What editing `message` to say `content` sends, as `editMessage` in 138399
 /// builds it.
 fn edit_body(message: &Message, content: &str) -> Value {
     let mut body = json!({ "content": content });
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn history_queries_read_like_the_clients() {
-        // `fetchMessages` in 148494 passes { before, after, limit, around }.
+        // `fetchMessages` in 138399 passes { before, after, limit, around }.
         let id = Snowflake(7);
         assert_eq!(Page::Newest.query(12), "limit=12");
         assert_eq!(Page::Before(id).query(24), "before=7&limit=24");

@@ -938,7 +938,7 @@ impl Message {
     }
 
     /// What the official client's Copy Text copies (`getContentMessage` in
-    /// 383233, then 355682): the markup as written, of the forwarded message
+    /// 383233, then 761304): the markup as written, of the forwarded message
     /// for a forward, and of the texts for one built from components. `None`
     /// when that is empty.
     pub fn copy_text(&self) -> Option<String> {
@@ -960,7 +960,7 @@ impl Message {
 
     /// The message a thread was started from, which the thread's first
     /// message stands for (a `THREAD_STARTER_MESSAGE`), when Discord sent
-    /// it along. The client shows it in its place (`nV` in 471533).
+    /// it along. The client shows it in its place (`nZ` in 567008).
     pub fn thread_starter(&self) -> Option<&Message> {
         match &self.referenced_message {
             Referenced::Message(original) if self.kind == Self::THREAD_STARTER => Some(original),

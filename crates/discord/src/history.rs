@@ -49,7 +49,7 @@ pub struct Viewport {
 
 impl Viewport {
     /// Messages to fetch when a channel opens: a window's worth (`o` and
-    /// `d` in 326337).
+    /// `h` in 326337).
     pub fn first_page(&self) -> u8 {
         let list = (f64::from(self.height) - WINDOW_CHROME).max(MIN_LIST_HEIGHT);
         let row = if self.compact { COMPACT_ROW } else { COZY_ROW } * (self.font_size() / DEFAULT_FONT_SIZE);
@@ -58,7 +58,7 @@ impl Viewport {
     }
 
     /// Messages to fetch per page of scrollback, either way (`loadMore` in
-    /// 471533).
+    /// 567008).
     pub fn scroll_page(&self) -> u8 {
         MAX_SCROLL_PAGE.min(2 * self.first_page())
     }
@@ -101,7 +101,7 @@ pub enum Load {
 }
 
 /// Decides when scrolling loads another page, for the open channel: the
-/// client's `isScrollLoadingDisabled` and `handleScroll` in 471533, plus that
+/// client's `isScrollLoadingDisabled` and `handleScroll` in 567008, plus that
 /// the list moving by itself never counts as scrolling. The client's list
 /// doesn't do that, and GTK's does (#88).
 #[derive(Debug, Default)]
@@ -195,7 +195,7 @@ pub struct Around {
 
 impl Around {
     /// `page` is oldest first; `newest` is the channel's last message. The
-    /// sums are `fetchMessages`' in 148494: the target counts with what's
+    /// sums are `fetchMessages`' in 138399: the target counts with what's
     /// after it, if it still exists.
     pub fn of(page: &[Snowflake], target: Snowflake, newest: Option<Snowflake>) -> Self {
         let half = usize::from(AROUND_PAGE) / 2;
@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     fn first_page_follows_the_window_like_the_client() {
-        // `o` and `d` in 326337: (h - 145) over 91px rows, 5% extra, 10 to 30.
+        // `o` and `h` in 326337: (h - 145) over 91px rows, 5% extra, 10 to 30.
         assert_eq!(viewport(1080).first_page(), 12);
         assert_eq!(viewport(1440).first_page(), 16);
         assert_eq!(viewport(2160).first_page(), 25);
@@ -380,7 +380,7 @@ mod tests {
 
     #[test]
     fn a_page_around_a_message_shows_where_the_channel_ends() {
-        // `fetchMessages` in 148494, with a limit of 30.
+        // `fetchMessages` in 138399, with a limit of 30.
         let target = Snowflake(100);
         let full = Around::of(&ids(85..=114), target, Some(Snowflake(500)));
         assert_eq!(full, Around { more_before: true, more_after: true });
