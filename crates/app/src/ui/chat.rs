@@ -243,6 +243,8 @@ impl App {
             self.state.borrow_mut().members.add(guild, vec![(message.author.id, member.roles.clone())], &[]);
         }
         let channel = message.channel_id;
+        self.state.borrow_mut().typing.message(channel, message.author.id, false);
+        self.refresh_typing();
         let viewing = self.state.borrow().channel == Some(channel) && self.chat_visible();
         let notify = {
             let mut state = self.state.borrow_mut();
@@ -653,6 +655,7 @@ impl App {
             (title, forum, state.rest.clone(), left)
         };
         let subtitle = self.channel_subtitle(id);
+        self.refresh_typing();
         // The channel we left keeps only its newest messages, which live
         // events keep current. The client keeps the rest to page back in from
         // memory; we ask for it.

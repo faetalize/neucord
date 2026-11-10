@@ -23,6 +23,7 @@ mod requests;
 mod sidebar;
 mod state;
 mod thread_line;
+mod typing;
 mod unread;
 mod uploads;
 mod widgets;
@@ -79,6 +80,12 @@ pub struct App {
     scroller: gtk::ScrolledWindow,
     composer: gtk::TextView,
     composer_box: gtk::Box,
+    /// Who is typing in the open channel.
+    typing_line: gtk::Label,
+    /// Redraws the typing line when the first entry lapses.
+    typing_tick: RefCell<Option<glib::SourceId>>,
+    /// The message box's text is being set by us, not typed.
+    composer_programmatic: Cell<bool>,
     length: composer::LengthIndicator,
     /// In place of the composer where we can't post: message requests, the
     /// system DM, a timeout. Above it while slowmode makes us wait.
@@ -208,6 +215,9 @@ impl App {
                 .css_classes(["composer-input"])
                 .build(),
             composer_box: gtk::Box::builder().css_classes(["composer", "card-row"]).build(),
+            typing_line: gtk::Label::builder().xalign(0.0).margin_start(12).margin_bottom(4).visible(false).build(),
+            typing_tick: RefCell::default(),
+            composer_programmatic: Cell::default(),
             length: composer::LengthIndicator::new(),
             notice_bar: gtk::Box::builder()
                 .spacing(8)

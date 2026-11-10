@@ -15,6 +15,7 @@ impl App {
     pub(super) fn logout(self: &Rc<Self>) {
         let rest = std::mem::take(&mut *self.state.borrow_mut()).rest;
         self.show_blank();
+        self.refresh_typing();
         self.timelines.borrow_mut().clear();
         self.discard_drafts();
         // Keeps the app running until Discord has heard, even if the window
@@ -168,6 +169,7 @@ impl App {
                     // Nitro changes the length limit.
                     self.update_length_indicator();
                 }
+                Event::TypingStart { channel_id, user_id, user } => self.on_typing(channel_id, user_id, user.as_ref()),
                 Event::MessageCreate(message) => self.on_message(*message),
                 Event::MessageUpdate(edit) => self.on_message_update(edit),
                 Event::MessageDelete { id, channel_id } => self.on_message_delete(id, channel_id),
@@ -312,6 +314,7 @@ impl App {
             state.members = members;
             state.private_channels = private_channels;
             state.relationships = relationships;
+            state.typing.clear();
             state.read = read_states;
             state.guild_folders = guild_folders;
             state.notifications = notification_settings;
@@ -341,6 +344,7 @@ impl App {
         self.me_label.set_label(&me);
         // READY may bring other Nitro, which changes the length limit.
         self.update_length_indicator();
+        self.refresh_typing();
         self.stack.set_visible_child_name("main");
         self.apply_required_action();
 
@@ -438,6 +442,7 @@ impl App {
         self.refresh_badges();
         self.queue_friends_refresh();
         if blocks_changed {
+            self.refresh_typing();
             self.refresh_rows();
         }
     }

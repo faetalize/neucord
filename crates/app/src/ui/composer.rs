@@ -115,6 +115,7 @@ impl App {
         self.composer_box.append(&self.composer);
         self.composer_box.append(&self.length.root);
         area.append(&self.composer_box);
+        area.append(&self.typing_line);
 
         // Mention autocomplete popup, anchored to the composer.
         self.mention_popover.set_child(Some(&self.mention_list));
@@ -133,6 +134,7 @@ impl App {
                 if let Some(this) = this.upgrade() {
                     this.update_mention_popup();
                     this.update_length_indicator();
+                    this.composer_typed();
                 }
             }
         });
@@ -508,7 +510,11 @@ impl App {
     /// Tell the slowmode tracker about a message to `channel`, then show the
     /// wait if that channel is still open. `record` is told whether we
     /// bypass slowmode there.
-    fn record_slowmode(self: &Rc<Self>, channel: Snowflake, record: impl FnOnce(&mut Slowmode, &Channel, bool)) {
+    pub(super) fn record_slowmode(
+        self: &Rc<Self>,
+        channel: Snowflake,
+        record: impl FnOnce(&mut Slowmode, &Channel, bool),
+    ) {
         let open = {
             let mut state = self.state.borrow_mut();
             let state = &mut *state;
@@ -574,7 +580,12 @@ impl App {
         });
         let ping = self.reply_ping.is_active();
         self.record_slowmode(channel, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
-        buffer.set_text("");
+        // The client's optimistic message, which ends what we were typing.
+        let me = self.state.borrow().me();
+        if let Some(me) = me {
+            self.state.borrow_mut().typing.message(channel, me, true);
+        }
+        self.set_composer_text("");
         self.set_reply(None);
         self.mention_popover.popdown();
         let this = self.clone();
@@ -607,7 +618,7 @@ impl App {
                     }
                     let buffer = this.composer.buffer();
                     if buffer.char_count() == 0 && this.reply.borrow().is_none() {
-                        buffer.set_text(&text);
+                        this.set_composer_text(&text);
                         if this.state.borrow().channel == Some(channel) {
                             this.set_reply(replying);
                             this.reply_ping.set_active(ping);

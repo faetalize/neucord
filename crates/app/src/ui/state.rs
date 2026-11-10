@@ -15,6 +15,7 @@ use discord::read_state::ReadStates;
 use discord::relationships::Relationships;
 use discord::settings::{GuildFolder, MediaSettings, RailEntry};
 use discord::threads;
+use discord::typing::Typing;
 use discord::verification::Account;
 use discord::{Channel, Gateway, Guild, Message, Rest, Resume, Snowflake, User};
 use gtk::glib;
@@ -102,6 +103,8 @@ pub(super) struct State {
     pub(super) pending_acks: HashMap<Snowflake, Snowflake>,
     /// How long until we may post again in each channel.
     pub(super) slowmode: Slowmode,
+    /// Who is typing, and when we last said that we are.
+    pub(super) typing: Typing,
     /// Other people's roles in each server.
     pub(super) members: Members,
 }
