@@ -5,6 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use discord::cooldowns::Slowmode;
+use discord::experiments::Experiments;
+use discord::limits::{Limits, Nitro};
 use discord::members::{Members, RoleColour};
 use discord::notifications::{NotificationSettings, Place};
 use discord::permissions;
@@ -52,6 +54,9 @@ pub(super) struct State {
     pub(super) me: Option<User>,
     /// What servers' verification asks of us.
     pub(super) account: Option<Account>,
+    pub(super) nitro: Nitro,
+    /// What Discord rolls out to the account and its servers.
+    pub(super) experiments: Experiments,
     /// A step Discord requires before the account can be used.
     pub(super) required_action: Option<String>,
     pub(super) guilds: Vec<Guild>,
@@ -155,6 +160,17 @@ impl State {
             (Some((None, _)), _) => true,
             (Some((Some(guild), channel)), Some(me)) => guild.can_view(channel, me, now_unix()),
             _ => false,
+        }
+    }
+
+    /// What Nitro, boosts and experiments allow us; before READY, what they
+    /// allow an account without them.
+    #[expect(dead_code, reason = "for the limits #82 and #120 enforce")]
+    pub(super) fn limits(&self) -> Limits<'_> {
+        Limits {
+            nitro: &self.nitro,
+            experiments: &self.experiments,
+            me: self.me.as_ref().map_or(Snowflake(0), |u| u.id),
         }
     }
 

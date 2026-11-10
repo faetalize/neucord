@@ -19,6 +19,7 @@ use soup::prelude::*;
 use crate::embed::Embed;
 use crate::experiments::Experiments;
 use crate::inflate::Inflater;
+use crate::limits::Nitro;
 use crate::members::Members;
 use crate::notifications::{GuildSettings, NotificationSettings};
 use crate::read_state::ReadStates;
@@ -51,6 +52,7 @@ pub struct Ready {
     pub user: User,
     /// What servers ask of the same user.
     pub account: Account,
+    pub nitro: Nitro,
     pub guilds: Vec<Guild>,
     /// The other members READY carries.
     pub members: Members,
@@ -135,9 +137,9 @@ pub enum Event {
         guild_id: Snowflake,
         role_id: Snowflake,
     },
-    /// Our account changed, for instance its email was verified or 2FA
-    /// turned on.
-    AccountUpdate(Account),
+    /// Our account changed, for instance its email was verified, 2FA
+    /// turned on or Nitro ran out.
+    AccountUpdate(Account, Nitro),
     MessageCreate(Box<Message>),
     /// An edit, or link previews arriving for a message.
     MessageUpdate(MessageEdit),
@@ -592,6 +594,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 required_action: data["required_action"].as_str().map(str::to_owned),
                 experiments,
                 account,
+                nitro: Nitro::from_user(&data["user"]),
                 user,
                 guilds,
                 members,
@@ -683,7 +686,9 @@ fn dispatch(state: &State, name: &str, data: Value) {
             _ => return,
         },
         "USER_UPDATE" => match Account::from_user(&data) {
-            Some(account) if Some(account.id) == state.me.get() => Event::AccountUpdate(account),
+            Some(account) if Some(account.id) == state.me.get() => {
+                Event::AccountUpdate(account, Nitro::from_user(&data))
+            }
             _ => return,
         },
         "RELATIONSHIP_ADD" => match Relationship::from_value(&data, &Default::default()) {
@@ -904,9 +909,10 @@ mod tests {
             &state,
             "GUILD_UPDATE",
             json!({"id": "1", "name": "A", "owner_id": "8", "verification_level": 3, "mfa_level": 1,
-                   "roles": [{"id": "1", "permissions": "1024"}]}),
+                   "premium_tier": 1, "roles": [{"id": "1", "permissions": "1024"}]}),
         );
         let Ok(Event::GuildUpdate(update)) = rx.try_recv() else { panic!("no guild update") };
+        assert_eq!(update.premium_tier, 1);
         assert_eq!(
             (update.id, update.owner_id, update.verification.level, update.requires_mfa, update.roles.len()),
             (Snowflake(1), Some(Snowflake(8)), crate::verification::VerificationLevel::High, true, 1),
@@ -928,10 +934,11 @@ mod tests {
         dispatch(
             &state,
             "USER_UPDATE",
-            json!({"id": "5", "verified": true, "email": "a@example.org", "mfa_enabled": true}),
+            json!({"id": "5", "verified": true, "email": "a@example.org", "mfa_enabled": true, "premium_type": 2}),
         );
-        let Ok(Event::AccountUpdate(account)) = rx.try_recv() else { panic!("no account update") };
+        let Ok(Event::AccountUpdate(account, nitro)) = rx.try_recv() else { panic!("no account update") };
         assert!(account.verified && account.email && !account.phone && account.mfa);
+        assert_eq!(nitro.premium_type, Some(crate::limits::PremiumType::Tier2));
 
         dispatch(&state, "CHANNEL_UPDATE", json!({"id": "9", "type": 0, "guild_id": "1", "rate_limit_per_user": 30}));
         let Ok(Event::GuildChannelUpdate { guild_id, channel }) = rx.try_recv() else { panic!("no channel update") };
@@ -953,12 +960,14 @@ mod tests {
             events: tx,
         };
         let ready = json!({
-            "user": {"id": "5", "username": "me"},
-            "guilds": [{"id": "1", "properties": {"name": "A"}}],
+            "user": {"id": "5", "username": "me", "premium_type": 3},
+            "guilds": [{"id": "1", "properties": {"name": "A", "premium_tier": 2}}],
             "merged_members": [[{"user_id": "5", "roles": []}, {"user_id": "6", "roles": ["40"]}]]
         });
         dispatch(&state, "READY", ready);
         let Ok(Event::Ready(ready)) = rx.try_recv() else { panic!("no READY") };
+        assert_eq!(ready.nitro.premium_type, Some(crate::limits::PremiumType::Tier0));
+        assert_eq!(ready.guilds[0].premium_tier, 2);
         assert_eq!(ready.members.roles(Snowflake(1), Snowflake(6)), Some(&[Snowflake(40)][..]));
         assert!(state.established.get());
 
