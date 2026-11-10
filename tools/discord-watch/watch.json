@@ -51,6 +51,15 @@
       "MANAGE_THREADS",
       "SEND_MESSAGES_IN_THREADS"
     ],
+    "PremiumPerk": [
+      "ANIMATED_EMOJIS",
+      "EMOJIS_EVERYWHERE",
+      "STICKERS_EVERYWHERE",
+      "ANIMATED_AVATAR",
+      "STREAM_MID_QUALITY",
+      "STREAM_HIGH_QUALITY",
+      "INCREASED_MESSAGE_LENGTH"
+    ],
     "RelationshipType": ["FRIEND", "BLOCKED", "PENDING_INCOMING", "PENDING_OUTGOING"],
     "RequiredAction": [
       "AGREEMENTS",
@@ -66,7 +75,13 @@
   },
   "methods": [
     "canDeleteOwnMessage",
+    "canStreamQuality",
     "canTrackUnreads",
+    "canUseAnimatedAvatar",
+    "canUseAnimatedEmojis",
+    "canUseCustomStickersEverywhere",
+    "canUseEmojisEverywhere",
+    "canUseIncreasedMessageLength",
     "createResponseHandler",
     "deleteMessage",
     "editMessage",
@@ -78,7 +93,11 @@
     "getForwardInfo",
     "getGuildChannelUnreadState",
     "getLastEditableMessage",
+    "getMaxAttachmentsCount",
+    "getMaxFileSize",
+    "getMaxTotalAttachmentSize",
     "getSystemMessageUserJoin",
+    "getUserMaxFileSize",
     "handleRequiredAction",
     "interceptResponse",
     "isChannelOnCooldown",

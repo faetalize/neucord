@@ -144,6 +144,17 @@ changed for unrelated reasons only needs a note in the issue.
   and a non-ephemeral message and no timeout, even for administrators.
   The keyboard shortcut uses `Et` there instead, without the Send Messages
   checks.
+- **What Nitro, boosts and experiments allow** (`limits.rs`). `R` in
+  722178, below the perks each premium type includes (anchor
+  `ProductCatalog.tsx`), asks the `perks` bitmask when the user has one,
+  else that table. A message takes 4000 characters with the perk, else
+  2000 (135621, anchor `? 4e3 : 2e3`). A file takes at least 20 MiB
+  (409481), a server gives 10 MiB unless its features raise it (`o2` in
+  453771, anchor `uploadSumTooLarge`), premium types give `f5` in 682901
+  (anchor `{ 3: { fileSize:`), and a message's total is `jS` in 292348
+  (anchor `0x40000000 : 524288e3`). Which stream settings Nitro or boosts
+  allow is 676030 (anchor `canStreamWithSettings`), over the presets in
+  753070.
 
 ## Notifications and unread state
 
