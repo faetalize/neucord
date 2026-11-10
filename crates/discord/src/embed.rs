@@ -341,7 +341,8 @@ pub fn merge(embeds: &[Embed]) -> Vec<Embed> {
 
 /// The embeds of `message` to show, merged, given the viewer's settings.
 /// The `SUPPRESS_EMBEDS` flag is honoured too, though Discord already
-/// removes the embeds of such messages.
+/// removes the embeds of such messages. Link embeds of Conjure projects
+/// are hidden whatever the settings: the client draws its own card there.
 pub fn visible(message: &Message, settings: &MediaSettings) -> Vec<Embed> {
     if message.embeds_suppressed() || !settings.render_embeds || !message.is_user_message() {
         return Vec::new();
@@ -349,7 +350,53 @@ pub fn visible(message: &Message, settings: &MediaSettings) -> Vec<Embed> {
     merge(&message.embeds)
         .into_iter()
         .filter(|e| !matches!(e.kind, EmbedKind::Hidden | EmbedKind::PollResult))
+        .filter(|e| e.kind == EmbedKind::Rich || !e.url.as_deref().is_some_and(is_conjure_project_link))
         .collect()
+}
+
+/// Whether `url` is a Conjure project link: `http(s)` on `conjure.town` or
+/// `conjure.city` (`www.` dropped), at `/{application id}/{slug}` with an
+/// optional `/{ticket}` and trailing slash. Parsed by hand, as the crate has
+/// no URL parser; WHATWG path normalisation (dot segments, stripped
+/// whitespace) isn't replicated.
+fn is_conjure_project_link(url: &str) -> bool {
+    let word = |s: &str, min: usize, max: usize| {
+        (min..=max).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    };
+    let Some((scheme, rest)) = url.split_once("://") else { return false };
+    let default_port = match scheme.to_ascii_lowercase().as_str() {
+        "https" => "443",
+        "http" => "80",
+        _ => return false,
+    };
+    let (authority, path) = match rest.find(['/', '\\', '?', '#']) {
+        Some(at) => rest.split_at(at),
+        None => (rest, ""),
+    };
+    let path = path.split(['?', '#']).next().unwrap_or_default().replace('\\', "/");
+    // `URL.host` carries a non-default port, which then fails the match.
+    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let host = host.strip_suffix(&format!(":{default_port}")).unwrap_or(host).to_ascii_lowercase();
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    if !matches!(host, "conjure.town" | "conjure.city") {
+        return false;
+    }
+    let Some(path) = path.strip_prefix('/') else { return false };
+    let mut parts: Vec<&str> = path.split('/').collect();
+    if parts.len() > 2 && parts.last() == Some(&"") {
+        parts.pop();
+    }
+    let [id, slug, ticket @ ..] = parts.as_slice() else { return false };
+    let ticket_ok = match ticket {
+        [] => true,
+        [ticket] => ticket.split_once('.').is_some_and(|(a, b)| word(a, 16, 200) && word(b, 16, 64)),
+        _ => false,
+    };
+    (17..=20).contains(&id.len())
+        && id.bytes().all(|b| b.is_ascii_digit())
+        && (1..=48).contains(&slug.len())
+        && slug.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && ticket_ok
 }
 
 /// Whether the content puts any link inside a spoiler. The official client
@@ -549,6 +596,58 @@ mod tests {
         assert!(visible(&message(r#","flags":4"#), &on).is_empty(), "SUPPRESS_EMBEDS");
         assert!(visible(&message(""), &off).is_empty());
         assert!(visible(&message(r#","type":7"#), &on).is_empty(), "system messages show no embeds");
+    }
+
+    #[test]
+    fn conjure_project_links_hide_non_rich_embeds() {
+        let message: Message = serde_json::from_value(json!({
+            "id": "1", "channel_id": "2", "author": {"id": "3", "username": "a"}, "timestamp": "t",
+            "embeds": [
+                {"type": "link", "url": "https://conjure.town/12345678901234567/my-project"},
+                {"type": "rich", "url": "https://conjure.town/12345678901234567/other-project", "title": "card"},
+                {"type": "link", "url": "https://example.com/12345678901234567/my-project"},
+            ]
+        }))
+        .unwrap();
+        let shown = visible(&message, &MediaSettings::default());
+        assert_eq!(shown.len(), 2, "only the link embed of the project is hidden");
+        assert_eq!(shown[0].kind, EmbedKind::Rich);
+        assert_eq!(shown[1].url.as_deref(), Some("https://example.com/12345678901234567/my-project"));
+    }
+
+    #[test]
+    fn conjure_project_link_shapes() {
+        let id = "12345678901234567";
+        let ticket = "abcdefghijklmnop.abcdefghijklmnop";
+        for url in [
+            format!("https://conjure.town/{id}/my-project-1"),
+            format!("http://CONJURE.city/{id}/p/"),
+            format!("https://www.conjure.town/{id}/p/{ticket}"),
+            format!("https://user@conjure.town:443/{id}/p/{ticket}/?x=1#y"),
+            format!("HTTPS://conjure.town/{}/p", "9".repeat(20)),
+        ] {
+            assert!(is_conjure_project_link(&url), "{url}");
+        }
+        for url in [
+            format!("https://conjure.town/{id}"),
+            format!("https://conjure.town/{id}/"),
+            format!("https://conjure.town/{}/p", "1".repeat(16)),
+            format!("https://conjure.town/{}/p", "1".repeat(21)),
+            format!("https://conjure.town/{id}/P"),
+            format!("https://conjure.town/{id}/{}", "a".repeat(49)),
+            format!("https://conjure.town/{id}/p/short.short"),
+            format!("https://conjure.town/{id}/p/{ticket}/more"),
+            format!("https://conjure.town/{id}/p//"),
+            format!("https://conjure.town:8080/{id}/p"),
+            format!("https://sub.conjure.town/{id}/p"),
+            format!("https://conjure.town.evil.com/{id}/p"),
+            format!("https://evil.com/conjure.town/{id}/p"),
+            format!("https://evil.com/?u=https://conjure.town/{id}/p"),
+            format!("ftp://conjure.town/{id}/p"),
+            format!("conjure.town/{id}/p"),
+        ] {
+            assert!(!is_conjure_project_link(&url), "{url}");
+        }
     }
 
     #[test]
