@@ -56,6 +56,20 @@ impl Slowmode {
         }
     }
 
+    /// Discord answered our typing notice in `channel` with how long we must
+    /// wait before posting, which replaces what we had worked out
+    /// (`SLOWMODE_SET_COOLDOWN` in `SlowmodeStore`). The client sets only a
+    /// wait above zero, and `bypass` ends the wait instead.
+    pub fn told(&mut self, channel: &Channel, cooldown_ms: i64, bypass: bool, now_ms: i64) {
+        if cooldown_ms <= 0 {
+            return;
+        }
+        self.ends.remove(&channel.id);
+        if !bypass {
+            self.ends.insert(channel.id, (now_ms + cooldown_ms + MARGIN_MS, channel.rate_limit_per_user));
+        }
+    }
+
     /// `channel` changed. A new slowmode can only shorten a running cooldown,
     /// as in the official client.
     pub fn update(&mut self, channel: &Channel, now_ms: i64) {
@@ -127,6 +141,30 @@ mod tests {
 
         slowmode.refused(&general, 4.2, 30_000);
         assert_eq!(slowmode.remaining_ms(&general, 30_000), 4_300, "Discord knew of a wait we didn't");
+    }
+
+    #[test]
+    fn typing_tells_of_a_wait() {
+        let mut slowmode = Slowmode::default();
+        let general = channel(1, 10);
+        slowmode.told(&general, 4_000, false, 1_000);
+        assert_eq!(slowmode.remaining_ms(&general, 1_000), 4_100, "with the client's margin");
+
+        slowmode.told(&general, 9_000, false, 2_000);
+        assert_eq!(slowmode.remaining_ms(&general, 2_000), 9_100, "replaces the wait we had, longer or not");
+        slowmode.told(&general, 1_000, false, 3_000);
+        assert_eq!(slowmode.remaining_ms(&general, 3_000), 1_100);
+
+        slowmode.told(&general, 0, false, 5_000);
+        assert_eq!(slowmode.remaining_ms(&general, 5_000), 0, "only a wait above zero is set; the 1.1 s were up");
+        slowmode.sent(&general, false, 10_000);
+        slowmode.told(&general, 0, false, 10_500);
+        assert_eq!(slowmode.remaining_ms(&general, 10_500), 9_600, "and zero leaves one running alone");
+
+        slowmode.told(&general, 5_000, true, 11_000);
+        assert_eq!(slowmode.remaining_ms(&general, 11_000), 0, "a moderator waits for nothing");
+        slowmode.told(&channel(2, 0), 5_000, false, 0);
+        assert_eq!(slowmode.remaining_ms(&channel(2, 0), 0), 0, "nor does a channel without slowmode");
     }
 
     #[test]

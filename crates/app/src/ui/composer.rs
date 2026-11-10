@@ -115,6 +115,7 @@ impl App {
         self.composer_box.append(&self.composer);
         self.composer_box.append(&self.length.root);
         area.append(&self.composer_box);
+        area.append(&self.typing_line);
 
         // Mention autocomplete popup, anchored to the composer.
         self.mention_popover.set_child(Some(&self.mention_list));
@@ -133,6 +134,7 @@ impl App {
                 if let Some(this) = this.upgrade() {
                     this.update_mention_popup();
                     this.update_length_indicator();
+                    this.composer_typed();
                 }
             }
         });
@@ -508,7 +510,11 @@ impl App {
     /// Tell the slowmode tracker about a message to `channel`, then show the
     /// wait if that channel is still open. `record` is told whether we
     /// bypass slowmode there.
-    fn record_slowmode(self: &Rc<Self>, channel: Snowflake, record: impl FnOnce(&mut Slowmode, &Channel, bool)) {
+    pub(super) fn record_slowmode(
+        self: &Rc<Self>,
+        channel: Snowflake,
+        record: impl FnOnce(&mut Slowmode, &Channel, bool),
+    ) {
         let open = {
             let mut state = self.state.borrow_mut();
             let state = &mut *state;
@@ -574,7 +580,12 @@ impl App {
         });
         let ping = self.reply_ping.is_active();
         self.record_slowmode(channel, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
-        buffer.set_text("");
+        // The client shows a message as sent before the request, ending what
+        // we were typing, unless files go with it: those it shows on success.
+        if files.is_empty() {
+            self.typing_message_sent(channel);
+        }
+        self.set_composer_text("");
         self.set_reply(None);
         self.mention_popover.popdown();
         let this = self.clone();
@@ -583,6 +594,8 @@ impl App {
             match this.send_with_uploads(&rest, channel, &text, reply, files).await {
                 Ok(_) => {
                     this.record_slowmode(channel, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
+                    // The client shows every message again on success, which ends what we typed meanwhile.
+                    this.typing_message_sent(channel);
                     // Sending from an old stretch of history returns to the present.
                     if this.timelines.borrow().get(channel).is_some_and(|t| t.detached) {
                         this.load_newest(channel);
@@ -607,7 +620,7 @@ impl App {
                     }
                     let buffer = this.composer.buffer();
                     if buffer.char_count() == 0 && this.reply.borrow().is_none() {
-                        buffer.set_text(&text);
+                        this.set_composer_text(&text);
                         if this.state.borrow().channel == Some(channel) {
                             this.set_reply(replying);
                             this.reply_ping.set_active(ping);

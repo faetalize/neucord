@@ -58,8 +58,13 @@ changed for unrelated reasons only needs a note in the issue.
   Bypass Slowmode in the channel (`cooldowns::bypasses_slowmode`). What
   feeds it isn't watched either: 138399
   resets the cooldown only after a send succeeds and reads `retry_after` on
-  `SLOWMODE_RATE_LIMITED`, and 741961 reads `message_send_cooldown_ms` from
-  the typing endpoint's answer, which Neucord doesn't send for yet (#8).
+  `SLOWMODE_RATE_LIMITED`.
+- **When we say we're typing, and who is listed** (`typing.rs`).
+  `handleTextareaChange` in 699344 sends for any change to a box that isn't
+  empty, unless the text starts with `/` or is the `+:name:` reaction
+  shortcut, and stops when the box is emptied. 620014 (anchor
+  `isBlockedOrIgnored`) lists everyone typing but us and whom we blocked or
+  ignored (`typing::shown`).
 - **What replaces the message box** (`update_notice_bar`). Client:
   `renderMessageBanner` in 699344 picks the banners. Otherwise the box is
   wrapped by 544990 in DMs (the system DM, a blocked user) and by 678655 in

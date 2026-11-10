@@ -87,7 +87,7 @@ impl App {
         let reply = self.reply.borrow().clone();
         self.set_reply(None);
         self.editing.replace(Some(EditCtx { message: message.clone(), draft, reply }));
-        buffer.set_text(text.unwrap_or(&message.content));
+        self.set_composer_text(text.unwrap_or(&message.content));
         buffer.place_cursor(&buffer.end_iter());
         self.edit_bar.set_visible(true);
         self.refresh_attach();
@@ -111,7 +111,7 @@ impl App {
         let Some(edit) = self.editing.take() else { return };
         self.edit_bar.set_visible(false);
         self.refresh_attach();
-        self.composer.buffer().set_text(&edit.draft);
+        self.set_composer_text(&edit.draft);
         // A reply started elsewhere stays there, as when switching channels.
         if edit.reply.as_ref().is_some_and(|r| Some(r.channel) == self.state.borrow().channel) {
             self.set_reply(edit.reply);

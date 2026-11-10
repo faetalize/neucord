@@ -159,6 +159,7 @@
     "RpcNotificationSettingsStore",
     "SafetyHubStore",
     "SlowmodeStore",
+    "TypingStore",
     "UploadAttachmentStore"
   ],
   "constants": ["ACCOUNT_AGE", "FONT_SIZES", "MEMBER_AGE", "REPLYABLE", "UNDELETABLE", "USER_MESSAGE"]

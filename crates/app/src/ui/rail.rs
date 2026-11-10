@@ -224,6 +224,7 @@ impl App {
                 self.content.set_visible_child_name("chat");
                 self.update_notice_bar();
                 self.show_blank();
+                self.refresh_typing();
                 self.header.set("No text channels you can see here", None);
                 self.set_content_title("Neucord");
                 self.rebuild_sidebar();

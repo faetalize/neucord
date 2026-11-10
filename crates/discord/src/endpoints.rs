@@ -15,6 +15,7 @@ pub(crate) const EDIT_MESSAGE: Endpoint = Endpoint::patch("/channels/{channel}/m
 pub(crate) const DELETE_MESSAGE: Endpoint = Endpoint::delete("/channels/{channel}/messages/{message}");
 pub(crate) const CREATE_ATTACHMENT: Endpoint = Endpoint::post("/channels/{channel}/attachments");
 pub(crate) const DELETE_UPLOAD: Endpoint = Endpoint::delete("/attachments/{+uploaded_filename}");
+pub(crate) const TYPING: Endpoint = Endpoint::post("/channels/{channel}/typing");
 pub(crate) const ACK: Endpoint = Endpoint::post("/channels/{channel}/messages/{message}/ack");
 pub(crate) const EDIT_CHANNEL: Endpoint = Endpoint::patch("/channels/{channel}");
 pub(crate) const USER: Endpoint = Endpoint::get("/users/{user}");

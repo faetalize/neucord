@@ -570,7 +570,7 @@ impl App {
         self.add_files(channel, vec![file]);
         // The text leaves the box only once it has become a file.
         if self.drafts.of(channel).len() > before {
-            buffer.set_text(&split.rest);
+            self.set_composer_text(&split.rest);
         }
     }
 

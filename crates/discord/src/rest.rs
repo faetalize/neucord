@@ -238,6 +238,19 @@ impl Rest {
         Ok(())
     }
 
+    /// Tell Discord we are typing in `channel`, which shows for ten seconds
+    /// (`TYPING_START_LOCAL` in 741961). Not retried after a 429, as the
+    /// client doesn't. Returns how many milliseconds Discord says we must
+    /// wait before posting in the channel: slowmode we may not have known of
+    /// (`message_send_cooldown_ms`, only in a 200), or 0.
+    pub async fn typing(&self, channel: Snowflake) -> Result<i64, Error> {
+        let (status, response) =
+            self.send_with(call!(TYPING, channel), None, Sending { retry_rate_limit: false, failed: 0 }).await?;
+        let answer: Value = Self::answer(status, &response)?;
+        let cooldown = if status == 200 { answer["message_send_cooldown_ms"].as_f64() } else { None };
+        Ok(cooldown.map_or(0, |ms| ms as i64))
+    }
+
     /// Open (or reopen) the DM with `user`.
     pub async fn open_dm(&self, user: Snowflake) -> Result<Channel, Error> {
         self.request(call!(OPEN_DM), Some(json!({ "recipients": [user] }))).await
@@ -340,13 +353,18 @@ impl Rest {
         body: Option<serde_json::Value>,
     ) -> Result<T, Error> {
         let (status, response) = self.send(call, body).await?;
+        Self::answer(status, &response)
+    }
+
+    /// What a response makes of a request: its body, or the error.
+    fn answer<T: DeserializeOwned>(status: u32, response: &[u8]) -> Result<T, Error> {
         match status {
             // 204 No Content reads as `null`, which `()` accepts.
             200..=299 if response.is_empty() => Ok(serde_json::from_value(serde_json::Value::Null)?),
-            200..=299 => Ok(serde_json::from_slice(&response)?),
+            200..=299 => Ok(serde_json::from_slice(response)?),
             401 => Err(Error::Unauthorized),
-            400 if serde_json::from_slice(&response).is_ok_and(|v| is_captcha(&v)) => Err(Error::Captcha),
-            _ => Err(Error::Http { status, body: String::from_utf8_lossy(&response).chars().take(300).collect() }),
+            400 if serde_json::from_slice(response).is_ok_and(|v| is_captcha(&v)) => Err(Error::Captcha),
+            _ => Err(Error::Http { status, body: String::from_utf8_lossy(response).chars().take(300).collect() }),
         }
     }
 

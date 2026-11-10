@@ -164,6 +164,13 @@ pub enum Event {
         added: bool,
         many: bool,
     },
+    /// Someone started typing in a channel. In a server it carries their
+    /// member, which names them.
+    TypingStart {
+        channel_id: Snowflake,
+        user_id: Snowflake,
+        user: Option<User>,
+    },
     /// One of our clients (maybe this one) marked `channel_id` read up to `message_id`.
     MessageAck {
         channel_id: Snowflake,
@@ -863,9 +870,21 @@ fn dispatch(state: &State, name: &str, data: Value) {
             let ids = data["ids"].as_array().into_iter().flatten().filter_map(parse_id).collect();
             Event::MessageDeleteBulk { ids, channel_id }
         }
+        "TYPING_START" => match typing_start(&data) {
+            Some(event) => event,
+            None => return,
+        },
         _ => return,
     };
     send_event(state, event);
+}
+
+fn typing_start(data: &Value) -> Option<Event> {
+    Some(Event::TypingStart {
+        channel_id: parse_id(&data["channel_id"])?,
+        user_id: parse_id(&data["user_id"])?,
+        user: User::deserialize(&data["member"]["user"]).ok(),
+    })
 }
 
 fn send_event(state: &State, event: Event) {
@@ -1114,6 +1133,22 @@ mod tests {
     fn member_request_as_the_client_sends_it() {
         let d = MemberRequest::new(Snowflake(1), &[Snowflake(6), Snowflake(7)]);
         assert_eq!(request_text(8, &d), r#"{"op":8,"d":{"guild_id":["1"],"user_ids":["6","7"],"presences":false}}"#);
+    }
+
+    #[test]
+    fn typing_in_a_dm_and_in_a_server() {
+        let dm = json!({"channel_id": "10", "user_id": "5", "timestamp": 1});
+        assert!(matches!(
+            typing_start(&dm),
+            Some(Event::TypingStart { channel_id: Snowflake(10), user_id: Snowflake(5), user: None })
+        ));
+        let server = json!({
+            "channel_id": "10", "guild_id": "2", "user_id": "5",
+            "member": {"user": {"id": "5", "username": "ann", "global_name": "Ann"}, "roles": []},
+        });
+        let Some(Event::TypingStart { user: Some(user), .. }) = typing_start(&server) else { panic!("no user") };
+        assert_eq!(user.display_name(), "Ann");
+        assert!(typing_start(&json!({"channel_id": "10"})).is_none(), "nobody typing");
     }
 
     #[test]
