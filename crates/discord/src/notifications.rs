@@ -213,6 +213,23 @@ impl NotificationSettings {
         mentions(message, me, my_roles, suppress_everyone, suppress_roles)
     }
 
+    /// Does a message add to the channel's mention count (the read state's
+    /// MESSAGE_CREATE, 218461)? `pinged` is `mentions_me`. Nothing from
+    /// a message `is_dropped` drops. Otherwise a ping, or any message in
+    /// a DM that isn't muted: a DM is a mention by itself.
+    pub fn counts_mention(
+        &self,
+        place: Option<&Place>,
+        group_dm: bool,
+        message: &Message,
+        pinged: bool,
+        blocked: impl Fn(Snowflake) -> bool,
+        now_unix: i64,
+    ) -> bool {
+        !is_dropped(message, group_dm, blocked)
+            && (pinged || place.is_some_and(|p| p.guild.is_none() && !self.channel_muted(p, now_unix)))
+    }
+
     /// Should a message here raise a desktop notification? DMs notify unless
     /// muted. In servers, a mention gets through a mute (as in Discord), but
     /// not a level of "nothing".
@@ -227,6 +244,18 @@ impl NotificationSettings {
         }
     }
 }
+
+/// Messages the client neither counts nor notifies (218461, 411238): from
+/// a blocked author, or answering a command a blocked user ran
+/// (`isBlockedOrIgnoredForMessage`), and a group DM's notice that someone
+/// left. Ignored users and a guild space's leaderboard aren't modelled.
+pub fn is_dropped(message: &Message, group_dm: bool, blocked: impl Fn(Snowflake) -> bool) -> bool {
+    (group_dm && message.kind == RECIPIENT_REMOVE)
+        || blocked(message.author.id)
+        || message.interaction_metadata.as_ref().is_some_and(|i| blocked(i.user.id))
+}
+
+const RECIPIENT_REMOVE: u8 = 2;
 
 fn mentions(message: &Message, me: Snowflake, my_roles: &[Snowflake], no_everyone: bool, no_roles: bool) -> bool {
     message.mentions.iter().any(|u| u.id == me)
@@ -290,6 +319,45 @@ mod tests {
         assert!(!s.channel_muted(&place(Some(1), 20, None), NOW), "mute expired");
         assert!(s.guild_muted(Snowflake(2), NOW));
         assert!(s.muted(&place(Some(2), 5, None), NOW));
+    }
+
+    #[test]
+    fn mention_counts() {
+        let s = settings();
+        let dm = place(None, 5, None);
+        let muted_dm = place(None, 99, None);
+        let guild = place(Some(1), 10, None);
+        let message = |extra: Value| -> Message {
+            let mut m = json!({"id": "1", "channel_id": "5", "author": {"id": "7", "username": "x"},
+                               "content": "", "timestamp": "2026-10-26T00:00:00+00:00"});
+            m.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(m).unwrap()
+        };
+        let plain = message(json!({}));
+        let nobody = |_| false;
+        let count = |place, group_dm, message: &Message, pinged, blocked: &[u64]| {
+            let blocked = |id: Snowflake| blocked.contains(&id.0);
+            s.counts_mention(Some(place), group_dm, message, pinged, blocked, NOW)
+        };
+        assert!(s.counts_mention(Some(&dm), false, &plain, false, nobody, NOW), "a DM is a mention");
+        assert!(!count(&muted_dm, false, &plain, false, &[]), "not in a muted DM");
+        assert!(count(&muted_dm, false, &plain, true, &[]), "unless it pings us");
+        assert!(!count(&guild, false, &plain, false, &[]), "a server message needs a ping");
+        assert!(count(&guild, false, &plain, true, &[]));
+        assert!(!s.counts_mention(None, false, &plain, false, nobody, NOW), "an unknown channel isn't a DM");
+        assert!(s.counts_mention(None, false, &plain, true, nobody, NOW));
+
+        for place in [&dm, &guild] {
+            assert!(!count(place, false, &plain, true, &[7]), "never from a blocked author");
+        }
+        let ran = message(json!({"interaction_metadata": {"user": {"id": "8", "username": "y"}}}));
+        assert!(!count(&dm, false, &ran, true, &[8]), "nor an app's answer to a blocked user's command");
+        assert!(count(&dm, false, &ran, true, &[9]), "someone else blocked");
+
+        let left = message(json!({"type": 2}));
+        assert!(!count(&dm, true, &left, true, &[]), "a group DM's notice that someone left");
+        assert!(count(&dm, false, &left, true, &[]), "in a DM it is an ordinary message");
+        assert!(count(&dm, true, &message(json!({"type": 1})), true, &[]), "other notices count");
     }
 
     #[test]
