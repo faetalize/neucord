@@ -90,9 +90,9 @@ const MESSAGE: Table<MessageTarget> = &[
     &[chat::COPY_MESSAGE_ID],
 ];
 
-/// [`MESSAGE`] where the media takedown regulation is TIDA: the client puts
-/// the Copy ID group (`tq`) before the one holding the link entries (`tX`,
-/// 777933). The group between them holds nothing Neucord has.
+/// [`MESSAGE`] where the media takedown regulation is TIDA: the client (761304)
+/// puts the Copy ID group (50268) before the link group (777933). The group
+/// between them holds nothing Neucord has.
 const MESSAGE_REGULATED: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
     &[edits::EDIT, composer::REPLY],
@@ -472,8 +472,11 @@ mod tests {
         };
         assert_eq!(ends(false), [vec!["copy-link", "open-link"], vec!["copy-message-id"]]);
         assert_eq!(ends(true), [vec!["copy-message-id"], vec!["copy-link", "open-link"]]);
-        // Nothing else moves.
-        assert_eq!(names(message(true))[..4], names(message(false))[..4]);
+        // The two groups swap and nothing else moves.
+        let mut swapped = names(message(false));
+        let n = swapped.len();
+        swapped.swap(n - 2, n - 1);
+        assert_eq!(names(message(true)), swapped);
     }
 
     #[test]

@@ -31,8 +31,8 @@
       "AUTOMOD_QUARANTINED_SERVER_TAG"
     ],
     "LoginRequiredAction": ["UPDATE_PASSWORD"],
-    "MediaTakedownRegulation": ["TIDA", "UK_STOPNCII", "BRAZIL_ONLINE_SAFETY_OF_WOMEN"],
     "MFALevel": ["NONE", "ELEVATED"],
+    "MediaTakedownRegulation": ["TIDA", "UK_STOPNCII", "BRAZIL_ONLINE_SAFETY_OF_WOMEN"],
     "MessageFlags": ["CROSSPOSTED", "SUPPRESS_EMBEDS", "EPHEMERAL", "IS_VOICE_MESSAGE", "IS_COMPONENTS_V2"],
     "MessageReferenceType": ["DEFAULT", "FORWARD"],
     "MessageType": [
