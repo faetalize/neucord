@@ -47,8 +47,9 @@ pub struct MuteConfig {
     end_time: Option<String>,
 }
 
-/// Muted with no end time, or an end time not yet past (`tG`, 544743: the
-/// client still mutes at the very second the mute ends).
+/// Muted with no end time, or an end time still in the future. The client
+/// clears a mute with a timer that fires at the end time (544743), so it
+/// ends there; `tG`'s `>=` only matters for a tie in milliseconds.
 pub(crate) fn mute_active(muted: bool, config: Option<&MuteConfig>, now_unix: i64) -> bool {
     if !muted {
         return false;
@@ -56,7 +57,7 @@ pub(crate) fn mute_active(muted: bool, config: Option<&MuteConfig>, now_unix: i6
     match config.and_then(|c| c.end_time.as_deref()) {
         None => true,
         Some(end) => glib::DateTime::from_iso8601(end, Some(&glib::TimeZone::utc()))
-            .map(|t| t.to_unix() >= now_unix)
+            .map(|t| t.to_unix() > now_unix)
             // Unparseable: trust the flag.
             .unwrap_or(true),
     }
@@ -241,7 +242,8 @@ impl NotificationSettings {
     }
 
     /// Should a message here raise a desktop notification? `allowNoMessages`
-    /// (543465) comes first: a mute on the server (for DMs, their settings
+    /// (543465) comes first, without its opt-in channels, which aren't
+    /// modelled: a mute on the server (for DMs, their settings
     /// entry), category or channel, or a level of "nothing", silences
     /// everything, mentions included. Then `mentioned` (`mentions_me`, so
     /// what the server suppresses is already out) decides under "mentions";
@@ -335,15 +337,13 @@ mod tests {
     }
 
     #[test]
-    fn a_mute_ending_now_still_holds() {
+    fn a_mute_ends_at_its_end_time() {
         let s = NotificationSettings::from_ready(&json!([
             {"guild_id": "1", "muted": true, "mute_config": {"end_time": "2027-01-15T08:00:00Z"}}
         ]));
-        let end = 1_800_000_000;
-        assert_eq!(glib::DateTime::from_iso8601("2027-01-15T08:00:00Z", None).unwrap().to_unix(), end);
+        let end = glib::DateTime::from_iso8601("2027-01-15T08:00:00Z", None).unwrap().to_unix();
         assert!(s.guild_muted(Snowflake(1), end - 1));
-        assert!(s.guild_muted(Snowflake(1), end), "the client mutes while the end is not before now");
-        assert!(!s.guild_muted(Snowflake(1), end + 1));
+        assert!(!s.guild_muted(Snowflake(1), end), "the client's timer clears it at the end time");
     }
 
     #[test]

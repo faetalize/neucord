@@ -74,6 +74,7 @@
     "VerificationLevel": ["NONE", "LOW", "MEDIUM", "HIGH", "VERY_HIGH"]
   },
   "methods": [
+    "allowAllMessages",
     "allowNoMessages",
     "canDeleteOwnMessage",
     "canStreamQuality",
@@ -103,6 +104,7 @@
     "interceptResponse",
     "isBlockedForMessage",
     "isBlockedOrIgnoredForMessage",
+    "isCategoryMuted",
     "isChannelMuted",
     "isChannelOnCooldown",
     "isForumLikeChannel",
@@ -112,6 +114,7 @@
     "isSystemUser",
     "renderEmbeds",
     "requestGuildMembers",
+    "resolvedMessageNotifications",
     "truncate",
     "unarchiveThreadIfNecessary",
     "usesLegacyCompression"
