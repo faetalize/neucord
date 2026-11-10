@@ -184,6 +184,14 @@ impl State {
         }
     }
 
+    /// Whether files may be attached in the channel (see [`permissions::can_attach`]).
+    pub(super) fn can_attach(&self, id: Snowflake) -> bool {
+        match (self.find_channel(id), &self.account) {
+            (Some((guild, channel)), Some(me)) => permissions::can_attach(guild, channel, me, now_unix()),
+            _ => false,
+        }
+    }
+
     /// Whether Reply is offered in the channel (see [`permissions::can_reply`]).
     pub(super) fn can_reply(&self, id: Snowflake) -> bool {
         match (self.find_channel(id), &self.account) {

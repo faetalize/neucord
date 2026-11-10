@@ -16,6 +16,7 @@ use super::App;
 use super::chat::MessageTarget;
 use super::menus::{self, Entry, Item, Kind};
 use super::state::{now_ms, now_unix};
+use super::uploads::Stopped;
 
 /// Reply to a message from its menu; Shift turns the ping off, as with the
 /// button.
@@ -110,6 +111,7 @@ impl App {
         self.reply_bar.append(&cancel);
         area.append(&self.reply_bar);
         self.build_edit_bar(area);
+        self.build_attach(area);
         self.composer_box.append(&self.composer);
         self.composer_box.append(&self.length.root);
         area.append(&self.composer_box);
@@ -196,6 +198,7 @@ impl App {
     pub(super) fn update_notice_bar(self: &Rc<Self>) {
         self.watch_timeout_end();
         self.show_notice_bar();
+        self.refresh_attach();
     }
 
     /// Look at permissions again when our timeout in the open server ends:
@@ -328,6 +331,7 @@ impl App {
         if !shown {
             self.end_edit();
         }
+        self.refresh_attach();
         let messages = self.messages();
         self.rebind(&messages, 0, messages.n_items());
     }
@@ -531,8 +535,9 @@ impl App {
             (state.channel, state.rest.clone())
         };
         let (Some(channel), Some(rest)) = (channel, rest) else { return };
+        let files = self.files_for_message(channel);
         // A hidden message box is a channel we must never post to (#51).
-        if text.is_empty() || !self.composer_box.is_visible() {
+        if (text.is_empty() && files.is_empty()) || !self.composer_box.is_visible() {
             return;
         }
         // The box follows our permissions, but they may have changed since.
@@ -543,6 +548,18 @@ impl App {
         let too_long = self.state.borrow().limits().check_length(&text);
         if let Err(too_long) = too_long {
             return self.show_too_long(too_long);
+        }
+        if !files.is_empty() {
+            if !self.state.borrow().can_attach(channel) {
+                return self.update_notice_bar();
+            }
+            let allowed = {
+                let state = self.state.borrow();
+                state.limits().uploads(state.find_channel(channel).and_then(|(guild, _)| guild))
+            };
+            if let Err(refusal) = discord::uploads::check_send(&allowed, &Self::sizes(&files)) {
+                return self.show_refusal(&refusal);
+            }
         }
         // Slowmode would refuse it; the notice bar says how long is left.
         if self.slowmode_left(channel) > 0 {
@@ -563,7 +580,7 @@ impl App {
         let this = self.clone();
         glib::spawn_future_local(async move {
             // The gateway echoes our own message back, which is what adds it to the list.
-            match rest.send_message(channel, &text, reply).await {
+            match this.send_with_uploads(&rest, channel, &text, reply, files).await {
                 Ok(_) => {
                     this.record_slowmode(channel, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
                     // Sending from an old stretch of history returns to the present.
@@ -571,16 +588,22 @@ impl App {
                         this.load_newest(channel);
                     }
                 }
-                Err(e) => {
-                    match e.slowmode_wait() {
-                        Some(wait) => {
+                Err(stopped) => {
+                    match &stopped {
+                        Stopped::Send(e) if e.slowmode_wait().is_some() => {
+                            let wait = e.slowmode_wait().unwrap_or_default();
                             this.record_slowmode(channel, |slowmode, c, _| slowmode.refused(c, wait, now_ms()));
                             this.show_composer_error("Not sent: slowmode is enabled in this channel.");
                         }
-                        None => {
+                        Stopped::Send(e) => {
                             this.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c));
                             this.show_composer_error(&format!("Not sent: {e}"));
                         }
+                        Stopped::Upload(why) => {
+                            this.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c));
+                            this.show_composer_error(&format!("Not sent: {why}"));
+                        }
+                        Stopped::Canceled => this.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c)),
                     }
                     let buffer = this.composer.buffer();
                     if buffer.char_count() == 0 && this.reply.borrow().is_none() {

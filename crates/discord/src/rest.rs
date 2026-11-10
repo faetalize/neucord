@@ -1,6 +1,6 @@
 //! Discord's HTTP API over libsoup, on the GLib main loop.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -12,6 +12,7 @@ use soup::prelude::*;
 
 use crate::endpoints::{Call, call};
 use crate::invalid::{Change, InvalidRequests};
+use crate::uploads::Sent;
 use crate::{Channel, Error, Message, Snowflake, identity};
 
 /// Error code for accepting a stranger's friend request without confirming.
@@ -136,6 +137,21 @@ thread_local! {
     static INVALID: RefCell<InvalidRequests> = RefCell::default();
 }
 
+/// What sets one request apart from the usual.
+#[derive(Clone, Copy)]
+struct Sending {
+    /// Try again once after a 429, which is how requests usually go.
+    retry_rate_limit: bool,
+    /// Requests that failed before this one, for `X-Failed-Requests`.
+    failed: u32,
+}
+
+impl Default for Sending {
+    fn default() -> Self {
+        Sending { retry_rate_limit: true, failed: 0 }
+    }
+}
+
 #[derive(Clone)]
 pub struct Rest {
     session: soup::Session,
@@ -183,29 +199,15 @@ impl Rest {
         self.request(call!(USER, user = id), None).await
     }
 
+    /// Post `content` and the uploaded `attachments`, which may be all of it.
     pub async fn send_message(
         &self,
         channel: Snowflake,
         content: &str,
         reply: Option<Reply>,
+        attachments: &[Sent<'_>],
     ) -> Result<Message, Error> {
-        let mut body = json!({
-            "content": content,
-            "nonce": Snowflake::now().to_string(),
-            "tts": false,
-            "flags": 0,
-        });
-        if let Some(reply) = reply {
-            // The same body the official client sends.
-            body["message_reference"] = json!({ "message_id": reply.to, "channel_id": channel });
-            if let Some(guild) = reply.guild {
-                body["message_reference"]["guild_id"] = json!(guild);
-            }
-            if !reply.ping {
-                // Mentions in the text still ping; only the reply itself doesn't.
-                body["allowed_mentions"] = json!({ "parse": ["users", "roles", "everyone"], "replied_user": false });
-            }
-        }
+        let body = message_body(channel, content, &Snowflake::now().to_string(), reply, attachments);
         self.request(call!(SEND_MESSAGE, channel), Some(body)).await
     }
 
@@ -283,6 +285,55 @@ impl Rest {
         Ok(())
     }
 
+    /// A request of the upload flow: not retried on a rate limit, which the
+    /// client's HTTP layer never does, and saying how many requests failed
+    /// before it in `X-Failed-Requests`, as it does for a retry (620632).
+    pub(crate) async fn send_upload_request(
+        &self,
+        call: Call,
+        body: Option<Value>,
+        failed: u32,
+    ) -> Result<(u32, glib::Bytes), Error> {
+        self.send_with(call, body, Sending { retry_rate_limit: false, failed }).await
+    }
+
+    /// `PUT` to an upload URL, which is Google's and not Discord's: it takes
+    /// no token and none of our headers. `body` is a stream and how long it
+    /// is, `sent` is told how many bytes have gone, and `content_range` is
+    /// for a resumed upload. Gives the status and the `Range` Google answers
+    /// with.
+    pub(crate) async fn put(
+        &self,
+        url: &str,
+        body: Option<(gio::InputStream, isize)>,
+        content_range: Option<&str>,
+        sent: Rc<dyn Fn(u64)>,
+    ) -> Result<(u32, Option<String>), Error> {
+        let msg = soup::Message::new("PUT", url).map_err(|_| Error::Protocol("the upload URL isn't one".into()))?;
+        // A 308 here means "resume", and has no Location to follow.
+        msg.add_flags(soup::MessageFlags::NO_REDIRECT);
+        if let Some(range) = content_range {
+            msg.request_headers().expect("request has headers").replace("Content-Range", range);
+        }
+        if let Some((stream, length)) = &body {
+            msg.set_request_body(Some("application/octet-stream"), Some(stream), *length);
+        }
+        let total = Cell::new(0u64);
+        msg.connect_wrote_body_data(move |_, chunk| {
+            total.set(total.get() + u64::from(chunk));
+            sent(total.get());
+        });
+        self.session.send_and_read_future(&msg, glib::Priority::DEFAULT).await.map_err(Error::Transport)?;
+        let range = msg.response_headers().and_then(|h| h.one("Range")).map(|r| r.to_string());
+        Ok((msg.status_code(), range))
+    }
+
+    /// Take back an upload (`delete` in 48325): the client sends it and
+    /// ignores what comes of it.
+    pub(crate) async fn delete_upload(&self, uploaded_filename: &str) {
+        let _ = self.send_upload_request(call!(DELETE_UPLOAD, uploaded_filename), None, 0).await;
+    }
+
     pub(crate) async fn request<T: DeserializeOwned>(
         &self,
         call: Call,
@@ -304,6 +355,10 @@ impl Rest {
     /// requests have been refused, rather than wait: requests queued for
     /// minutes would all go at once when the pause ends.
     pub(crate) async fn send(&self, call: Call, body: Option<Value>) -> Result<(u32, glib::Bytes), Error> {
+        self.send_with(call, body, Sending::default()).await
+    }
+
+    async fn send_with(&self, call: Call, body: Option<Value>, options: Sending) -> Result<(u32, glib::Bytes), Error> {
         let mut retries = 0;
         let mut captchas = 0;
         let mut answer: Option<(String, Captcha)> = None;
@@ -317,6 +372,9 @@ impl Rest {
             let headers = msg.request_headers().expect("request has headers");
             for (name, value) in base_headers(self.token.as_deref()) {
                 headers.replace(name, &value);
+            }
+            if options.failed > 0 {
+                headers.replace("X-Failed-Requests", &options.failed.to_string());
             }
             if let Some((key, captcha)) = &answer {
                 headers.replace("X-Captcha-Key", key);
@@ -347,6 +405,7 @@ impl Rest {
                 }
             }
             if status == 429
+                && options.retry_rate_limit
                 && retries < MAX_RATE_LIMIT_RETRIES
                 && let Some(wait) = rate_limit_wait(&response)
             {
@@ -373,6 +432,37 @@ impl Rest {
             handler(wait);
         }
     }
+}
+
+/// What sending a message sends, as `_sendMessage` in 138399 builds it.
+fn message_body(
+    channel: Snowflake,
+    content: &str,
+    nonce: &str,
+    reply: Option<Reply>,
+    attachments: &[Sent<'_>],
+) -> Value {
+    let mut body = json!({
+        "content": content,
+        "nonce": nonce,
+        "tts": false,
+        "flags": 0,
+    });
+    if let Some(reply) = reply {
+        // The same body the official client sends.
+        body["message_reference"] = json!({ "message_id": reply.to, "channel_id": channel });
+        if let Some(guild) = reply.guild {
+            body["message_reference"]["guild_id"] = json!(guild);
+        }
+        if !reply.ping {
+            // Mentions in the text still ping; only the reply itself doesn't.
+            body["allowed_mentions"] = json!({ "parse": ["users", "roles", "everyone"], "replied_user": false });
+        }
+    }
+    if !attachments.is_empty() {
+        body["attachments"] = attachments.iter().enumerate().map(|(index, a)| a.body(index)).collect();
+    }
+    body
 }
 
 /// What editing `message` to say `content` sends, as `editMessage` in 138399
@@ -419,7 +509,8 @@ pub(crate) fn is_captcha(body: &Value) -> bool {
 mod tests {
     use serde_json::json;
 
-    use super::{Captcha, Page, ReplyPing, base_headers, edit_body, rate_limit_wait};
+    use super::{Captcha, Page, Reply, ReplyPing, base_headers, edit_body, message_body, rate_limit_wait};
+    use crate::uploads::Sent;
     use crate::{Message, Snowflake, identity};
 
     #[test]
@@ -445,6 +536,30 @@ mod tests {
         assert_eq!(Page::Before(id).query(24), "before=7&limit=24");
         assert_eq!(Page::After(id).query(24), "after=7&limit=24");
         assert_eq!(Page::Around(id).query(30), "limit=30&around=7");
+    }
+
+    #[test]
+    fn a_message_names_its_uploads() {
+        let sent = |name: &'static str| Sent {
+            filename: name,
+            uploaded_filename: "u/f",
+            description: None,
+            spoiler: false,
+            content_type: "image/png",
+        };
+        let body = message_body(Snowflake(9), "", "1", None, &[sent("a.png"), sent("b.png")]);
+        assert_eq!(body["content"], "", "files alone are a message");
+        assert_eq!(
+            (body["attachments"][0]["id"].as_str(), body["attachments"][1]["id"].as_str()),
+            (Some("0"), Some("1"))
+        );
+        assert_eq!(body["attachments"][1]["filename"], "b.png");
+        assert!(message_body(Snowflake(9), "hi", "1", None, &[]).get("attachments").is_none());
+        // A reply to a message goes with the files.
+        let reply = Reply { to: Snowflake(3), guild: None, ping: true };
+        let body = message_body(Snowflake(9), "hi", "1", Some(reply), &[sent("a.png")]);
+        assert_eq!(body["message_reference"], json!({ "message_id": "3", "channel_id": "9" }));
+        assert_eq!(body["attachments"].as_array().map(Vec::len), Some(1));
     }
 
     #[test]

@@ -192,6 +192,7 @@ impl App {
             .bottom_bar_style(adw::ToolbarStyle::Flat)
             .css_classes(["floating-bars"])
             .build();
+        page.add_controller(self.drop_target());
         let header = self.header.header_bar(&[self.sidebar_toggle().upcast_ref()]);
         page.add_top_bar(&header);
         page.add_top_bar(&self.present_bar);

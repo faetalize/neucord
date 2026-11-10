@@ -4,7 +4,8 @@
 //!
 //! `tools/discord-watch` reads this file as text, so each endpoint stays on
 //! one line: `pub(crate) const NAME: Endpoint = Endpoint::post("/path/{param}");`.
-//! Paths name their parameters and never hold a query.
+//! Paths name their parameters and never hold a query. A parameter written
+//! `{+name}` keeps its `/`, for a value that is itself a path.
 
 use std::fmt::Display;
 
@@ -12,6 +13,8 @@ pub(crate) const MESSAGES: Endpoint = Endpoint::get("/channels/{channel}/message
 pub(crate) const SEND_MESSAGE: Endpoint = Endpoint::post("/channels/{channel}/messages");
 pub(crate) const EDIT_MESSAGE: Endpoint = Endpoint::patch("/channels/{channel}/messages/{message}");
 pub(crate) const DELETE_MESSAGE: Endpoint = Endpoint::delete("/channels/{channel}/messages/{message}");
+pub(crate) const CREATE_ATTACHMENT: Endpoint = Endpoint::post("/channels/{channel}/attachments");
+pub(crate) const DELETE_UPLOAD: Endpoint = Endpoint::delete("/attachments/{+uploaded_filename}");
 pub(crate) const ACK: Endpoint = Endpoint::post("/channels/{channel}/messages/{message}/ack");
 pub(crate) const EDIT_CHANNEL: Endpoint = Endpoint::patch("/channels/{channel}");
 pub(crate) const USER: Endpoint = Endpoint::get("/users/{user}");
@@ -63,7 +66,7 @@ impl Endpoint {
         let (mut i, mut params) = (0, 0);
         while i < path.len() {
             if path[i] == b'{' {
-                let start = i + 1;
+                let start = if path[i + 1] == b'+' { i + 2 } else { i + 1 };
                 while path[i] != b'}' {
                     i += 1;
                 }
@@ -84,8 +87,11 @@ impl Endpoint {
     pub(crate) fn fill(self, params: &[(&str, &dyn Display)]) -> Call {
         let mut path = self.path.to_owned();
         for (name, value) in params {
-            let value = glib::uri_escape_string(value.to_string(), None::<&str>, false);
-            path = path.replace(&format!("{{{name}}}"), &value);
+            let value = value.to_string();
+            let plain = glib::uri_escape_string(&value, None::<&str>, false);
+            path = path.replace(&format!("{{{name}}}"), &plain);
+            let nested = glib::uri_escape_string(&value, Some("/"), false);
+            path = path.replace(&format!("{{+{name}}}"), &nested);
         }
         Call { method: self.method, path }
     }
@@ -165,6 +171,13 @@ mod tests {
         assert_eq!((call.method(), call.path()), ("POST", "/channels/1/messages/2/ack"));
         assert_eq!(call!(MESSAGES, channel).query("limit=50").path(), "/channels/1/messages?limit=50");
         assert_eq!(call!(LOGIN).path(), "/auth/login");
+    }
+
+    #[test]
+    fn plus_keeps_slashes() {
+        let call = call!(DELETE_UPLOAD, uploaded_filename = "a-1/my file.png");
+        assert_eq!((call.method(), call.path()), ("DELETE", "/attachments/a-1/my%20file.png"));
+        assert_eq!(call!(USER, user = "a/b").path(), "/users/a%2Fb", "plain parameters still escape it");
     }
 
     #[test]
