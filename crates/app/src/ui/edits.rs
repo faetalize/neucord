@@ -90,6 +90,7 @@ impl App {
         buffer.set_text(text.unwrap_or(&message.content));
         buffer.place_cursor(&buffer.end_iter());
         self.edit_bar.set_visible(true);
+        self.refresh_attach();
         self.refresh_message(message.id);
         self.composer.grab_focus();
     }
@@ -109,6 +110,7 @@ impl App {
     pub(super) fn end_edit(self: &Rc<Self>) {
         let Some(edit) = self.editing.take() else { return };
         self.edit_bar.set_visible(false);
+        self.refresh_attach();
         self.composer.buffer().set_text(&edit.draft);
         // A reply started elsewhere stays there, as when switching channels.
         if edit.reply.as_ref().is_some_and(|r| Some(r.channel) == self.state.borrow().channel) {

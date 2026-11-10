@@ -427,6 +427,14 @@ pub fn can_send(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64
     }
 }
 
+/// Whether the client offers attaching files in `channel` (the attach menu
+/// in 316576, whose `canAttachFiles` is any private channel, else Attach
+/// Files with Send Messages), where [`can_send`] also holds.
+pub fn can_attach(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64) -> bool {
+    can_send(guild, channel, me, now)
+        && guild.is_none_or(|g| in_channel(g, channel, me, now).contains(Permissions::ATTACH_FILES))
+}
+
 /// Whether the client offers Reply in `channel` (517997), with
 /// [`crate::Message::is_replyable`] for the message itself: not in the
 /// system DM, in a server only with Send Messages and Read Message History
@@ -737,6 +745,28 @@ mod tests {
 
     fn joined() -> serde_json::Value {
         json!({"member": {"flags": 0, "join_timestamp": "2026-10-28T00:00:00+00:00"}})
+    }
+
+    #[test]
+    fn attaching_takes_attach_files_with_send_messages_in_servers() {
+        let me = me();
+        let mut guild = guild();
+        let open = channel(&[]);
+        assert!(can_send(Some(&guild), &open, &me, 0) && !can_attach(Some(&guild), &open, &me, 0));
+        guild.my_roles.push(Snowflake(MOD));
+        let moderator = guild.roles.iter_mut().find(|r| r.id == Snowflake(MOD)).unwrap();
+        moderator.permissions = moderator.permissions | Permissions::ATTACH_FILES;
+        assert!(can_attach(Some(&guild), &open, &me, 0));
+        let muted = channel(&[(GUILD, SEND, Permissions::NONE)]);
+        assert!(!can_attach(Some(&guild), &muted, &me, 0), "Attach Files alone isn't enough");
+
+        let dm: Channel = serde_json::from_value(json!({"id": "9", "type": 1})).unwrap();
+        assert!(can_attach(None, &dm, &me, 0), "a private channel needs no permission");
+        let system: Channel = serde_json::from_value(
+            json!({"id": "9", "type": 1, "recipients": [{"id": "2", "username": "d", "system": true}]}),
+        )
+        .unwrap();
+        assert!(system.is_system_dm() && !can_attach(None, &system, &me, 0));
     }
 
     #[test]

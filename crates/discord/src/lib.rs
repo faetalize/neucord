@@ -36,6 +36,7 @@ pub mod settings;
 pub mod shape;
 pub mod system;
 pub mod threads;
+pub mod uploads;
 pub mod verification;
 
 pub use gateway::{Event, Gateway, Ready, Resume};

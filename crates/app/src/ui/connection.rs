@@ -16,6 +16,7 @@ impl App {
         let rest = std::mem::take(&mut *self.state.borrow_mut()).rest;
         self.show_blank();
         self.timelines.borrow_mut().clear();
+        self.discard_drafts();
         // Keeps the app running until Discord has heard, even if the window
         // is closed right away.
         let hold = self.window.application().map(|app| app.hold());
