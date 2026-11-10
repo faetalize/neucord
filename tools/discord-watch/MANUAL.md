@@ -146,6 +146,12 @@ changed for unrelated reasons only needs a note in the issue.
   and a non-ephemeral message and no timeout, even for administrators.
   The keyboard shortcut uses `Et` there instead, without the Send Messages
   checks.
+- **Whether a reply pings** (`ReplyPing::for_click` in `rest.rs`).
+  `PendingReplyStore` is watched, but the click rule isn't: Shift or
+  replying to yourself turns the ping off, and the toggle shows only in
+  servers, on others' messages (`$b` in 519222, anchor
+  `showMentionToggle: !i && !l`). The send reads `shouldMention` alone
+  (`getSendMessageOptionsForReply` in 138399).
 - **What Nitro, boosts and experiments allow** (`limits.rs`, and its message
   length in `ui/composer.rs`). `R` in 722178, below the perks each premium
   type includes (anchor `ProductCatalog.tsx`), asks the `perks` bitmask when
