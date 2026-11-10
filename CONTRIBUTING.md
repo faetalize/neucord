@@ -44,7 +44,7 @@ real IDs, names or payloads: use made-up test data.
 ## What every issue and pull request looks at
 
 Neucord follows the official client, so each issue and pull request checks
-it for three things:
+it for four things:
 
 - **Account safety.** Neucord sends nothing the official client wouldn't,
   and holds back where it does: a request no official client makes is how
@@ -61,6 +61,16 @@ it for three things:
   LLMs tend to be trigger happy and always find a reason to add something to
   a file. Make sure any addition to MANUAL.md has to fight for its right to
   exist.
+- **Limits.** Nitro, a server's boost level and Discord's experiments decide
+  much of what an account may do: how long a message may be, how large an
+  upload, which emoji and stickers work outside their server, how well it
+  may stream. `discord::limits` knows them, read from the client. Anything
+  Neucord sends that the client gates checks there first and holds back as
+  the client does, before any request, and never works around one. A
+  feature Discord rolls out through an experiment shows only where Discord
+  assigned it (`discord::experiments`). If the client gates something
+  `limits.rs` doesn't know yet, the same pull request adds it there, with
+  its tracking.
 - **Context menus.** Say whether the official client offers the feature in
   a context menu: on which surface, which items, under what conditions. If
   Neucord has that surface, the pull request adds the entries to its table
