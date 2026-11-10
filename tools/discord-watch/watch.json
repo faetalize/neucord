@@ -96,6 +96,7 @@
     "getMaxAttachmentsCount",
     "getMaxFileSize",
     "getMaxTotalAttachmentSize",
+    "getSendMessageOptionsForReply",
     "getSystemMessageUserJoin",
     "getUserMaxFileSize",
     "handleRequiredAction",

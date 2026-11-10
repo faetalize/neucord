@@ -150,8 +150,8 @@ changed for unrelated reasons only needs a note in the issue.
   `PendingReplyStore` is watched, but the click rule isn't: Shift or
   replying to yourself turns the ping off, and the toggle shows only in
   servers, on others' messages (`$b` in 519222, anchor
-  `showMentionToggle: !i && !l`). The send reads `shouldMention` alone
-  (`getSendMessageOptionsForReply` in 138399).
+  `shouldMention` next to `shiftKey`). The send reads `shouldMention` alone
+  (`getSendMessageOptionsForReply`, watched).
 - **What Nitro, boosts and experiments allow** (`limits.rs`, and its message
   length in `ui/composer.rs`). `R` in 722178, below the perks each premium
   type includes (anchor `ProductCatalog.tsx`), asks the `perks` bitmask when
