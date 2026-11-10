@@ -1525,7 +1525,8 @@ impl App {
     /// Open the menu for `message`, whose row is `row`, at `at` there.
     fn message_menu(self: &Rc<Self>, row: &gtk::Box, message: Message, at: At, link: Option<String>) {
         let target = MessageTarget { selection: selection_in(row.upcast_ref()), link, message };
-        menus::popup(self, menus::MESSAGE, target, row, at);
+        let regulated = self.state.borrow().media_takedown_regulated;
+        menus::popup(self, menus::message(regulated), target, row, at);
     }
 
     /// The spoilers revealed in a message's text, remembered while the app

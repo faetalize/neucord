@@ -92,6 +92,9 @@ pub(super) struct State {
     pub(super) media: MediaSettings,
     /// Menus offer to copy ids.
     pub(super) developer_mode: bool,
+    /// The message menu's last groups come in the order the client uses
+    /// where the media takedown regulation is TIDA.
+    pub(super) media_takedown_regulated: bool,
     /// Compact message display, which sizes history pages.
     pub(super) message_display_compact: bool,
     /// Acks waiting to be sent: channel → newest message read.

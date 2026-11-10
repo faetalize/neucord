@@ -25,6 +25,7 @@ pub mod notifications;
 pub mod permissions;
 pub mod poll;
 pub mod read_state;
+pub mod regional;
 pub mod relationships;
 pub mod remote_auth;
 pub mod rest;
