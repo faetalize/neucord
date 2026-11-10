@@ -1,6 +1,6 @@
 // Split a build into one readable file per webpack module, for reading and
-// grepping Discord's client. Module ids are stable across builds, so the
-// files of two builds diff module by module.
+// grepping Discord's client. Most module ids survive a build, so the files
+// of two builds mostly diff module by module.
 
 import { availableParallelism } from "node:os";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
