@@ -66,6 +66,30 @@ pub struct Reply {
     pub ping: bool,
 }
 
+/// Whether a reply pings its author, as Reply sets it up in the official
+/// client (`shouldMention`, `showMentionToggle` in the pending reply).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReplyPing {
+    /// The ping's starting state, and its final one where there is no toggle.
+    pub ping: bool,
+    /// Whether the reply bar offers the ping toggle.
+    pub toggle: bool,
+}
+
+impl ReplyPing {
+    /// For a click on Reply. `own`: the message is ours. `private`: the
+    /// channel is a DM or group DM. `shift`: Shift was held, which turns
+    /// the ping off whether or not the toggle is there.
+    pub fn for_click(own: bool, private: bool, shift: bool) -> Self {
+        Self { ping: !shift && !own, toggle: !private && !own }
+    }
+
+    /// The ping where the toggle doesn't decide it.
+    pub fn fixed(self) -> Option<bool> {
+        (!self.toggle).then_some(self.ping)
+    }
+}
+
 /// A captcha Discord wants solved before it carries out a request.
 #[derive(Clone, Debug)]
 pub struct Captcha {
@@ -395,8 +419,23 @@ pub(crate) fn is_captcha(body: &Value) -> bool {
 mod tests {
     use serde_json::json;
 
-    use super::{Captcha, Page, base_headers, edit_body, rate_limit_wait};
+    use super::{Captcha, Page, ReplyPing, base_headers, edit_body, rate_limit_wait};
     use crate::{Message, Snowflake, identity};
+
+    #[test]
+    fn shift_turns_the_ping_off_even_where_the_toggle_is_hidden() {
+        // `$b` in 519222: shouldMention: !shift && !own, showMentionToggle: !private && !own.
+        let ping = |own, private, shift| ReplyPing::for_click(own, private, shift);
+        assert_eq!(ping(false, false, false), ReplyPing { ping: true, toggle: true });
+        assert_eq!(ping(false, false, true), ReplyPing { ping: false, toggle: true });
+        assert_eq!(ping(false, true, false), ReplyPing { ping: true, toggle: false });
+        assert_eq!(ping(false, true, true), ReplyPing { ping: false, toggle: false });
+        for (private, shift) in [(false, false), (false, true), (true, false), (true, true)] {
+            assert_eq!(ping(true, private, shift), ReplyPing { ping: false, toggle: false });
+        }
+        assert_eq!(ping(false, true, true).fixed(), Some(false));
+        assert_eq!(ping(false, false, true).fixed(), None);
+    }
 
     #[test]
     fn history_queries_read_like_the_clients() {

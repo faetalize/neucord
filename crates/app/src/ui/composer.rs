@@ -7,7 +7,7 @@ use std::time::Duration;
 use adw::prelude::*;
 use discord::cooldowns::{Slowmode, bypasses_slowmode, wait_words};
 use discord::limits::{LengthCount, TooLong, message_length};
-use discord::rest::Reply;
+use discord::rest::{Reply, ReplyPing};
 use discord::verification::{self, Gate};
 use discord::{Channel, Message, Snowflake};
 use gtk::glib;
@@ -34,7 +34,7 @@ pub(super) struct ReplyCtx {
     pub(super) to: Snowflake,
     pub(super) author: String,
     /// Set where the ping can't be toggled, as in the official client:
-    /// replies to yourself never ping, replies in DMs always do.
+    /// replies to yourself never ping, and in DMs the click alone decides.
     pub(super) fixed_ping: Option<bool>,
 }
 
@@ -351,12 +351,9 @@ impl App {
             let guild = state.find_channel(message.channel_id).and_then(|(guild, _)| guild.map(|g| g.id));
             (state.me() == Some(message.author.id), guild)
         };
-        let fixed_ping = match (own, guild) {
-            (true, _) => Some(false),
-            (false, None) => Some(true),
-            (false, Some(_)) => None,
-        };
-        self.reply_ping.set_active(!no_ping);
+        let ping = ReplyPing::for_click(own, guild.is_none(), no_ping);
+        let fixed_ping = ping.fixed();
+        self.reply_ping.set_active(ping.ping);
         self.set_reply(Some(ReplyCtx {
             channel: message.channel_id,
             guild,
