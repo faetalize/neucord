@@ -1,9 +1,10 @@
 // What Neucord depends on, read from its own source so there is no list to
 // keep: REST calls are the table in crates/discord/src/endpoints.rs, which
 // every request goes through; gateway events are the event names gateway.rs
-// matches on; the API version is identity.rs's API_BASE.
+// matches on; the API version is identity.rs's API_BASE; experiments are the
+// names written out in crates/discord outside its tests.
 
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 /** `/channels/{channel}/messages?limit={0}` → `/channels/{}/messages`. */
@@ -36,9 +37,17 @@ export async function neucordUses(repo) {
   for (const m of gateway.matchAll(/"([A-Z][A-Z0-9_]*)"\s*(?==>|\|)/g)) events.add(m[1]);
   for (const m of gateway.matchAll(/\|\s*"([A-Z][A-Z0-9_]*)"/g)) events.add(m[1]);
 
+  // `"2026-09-nitro-file-upload-rollout"`, `"2022-07_voice_in_threads"`.
+  const experiments = new Set();
+  for (const file of (await readdir(src)).filter((f) => f.endsWith(".rs"))) {
+    const code = (await readFile(join(src, file), "utf8")).split("#[cfg(test)]")[0];
+    for (const m of code.matchAll(/"(20\d\d-\d\d[-_][A-Za-z0-9_-]+)"/g)) experiments.add(m[1]);
+  }
+
   return {
     rest: rest.sort((a, b) => `${a.path} ${a.method}`.localeCompare(`${b.path} ${b.method}`)),
     events: [...events].sort(),
+    experiments: [...experiments].sort(),
     apiVersion,
     unread,
   };

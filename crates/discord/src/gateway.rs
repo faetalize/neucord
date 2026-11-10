@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use soup::prelude::*;
 
 use crate::embed::Embed;
+use crate::experiments::Experiments;
 use crate::inflate::Inflater;
 use crate::members::Members;
 use crate::notifications::{GuildSettings, NotificationSettings};
@@ -67,6 +68,8 @@ pub struct Ready {
     /// A step Discord requires before the account can be used, if any
     /// (see [`crate::account`]).
     pub required_action: Option<String>,
+    /// What Discord rolls out to the account and its servers.
+    pub experiments: Experiments,
 }
 
 #[derive(Debug)]
@@ -560,11 +563,13 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 *state.session.borrow_mut() = Some((id.to_owned(), url.to_owned()));
             }
             let raw_guilds = data["guilds"].as_array().map(Vec::as_slice).unwrap_or_default();
-            let guilds = raw_guilds
+            let guilds: Vec<Guild> = raw_guilds
                 .iter()
                 .enumerate()
                 .filter_map(|(i, g)| guild_with_member(g, &data["merged_members"][i], user.id))
                 .collect();
+            let experiments = Experiments::from_ready(&data);
+            crate::experiments::debug_dump(&data, &experiments, user.id, &guilds);
             let mut members = Members::default();
             for (i, g) in raw_guilds.iter().enumerate() {
                 if let Some(id) = parse_id(&g["id"]) {
@@ -585,6 +590,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 developer_mode: settings::developer_mode(&data["user_settings"]).unwrap_or(false),
                 message_display_compact: settings::message_display_compact(&data["user_settings"]).unwrap_or(false),
                 required_action: data["required_action"].as_str().map(str::to_owned),
+                experiments,
                 account,
                 user,
                 guilds,

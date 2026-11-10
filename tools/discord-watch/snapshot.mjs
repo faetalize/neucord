@@ -1,7 +1,8 @@
 // Distil a build into what a third-party client depends on: REST endpoint
 // paths, the fields each REST call sends, the headers added to every
 // request, the gateway events the client handles and the payload fields it
-// reads, and the enums, methods, stores and constants named in watch.json.
+// reads, the enums, methods, stores and constants named in watch.json, and
+// every experiment the client defines.
 // Minified names are dropped, so snapshots of two builds differ only where
 // Discord changed something.
 
@@ -10,6 +11,8 @@ import { join } from "node:path";
 import { parse, walk, isFunction, keyName, modulesOf } from "./js.mjs";
 
 const WATCH = JSON.parse(await readFile(new URL("./watch.json", import.meta.url), "utf8"));
+// The modules MANUAL.md has people check by hand, by id.
+const MANUAL = new Set((await readFile(new URL("./MANUAL.md", import.meta.url), "utf8")).match(/\b\d{4,7}\b/g) ?? []);
 const METHODS = { get: "GET", post: "POST", put: "PUT", patch: "PATCH", del: "DELETE", delete: "DELETE" };
 const CONSTANT = /^[A-Z][A-Z0-9_]*$/;
 const HEADER = /^[A-Za-z][A-Za-z0-9-]*$/;
@@ -289,6 +292,165 @@ function constantOf(node) {
   return undefined;
 }
 
+/** An experiment config as data: literals, objects and arrays as they are,
+ * `!0` and `void 0` as what they mean, `new X(…)` and calls by their
+ * arguments, and anything named by the minifier as `<import>` or
+ * `<function>`, which a build can rename. */
+function valueOf(node) {
+  switch (node?.type) {
+    case "Literal":
+      return node.value;
+    case "TemplateLiteral":
+      return node.expressions.length === 0 ? node.quasis[0].value.cooked : "<template>";
+    case "UnaryExpression":
+      if (node.operator === "!" && node.argument.type === "Literal") return !node.argument.value;
+      if (node.operator === "void") return null;
+      if (node.operator === "-" && node.argument.type === "Literal") return -node.argument.value;
+      return "<expression>";
+    case "ObjectExpression":
+      return Object.fromEntries(
+        node.properties.map((p) =>
+          p.type === "SpreadElement" ? ["...", "<spread>"] : [keyName(p) ?? "[computed]", valueOf(p.value)],
+        ),
+      );
+    case "ArrayExpression":
+      return node.elements.map(valueOf);
+    case "NewExpression":
+    case "CallExpression":
+      return { "<call>": node.arguments.map(valueOf) };
+    case "ArrowFunctionExpression":
+    case "FunctionExpression":
+      return "<function>";
+    default:
+      return node ? "<import>" : null;
+  }
+}
+
+/** An experiment definition: Apex `{ name, kind, defaultConfig, variations }`
+ * or the older `{ kind, id, label, defaultConfig, treatments }`. */
+function experimentOf(node) {
+  if (node?.type !== "ObjectExpression") return null;
+  const get = (key) => node.properties.find((p) => keyName(p) === key)?.value;
+  const kind = get("kind");
+  if (kind?.type !== "Literal" || !["user", "guild", "installation"].includes(kind.value)) return null;
+  const literal = (key) => (get(key)?.type === "Literal" ? get(key).value : null);
+  if (typeof literal("name") === "string" && get("variations")) {
+    const variants = get("variations").type === "ObjectExpression" ? get("variations").properties : [];
+    return [
+      literal("name"),
+      {
+        system: "apex",
+        kind: kind.value,
+        default: valueOf(get("defaultConfig")),
+        variants: Object.fromEntries(variants.map((p) => [keyName(p) ?? "[computed]", valueOf(p.value)])),
+      },
+    ];
+  }
+  if (typeof literal("id") === "string" && get("treatments")?.type === "ArrayExpression") {
+    const treatments = get("treatments").elements.map((t) => valueOf(t));
+    return [
+      literal("id"),
+      {
+        system: "legacy",
+        kind: kind.value,
+        label: literal("label"),
+        default: valueOf(get("defaultConfig")),
+        variants: Object.fromEntries(treatments.map((t) => [String(t?.id), { label: t?.label, config: t?.config }])),
+      },
+    ];
+  }
+  return null;
+}
+
+/** What a module's code refers to: its imports (`r = n(17928)`), the
+ * experiments it defines, its exports (`n.d(t, { ew: () => o })`) and its
+ * other declarations, each keyed by the identifier declaring it, as
+ * minifiers reuse a name in scopes that don't see each other. */
+function bindingsOf(body, require) {
+  const declared = declarations(body);
+  const imports = new Map();
+  const experiments = new Map();
+  const exported = new Map();
+  const locals = new Map();
+  walk(body, (n) => {
+    if (n.type === "VariableDeclarator" && n.id.type === "Identifier" && n.init) {
+      const init = n.init;
+      const call = init.type === "CallExpression" ? init : null;
+      if (
+        call?.callee.type === "Identifier" &&
+        call.callee.name === require &&
+        typeof call.arguments[0]?.value === "number"
+      ) {
+        imports.set(n.id, String(call.arguments[0].value));
+      } else if (call && experimentOf(call.arguments[0])) {
+        experiments.set(n.id, experimentOf(call.arguments[0])[0]);
+      } else {
+        locals.set(n.id, init);
+      }
+    }
+    if (n.type === "FunctionDeclaration" && n.id) locals.set(n.id, n.body);
+    const callee = n.type === "CallExpression" ? n.callee : null;
+    // `n.d(t, { K: () => a })` exports through getters; newer builds also
+    // pass values, the code itself: `n.d(t, {}, { K: function () { … } })`.
+    if (callee?.type === "MemberExpression" && callee.object.name === require && callee.property.name === "d") {
+      const [, getters, values] = n.arguments;
+      for (const p of getters?.type === "ObjectExpression" ? getters.properties : []) {
+        const value = isFunction(p.value) ? p.value.body : null;
+        if (value?.type === "Identifier" || value?.type === "MemberExpression") exported.set(keyName(p), value);
+      }
+      for (const p of values?.type === "ObjectExpression" ? values.properties : []) {
+        if (p.type === "Property") exported.set(keyName(p), p.value);
+      }
+    }
+  });
+  // `let l = a;` re-exports an experiment under another name.
+  for (const [id, init] of locals) {
+    const target = init.type === "Identifier" ? declared.get(init) : null;
+    if (experiments.has(target)) experiments.set(id, experiments.get(target));
+  }
+  return { declared, imports, experiments, exported, locals };
+}
+
+/** The experiments `node` uses directly, and the exports of other modules
+ * it reads (`"219882.ew"`), following the module's own functions. */
+function touches(node, bindings) {
+  const experiments = new Set();
+  const reads = new Set();
+  const seen = new Set();
+  const queue = [node];
+  while (queue.length > 0) {
+    const stack = [queue.pop()];
+    while (stack.length > 0) {
+      const n = stack.pop();
+      if (n.type === "MemberExpression" && !n.computed) {
+        const from = n.object.type === "Identifier" ? bindings.imports.get(bindings.declared.get(n.object)) : null;
+        if (from) reads.add(`${from}.${n.property.name}`);
+        else stack.push(n.object);
+        continue;
+      }
+      if (n.type === "Identifier") {
+        const id = bindings.declared.get(n);
+        if (bindings.experiments.has(id)) experiments.add(bindings.experiments.get(id));
+        else if (bindings.locals.has(id) && !seen.has(id)) {
+          seen.add(id);
+          queue.push(bindings.locals.get(id));
+        }
+        continue;
+      }
+      for (const key in n) {
+        // Names that aren't references: object keys and method names.
+        if (key === "key" && !n.computed && ["Property", "MethodDefinition", "PropertyDefinition"].includes(n.type))
+          continue;
+        const value = n[key];
+        if (Array.isArray(value)) {
+          for (const child of value) if (child && typeof child.type === "string") stack.push(child);
+        } else if (value && typeof value.type === "string") stack.push(value);
+      }
+    }
+  }
+  return { experiments: [...experiments], reads: [...reads] };
+}
+
 /** Sort object keys recursively, so the JSON is stable across runs. */
 function sorted(value) {
   if (Array.isArray(value)) return value.map(sorted);
@@ -312,6 +474,12 @@ export async function snapshot(dir) {
   const methods = new Map(WATCH.methods.map((name) => [name, new Set()]));
   const stores = new Map(WATCH.stores.map((name) => [name, new Set()]));
   const constants = new Map(WATCH.constants.map((name) => [name, new Set()]));
+  const experiments = new Map();
+  // What each module's exports touch, and what the code holding a rule
+  // Neucord copies touches: the watched methods and stores, and the modules
+  // MANUAL.md names. Resolved across modules once every module is read.
+  const exportsTouch = new Map();
+  const copied = new Map();
   let modules = 0;
   let unparsed = 0;
 
@@ -324,9 +492,24 @@ export async function snapshot(dir) {
       unparsed++;
       continue;
     }
-    for (const { property } of modulesOf(ast)) {
+    for (const { id, property } of modulesOf(ast)) {
       modules++;
       const body = property.value;
+      const require = body.params[2]?.name;
+      const bindings = bindingsOf(body, require);
+      const exports = {};
+      for (const [name, value] of bindings.exported) exports[name] = touches(value, bindings);
+      exportsTouch.set(id, exports);
+      // Keyed by the method's or store's name, which survive the module
+      // renumbering a build can bring; MANUAL.md's modules only have ids.
+      const copy = (scope, key) => {
+        const found = touches(scope, bindings);
+        const all = copied.get(key) ?? { experiments: new Set(), reads: new Set() };
+        found.experiments.forEach((e) => all.experiments.add(e));
+        found.reads.forEach((r) => all.reads.add(r));
+        copied.set(key, all);
+      };
+      if (MANUAL.has(id)) copy(body, `module ${id}`);
       const text = source.slice(body.start, body.end);
       const isGatewayModule = text.includes('"READY_SUPPLEMENTAL"') && text.includes('"INITIAL_GUILD"');
       // Constants are named where they are used or exported, and often
@@ -365,6 +548,8 @@ export async function snapshot(dir) {
         }
         if (node.type === "CallExpression") {
           const callee = node.callee;
+          const experiment = experimentOf(node.arguments[0]);
+          if (experiment) experiments.set(experiment[0], JSON.stringify(sorted(experiment[1])));
           const options = node.arguments[0];
           const method = callee.type === "MemberExpression" && !callee.computed && METHODS[callee.property.name];
           const url =
@@ -403,13 +588,26 @@ export async function snapshot(dir) {
         // Class methods and object methods alike: `isSystemDM() { … }`.
         if ((node.type === "MethodDefinition" || node.type === "Property") && isFunction(node.value)) {
           const name = !node.computed && node.key.type === "Identifier" ? node.key.name : null;
-          if (methods.has(name)) methods.get(name).add(normalized(source, node.value));
+          if (methods.has(name)) {
+            methods.get(name).add(normalized(source, node.value));
+            copy(node.value, name);
+          }
         }
         // Stores name themselves: `static displayName = "GuildVerificationStore"`.
         // Their rules live in functions of the module around them.
         if (node.type === "PropertyDefinition" && node.static && !node.computed && node.key.name === "displayName") {
           const name = node.value?.value;
-          if (stores.has(name)) stores.get(name).add(normalized(source, body, { module: true }));
+          if (stores.has(name)) {
+            stores.get(name).add(normalized(source, body, { module: true }));
+          }
+        }
+        // A store's class: its rules are its methods and what they call.
+        if (node.type === "ClassDeclaration" || node.type === "ClassExpression") {
+          const store = node.body.body.find(
+            (m) =>
+              m.type === "PropertyDefinition" && m.static && m.key.name === "displayName" && stores.has(m.value?.value),
+          );
+          if (store) copy(node.body, store.value.value);
         }
         const table = node.type === "ObjectExpression" && objectEnum(node);
         if (table) {
@@ -442,6 +640,26 @@ export async function snapshot(dir) {
   const score = (table) => Object.keys(table).filter((k) => named.has(k)).length;
   const endpoints = endpointTables.sort((a, b) => score(b) - score(a))[0] ?? {};
 
+  // The experiments code holding a copied rule reads, itself or through an
+  // export of the module defining them: any of them may change that rule
+  // per account. Following helpers further mostly finds the media engine's.
+  const resolve = (read, depth, seen) => {
+    if (depth === 0 || seen.has(read)) return [];
+    seen.add(read);
+    const [module, name] = read.split(".");
+    const table = exportsTouch.get(module);
+    // Export names such as `constructor` would find the prototype's.
+    if (!table || !Object.hasOwn(table, name)) return [];
+    const touched = table[name];
+    return [...touched.experiments, ...touched.reads.flatMap((r) => resolve(r, depth - 1, seen))];
+  };
+  const reached = {};
+  for (const [key, { experiments: own, reads }] of copied) {
+    const seen = new Set();
+    const names = new Set([...own, ...[...reads].flatMap((r) => resolve(r, 1, seen))]);
+    if (names.size > 0) reached[key] = [...names].sort();
+  }
+
   return sorted({
     channel: meta.channel,
     build: meta.build,
@@ -455,5 +673,7 @@ export async function snapshot(dir) {
     methods: Object.fromEntries([...methods].map(([k, v]) => [k, [...v].sort()])),
     stores: Object.fromEntries([...stores].map(([k, v]) => [k, [...v].sort()])),
     constants: Object.fromEntries([...constants].map(([k, v]) => [k, [...v].sort().map((s) => JSON.parse(s))])),
+    experiments: Object.fromEntries([...experiments].map(([k, v]) => [k, JSON.parse(v)])),
+    reached,
   });
 }

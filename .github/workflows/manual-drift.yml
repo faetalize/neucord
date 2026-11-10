@@ -1,7 +1,8 @@
 name: Manual drift check
 
 # Some of what Neucord copies from the official client can't be snapshotted,
-# so tools/discord-watch/MANUAL.md lists it for a hand check. Open the week's
+# and what Discord sends the account takes a logged-in Neucord, so
+# tools/discord-watch/MANUAL.md lists both for a hand check. Open the week's
 # issue for that check, whatever the Discord watch found.
 on:
   schedule:
@@ -24,6 +25,6 @@ jobs:
           gh label create manual-drift --color 5865F2 \
             --description "Weekly hand check of what discord-watch can't snapshot" --force >/dev/null
           gh issue create --label manual-drift --title "Manual drift check, week of $(date -u +%F)" --body "$(cat <<EOF
-          Read [MANUAL.md]($MANUAL) in its entirety and follow its steps.
+          Read [MANUAL.md]($MANUAL) in its entirety and follow its steps. One of them runs Neucord logged in, to see what Discord sends the account, so do this on a machine with a Neucord session.
           EOF
           )"
