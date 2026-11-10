@@ -219,7 +219,9 @@ pub fn size_words(bytes: u64) -> String {
 /// in this order when files are added (518960's `R`): an empty file, one
 /// over the limit or a batch over the total, then the count. It checks the
 /// total of all files only at send, after the uploads. Neucord checks it
-/// here as well, so nothing is uploaded that couldn't be sent.
+/// here as well, deliberately: uploads start when a file is added, so a
+/// draft over the total would be uploaded in full just to be turned back at
+/// send. Holding back earlier never sends more than the client would.
 pub fn check_added(limits: &Uploads, queued: &[u64], added: &[u64]) -> Result<(), Refusal> {
     if added.contains(&0) {
         return Err(Refusal::Empty);
