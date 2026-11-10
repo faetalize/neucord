@@ -274,6 +274,36 @@ impl Embed {
         shaped
     }
 
+    /// The embed's picture and video as the client keeps them (`fK` in
+    /// 659674), by their original `url`: an image or article's picture is its
+    /// thumbnail, unless it has an `image`; a video counts only with a still
+    /// (a thumbnail, or one made from its own proxied file), and isn't
+    /// Sketchfab's. Media without a size is dropped. A message older than
+    /// 2017, which the client lets only a few providers' videos through, can
+    /// carry none of the signed links this serves.
+    pub(crate) fn client_media(&self) -> (Option<&EmbedMedia>, Option<&EmbedMedia>) {
+        let sized = |media: &&EmbedMedia| media.sized().is_some();
+        let thumbnail = self.thumbnail.as_ref().filter(sized);
+        let mut image = match self.kind {
+            EmbedKind::Article | EmbedKind::Image => thumbnail,
+            _ => None,
+        };
+        image = self.image.as_ref().filter(sized).or(image);
+        let video = self.video.as_ref().filter(sized).filter(|video| {
+            let has_still = (thumbnail.is_some() && !matches!(self.kind, EmbedKind::Article | EmbedKind::Image))
+                || video.proxy_url.is_some();
+            let url = video.url.as_deref().unwrap_or_default().to_ascii_lowercase();
+            let sketchfab = self
+                .provider
+                .as_ref()
+                .and_then(|p| p.name.as_deref())
+                .is_some_and(|name| name.to_ascii_lowercase().contains("sketchfab"))
+                || url.starts_with("https://sketchfab.com");
+            has_still && !sketchfab && (video.proxy_url.is_some() || url.starts_with("https:"))
+        });
+        (image, video)
+    }
+
     /// How to show this embed. With `show_media` off (the viewer's
     /// `inline_embed_media`), every embed is a card without media.
     pub fn display(&self, show_media: bool) -> Display {

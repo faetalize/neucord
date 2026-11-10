@@ -171,6 +171,10 @@ impl App {
                 Event::MessageCreate(message) => self.on_message(*message),
                 Event::MessageUpdate(edit) => self.on_message_update(edit),
                 Event::MessageDelete { id, channel_id } => self.on_message_delete(id, channel_id),
+                Event::MessageDeleteBulk { ids, channel_id } => self.on_message_delete_bulk(ids, channel_id),
+                Event::PollVote { channel_id, message_id, votes, added, many } => {
+                    self.on_poll_vote(channel_id, message_id, votes, added, many)
+                }
                 Event::MessageAck { channel_id, message_id } => {
                     self.state.borrow_mut().read.ack(channel_id, message_id);
                     self.withdraw_notification(channel_id);
@@ -234,6 +238,7 @@ impl App {
                     self.refresh_badges();
                 }
                 Event::Resumed => {
+                    self.timelines.borrow_mut().held.resumed();
                     self.state.borrow_mut().members.resumed();
                     self.send_member_requests();
                     let name = {
@@ -245,6 +250,7 @@ impl App {
                     // Replayed messages have already updated the open channel.
                 }
                 Event::Closed { code, reason, resume } => {
+                    self.timelines.borrow_mut().held.closed();
                     self.state.borrow_mut().resume = resume;
                     if Event::is_fatal_close(code) {
                         *self.state.borrow_mut() = State::default();
@@ -265,6 +271,8 @@ impl App {
     }
 
     pub(super) fn on_ready(self: &Rc<Self>, ready: Ready) {
+        // A new session: what we hold for each channel may have missed events.
+        self.timelines.borrow_mut().held.opened();
         let Ready {
             user,
             account,

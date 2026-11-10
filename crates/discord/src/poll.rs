@@ -126,6 +126,36 @@ impl Poll {
         }
     }
 
+    /// A vote for `answer` arrived, as `addReaction` in 383233 counts a vote:
+    /// ours is counted once, and in a DM the other side's only if no one else
+    /// counted for the answer, since two people can't vote twice.
+    pub fn vote(&mut self, answer: u32, me: bool, dm: bool) {
+        let results = self.results.get_or_insert_with(Results::default);
+        let Some(count) = results.answer_counts.iter_mut().find(|c| c.id == answer) else {
+            results.answer_counts.push(Count { id: answer, count: 1, me_voted: me });
+            return;
+        };
+        if dm && !me && count.count - u32::from(count.me_voted).min(count.count) >= 1 {
+            return;
+        }
+        if !(me && count.me_voted) {
+            count.count += 1;
+        }
+        count.me_voted |= me;
+    }
+
+    /// A vote for `answer` was taken back (`removeReaction`). Ours may be gone
+    /// from the count already, and an answer left with no votes has no count.
+    pub fn unvote(&mut self, answer: u32, me: bool) {
+        let Some(results) = &mut self.results else { return };
+        let Some(count) = results.answer_counts.iter_mut().find(|c| c.id == answer) else { return };
+        if !(me && !count.me_voted) {
+            count.count = count.count.saturating_sub(1);
+        }
+        count.me_voted &= !me;
+        results.answer_counts.retain(|c| c.count > 0);
+    }
+
     /// What the poll asks of a voter.
     pub fn prompt(&self) -> &'static str {
         if self.allow_multiselect { "Select one or more answers" } else { "Select one answer" }
@@ -240,5 +270,58 @@ mod tests {
                 percent: 75
             })
         );
+    }
+
+    fn counts(p: &Poll) -> Vec<(u32, u32, bool)> {
+        p.results.iter().flat_map(|r| &r.answer_counts).map(|c| (c.id, c.count, c.me_voted)).collect()
+    }
+
+    #[test]
+    fn a_vote_counts_for_its_answer() {
+        let mut p = poll("null", r#"{"id":1,"count":2,"me_voted":false}"#);
+        p.vote(1, false, false);
+        p.vote(2, true, false);
+        assert_eq!(counts(&p), [(1, 3, false), (2, 1, true)], "a first vote makes its count");
+        let mut empty: Poll = serde_json::from_str(r#"{"question":{},"answers":[{"answer_id":1}]}"#).unwrap();
+        empty.vote(1, false, false);
+        assert_eq!(empty.votes(1), 1, "a poll nobody had voted on has no results yet");
+    }
+
+    #[test]
+    fn our_own_vote_is_counted_once() {
+        // We voted here, so the count has it already when the gateway repeats it.
+        let mut p = poll("null", r#"{"id":1,"count":2,"me_voted":true}"#);
+        p.vote(1, true, false);
+        assert_eq!(counts(&p), [(1, 2, true)]);
+    }
+
+    #[test]
+    fn in_a_dm_the_other_side_votes_an_answer_once() {
+        let mut p = poll("null", r#"{"id":1,"count":1,"me_voted":false}"#);
+        p.vote(1, false, true);
+        assert_eq!(p.votes(1), 1, "a repeat in a two-person chat");
+        p.vote(1, false, false);
+        assert_eq!(p.votes(1), 2, "anywhere else it is another voter");
+        p.vote(1, true, true);
+        assert_eq!(counts(&p), [(1, 3, true)], "ours always counts");
+    }
+
+    #[test]
+    fn a_vote_taken_back_leaves_its_count() {
+        let mut p = poll("null", r#"{"id":1,"count":2,"me_voted":true},{"id":2,"count":1,"me_voted":false}"#);
+        p.unvote(1, false);
+        p.unvote(2, false);
+        assert_eq!(counts(&p), [(1, 1, true)], "the last vote of an answer takes its count with it");
+        p.unvote(1, true);
+        assert_eq!(counts(&p), [], "ours");
+        p.unvote(3, false);
+    }
+
+    #[test]
+    fn taking_back_ours_twice_counts_once() {
+        // The client has taken it off already when the gateway says so.
+        let mut p = poll("null", r#"{"id":1,"count":2,"me_voted":false}"#);
+        p.unvote(1, true);
+        assert_eq!(counts(&p), [(1, 2, false)]);
     }
 }

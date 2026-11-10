@@ -15,6 +15,7 @@ pub mod embed;
 mod endpoints;
 pub mod experiments;
 pub mod gateway;
+pub mod held;
 pub mod history;
 mod identity;
 mod inflate;

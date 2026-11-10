@@ -149,6 +149,21 @@ pub enum Event {
         id: Snowflake,
         channel_id: Snowflake,
     },
+    /// A purge or an automod sweep.
+    MessageDeleteBulk {
+        ids: Vec<Snowflake>,
+        channel_id: Snowflake,
+    },
+    /// Votes on a poll's answers, as `(answer_id, user_id)`: added, or taken back.
+    /// `many` is a `MESSAGE_POLL_VOTE_ADD_MANY`, which the client counts
+    /// without its DM rule.
+    PollVote {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        votes: Vec<(u32, Snowflake)>,
+        added: bool,
+        many: bool,
+    },
     /// One of our clients (maybe this one) marked `channel_id` read up to `message_id`.
     MessageAck {
         channel_id: Snowflake,
@@ -812,6 +827,42 @@ fn dispatch(state: &State, name: &str, data: Value) {
             };
             Event::MessageDelete { id, channel_id }
         }
+        "MESSAGE_POLL_VOTE_ADD" | "MESSAGE_POLL_VOTE_REMOVE" => {
+            let (Some(channel_id), Some(message_id), Some(user), Some(answer)) = (
+                parse_id(&data["channel_id"]),
+                parse_id(&data["message_id"]),
+                parse_id(&data["user_id"]),
+                data["answer_id"].as_u64().and_then(|a| u32::try_from(a).ok()),
+            ) else {
+                return;
+            };
+            Event::PollVote {
+                channel_id,
+                message_id,
+                votes: vec![(answer, user)],
+                added: name.ends_with("ADD"),
+                many: false,
+            }
+        }
+        "MESSAGE_POLL_VOTE_ADD_MANY" => {
+            let (Some(channel_id), Some(message_id)) = (parse_id(&data["channel_id"]), parse_id(&data["message_id"]))
+            else {
+                return;
+            };
+            let votes = data["votes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| Some((u32::try_from(v["answer_id"].as_u64()?).ok()?, v["users"].as_array()?)))
+                .flat_map(|(answer, users)| users.iter().filter_map(parse_id).map(move |user| (answer, user)))
+                .collect();
+            Event::PollVote { channel_id, message_id, votes, added: true, many: true }
+        }
+        "MESSAGE_DELETE_BULK" => {
+            let Some(channel_id) = parse_id(&data["channel_id"]) else { return };
+            let ids = data["ids"].as_array().into_iter().flatten().filter_map(parse_id).collect();
+            Event::MessageDeleteBulk { ids, channel_id }
+        }
         _ => return,
     };
     send_event(state, event);
@@ -1087,5 +1138,59 @@ mod tests {
         });
         let system: Vec<bool> = private_channels(&ready).iter().map(Channel::is_system_dm).collect();
         assert_eq!(system, [true, false, false]);
+    }
+
+    fn fresh_state() -> (State, async_channel::Receiver<Event>) {
+        let (tx, rx) = async_channel::unbounded();
+        let state = State {
+            token: String::new(),
+            me: Cell::new(Some(Snowflake(5))),
+            session: RefCell::new(None),
+            resuming: Cell::new(false),
+            resumable: Cell::new(true),
+            established: Cell::new(true),
+            seq: Cell::new(None),
+            acked: Cell::new(true),
+            events: tx,
+        };
+        (state, rx)
+    }
+
+    #[test]
+    fn a_bulk_delete_names_every_message_it_removes() {
+        // `MESSAGE_DELETE_BULK` in 596344 removes `ids` from the channel's messages.
+        let (state, rx) = fresh_state();
+        dispatch(&state, "MESSAGE_DELETE_BULK", json!({"ids": ["7", "9", "x"], "channel_id": "3", "guild_id": "1"}));
+        let Ok(Event::MessageDeleteBulk { ids, channel_id }) = rx.try_recv() else { panic!("no bulk delete") };
+        assert_eq!((ids, channel_id), (vec![Snowflake(7), Snowflake(9)], Snowflake(3)));
+        dispatch(&state, "MESSAGE_DELETE_BULK", json!({"ids": ["7"]}));
+        assert!(rx.try_recv().is_err(), "no channel, nothing to remove from");
+    }
+
+    #[test]
+    fn poll_votes_arrive_one_or_many() {
+        // 225123 turns these into reactions of the vote type.
+        let (state, rx) = fresh_state();
+        let one = json!({"channel_id": "3", "message_id": "9", "user_id": "5", "answer_id": 2, "guild_id": "1"});
+        dispatch(&state, "MESSAGE_POLL_VOTE_ADD", one.clone());
+        let Ok(Event::PollVote { channel_id, message_id, votes, added, many }) = rx.try_recv() else {
+            panic!("no vote")
+        };
+        assert_eq!(
+            (channel_id, message_id, votes, added, many),
+            (Snowflake(3), Snowflake(9), vec![(2, Snowflake(5))], true, false)
+        );
+        dispatch(&state, "MESSAGE_POLL_VOTE_REMOVE", one);
+        let Ok(Event::PollVote { added, .. }) = rx.try_recv() else { panic!("no vote taken back") };
+        assert!(!added);
+        dispatch(
+            &state,
+            "MESSAGE_POLL_VOTE_ADD_MANY",
+            json!({"channel_id": "3", "message_id": "9", "votes": [
+                {"answer_id": 1, "users": ["5", "6"]}, {"answer_id": 2, "users": ["7"]}]}),
+        );
+        let Ok(Event::PollVote { votes, added, many, .. }) = rx.try_recv() else { panic!("no votes") };
+        let all = [(1, Snowflake(5)), (1, Snowflake(6)), (2, Snowflake(7))];
+        assert_eq!((votes, added, many), (all.to_vec(), true, true));
     }
 }
