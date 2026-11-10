@@ -121,7 +121,9 @@ changed for unrelated reasons only needs a note in the issue.
   except the system DM when it has unread messages, and throws away one with an
   expired link: `$r` in 679164, which ends a signed link an hour before its
   `ex`. `loadComplete` in 755364 sets both flags from `isStale`. What else
-  moves them is in the watched `MessageStore`.
+  moves them is in the watched `MessageStore`. A page that lands stale for the
+  open channel is asked for again by `$`, at most every ten seconds a channel
+  (anchor `MessageManager.staleFetch`); Neucord leaves a stale jump page be.
 - **How the gateway connects** (`GATEWAY_QUERY` in `identity.rs`,
   `inflate.rs`). What each compression asks for is watched (`getAlgorithm`,
   and `usesLegacyCompression` for IDENTIFY's `compress`). Which one the

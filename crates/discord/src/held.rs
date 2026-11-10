@@ -10,7 +10,8 @@
 //! every channel by READY (`CONNECTION_OPEN`) and for one that we lose View
 //! Channel on. A resume clears nothing: Discord replays what was missed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use crate::Snowflake;
 
@@ -40,10 +41,15 @@ pub struct Opening {
     pub system_dm_unread: bool,
 }
 
+/// How soon after a page a stale one is asked for again (`b` in 123363).
+const REFETCH_GAP: Duration = Duration::from_secs(10);
+
 #[derive(Debug, Default)]
 pub struct Held {
     link: Link,
     fresh: HashSet<Snowflake>,
+    /// When each channel last had a page arrive that was let through.
+    landed: HashMap<Snowflake, Instant>,
 }
 
 impl Held {
@@ -75,21 +81,41 @@ impl Held {
     /// page asked for without a session, or across a connection change, may
     /// have missed what came while the connection was down: `isStale` in
     /// `fetchMessages` (138399).
-    pub fn loaded(&mut self, channel: Snowflake, started: Started) {
-        if started.established && started.changed == self.link.changed {
-            self.fresh.insert(channel);
-        } else {
+    pub fn loaded(&mut self, channel: Snowflake, started: Started) -> bool {
+        let stale = self.is_stale(started);
+        if stale {
             self.fresh.remove(&channel);
+        } else {
+            self.fresh.insert(channel);
         }
+        stale
     }
 
     /// An older or newer page arrived. A stale one takes the trust in the
     /// channel away, as it does in the client; a current one gives none to a
-    /// channel whose newest page hasn't been asked for.
-    pub fn paged(&mut self, channel: Snowflake, started: Started) {
+    /// channel whose newest page hasn't been asked for. Says whether it was
+    /// stale.
+    pub fn paged(&mut self, channel: Snowflake, started: Started) -> bool {
         if self.fresh.contains(&channel) {
-            self.loaded(channel, started);
+            return self.loaded(channel, started);
         }
+        self.is_stale(started)
+    }
+
+    fn is_stale(&self, started: Started) -> bool {
+        !started.established || started.changed != self.link.changed
+    }
+
+    /// Whether a page that just arrived for `channel`, `stale` or not, is
+    /// asked for again at once (`$` in 123363): only the open channel, only
+    /// while connected, and not within ten seconds of the last page that got
+    /// this far, which the client times for every page, stale or not.
+    pub fn refetch(&mut self, channel: Snowflake, stale: bool, open: bool, now: Instant) -> bool {
+        if self.landed.get(&channel).is_some_and(|&last| now.saturating_duration_since(last) < REFETCH_GAP) {
+            return false;
+        }
+        self.landed.insert(channel, now);
+        stale && open && self.link.established
     }
 
     /// We may no longer see the channels that `lost` picks out. Nothing tells
@@ -252,5 +278,55 @@ mod tests {
     fn a_channel_being_loaded_is_not_asked_for_twice() {
         let held = session(&[]);
         assert!(!held.fetch_on_open(A, Opening { loading: true, ..OPEN }));
+    }
+
+    /// A page for `A` that crossed a connection change, which is stale.
+    fn stale_page(held: &mut Held) -> bool {
+        let started = held.started();
+        held.closed();
+        held.resumed();
+        held.loaded(A, started)
+    }
+
+    #[test]
+    fn a_stale_page_of_the_open_channel_is_asked_for_again() {
+        let mut held = session(&[]);
+        let stale = stale_page(&mut held);
+        assert!(stale);
+        assert!(held.refetch(A, stale, true, Instant::now()));
+    }
+
+    #[test]
+    fn a_current_page_or_another_channel_is_not() {
+        let mut held = session(&[]);
+        let started = held.started();
+        let current = held.loaded(A, started);
+        assert!(!held.refetch(A, current, true, Instant::now()), "nothing missed");
+        let stale = stale_page(&mut held);
+        assert!(!held.refetch(B, stale, false, Instant::now()), "not the open channel");
+    }
+
+    #[test]
+    fn nothing_is_asked_for_while_disconnected() {
+        let mut held = session(&[]);
+        let started = held.started();
+        held.closed();
+        let stale = held.loaded(A, started);
+        assert!(!held.refetch(A, stale, true, Instant::now()));
+    }
+
+    #[test]
+    fn a_page_within_ten_seconds_of_the_last_is_let_be() {
+        // Every page starts the ten seconds, stale or not, so a refetch that
+        // lands stale itself doesn't ask again at once.
+        let mut held = session(&[]);
+        let now = Instant::now();
+        let started = held.started();
+        let current = held.loaded(A, started);
+        assert!(!held.refetch(A, current, true, now));
+        let stale = stale_page(&mut held);
+        assert!(!held.refetch(A, stale, true, now + Duration::from_secs(9)));
+        assert!(held.refetch(A, stale, true, now + Duration::from_secs(19)), "ten seconds after the one before");
+        assert!(!held.refetch(A, stale, true, now + Duration::from_secs(20)), "and that one counts too");
     }
 }

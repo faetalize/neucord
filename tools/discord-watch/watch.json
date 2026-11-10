@@ -76,6 +76,7 @@
     "VerificationLevel": ["NONE", "LOW", "MEDIUM", "HIGH", "VERY_HIGH"]
   },
   "methods": [
+    "addReaction",
     "allowAllMessages",
     "allowNoMessages",
     "canDeleteOwnMessage",
@@ -125,6 +126,7 @@
     "isSystemDM",
     "isSystemUser",
     "parseRangeHeader",
+    "removeReaction",
     "renderEmbeds",
     "removeFromMsgDraft",
     "requestGuildMembers",

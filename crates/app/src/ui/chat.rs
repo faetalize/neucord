@@ -365,6 +365,42 @@ impl App {
         }
     }
 
+    /// A purge: every message it names goes, as one by one.
+    pub(super) fn on_message_delete_bulk(self: &Rc<Self>, ids: Vec<Snowflake>, channel_id: Snowflake) {
+        for id in ids {
+            self.on_message_delete(id, channel_id);
+        }
+    }
+
+    /// Votes arrived for a poll, or were taken back. Held channels count too:
+    /// the client keeps their polls current, and so must we.
+    pub(super) fn on_poll_vote(
+        self: &Rc<Self>,
+        channel: Snowflake,
+        message: Snowflake,
+        votes: Vec<(u32, Snowflake)>,
+        added: bool,
+    ) {
+        let Some(store) = self.timelines.borrow().get(channel).map(|t| t.store.clone()) else { return };
+        let (me, dm) = {
+            let state = self.state.borrow();
+            (state.me(), state.find_channel(channel).is_some_and(|(_, c)| c.kind == ChannelKind::Dm))
+        };
+        let mut changed = None;
+        for (answer, user) in votes {
+            let mine = me == Some(user);
+            let at = timelines::edit(&store, message, |m| {
+                if let Some(poll) = &mut m.poll {
+                    if added { poll.vote(answer, mine, dm) } else { poll.unvote(answer, mine) }
+                }
+            });
+            changed = at.or(changed);
+        }
+        if let Some(position) = changed {
+            self.rebind(&store, position, 1);
+        }
+    }
+
     /// Move the focus to a neighbour of the row at `position` in `store`, if
     /// that row has it and is about to go. The list scrolls to follow its
     /// focus, and GTK would move it to the first row, taking the view to
@@ -696,7 +732,7 @@ impl App {
             }
             match result {
                 Ok(page) => {
-                    this.timelines.borrow_mut().held.loaded(id, started);
+                    let stale = this.timelines.borrow_mut().held.loaded(id, started);
                     this.learn_messages(&page);
                     let full = page.len() == usize::from(limit);
                     let open = this.state.borrow().channel == Some(id);
@@ -724,6 +760,7 @@ impl App {
                             this.mark_read(id);
                         }
                     }
+                    this.refetch_if_stale(id, stale);
                 }
                 Err(e) => {
                     if this.state.borrow().channel == Some(id) {
@@ -732,6 +769,16 @@ impl App {
                 }
             }
         });
+    }
+
+    /// A page just arrived for `channel`. If the connection changed while it
+    /// was on its way, and the channel is open, the client asks for it again
+    /// at once (`$` in 123363).
+    fn refetch_if_stale(self: &Rc<Self>, channel: Snowflake, stale: bool) {
+        let open = self.state.borrow().channel == Some(channel);
+        if self.timelines.borrow_mut().held.refetch(channel, stale, open, Instant::now()) {
+            self.load_newest(channel);
+        }
     }
 
     /// Learn names from a batch of messages (and the ones they reply to) and
@@ -887,9 +934,7 @@ impl App {
         let this = self.clone();
         glib::spawn_future_local(async move {
             let result = rest.messages(channel, limit, Page::Before(before)).await;
-            if result.is_ok() {
-                this.timelines.borrow_mut().held.paged(channel, started);
-            }
+            let stale = result.is_ok() && this.timelines.borrow_mut().held.paged(channel, started);
             let still_cached = this.timelines.borrow().get(channel).is_some_and(|t| t.store == store);
             if let Some(timeline) = this.timelines.borrow_mut().get_mut(channel) {
                 timeline.loading = false;
@@ -897,6 +942,7 @@ impl App {
             if !still_cached {
                 return;
             }
+            let landed = result.is_ok();
             match result {
                 // Only prepend if the store still starts where we asked from;
                 // a merge that replaced it would make this page a gap.
@@ -921,6 +967,9 @@ impl App {
                 }
             }
             this.page_landed(channel);
+            if landed {
+                this.refetch_if_stale(channel, stale);
+            }
         });
     }
 
@@ -941,9 +990,8 @@ impl App {
         let this = self.clone();
         glib::spawn_future_local(async move {
             let result = rest.messages(channel, limit, Page::After(after)).await;
-            if result.is_ok() {
-                this.timelines.borrow_mut().held.paged(channel, started);
-            }
+            let stale = result.is_ok() && this.timelines.borrow_mut().held.paged(channel, started);
+            let landed = result.is_ok();
             let still_detached = {
                 let mut timelines = this.timelines.borrow_mut();
                 let timeline = timelines.get_mut(channel).filter(|t| t.store == store);
@@ -979,6 +1027,9 @@ impl App {
                 }
             }
             this.page_landed(channel);
+            if landed {
+                this.refetch_if_stale(channel, stale);
+            }
         });
     }
 
@@ -1093,7 +1144,11 @@ impl App {
             }) else {
                 return;
             };
-            this.timelines.borrow_mut().held.loaded(channel, started);
+            let stale = this.timelines.borrow_mut().held.loaded(channel, started);
+            // The client asks for the page around the message again when it
+            // lands stale; we don't, but its ten seconds still run.
+            let open = this.state.borrow().channel == Some(channel);
+            this.timelines.borrow_mut().held.refetch(channel, stale, open, Instant::now());
             this.update_present_bar();
             this.update_unread_bar();
             then(&this, &store);

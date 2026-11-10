@@ -173,6 +173,10 @@ impl App {
                 Event::MessageCreate(message) => self.on_message(*message),
                 Event::MessageUpdate(edit) => self.on_message_update(edit),
                 Event::MessageDelete { id, channel_id } => self.on_message_delete(id, channel_id),
+                Event::MessageDeleteBulk { ids, channel_id } => self.on_message_delete_bulk(ids, channel_id),
+                Event::PollVote { channel_id, message_id, votes, added } => {
+                    self.on_poll_vote(channel_id, message_id, votes, added)
+                }
                 Event::MessageAck { channel_id, message_id } => {
                     self.state.borrow_mut().read.ack(channel_id, message_id);
                     self.withdraw_notification(channel_id);
