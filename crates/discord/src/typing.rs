@@ -362,6 +362,16 @@ mod tests {
     }
 
     #[test]
+    fn a_message_shown_again_cancels_what_was_typed_since() {
+        let mut typing = Typing::default();
+        typing.message(ROOM, ME, true);
+        let meanwhile = typing.typed(ROOM, ME, 500).unwrap();
+        typing.message(ROOM, ME, true);
+        assert_eq!(typing.send_due(meanwhile.token, 2_000), None, "the send waiting is withdrawn");
+        assert!(typing.typers(ROOM, 2_000).is_empty());
+    }
+
+    #[test]
     fn typing_in_another_channel_withdraws_the_send_waiting_in_the_first() {
         let mut typing = Typing::default();
         let here = typing.typed(ROOM, ME, 0).unwrap();

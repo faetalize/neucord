@@ -59,8 +59,7 @@ changed for unrelated reasons only needs a note in the issue.
   feeds it isn't watched either: 138399
   resets the cooldown only after a send succeeds and reads `retry_after` on
   `SLOWMODE_RATE_LIMITED`.
-- **When we say we're typing, and who is listed** (`typing.rs`). The store is
-  watched (`TypingStore`: the ten seconds, the schedule, the crowd of six).
+- **When we say we're typing, and who is listed** (`typing.rs`).
   `handleTextareaChange` in 699344 sends for any change to a box that isn't
   empty, unless the text starts with `/` or is the `+:name:` reaction
   shortcut, and stops when the box is emptied. 620014 (anchor

@@ -580,10 +580,10 @@ impl App {
         });
         let ping = self.reply_ping.is_active();
         self.record_slowmode(channel, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
-        // The client's optimistic message, which ends what we were typing.
-        let me = self.state.borrow().me();
-        if let Some(me) = me {
-            self.state.borrow_mut().typing.message(channel, me, true);
+        // The client shows a message as sent before the request, ending what
+        // we were typing, unless files go with it: those it shows on success.
+        if files.is_empty() {
+            self.typing_message_sent(channel);
         }
         self.set_composer_text("");
         self.set_reply(None);
@@ -594,6 +594,8 @@ impl App {
             match this.send_with_uploads(&rest, channel, &text, reply, files).await {
                 Ok(_) => {
                     this.record_slowmode(channel, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
+                    // The client shows every message again on success, which ends what we typed meanwhile.
+                    this.typing_message_sent(channel);
                     // Sending from an old stretch of history returns to the present.
                     if this.timelines.borrow().get(channel).is_some_and(|t| t.detached) {
                         this.load_newest(channel);

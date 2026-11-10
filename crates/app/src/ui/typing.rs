@@ -20,6 +20,15 @@ impl App {
         self.composer_programmatic.set(false);
     }
 
+    /// Our message to `channel` was shown as sent (138399's `receiveMessage`):
+    /// what we were typing is over, and the schedule starts afresh.
+    pub(super) fn typing_message_sent(&self, channel: Snowflake) {
+        let me = self.state.borrow().me();
+        if let Some(me) = me {
+            self.state.borrow_mut().typing.message(channel, me, true);
+        }
+    }
+
     /// The text in the message box changed because the user changed it.
     pub(super) fn composer_typed(self: &Rc<Self>) {
         // Editing happens in the same box, and is no message being written.
@@ -118,10 +127,9 @@ impl App {
                 .collect()
         };
         let line = &self.typing_line;
-        line.set_visible(!names.is_empty());
         line.set_markup(&markup(false));
         // The names that don't fit give way to "Multiple people".
-        let room = self.composer_box.width();
+        let room = self.composer_box.width() - line.margin_start();
         if room > 0 && line.measure(gtk::Orientation::Horizontal, -1).1 > room {
             line.set_markup(&markup(true));
         }
