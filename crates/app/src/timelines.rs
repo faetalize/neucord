@@ -1,10 +1,11 @@
-//! Message history per channel, kept for recently viewed channels so going
-//! back to one is instant. Each channel has its own `ListStore`; the message
-//! list shows whichever is open by swapping its model.
+//! Message history per channel, kept for channels we viewed so going back to
+//! one is instant, and needs no request. Each channel has its own
+//! `ListStore`; the message list shows whichever is open by swapping its model.
 //!
 //! Stores hold `BoxedAnyObject<Message>`, oldest first. They are filled from
 //! three directions: the newest page when a channel opens (merged into what
-//! is cached), older pages as the user scrolls up, and gateway events.
+//! is cached), older pages as the user scrolls up, and gateway events. Whether
+//! opening a channel asks for the newest page at all is [`Held`]'s to say.
 //!
 //! Jumping to an old message (a reply's original) replaces the store with the
 //! page around it. Until scrolling down pages back to the newest message, the
@@ -12,16 +13,20 @@
 
 use std::collections::HashMap;
 
+use discord::cdn;
+use discord::held::Held;
 use discord::history::Around;
 use discord::{Message, Referenced, Snowflake};
 use gtk::gio;
 use gtk::prelude::*;
 
-/// Channels kept in memory. The open channel is never evicted.
-const CAPACITY: usize = 12;
+/// Channels kept in memory. The open channel is never evicted. The client
+/// evicts none, and asks for nothing it holds, so this is only a bound on
+/// memory: a channel past it is asked for again, which the client wouldn't.
+const CAPACITY: usize = 200;
 /// A channel we left keeps everything up to `MAX_RETAINED` messages, past that the
-/// newest `RETAINED`: the official client's `UNo` and `rLJ`, so going back
-/// asks for no more than it would.
+/// newest `RETAINED`: the official client's `truncate` (755364), so going
+/// back asks for no more than it would.
 const MAX_RETAINED: u32 = 120;
 const RETAINED: u32 = 60;
 
@@ -40,6 +45,8 @@ pub struct Timeline {
 pub struct Timelines {
     channels: HashMap<Snowflake, Timeline>,
     clock: u64,
+    /// Which of the channels can be shown without asking again.
+    pub held: Held,
 }
 
 impl Timelines {
@@ -52,6 +59,7 @@ impl Timelines {
             let oldest = self.channels.iter().min_by_key(|(_, t)| t.last_used).map(|(id, _)| *id);
             if let Some(oldest) = oldest {
                 self.channels.remove(&oldest);
+                self.held.forget(oldest);
             }
         }
         let timeline = self.channels.entry(channel).or_insert_with(|| Timeline {
@@ -75,7 +83,34 @@ impl Timelines {
 
     pub fn clear(&mut self) {
         self.channels.clear();
+        self.held = Held::default();
     }
+
+    /// [`open`](Self::open) for showing the channel. Like the client, a
+    /// channel with a link that has expired (or soon will) is emptied, not
+    /// shown: its images would be dead, so it is asked for again.
+    pub fn reopen(&mut self, channel: Snowflake, now_ms: u64) -> &mut Timeline {
+        let expired = self.channels.get(&channel).is_some_and(|t| holds_expired_link(&t.store, now_ms));
+        if expired {
+            self.held.forget(channel);
+        }
+        let timeline = self.open(channel);
+        if expired {
+            timeline.store.remove_all();
+            timeline.complete = false;
+            timeline.detached = false;
+        }
+        timeline
+    }
+}
+
+fn holds_expired_link(store: &gio::ListStore, now_ms: u64) -> bool {
+    (0..store.n_items()).any(|position| {
+        store
+            .item(position)
+            .and_downcast::<glib::BoxedAnyObject>()
+            .is_some_and(|object| cdn::links_expired(&object.borrow::<Message>(), now_ms))
+    })
 }
 
 pub fn boxed(message: Message) -> glib::BoxedAnyObject {
@@ -391,6 +426,35 @@ mod tests {
         assert!(timeline.complete);
     }
 
+    fn with_attachment(id: u64, url: &str) -> Message {
+        let mut message = msg(id, "");
+        message.attachments =
+            serde_json::from_value(serde_json::json!([{"id": "1", "filename": "a.png", "url": url}])).unwrap();
+        message
+    }
+
+    #[test]
+    fn a_channel_with_an_expired_link_is_emptied_and_asked_for_again() {
+        let live = "https://cdn.discordapp.com/attachments/1/2/a.png?ex=ffffffff";
+        let mut timelines = Timelines::default();
+        timelines.held.opened();
+        let timeline = timelines.open(Snowflake(1));
+        timeline.store.append(&boxed(msg(1, "")));
+        timeline.store.append(&boxed(with_attachment(2, live)));
+        timeline.complete = true;
+        let started = timelines.held.started();
+        timelines.held.loaded(Snowflake(1), started);
+        let kept = timelines.reopen(Snowflake(1), 0);
+        assert_eq!(kept.store.n_items(), 2, "its links are good");
+        assert!(kept.complete);
+
+        let timeline = timelines.reopen(Snowflake(1), u64::MAX / 2000);
+        assert_eq!(timeline.store.n_items(), 0);
+        assert!(!timeline.complete, "an emptied channel is a new one");
+        let opening = discord::held::Opening::default();
+        assert!(timelines.held.fetch_on_open(Snowflake(1), opening));
+    }
+
     #[test]
     fn eviction_is_least_recently_used() {
         let mut timelines = Timelines::default();
@@ -398,9 +462,9 @@ mod tests {
             timelines.open(Snowflake(id));
         }
         timelines.open(Snowflake(0)); // touch 0, so 1 is now the oldest
-        timelines.open(Snowflake(100));
+        timelines.open(Snowflake(1000));
         assert!(timelines.get(Snowflake(0)).is_some());
         assert!(timelines.get(Snowflake(1)).is_none());
-        assert!(timelines.get(Snowflake(100)).is_some());
+        assert!(timelines.get(Snowflake(1000)).is_some());
     }
 }

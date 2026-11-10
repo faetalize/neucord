@@ -5,6 +5,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use discord::held::Opening;
 use discord::history::{AROUND_PAGE, Around, KINETIC_INPUT, Load, Loadable, Position, SCROLL_INPUT, Viewport};
 use discord::notifications;
 use discord::read_state::starts_unread;
@@ -18,7 +19,7 @@ use super::App;
 use super::embeds::{behind_spoiler, embed_widget};
 use super::menus::{self, At, Entry, Item};
 use super::message_row::{MessageRow, Parts};
-use super::state::{Unread, now_unix};
+use super::state::{Unread, now_ms, now_unix};
 use super::widgets::avatar_widget;
 use super::{attachments, components, polls};
 use crate::render::{Context, Names, Spoilers};
@@ -607,8 +608,9 @@ impl App {
             (title, forum, state.rest.clone(), left)
         };
         let subtitle = self.channel_subtitle(id);
-        // The channel we left keeps only its newest messages: live events keep
-        // those current, and coming back refetches the newest page anyway.
+        // The channel we left keeps only its newest messages, which live
+        // events keep current. The client keeps the rest to page back in from
+        // memory; we ask for it.
         if let Some(left) = left
             && let Some(timeline) = self.timelines.borrow_mut().get_mut(left)
         {
@@ -646,13 +648,18 @@ impl App {
         self.update_notice_bar();
 
         // Show what we have at once (instant for a recently viewed channel),
-        // then fetch the newest page and merge it in. The client doesn't ask
-        // again for a channel it has, but it subscribes to servers and we
-        // don't, so we can't tell that the gateway kept this one current (#90).
-        let (store, loading) = {
+        // and ask for the newest page, to merge in, only where the client
+        // would: not for a channel it holds, which the gateway keeps current.
+        let system_dm_unread = {
+            let state = self.state.borrow();
+            state.find_channel(id).is_some_and(|(_, c)| c.is_system_dm() && state.is_unread(c))
+        };
+        let (store, loading, detached, fetch) = {
             let mut timelines = self.timelines.borrow_mut();
-            let timeline = timelines.open(id);
-            (timeline.store.clone(), timeline.loading)
+            let timeline = timelines.reopen(id, u64::try_from(now_ms()).unwrap_or_default());
+            let (store, loading, detached) = (timeline.store.clone(), timeline.loading, timeline.detached);
+            let fetch = timelines.held.fetch_on_open(id, Opening { loading, system_dm_unread });
+            (store, loading, detached, fetch)
         };
         self.scroll_loader.borrow_mut().reset();
         self.selection.set_model(Some(&store));
@@ -660,8 +667,12 @@ impl App {
         self.update_unread_bar();
         self.settle_at_end();
 
-        if rest.is_some() && !loading {
+        if rest.is_some() && fetch {
             self.load_newest(id);
+        } else if !loading && !detached && self.chat_visible() {
+            // What we hold is shown as it is, and reading it is all a page
+            // arriving would have done.
+            self.mark_read(id);
         }
     }
 
@@ -676,6 +687,7 @@ impl App {
             (timeline.store.clone(), timeline.detached)
         };
         let limit = self.viewport().first_page();
+        let started = self.timelines.borrow().held.started();
         let this = self.clone();
         glib::spawn_future_local(async move {
             let result = rest.messages(id, limit, Page::Newest).await;
@@ -684,6 +696,7 @@ impl App {
             }
             match result {
                 Ok(page) => {
+                    this.timelines.borrow_mut().held.loaded(id, started);
                     this.learn_messages(&page);
                     let full = page.len() == usize::from(limit);
                     let open = this.state.borrow().channel == Some(id);
@@ -870,9 +883,13 @@ impl App {
         };
         self.scroll_loader.borrow_mut().load_started(self.content_height());
         let limit = self.viewport().scroll_page();
+        let started = self.timelines.borrow().held.started();
         let this = self.clone();
         glib::spawn_future_local(async move {
             let result = rest.messages(channel, limit, Page::Before(before)).await;
+            if result.is_ok() {
+                this.timelines.borrow_mut().held.paged(channel, started);
+            }
             let still_cached = this.timelines.borrow().get(channel).is_some_and(|t| t.store == store);
             if let Some(timeline) = this.timelines.borrow_mut().get_mut(channel) {
                 timeline.loading = false;
@@ -920,9 +937,13 @@ impl App {
         };
         self.scroll_loader.borrow_mut().load_started(self.content_height());
         let limit = self.viewport().scroll_page();
+        let started = self.timelines.borrow().held.started();
         let this = self.clone();
         glib::spawn_future_local(async move {
             let result = rest.messages(channel, limit, Page::After(after)).await;
+            if result.is_ok() {
+                this.timelines.borrow_mut().held.paged(channel, started);
+            }
             let still_detached = {
                 let mut timelines = this.timelines.borrow_mut();
                 let timeline = timelines.get_mut(channel).filter(|t| t.store == store);
@@ -1042,6 +1063,7 @@ impl App {
         if let Some(timeline) = self.timelines.borrow_mut().get_mut(channel) {
             timeline.loading = true;
         }
+        let started = self.timelines.borrow().held.started();
         let this = self.clone();
         glib::spawn_future_local(async move {
             let result = rest.messages(channel, AROUND_PAGE, Page::Around(id)).await;
@@ -1071,6 +1093,7 @@ impl App {
             }) else {
                 return;
             };
+            this.timelines.borrow_mut().held.loaded(channel, started);
             this.update_present_bar();
             this.update_unread_bar();
             then(&this, &store);

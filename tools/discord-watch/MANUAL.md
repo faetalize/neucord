@@ -115,6 +115,13 @@ changed for unrelated reasons only needs a note in the issue.
   `handleUserScrollGesture` with its keys in `il`. What a page around a
   message says about the channel's ends, and the query's order, are in
   `fetchMessages` in 138399.
+- **When opening a channel fetches it again** (`discord::held`,
+  `Timelines::reopen`). `M` in 123363 (anchor `Found expired attachment link`)
+  asks for no page of a channel whose messages are `ready` and not `cached`,
+  except the system DM when it has unread messages, and throws away one with an
+  expired link: `$r` in 679164, which ends a signed link an hour before its
+  `ex`. `loadComplete` in 755364 sets both flags from `isStale`. What else
+  moves them is in the watched `MessageStore`.
 - **How the gateway connects** (`GATEWAY_QUERY` in `identity.rs`,
   `inflate.rs`). What each compression asks for is watched (`getAlgorithm`,
   and `usesLegacyCompression` for IDENTIFY's `compress`). Which one the

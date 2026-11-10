@@ -147,6 +147,7 @@
     "GuildVerificationStore",
     "JoinedThreadsStore",
     "LoginRequiredActionStore",
+    "MessageStore",
     "PendingReplyStore",
     "PermissionStore",
     "RegionalFeatureConfigStore",
