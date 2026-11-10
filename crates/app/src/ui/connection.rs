@@ -277,6 +277,7 @@ impl App {
             guild_folders,
             media_settings,
             developer_mode,
+            media_takedown_regulated,
             message_display_compact,
             required_action,
             experiments,
@@ -307,6 +308,7 @@ impl App {
             state.notifications = notification_settings;
             state.media = media_settings;
             state.developer_mode = developer_mode;
+            state.media_takedown_regulated = media_takedown_regulated;
             state.message_display_compact = message_display_compact;
             state.required_action = required_action;
             state.account = Some(account);

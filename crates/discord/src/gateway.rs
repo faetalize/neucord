@@ -66,6 +66,8 @@ pub struct Ready {
     pub guild_folders: Vec<GuildFolder>,
     pub media_settings: MediaSettings,
     pub developer_mode: bool,
+    /// See [`crate::regional::media_takedown_regulated`].
+    pub media_takedown_regulated: bool,
     pub message_display_compact: bool,
     /// A step Discord requires before the account can be used, if any
     /// (see [`crate::account`]).
@@ -590,6 +592,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
                     media
                 },
                 developer_mode: settings::developer_mode(&data["user_settings"]).unwrap_or(false),
+                media_takedown_regulated: crate::regional::media_takedown_regulated(&data["regional_feature_config"]),
                 message_display_compact: settings::message_display_compact(&data["user_settings"]).unwrap_or(false),
                 required_action: data["required_action"].as_str().map(str::to_owned),
                 experiments,

@@ -32,6 +32,7 @@
     ],
     "LoginRequiredAction": ["UPDATE_PASSWORD"],
     "MFALevel": ["NONE", "ELEVATED"],
+    "MediaTakedownRegulation": ["TIDA", "UK_STOPNCII", "BRAZIL_ONLINE_SAFETY_OF_WOMEN"],
     "MessageFlags": ["CROSSPOSTED", "SUPPRESS_EMBEDS", "EPHEMERAL", "IS_VOICE_MESSAGE", "IS_COMPONENTS_V2"],
     "MessageReferenceType": ["DEFAULT", "FORWARD"],
     "MessageType": [
@@ -125,6 +126,7 @@
     "LoginRequiredActionStore",
     "PendingReplyStore",
     "PermissionStore",
+    "RegionalFeatureConfigStore",
     "RpcNotificationSettingsStore",
     "SafetyHubStore",
     "SlowmodeStore"

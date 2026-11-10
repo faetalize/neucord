@@ -81,7 +81,7 @@ pub(super) type Table<T, C = App> = &'static [&'static [Entry<T, C>]];
 
 /// A message's menu: what Neucord has of the official client's (761304),
 /// in its order.
-pub(super) const MESSAGE: Table<MessageTarget> = &[
+const MESSAGE: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
     &[edits::EDIT, composer::REPLY],
     &[chat::COPY_TEXT, chat::COPY_MESSAGE_LINK],
@@ -89,6 +89,24 @@ pub(super) const MESSAGE: Table<MessageTarget> = &[
     &[chat::COPY_LINK, chat::OPEN_LINK],
     &[chat::COPY_MESSAGE_ID],
 ];
+
+/// [`MESSAGE`] where the media takedown regulation is TIDA: the client (761304)
+/// puts the Copy ID group (50268) before the link group (777933). The group
+/// between them holds nothing Neucord has.
+const MESSAGE_REGULATED: Table<MessageTarget> = &[
+    &[chat::COPY_SELECTION],
+    &[edits::EDIT, composer::REPLY],
+    &[chat::COPY_TEXT, chat::COPY_MESSAGE_LINK],
+    &[edits::DELETE],
+    &[chat::COPY_MESSAGE_ID],
+    &[chat::COPY_LINK, chat::OPEN_LINK],
+];
+
+/// The message menu for an account: `regulated` is READY's media takedown
+/// regulation being TIDA, which the client orders the last groups by.
+pub(super) fn message(regulated: bool) -> Table<MessageTarget> {
+    if regulated { MESSAGE_REGULATED } else { MESSAGE }
+}
 
 /// Added below the message box's own menu (GTK's cut, copy, paste and
 /// emoji). The official client's (194400) also has spellcheck and more.
@@ -435,6 +453,30 @@ mod tests {
         assert_eq!(section(&settings, 0).n_items(), 2);
         // Names from Discord keep their underscores.
         assert_eq!(label(&section(menu.upcast_ref(), 2), 0).as_deref(), Some("mod__team"));
+    }
+
+    /// The names of a table's entries, section by section.
+    fn names(table: Table<MessageTarget>) -> Vec<Vec<&'static str>> {
+        let name = |entry: &Entry<MessageTarget>| match entry {
+            Entry::Item(item) => item.name,
+            Entry::Choices(choices) => choices.name,
+        };
+        table.iter().map(|entries| entries.iter().map(name).collect()).collect()
+    }
+
+    #[test]
+    fn message_menu_puts_the_id_before_the_links_where_media_takedown_is_regulated() {
+        let ends = |regulated| {
+            let names = names(message(regulated));
+            names[names.len() - 2..].to_vec()
+        };
+        assert_eq!(ends(false), [vec!["copy-link", "open-link"], vec!["copy-message-id"]]);
+        assert_eq!(ends(true), [vec!["copy-message-id"], vec!["copy-link", "open-link"]]);
+        // The two groups swap and nothing else moves.
+        let mut swapped = names(message(false));
+        let n = swapped.len();
+        swapped.swap(n - 2, n - 1);
+        assert_eq!(names(message(true)), swapped);
     }
 
     #[test]
