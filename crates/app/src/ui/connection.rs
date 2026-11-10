@@ -156,8 +156,12 @@ impl App {
                     }
                     self.permissions_changed(Some(guild_id));
                 }
-                Event::AccountUpdate(account) => {
-                    self.state.borrow_mut().account = Some(account);
+                Event::AccountUpdate(account, nitro) => {
+                    {
+                        let mut state = self.state.borrow_mut();
+                        state.account = Some(account);
+                        state.nitro = nitro;
+                    }
                     // 2FA turned on or off changes moderators' permissions.
                     self.permissions_changed(None);
                 }
@@ -261,6 +265,7 @@ impl App {
         let Ready {
             user,
             account,
+            nitro,
             guilds,
             members,
             private_channels,
@@ -272,8 +277,7 @@ impl App {
             developer_mode,
             message_display_compact,
             required_action,
-            // Nothing the app shows depends on an experiment yet.
-            experiments: _,
+            experiments,
         } = ready;
         self.learn_users(private_channels.iter().flat_map(|c| &c.recipients));
         self.learn_users(
@@ -304,6 +308,8 @@ impl App {
             state.message_display_compact = message_display_compact;
             state.required_action = required_action;
             state.account = Some(account);
+            state.nitro = nitro;
+            state.experiments = experiments;
             let store = (!state.persisted).then(|| (state.token.clone(), user.username.clone()));
             state.persisted = true;
             state.users.insert(user.id.0, user.display_name().to_string());

@@ -17,6 +17,7 @@ pub mod history;
 mod identity;
 mod inflate;
 mod invalid;
+pub mod limits;
 pub mod markup;
 pub mod members;
 pub mod model;

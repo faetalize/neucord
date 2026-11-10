@@ -376,6 +376,8 @@ pub struct Guild {
     pub member_count: Option<u64>,
     pub hub_type: Option<u8>,
     pub vanity_url_code: Option<String>,
+    /// Boost level, 0 to 3.
+    pub premium_tier: u8,
 }
 
 /// What Neucord uses of our own member in a server, which READY, GUILD_CREATE
@@ -438,6 +440,7 @@ impl Guild {
         self.member_count = update.member_count.or(self.member_count);
         self.hub_type = update.hub_type;
         self.vanity_url_code = update.vanity_url_code;
+        self.premium_tier = update.premium_tier;
     }
 
     /// One of the server's channels, not counting threads.
@@ -611,6 +614,7 @@ impl<'de> Deserialize<'de> for Guild {
             member_count: value["member_count"].as_u64(),
             hub_type: props["hub_type"].as_u64().and_then(|t| u8::try_from(t).ok()),
             vanity_url_code: props["vanity_url_code"].as_str().map(String::from),
+            premium_tier: props["premium_tier"].as_u64().and_then(|t| u8::try_from(t).ok()).unwrap_or(0),
         })
     }
 }
