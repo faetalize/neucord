@@ -78,6 +78,7 @@ pub struct App {
     scroller: gtk::ScrolledWindow,
     composer: gtk::TextView,
     composer_box: gtk::Box,
+    length: composer::LengthIndicator,
     /// In place of the composer where we can't post: message requests, the
     /// system DM, a timeout. Above it while slowmode makes us wait.
     notice_bar: gtk::Box,
@@ -204,6 +205,7 @@ impl App {
                 .css_classes(["composer-input"])
                 .build(),
             composer_box: gtk::Box::builder().css_classes(["composer", "card-row"]).build(),
+            length: composer::LengthIndicator::new(),
             notice_bar: gtk::Box::builder()
                 .spacing(8)
                 .visible(false)

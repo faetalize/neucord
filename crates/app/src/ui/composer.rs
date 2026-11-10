@@ -4,12 +4,13 @@
 use std::rc::Rc;
 use std::time::Duration;
 
+use adw::prelude::*;
 use discord::cooldowns::{Slowmode, bypasses_slowmode, wait_words};
+use discord::limits::{LengthCount, TooLong, message_length};
 use discord::rest::Reply;
 use discord::verification::{self, Gate};
 use discord::{Channel, Message, Snowflake};
 use gtk::glib;
-use gtk::prelude::*;
 
 use super::App;
 use super::chat::MessageTarget;
@@ -35,6 +36,39 @@ pub(super) struct ReplyCtx {
     /// Set where the ping can't be toggled, as in the official client:
     /// replies to yourself never ping, replies in DMs always do.
     pub(super) fixed_ping: Option<bool>,
+}
+
+/// How long the message box's text is against the limit, in its corner.
+pub(super) struct LengthIndicator {
+    root: gtk::Box,
+    icon: gtk::Image,
+    number: gtk::Label,
+}
+
+impl LengthIndicator {
+    pub(super) fn new() -> Self {
+        let icon = gtk::Image::from_icon_name("starred-symbolic");
+        let number = gtk::Label::builder().css_classes(["numeric"]).build();
+        let root = gtk::Box::builder().spacing(6).valign(gtk::Align::Center).visible(false).build();
+        root.append(&icon);
+        root.append(&number);
+        Self { root, icon, number }
+    }
+
+    fn show(&self, count: Option<LengthCount>) {
+        self.root.set_visible(count.is_some());
+        let Some(count) = count else { return };
+        self.icon.set_visible(count.powered);
+        self.icon.set_tooltip_text(Some(&count.powered_tooltip()));
+        self.number.set_visible(count.number);
+        self.number.set_label(&count.remaining.to_string());
+        self.number.set_tooltip_text(Some(&count.tooltip()));
+        if count.remaining < 0 {
+            self.number.add_css_class("error");
+        } else {
+            self.number.remove_css_class("error");
+        }
+    }
 }
 
 #[derive(Default)]
@@ -77,6 +111,7 @@ impl App {
         area.append(&self.reply_bar);
         self.build_edit_bar(area);
         self.composer_box.append(&self.composer);
+        self.composer_box.append(&self.length.root);
         area.append(&self.composer_box);
 
         // Mention autocomplete popup, anchored to the composer.
@@ -95,6 +130,7 @@ impl App {
             move |_| {
                 if let Some(this) = this.upgrade() {
                     this.update_mention_popup();
+                    this.update_length_indicator();
                 }
             }
         });
@@ -359,6 +395,25 @@ impl App {
         });
     }
 
+    /// Draw the length indicator for what the box holds now.
+    pub(super) fn update_length_indicator(&self) {
+        let buffer = self.composer.buffer();
+        let length = message_length(&buffer.text(&buffer.start_iter(), &buffer.end_iter(), false));
+        let count = self.state.borrow().limits().length_count(length, self.editing().is_some());
+        self.length.show(count);
+    }
+
+    /// Tell the user a message is too long, and keep it in the box.
+    pub(super) fn show_too_long(self: &Rc<Self>, too_long: TooLong) {
+        let dialog = adw::AlertDialog::new(Some(too_long.heading()), Some(&too_long.body()));
+        dialog.add_response("okay", "_Okay");
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            dialog.choose_future(Some(&this.window)).await;
+            this.composer.grab_focus();
+        });
+    }
+
     /// Show or hide the mention popup based on the `@word` at the cursor.
     pub(super) fn update_mention_popup(self: &Rc<Self>) {
         let Some((start, prefix)) = mention_token(&self.composer.buffer()) else {
@@ -486,6 +541,11 @@ impl App {
         // The box follows our permissions, but they may have changed since.
         if !self.state.borrow().can_send(channel) {
             return self.update_notice_bar();
+        }
+        // The client checks length before slowmode. The text stays in the box to be shortened.
+        let too_long = self.state.borrow().limits().check_length(&text);
+        if let Err(too_long) = too_long {
+            return self.show_too_long(too_long);
         }
         // Slowmode would refuse it; the notice bar says how long is left.
         if self.slowmode_left(channel) > 0 {

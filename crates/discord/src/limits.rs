@@ -132,6 +132,60 @@ pub fn message_length(text: &str) -> usize {
     text.encode_utf16().count()
 }
 
+/// A message's length without Nitro, and with the perk.
+const MESSAGE: usize = 2000;
+const LONG_MESSAGE: usize = 4000;
+
+/// A message over the limit, which the client turns back with an alert
+/// (710272). Without the perk it opens a Nitro upsell instead, which
+/// Neucord doesn't copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TooLong {
+    pub length: usize,
+    pub max: usize,
+}
+
+impl TooLong {
+    pub fn heading(&self) -> &'static str {
+        "Your message is too long."
+    }
+
+    /// The client says "of {length} characters shorter", with the whole
+    /// length where the amount over would read right.
+    pub fn body(&self) -> String {
+        format!(
+            "Please make your message of {} characters shorter. We've set the limit at {} characters to be courteous to others.",
+            self.length, self.max
+        )
+    }
+}
+
+/// What the length indicator shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LengthCount {
+    /// Characters left; below zero, over the limit.
+    pub remaining: i64,
+    pub max: usize,
+    /// The number shows only near the limit.
+    pub number: bool,
+    /// The Nitro icon: Nitro is what lets the message past the usual length.
+    pub powered: bool,
+}
+
+impl LengthCount {
+    pub fn tooltip(&self) -> String {
+        match self.remaining {
+            0 => "Message is at max length".to_owned(),
+            r if r > 0 => format!("{r} characters remaining"),
+            _ => "Message is too long".to_owned(),
+        }
+    }
+
+    pub fn powered_tooltip(&self) -> String {
+        format!("Nitro is powering you with {} characters per message!", self.max)
+    }
+}
+
 /// What one message may carry (the client's message upload target, 313034).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Uploads {
@@ -195,7 +249,25 @@ impl Limits<'_> {
     /// The longest message we may send, or edit one to, as
     /// [`message_length`] counts it (135621).
     pub fn max_message_length(&self) -> usize {
-        if self.nitro.has(Perk::IncreasedMessageLength) { 4000 } else { 2000 }
+        if self.nitro.has(Perk::IncreasedMessageLength) { LONG_MESSAGE } else { MESSAGE }
+    }
+
+    /// Refuses `text` if it's over [`Self::max_message_length`]. A message
+    /// is checked trimmed, an edit as the box holds it.
+    pub fn check_length(&self, text: &str) -> Result<(), TooLong> {
+        let (length, max) = (message_length(text), self.max_message_length());
+        if length > max { Err(TooLong { length, max }) } else { Ok(()) }
+    }
+
+    /// What the message box's length indicator draws for a text of `length`,
+    /// counted from the box as it is, untrimmed (263582, drawn in 246049).
+    /// An edit has no Nitro icon.
+    pub fn length_count(&self, length: usize, editing: bool) -> Option<LengthCount> {
+        let max = self.max_message_length();
+        let remaining = max as i64 - length as i64;
+        let number = remaining <= (max / 10) as i64;
+        let powered = !editing && self.nitro.has(Perk::IncreasedMessageLength) && length > MESSAGE && remaining >= 0;
+        (number || powered).then_some(LengthCount { remaining, max, number, powered })
     }
 
     /// What a message may carry in `guild`, or in DMs. The server's side
@@ -311,6 +383,59 @@ mod tests {
         assert_eq!(limit(&Nitro::default()), 2000);
         assert_eq!(limit(&nitro(json!({"premium_type": 3}))), 2000, "Basic doesn't lengthen messages");
         assert_eq!(limit(&nitro(json!({"premium_type": 2}))), 4000);
+    }
+
+    fn counted(n: &Nitro, length: usize, editing: bool) -> Option<LengthCount> {
+        let experiments = Experiments::default();
+        Limits { nitro: n, experiments: &experiments, me: ME }.length_count(length, editing)
+    }
+
+    #[test]
+    fn too_long_messages_are_refused_by_utf16_length() {
+        let experiments = Experiments::default();
+        let free = Nitro::default();
+        let full = nitro(json!({"premium_type": 2}));
+        let check = |n: &Nitro, text: &str| Limits { nitro: n, experiments: &experiments, me: ME }.check_length(text);
+        assert_eq!(check(&free, &"a".repeat(2000)), Ok(()));
+        let over = check(&free, &"a".repeat(2001)).unwrap_err();
+        assert_eq!((over.length, over.max), (2001, 2000));
+        assert!(over.body().contains("message of 2001 characters shorter"));
+        assert!(over.body().contains("limit at 2000 characters"));
+        // 1001 emoji are 2002 units.
+        assert!(check(&free, &"🙂".repeat(1000)).is_ok() && check(&free, &"🙂".repeat(1001)).is_err());
+        assert_eq!(check(&full, &"a".repeat(4000)), Ok(()));
+        assert_eq!(check(&full, &"a".repeat(4001)).unwrap_err().max, 4000);
+    }
+
+    #[test]
+    fn the_indicator_shows_near_the_limit() {
+        let free = Nitro::default();
+        assert_eq!(counted(&free, 1799, false), None, "200 left is where it shows");
+        assert_eq!(counted(&free, 1800, false).map(|c| (c.remaining, c.number, c.powered)), Some((200, true, false)));
+        assert_eq!(counted(&free, 2000, false).unwrap().tooltip(), "Message is at max length");
+        let over = counted(&free, 2010, true).unwrap();
+        assert_eq!((over.remaining, over.tooltip()), (-10, "Message is too long".to_owned()));
+        assert_eq!(counted(&free, 1900, false).unwrap().tooltip(), "100 characters remaining");
+    }
+
+    #[test]
+    fn nitro_shows_the_indicator_past_the_usual_length() {
+        let full = nitro(json!({"premium_type": 2}));
+        assert_eq!(counted(&full, 2000, false), None, "not past it yet");
+        let icon = counted(&full, 2001, false).unwrap();
+        assert!(icon.powered && !icon.number, "the icon alone until near 4000");
+        assert_eq!(icon.powered_tooltip(), "Nitro is powering you with 4000 characters per message!");
+        assert_eq!(counted(&full, 3599, false).map(|c| c.number), Some(false));
+        assert_eq!(counted(&full, 3600, false).map(|c| (c.number, c.powered)), Some((true, true)));
+        assert_eq!(counted(&full, 4000, false).map(|c| (c.remaining, c.powered)), Some((0, true)));
+        assert_eq!(counted(&full, 4001, false).map(|c| (c.remaining, c.number, c.powered)), Some((-1, true, false)));
+        assert_eq!(counted(&full, 3000, true), None, "an edit has no icon");
+        assert_eq!(counted(&full, 3700, true).map(|c| (c.number, c.powered)), Some((true, false)));
+        assert_eq!(
+            counted(&nitro(json!({"premium_type": 3})), 2001, false).map(|c| c.number),
+            Some(true),
+            "no perk, over"
+        );
     }
 
     #[test]

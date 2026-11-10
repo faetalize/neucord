@@ -165,7 +165,6 @@ impl State {
 
     /// What Nitro, boosts and experiments allow us; before READY, what they
     /// allow an account without them.
-    #[expect(dead_code, reason = "for the limits #82 and #120 enforce")]
     pub(super) fn limits(&self) -> Limits<'_> {
         Limits {
             nitro: &self.nitro,

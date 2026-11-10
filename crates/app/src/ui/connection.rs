@@ -164,6 +164,8 @@ impl App {
                     }
                     // 2FA turned on or off changes moderators' permissions.
                     self.permissions_changed(None);
+                    // Nitro changes the length limit.
+                    self.update_length_indicator();
                 }
                 Event::MessageCreate(message) => self.on_message(*message),
                 Event::MessageUpdate(edit) => self.on_message_update(edit),
@@ -326,6 +328,8 @@ impl App {
 
         let me = self.state.borrow().me.as_ref().map(|u| u.display_name().to_owned()).unwrap_or_default();
         self.me_label.set_label(&me);
+        // READY may bring other Nitro, which changes the length limit.
+        self.update_length_indicator();
         self.stack.set_visible_child_name("main");
         self.apply_required_action();
 
