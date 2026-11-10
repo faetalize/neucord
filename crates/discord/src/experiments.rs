@@ -25,12 +25,11 @@ pub fn murmur3(key: &str) -> u32 {
     let data = key.as_bytes();
     let mut h: u32 = 0;
     let mix = |k: u32| k.wrapping_mul(C1).rotate_left(15).wrapping_mul(C2);
-    let mut chunks = data.chunks_exact(4);
-    for chunk in &mut chunks {
-        h ^= mix(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    let (chunks, tail) = data.as_chunks::<4>();
+    for &chunk in chunks {
+        h ^= mix(u32::from_le_bytes(chunk));
         h = h.rotate_left(13).wrapping_mul(5).wrapping_add(0xe654_6b64);
     }
-    let tail = chunks.remainder();
     if !tail.is_empty() {
         let k = tail.iter().rev().fold(0u32, |k, &b| (k << 8) | u32::from(b));
         h ^= mix(k);
