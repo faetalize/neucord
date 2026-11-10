@@ -82,14 +82,16 @@ changed for unrelated reasons only needs a note in the issue.
   `sendMessage` in 138399 doesn't call `unarchiveThreadIfNecessary`
   (7909), while edits and deletes do.
 - **Editing and deleting** (`permissions::can_edit`, `can_delete`;
-  `ui/edits.rs`). The requests are watched (`editMessage`, `deleteMessage`,
+  `ui/edits.rs`, `edits::decide`). The requests are watched (`editMessage`, `deleteMessage`,
   `unarchiveThreadIfNecessary`), as are `canDeleteOwnMessage` and
   `UNDELETABLE`. When each is offered isn't: Edit in 697470 (anchor
   `referralTrialOfferId`), Delete in 483768 (anchor
   `isModeratorReportChannel`), both only where `Id` in 406704 holds, and
   Edit not under `s5` there. An emptied edit asks to delete instead, an
-  unchanged one sends nothing (205120, anchor `onConfirmDelete`), and a
-  crossposted one asks first (91624).
+  unchanged one sends nothing (205120, anchor `onConfirmDelete`), both on
+  the box untrimmed, and what it sends drops only trailing empty lines
+  (`ignoreTrailingEmptyNodes` in 84046's submit); a crossposted one asks
+  first (91624).
 - **Forum and media channels take no message** (the forum page in
   `select_channel`, `permissions::can_send`, `update_notice_bar`). Neucord
   shows no box there, loads nothing and refuses to send, whatever Send
@@ -145,16 +147,14 @@ changed for unrelated reasons only needs a note in the issue.
   The keyboard shortcut uses `Et` there instead, without the Send Messages
   checks.
 - **What Nitro, boosts and experiments allow** (`limits.rs`, and its message
-  length in `ui/composer.rs`, `edits.rs`). `R` in
-  722178, below the perks each premium type includes (anchor
-  `ProductCatalog.tsx`), asks the `perks` bitmask when the user has one,
-  else that table. A message takes 4000 characters with the perk, else
-  2000 (135621, anchor `? 4e3 : 2e3`). A longer one is turned back, sending
-  trimmed and an edit as it stands, which is also what the edit sends, bar
-  trailing empty lines (710272, anchor `MESSAGE_LENGTH_UPSELL`; 205120's
-  `onSubmit`; `ignoreTrailingEmptyNodes` in 323350);
-  the counter shows from a tenth of the limit left, and past 2000 with the
-  perk (263582). A file takes at least 20 MiB
+  length in `ui/composer.rs`). `R` in 722178, below the perks each premium
+  type includes (anchor `ProductCatalog.tsx`), asks the `perks` bitmask when
+  the user has one, else that table. A message takes 4000 characters with
+  the perk, else 2000 (135621, anchor `? 4e3 : 2e3`). A longer one is turned
+  back (710272, anchor `MESSAGE_LENGTH_UPSELL`): a new message once trimmed
+  (`handleSendMessage` in 699344), an edit as it stands. The counter shows
+  from a tenth of the limit left, and past 2000 with the perk (263582,
+  anchor `showsUpsell`). A file takes at least 20 MiB
   (409481), a server gives 10 MiB unless its features raise it (`o2` in
   453771, anchor `uploadSumTooLarge`), premium types give `f5` in 682901
   (anchor `{ 3: { fileSize:`), and a message's total is `jS` in 292348

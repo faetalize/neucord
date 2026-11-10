@@ -542,7 +542,7 @@ impl App {
         if !self.state.borrow().can_send(channel) {
             return self.update_notice_bar();
         }
-        // The client checks length before slowmode; the text stays for trimming.
+        // The client checks length before slowmode. The text stays in the box to be shortened.
         let too_long = self.state.borrow().limits().check_length(&text);
         if let Err(too_long) = too_long {
             return self.show_too_long(too_long);
