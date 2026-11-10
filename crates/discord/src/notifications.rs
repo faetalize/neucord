@@ -47,7 +47,9 @@ pub struct MuteConfig {
     end_time: Option<String>,
 }
 
-/// Muted with no end time, or an end time still in the future.
+/// Muted with no end time, or an end time still in the future. The client
+/// clears a mute with a timer that fires at the end time (544743), so it
+/// ends there; `tG`'s `>=` only matters for a tie in milliseconds.
 pub(crate) fn mute_active(muted: bool, config: Option<&MuteConfig>, now_unix: i64) -> bool {
     if !muted {
         return false;
@@ -147,9 +149,11 @@ impl NotificationSettings {
             .any(|o| mute_active(o.muted, o.mute_config.as_ref(), now_unix))
     }
 
-    /// Anything here is muted: the server, the category or the channel.
+    /// Anything here is muted: the server (for DMs, their own settings
+    /// entry: `isMuted(null)`), the category or the channel.
     pub fn muted(&self, place: &Place, now_unix: i64) -> bool {
-        place.guild.is_some_and(|g| self.guild_muted(g, now_unix)) || self.channel_muted(place, now_unix)
+        self.by_guild.get(&place.guild).is_some_and(|s| mute_active(s.muted, s.mute_config.as_ref(), now_unix))
+            || self.channel_muted(place, now_unix)
     }
 
     pub fn level(&self, place: &Place) -> Level {
@@ -183,8 +187,11 @@ impl NotificationSettings {
     }
 
     /// Should `message`, in `thread`, raise a desktop notification
-    /// (411238)? Not in a thread we muted. Mentions count here whatever
-    /// the server suppresses.
+    /// (411238)? Not in a thread we muted, and not where `allowNoMessages`
+    /// (543465) blocks it first: it asks about the thread as a channel,
+    /// whose "category" is the parent channel, so it sees the server's mute
+    /// and the parent's own mute and level, never the category above it.
+    /// Mentions count here whatever the server suppresses.
     pub fn should_notify_in_thread(
         &self,
         thread: &Channel,
@@ -195,6 +202,10 @@ impl NotificationSettings {
         now_unix: i64,
     ) -> bool {
         if thread.member.as_ref().is_none_or(|m| m.is_muted(now_unix)) {
+            return false;
+        }
+        let as_channel = Place { parent: None, ..*parent };
+        if self.muted(&as_channel, now_unix) || self.level(&as_channel) == Level::Nothing {
             return false;
         }
         match self.thread_level(thread, parent, now_unix) {
@@ -227,20 +238,24 @@ impl NotificationSettings {
         now_unix: i64,
     ) -> bool {
         !is_dropped(message, group_dm, blocked)
-            && (pinged || place.is_some_and(|p| p.guild.is_none() && !self.channel_muted(p, now_unix)))
+            && (pinged || place.is_some_and(|p| p.guild.is_none() && !self.muted(p, now_unix)))
     }
 
-    /// Should a message here raise a desktop notification? DMs notify unless
-    /// muted. In servers, a mention gets through a mute (as in Discord), but
-    /// not a level of "nothing".
+    /// Should a message here raise a desktop notification? `allowNoMessages`
+    /// (543465) comes first, without its opt-in channels, which aren't
+    /// modelled: a mute on the server (for DMs, their settings
+    /// entry), category or channel, or a level of "nothing", silences
+    /// everything, mentions included. Then `mentioned` (`mentions_me`, so
+    /// what the server suppresses is already out) decides under "mentions";
+    /// a DM is no mention for that, so a DM level of "mentions" needs a ping.
     pub fn should_notify(&self, place: &Place, mentioned: bool, now_unix: i64) -> bool {
-        if place.guild.is_none() {
-            return !self.channel_muted(place, now_unix);
+        if self.muted(place, now_unix) {
+            return false;
         }
         match self.level(place) {
             Level::Nothing => false,
             Level::Mentions => mentioned,
-            Level::All => mentioned || !self.muted(place, now_unix),
+            Level::All => true,
         }
     }
 }
@@ -322,6 +337,44 @@ mod tests {
     }
 
     #[test]
+    fn a_mute_ends_at_its_end_time() {
+        let s = NotificationSettings::from_ready(&json!([
+            {"guild_id": "1", "muted": true, "mute_config": {"end_time": "2027-01-15T08:00:00Z"}}
+        ]));
+        let end = glib::DateTime::from_iso8601("2027-01-15T08:00:00Z", None).unwrap().to_unix();
+        assert!(s.guild_muted(Snowflake(1), end - 1));
+        assert!(!s.guild_muted(Snowflake(1), end), "the client's timer clears it at the end time");
+    }
+
+    #[test]
+    fn dms_go_by_their_settings_entry() {
+        let dm = place(None, 5, None);
+        let entry = |extra: Value| {
+            let mut e =
+                json!({"guild_id": null, "channel_overrides": [{"channel_id": "6", "message_notifications": 0}]});
+            e.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            NotificationSettings::from_ready(&json!([e]))
+        };
+        let muted = entry(json!({"muted": true, "mute_config": null}));
+        assert!(!muted.should_notify(&dm, false, NOW), "all DMs muted");
+        assert!(!muted.should_notify(&dm, true, NOW), "mentions too");
+        let expired = entry(json!({"muted": true, "mute_config": {"end_time": "2020-01-01T00:00:00Z"}}));
+        assert!(expired.should_notify(&dm, false, NOW), "an expired mute");
+        let nothing = entry(json!({"message_notifications": 2}));
+        assert!(!nothing.should_notify(&dm, true, NOW), "level nothing");
+        assert!(nothing.should_notify(&place(None, 6, None), false, NOW), "a DM's own level wins");
+        let mentions = entry(json!({"message_notifications": 1}));
+        assert!(!mentions.should_notify(&dm, false, NOW), "level mentions");
+        assert!(mentions.should_notify(&dm, true, NOW));
+        // A mention count follows the same mute.
+        let message: Message = serde_json::from_value(json!({"id": "1", "channel_id": "5",
+            "author": {"id": "7", "username": "x"}, "content": "", "timestamp": "2026-10-26T00:00:00+00:00"}))
+        .unwrap();
+        assert!(!muted.counts_mention(Some(&dm), false, &message, false, |_| false, NOW));
+        assert!(nothing.counts_mention(Some(&dm), false, &message, false, |_| false, NOW), "a level doesn't");
+    }
+
+    #[test]
     fn mention_counts() {
         let s = settings();
         let dm = place(None, 5, None);
@@ -367,7 +420,11 @@ mod tests {
         assert!(!s.should_notify(&place(Some(1), 12, None), false, NOW), "mentions only, not mentioned");
         assert!(s.should_notify(&place(Some(1), 12, None), true, NOW));
         assert!(!s.should_notify(&place(Some(2), 5, None), false, NOW), "muted server");
-        assert!(s.should_notify(&place(Some(2), 5, None), true, NOW), "a mention gets through a mute");
+        assert!(!s.should_notify(&place(Some(2), 5, None), true, NOW), "a mute silences mentions too");
+        assert!(!s.should_notify(&place(Some(1), 11, None), true, NOW), "muted channel, mentions level");
+        assert!(!s.should_notify(&place(Some(1), 12, Some(11)), true, NOW), "muted category");
+        assert!(s.should_notify(&place(Some(1), 20, None), true, NOW), "an expired mute no longer silences");
+        assert!(!s.should_notify(&place(Some(1), 20, None), false, NOW), "but the level still applies");
         assert!(s.should_notify(&place(None, 98, None), false, NOW), "DM");
         assert!(!s.should_notify(&place(None, 99, None), false, NOW), "muted DM");
     }
@@ -403,6 +460,17 @@ mod tests {
         let mut muted = member(1 << 1);
         muted["muted"] = json!(true);
         assert!(!s.should_notify_in_thread(&thread(muted), &parent, &everyone, me, &[], NOW), "muted thread");
+
+        // The client's mute check sees the server and the parent channel itself, whatever our thread flags
+        // say; a category above the parent is only looked at when we chose nothing for the thread.
+        let notify = |flags: u64, parent: &Place| {
+            s.should_notify_in_thread(&thread(member(flags)), parent, &everyone, me, &[], NOW)
+        };
+        assert!(!notify(1 << 1, &place(Some(2), 5, None)), "muted server, thread set to all messages");
+        assert!(!notify(1 << 2, &place(Some(2), 5, None)), "muted server, thread set to mentions");
+        assert!(!notify(1 << 1, &place(Some(1), 11, None)), "muted parent channel");
+        assert!(notify(1 << 1, &place(Some(1), 12, Some(11))), "muted category: not looked at");
+        assert!(!notify(0, &place(Some(1), 12, Some(11))), "muted category, nothing chosen");
     }
 
     #[test]

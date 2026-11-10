@@ -172,9 +172,8 @@ changed for unrelated reasons only needs a note in the issue.
 
 - **Which messages notify** (`notifications.rs`, `on_message` in
   `ui/chat.rs`). The decision is watched (`RpcNotificationSettingsStore`).
-  Levels and mutes resolve in 543465 (`resolvedMessageNotifications`,
-  `isGuildOrCategoryOrChannelMuted`), mute expiry is in 544743, and the
-  mention test in 451919. A thread's level is in 607508
+  Levels and mutes resolve in 543465 (watched), mute expiry is in 544743,
+  and the mention test in 451919. A thread's level is in 607508
   (`NotificationSettings::thread_level`): nothing unless joined, then our
   thread member's flags, else nothing under a muted parent, else the
   parent's level. In threads, the decision ignores what the server
