@@ -706,6 +706,53 @@ mod tests {
         assert!(full.translate(":far: :spin:").locked.is_empty());
     }
 
+    /// The client's parser (`emoji` rule, 451909) looks a typed `:name:` up
+    /// among the emoji we can see, whoever may send them, and only a role we
+    /// lack takes an emoji out of that list. `invalidEmojis` only collects
+    /// the Nitro-locked ones for the notice: the content keeps the markup.
+    #[test]
+    fn a_typed_name_of_an_emoji_we_may_not_send_is_written_as_the_client_does() {
+        let home = guild(
+            "1",
+            &[],
+            vec![
+                custom("9", "zlost", json!({"available": false})),
+                custom("8", "zclub", json!({"roles": ["40"]})),
+                custom("7", "zspin", json!({"animated": true})),
+            ],
+        );
+        let away = guild("2", &[], vec![custom("10", "zfar", json!({}))]);
+        let guilds = [home, away];
+        let typed = ":zlost: :zclub: :zspin: :zfar:";
+
+        // No Nitro: the other server's and the animated one are locked.
+        let free = library(&guilds, json!({}), here(true)).translate(typed);
+        assert_eq!(free.text, "<:zlost:9> :zclub: <a:zspin:7> <:zfar:10>");
+        let locked: Vec<&str> = free.locked.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(locked, ["zspin", "zfar"], "only Nitro makes an emoji invalid");
+
+        // Use External Emojis missing: written out, and nothing to tell.
+        let nitro = json!({"premium_type": 2});
+        let no_permission = library(&guilds, nitro.clone(), here(false)).translate(typed);
+        assert_eq!(no_permission.text, "<:zlost:9> :zclub: <a:zspin:7> <:zfar:10>");
+        assert!(no_permission.locked.is_empty());
+
+        // The server lost the emoji's boosts: written out all the same.
+        let lost = library(&guilds, nitro, here(true)).translate(":zlost:");
+        assert_eq!((lost.text.as_str(), lost.locked.len()), ("<:zlost:9>", 0));
+
+        // A role we lack: not an emoji for us, so the text stays.
+        assert!(free.text.contains(":zclub:") && no_permission.text.contains(":zclub:"));
+    }
+
+    #[test]
+    fn shortcodes_are_gemojis_not_discords() {
+        assert_eq!(library(&[], json!({}), here(true)).translate(":slightly_smiling_face:").text, "🙂");
+        // Discord's own name for it isn't gemoji's, so it stays as typed.
+        assert!(unicode("slight_smile").is_none());
+        assert_eq!(library(&[], json!({}), here(true)).translate(":slight_smile:").text, ":slight_smile:");
+    }
+
     #[test]
     fn the_notice_says_what_nitro_would_do() {
         let animated = GuildEmoji {
