@@ -50,7 +50,8 @@
       "ADMINISTRATOR",
       "BYPASS_SLOWMODE",
       "MANAGE_THREADS",
-      "SEND_MESSAGES_IN_THREADS"
+      "SEND_MESSAGES_IN_THREADS",
+      "ATTACH_FILES"
     ],
     "PremiumPerk": [
       "ANIMATED_EMOJIS",
@@ -88,6 +89,7 @@
     "createResponseHandler",
     "deleteMessage",
     "editMessage",
+    "ensureFreshResponseUrl",
     "fetchMessages",
     "focusMessage",
     "getAckTimestamp",
@@ -99,8 +101,10 @@
     "getMaxAttachmentsCount",
     "getMaxFileSize",
     "getMaxTotalAttachmentSize",
+    "getResumePosition",
     "getSendMessageOptionsForReply",
     "getSystemMessageUserJoin",
+    "getUploadPayload",
     "getUserMaxFileSize",
     "handleRequiredAction",
     "interceptResponse",
@@ -111,14 +115,20 @@
     "isChannelOnCooldown",
     "isForumLikeChannel",
     "isGuildOrCategoryOrChannelMuted",
+    "isResponseUrlStale",
     "isScheduledForDeletion",
     "isSystemDM",
     "isSystemUser",
+    "parseRangeHeader",
     "renderEmbeds",
     "requestGuildMembers",
     "resolvedMessageNotifications",
+    "retryOpts",
+    "startOrResumeUpload",
     "truncate",
     "unarchiveThreadIfNecessary",
+    "uploadFileToCloud",
+    "uploadFileWithResumption",
     "usesLegacyCompression"
   ],
   "stores": [
@@ -134,7 +144,8 @@
     "RegionalFeatureConfigStore",
     "RpcNotificationSettingsStore",
     "SafetyHubStore",
-    "SlowmodeStore"
+    "SlowmodeStore",
+    "UploadAttachmentStore"
   ],
   "constants": ["ACCOUNT_AGE", "FONT_SIZES", "MEMBER_AGE", "REPLYABLE", "UNDELETABLE", "USER_MESSAGE"]
 }
