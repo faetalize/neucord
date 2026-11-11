@@ -28,7 +28,8 @@ use soup::prelude::*;
 mod animated;
 mod lru;
 mod play;
-use animated::{AnimatedPaintable, FramePaintable, Lease};
+pub use animated::Lease;
+use animated::{AnimatedPaintable, FramePaintable};
 use discord::animation::Subject;
 use lru::Lru;
 pub use play::{Motion, Row, Update};
@@ -125,6 +126,26 @@ impl Images {
             let size = texture.width() as u64 * texture.height() as u64 * 4;
             this.0.textures.borrow_mut().insert(&url, texture.clone(), size);
             done(texture.upcast());
+        });
+    }
+
+    /// [`load`](Self::load) for media shown without the rules for moving
+    /// ones, such as in the viewer: an animation arrives with the lease that
+    /// keeps its frames advancing for as long as it is held, and one that
+    /// doesn't decode arrives as its still.
+    pub fn load_playing(&self, url: &str, animated: bool, done: impl FnOnce(gdk::Paintable, Option<Lease>) + 'static) {
+        if !animated {
+            return self.load(url, |paintable| done(paintable, None));
+        }
+        let (this, url) = (self.clone(), url.to_owned());
+        glib::spawn_future_local(async move {
+            match this.moving(&url).await {
+                Some(paintable) => {
+                    let lease = animated::play(&paintable);
+                    done(paintable, lease);
+                }
+                None => this.load(&url, |paintable| done(paintable, None)),
+            }
         });
     }
 
@@ -392,6 +413,12 @@ impl Images {
         for path in lru::over_budget(files, VIDEO_BUDGET) {
             let _ = std::fs::remove_file(path);
         }
+    }
+
+    /// A file's bytes, cached nowhere: for saving and copying, which want
+    /// the original once.
+    pub async fn fetch(&self, url: &str) -> Option<glib::Bytes> {
+        self.download(url).await
     }
 
     async fn download(&self, url: &str) -> Option<glib::Bytes> {

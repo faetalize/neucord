@@ -35,7 +35,7 @@
     "ApplicationCommandType": ["CHAT", "USER", "MESSAGE", "PRIMARY_ENTRY_POINT"],
     "ApplicationIntegrationType": ["GUILD_INSTALL", "USER_INSTALL"],
     "ButtonStyle": ["PRIMARY", "SECONDARY", "SUCCESS", "DESTRUCTIVE", "LINK", "PREMIUM"],
-    "ChannelFlags": ["IS_SCHEDULED_FOR_DELETION", "PINNED", "REQUIRE_TAG", "IS_MODERATOR_REPORT_CHANNEL"],
+    "ChannelFlags": ["IS_SCHEDULED_FOR_DELETION", "PINNED", "REQUIRE_TAG", "HIDE_MEDIA_DOWNLOAD_OPTIONS", "IS_MODERATOR_REPORT_CHANNEL"],
     "ChannelType": [
       "DM",
       "GROUP_DM",
@@ -149,7 +149,9 @@
     "allowNoMessages",
     "buildHeadersForMd5",
     "buildOriginalMd5Headers",
+    "canCopyImage",
     "canDeleteOwnMessage",
+    "canSaveImage",
     "canRetry",
     "canStreamQuality",
     "canTrackUnreads",
@@ -302,5 +304,16 @@
     "UploadAttachmentStore",
     "UserProfileStore"
   ],
-  "constants": ["ACCOUNT_AGE", "FONT_SIZES", "MEMBER_AGE", "POLLS", "REPLYABLE", "UNDELETABLE", "USER_MESSAGE", "bannerHeight", "bannerWidth"]
+  "constants": ["ACCOUNT_AGE", "FONT_SIZES", "MEMBER_AGE", "POLLS", "REPLYABLE", "UNDELETABLE", "USER_MESSAGE", "bannerHeight", "bannerWidth"],
+  "protos": [
+    "discord_protos.discord_users.v1.AppearanceSettings",
+    "discord_protos.discord_users.v1.GuildFolder",
+    "discord_protos.discord_users.v1.GuildFolders",
+    "discord_protos.discord_users.v1.PreloadedUserSettings",
+    "discord_protos.discord_users.v1.TextAndImagesSettings",
+    "google.protobuf.BoolValue",
+    "google.protobuf.Int64Value",
+    "google.protobuf.StringValue",
+    "google.protobuf.UInt64Value"
+  ]
 }

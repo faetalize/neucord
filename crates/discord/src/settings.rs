@@ -2,9 +2,11 @@
 //! (which also define the order of servers in the rail), how media and
 //! embeds show, Developer Mode, and compact display.
 //!
-//! They come as JSON in READY's `user_settings` (and in USER_SETTINGS_UPDATE)
-//! while the gateway capabilities are 0. Newer clients get the same data
-//! only as protobuf (`user_settings_proto`); see issue #2.
+//! They come twice: as JSON in READY's `user_settings` and
+//! USER_SETTINGS_UPDATE, and as protobuf in READY's `user_settings_proto` and
+//! USER_SETTINGS_PROTO_UPDATE (see [`crate::settings_proto`]), which is all
+//! the official client reads. Both are read as a [`SettingsPatch`], the
+//! settings a payload mentions, so either can stand alone.
 
 use serde_json::Value;
 
@@ -45,18 +47,6 @@ pub fn guild_folders(settings: &Value) -> Option<Vec<GuildFolder>> {
     )
 }
 
-/// Developer Mode, if a settings object mentions it: menus then offer to
-/// copy ids.
-pub fn developer_mode(settings: &Value) -> Option<bool> {
-    settings.get("developer_mode")?.as_bool()
-}
-
-/// Compact message display, if a settings object mentions it. Neucord has no
-/// compact layout, but the official client sizes its history pages by this.
-pub fn message_display_compact(settings: &Value) -> Option<bool> {
-    settings.get("message_display_compact")?.as_bool()
-}
-
 /// The "Chat" settings for embeds, media and reactions. Discord's defaults
 /// are all on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,7 +76,7 @@ pub enum StickerAnimation {
 }
 
 impl StickerAnimation {
-    fn from_number(n: u64) -> Option<Self> {
+    pub(crate) fn from_number(n: u64) -> Option<Self> {
         match n {
             0 => Some(Self::Always),
             1 => Some(Self::OnInteraction),
@@ -168,6 +158,54 @@ impl MediaSettings {
             animate_stickers: StickerAnimation::OnInteraction,
             ..self
         }
+    }
+}
+
+/// Everything in this module, as the account has it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Settings {
+    /// Empty if the user never arranged servers.
+    pub guild_folders: Vec<GuildFolder>,
+    pub media: MediaSettings,
+    /// Menus then offer to copy ids.
+    pub developer_mode: bool,
+    /// Neucord has no compact layout, but the official client sizes its
+    /// history pages by this.
+    pub message_display_compact: bool,
+}
+
+/// The settings a payload mentions; the rest are `None`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SettingsPatch {
+    pub guild_folders: Option<Vec<GuildFolder>>,
+    pub media: MediaPatch,
+    pub developer_mode: Option<bool>,
+    pub message_display_compact: Option<bool>,
+}
+
+impl SettingsPatch {
+    pub fn from_json(settings: &Value) -> Self {
+        SettingsPatch {
+            guild_folders: guild_folders(settings),
+            media: MediaPatch::from_settings(settings),
+            developer_mode: settings.get("developer_mode").and_then(Value::as_bool),
+            message_display_compact: settings.get("message_display_compact").and_then(Value::as_bool),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl Settings {
+    pub fn apply(&mut self, patch: SettingsPatch) {
+        if let Some(folders) = patch.guild_folders {
+            self.guild_folders = folders;
+        }
+        self.media.apply(patch.media);
+        self.developer_mode = patch.developer_mode.unwrap_or(self.developer_mode);
+        self.message_display_compact = patch.message_display_compact.unwrap_or(self.message_display_compact);
     }
 }
 
@@ -281,15 +319,22 @@ mod tests {
     }
 
     #[test]
-    fn developer_mode_when_mentioned() {
-        assert_eq!(developer_mode(&json!({"developer_mode": true})), Some(true));
-        assert_eq!(developer_mode(&json!({"theme": "dark"})), None);
+    fn json_patch_holds_what_is_mentioned() {
+        let patch = SettingsPatch::from_json(&json!({"developer_mode": true, "theme": "dark"}));
+        assert_eq!(patch, SettingsPatch { developer_mode: Some(true), ..SettingsPatch::default() });
+        let patch = SettingsPatch::from_json(&json!({"message_display_compact": false, "gif_auto_play": false}));
+        assert_eq!(patch.message_display_compact, Some(false));
+        assert_eq!(patch.media.gif_auto_play, Some(false));
+        assert!(SettingsPatch::from_json(&json!({"theme": "dark"})).is_empty());
     }
 
     #[test]
-    fn compact_when_mentioned() {
-        assert_eq!(message_display_compact(&json!({"message_display_compact": true})), Some(true));
-        assert_eq!(message_display_compact(&json!({"theme": "dark"})), None);
+    fn a_patch_changes_only_what_it_mentions() {
+        let mut settings = Settings { developer_mode: true, ..Settings::default() };
+        settings.apply(SettingsPatch { message_display_compact: Some(true), ..SettingsPatch::default() });
+        assert!(settings.developer_mode && settings.message_display_compact);
+        settings.apply(SettingsPatch { guild_folders: Some(vec![]), ..SettingsPatch::default() });
+        assert!(settings.developer_mode, "mentioning folders leaves the rest");
     }
 
     #[test]

@@ -7,6 +7,7 @@
 //! client asks for ([`asset_size`]).
 
 const CDN: &str = "https://cdn.discordapp.com";
+const CDN_HOST: &str = "cdn.discordapp.com";
 
 fn ext(hash: &str) -> &'static str {
     if hash.starts_with("a_") { "gif" } else { "png" }
@@ -137,6 +138,118 @@ pub fn with_params(url: &str, set: &[(&str, &str)]) -> String {
         .collect();
     params.extend(set.iter().map(|(name, value)| format!("{name}={value}")));
     format!("{base}?{}", params.join("&"))
+}
+
+/// Whether a link is the CDN's or the media proxy's own (`isDiscordAssetUrl`
+/// in 998218). The client counts the GIF providers' hosts too; Neucord
+/// never fetches from those, so it doesn't.
+pub fn is_asset(url: &str) -> bool {
+    parse(url).is_some_and(|url| url.host == CDN_HOST || url.host.ends_with(".discordapp.net"))
+}
+
+/// A file's type as the client names it (`U` in 229531): by the content
+/// type if it has one of an image or video, else the last bit of the path
+/// if that is short enough to be an extension.
+pub fn extension(url: &str, content_type: Option<&str>) -> Option<String> {
+    let kind = content_type.map(str::to_ascii_lowercase);
+    if let Some(kind) = kind.as_deref().filter(|k| k.starts_with("image/") || k.starts_with("video/")) {
+        return Some(match kind {
+            "image/jpeg" => "jpg".to_owned(),
+            "video/quicktime" => "mov".to_owned(),
+            other => other.split('/').nth(1).unwrap_or_default().to_owned(),
+        });
+    }
+    let path = parse(url)?.path;
+    // `pathname.split(".").pop()`: with no dot, the whole path.
+    let last = path.rsplit('.').next().unwrap_or(path);
+    (last.len() <= 5).then(|| last.to_ascii_lowercase())
+}
+
+/// A link to the file itself, as Open in Browser and the copies take it
+/// (`XW` in 803316): the proxy's `media.discordapp.net` is the CDN's
+/// `cdn.discordapp.com`, and the size and format asked of the proxy go.
+/// A file of no known type gets `format` instead, if one is given. The
+/// CDN's own links stay as they are.
+pub fn original(url: &str, content_type: Option<&str>, format: Option<&str>) -> String {
+    let Some(parsed) = parse(url) else { return url.to_owned() };
+    let Some((scheme, rest)) = url.split_once("://") else { return url.to_owned() };
+    if parsed.host == CDN_HOST {
+        return url.to_owned();
+    }
+    let (rest, fragment) = rest.split_once('#').map_or((rest, ""), |(rest, fragment)| (rest, fragment));
+    let (rest, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let (authority, path) = rest.find('/').map_or((rest, ""), |at| rest.split_at(at));
+    let authority = if scheme == "https" && authority == "media.discordapp.net" { CDN_HOST } else { authority };
+    let mut params: Vec<String> = query
+        .split('&')
+        .filter(|param| {
+            let name = param.split('=').next().unwrap_or_default();
+            !param.is_empty() && !["width", "height", "quality", "size", "format"].contains(&name)
+        })
+        .map(String::from)
+        .collect();
+    if let Some(format) = format.filter(|_| extension(url, content_type).is_none()) {
+        params.push(format!("format={format}"));
+    }
+    let query = if params.is_empty() { String::new() } else { format!("?{}", params.join("&")) };
+    let fragment = if fragment.is_empty() { String::new() } else { format!("#{fragment}") };
+    format!("{scheme}://{authority}{path}{query}{fragment}")
+}
+
+/// Fit `size` into `max` keeping its aspect ratio, without enlarging (`Uj`
+/// in 515718): rounded after each of the two cuts, as the client does.
+pub fn fit(size: (u32, u32), max: (u32, u32)) -> (u32, u32) {
+    let ((mut width, mut height), (max_width, max_height)) = ((f64::from(size.0), f64::from(size.1)), max);
+    let (max_width, max_height) = (f64::from(max_width), f64::from(max_height));
+    if width != max_width || height != max_height {
+        let by_width = if width > max_width { max_width / width } else { 1.0 };
+        width = (width * by_width).round();
+        height = (height * by_width).round();
+        let by_height = if height > max_height { max_height / height } else { 1.0 };
+        width = (width * by_height).round();
+        height = (height * by_height).round();
+    }
+    (width as u32, height as u32)
+}
+
+/// How much of its size `size` keeps in `max` (`U8` in 515718).
+fn ratio(size: (u32, u32), max: (u32, u32)) -> f64 {
+    let (width, height) = (f64::from(size.0), f64::from(size.1));
+    let by_width = if width > f64::from(max.0) { f64::from(max.0) / width } else { 1.0 };
+    let height = (height * by_width).round();
+    let by_height = if height > f64::from(max.1) { f64::from(max.1) / height } else { 1.0 };
+    (by_width * by_height).min(1.0)
+}
+
+/// The largest side the client asks the proxy for.
+const MAX_SIDE: u32 = 4096;
+
+/// An image of the media viewer as the client asks for it (`AE` in 776231,
+/// with the ratio `getRatio` in 619517 gives): the proxy's version of
+/// `size` scaled down to what fits `fit`, at the screen's `scale`, up to
+/// 4096 a side, and only if that is not its size already. The CDN's own
+/// links are never sized, nor is anything else but the proxy's.
+pub fn modal_url(src: &str, size: (u32, u32), fit_in: (u32, u32), scale: u32, animated: bool) -> String {
+    if parse(src).is_none_or(|url| url.host == CDN_HOST) {
+        return src.to_owned();
+    }
+    let ratio = ratio(size, fit_in);
+    let mut target = size;
+    if ratio < 1.0 {
+        target = ((f64::from(size.0) * ratio).round() as u32, (f64::from(size.1) * ratio).round() as u32);
+    }
+    let scale = scale.max(1);
+    let target = fit((target.0 * scale, target.1 * scale), (MAX_SIDE, MAX_SIDE));
+    let mut url = src.to_owned();
+    // An animated WebP or AVIF is asked to stay animated.
+    let path = parse(src).map(|url| url.path.to_ascii_lowercase()).unwrap_or_default();
+    if animated && (path.ends_with(".webp") || path.ends_with(".avif")) {
+        url = with_params(&url, &[("animated", "true")]);
+    }
+    if target != size {
+        url = with_params(&url, &[("width", &target.0.to_string()), ("height", &target.1.to_string())]);
+    }
+    url
 }
 
 /// How long before its `ex` a signed link counts as expired.
@@ -446,5 +559,75 @@ mod tests {
         assert!(links_expired(&video(still.clone()), 2_000));
         let sketchfab = serde_json::json!({"thumbnail": still["thumbnail"], "provider": {"name": "Sketchfab"}});
         assert!(!links_expired(&video(sketchfab), 2_000), "never shown");
+    }
+
+    #[test]
+    fn the_original_of_a_proxied_file_is_the_cdns() {
+        let proxied =
+            "https://media.discordapp.net/attachments/1/2/a.png?ex=1&width=100&height=50&format=webp&quality=lossless";
+        assert_eq!(original(proxied, None, None), "https://cdn.discordapp.com/attachments/1/2/a.png?ex=1");
+        // The CDN's own links are untouched, size parameters and all.
+        let cdn = "https://cdn.discordapp.com/attachments/1/2/a.png?ex=1&width=3";
+        assert_eq!(original(cdn, None, Some("png")), cdn);
+        // Other hosts keep theirs; a file of no known type is asked as `format`.
+        let external = "https://images-ext-1.discordapp.net/external/x/https/e.test/a?width=1&height=1#top";
+        assert_eq!(original(external, None, None), "https://images-ext-1.discordapp.net/external/x/https/e.test/a#top");
+        assert_eq!(original("https://e.test/video", None, Some("png")), "https://e.test/video?format=png");
+        assert_eq!(original("https://e.test/video", Some("image/gif"), Some("png")), "https://e.test/video");
+        assert_eq!(
+            original("https://media.discordapp.net:8443/a.png", None, None),
+            "https://media.discordapp.net:8443/a.png"
+        );
+    }
+
+    #[test]
+    fn a_files_type_is_its_content_type_then_its_extension() {
+        assert_eq!(extension("https://e.test/a.PNG?x=1", None).as_deref(), Some("png"));
+        assert_eq!(extension("https://e.test/a.png", Some("image/jpeg")).as_deref(), Some("jpg"));
+        assert_eq!(extension("https://e.test/a.png", Some("video/quicktime")).as_deref(), Some("mov"));
+        assert_eq!(extension("https://e.test/a.png", Some("text/plain")).as_deref(), Some("png"));
+        assert_eq!(extension("https://e.test/a/file.longext", None), None);
+        assert_eq!(extension("https://e.test/a/file", None), None);
+    }
+
+    #[test]
+    fn only_discords_own_hosts_are_assets() {
+        assert!(is_asset("https://cdn.discordapp.com/a.png"));
+        assert!(is_asset("https://media.discordapp.net/a.png"));
+        assert!(is_asset("https://images-ext-2.discordapp.net/external/x"));
+        assert!(!is_asset("https://media.tenor.com/a.gif"));
+        assert!(!is_asset("https://discordapp.net.evil.test/a.png"));
+        assert!(!is_asset("https://notdiscordapp.com/a.png"));
+    }
+
+    #[test]
+    fn fitting_rounds_after_each_cut() {
+        assert_eq!(fit((4000, 2000), (1000, 1000)), (1000, 500));
+        assert_eq!(fit((2000, 4000), (1000, 1000)), (500, 1000));
+        assert_eq!(fit((300, 200), (1000, 1000)), (300, 200), "never enlarged");
+        assert_eq!(fit((1001, 7), (1000, 1000)), (1000, 7));
+        assert_eq!(fit((10, 4000), (100, 100)), (0, 100), "a sliver rounds away");
+    }
+
+    #[test]
+    fn the_viewer_asks_the_proxy_for_the_size_it_shows() {
+        let proxy = "https://media.discordapp.net/attachments/1/2/a.png?ex=1&is=2&hm=3&";
+        // Shown at 1000x500 of 4000x2000 on a screen at twice the scale.
+        assert_eq!(
+            modal_url(proxy, (4000, 2000), (1000, 500), 2, false),
+            "https://media.discordapp.net/attachments/1/2/a.png?ex=1&is=2&hm=3&width=2000&height=1000"
+        );
+        // At its own size the proxy is not asked to resize.
+        assert_eq!(modal_url(proxy, (1000, 500), (1000, 500), 1, false), proxy);
+        // Never above 4096 a side.
+        let huge = modal_url(proxy, (9000, 4500), (9000, 4500), 1, false);
+        assert!(huge.ends_with("width=4096&height=2048"), "{huge}");
+        // The CDN's own links, and anything not a link, are loaded as they are.
+        let cdn = "https://cdn.discordapp.com/attachments/1/2/a.png?ex=1";
+        assert_eq!(modal_url(cdn, (4000, 2000), (1000, 500), 2, false), cdn);
+        // An animated WebP stays animated.
+        let webp = "https://media.discordapp.net/attachments/1/2/a.webp?ex=1";
+        assert_eq!(modal_url(webp, (10, 10), (10, 10), 1, true), format!("{webp}&animated=true"));
+        assert_eq!(modal_url(webp, (10, 10), (10, 10), 1, false), webp);
     }
 }
