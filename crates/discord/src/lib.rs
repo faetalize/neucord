@@ -38,6 +38,7 @@ pub mod members;
 pub mod model;
 pub mod notes;
 pub mod notice;
+pub mod notification_edit;
 pub mod notifications;
 pub mod permissions;
 pub mod poll;

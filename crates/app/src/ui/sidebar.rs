@@ -91,6 +91,7 @@ impl App {
                     row.append(&badge);
                 }
                 let row = self.append_row(&row, Some(Target::Channel(dm.id)), state.channel == Some(dm.id));
+                self.menu_on(&row, menus::DIRECT_MESSAGE, dm.id);
                 let place = Place { guild: None, guild_default: 0, channel: dm.id, parent: None };
                 if state.notifications.channel_muted(&place, now_unix()) {
                     row.add_css_class("muted");
@@ -112,7 +113,11 @@ impl App {
                     .ellipsize(pango::EllipsizeMode::End)
                     .css_classes(["category", "dimmed"])
                     .build();
-                self.append_row(&label, None, false);
+                let row = self.append_row(&label, None, false);
+                // A category's menu acts on the category's own channel, which its channels name.
+                if let Some(id) = channels.first().and_then(|c| c.parent_id) {
+                    self.menu_on(&row, menus::CATEGORY, id);
+                }
             }
             for channel in channels {
                 let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -135,7 +140,7 @@ impl App {
                     row.append(&badge);
                 }
                 let row = self.append_row(&row, Some(Target::Channel(channel.id)), state.channel == Some(channel.id));
-                self.channel_menu_on(&row, channel.id);
+                self.menu_on(&row, menus::CHANNEL, channel.id);
                 let place = Place {
                     guild: Some(guild.id),
                     guild_default: guild.default_message_notifications,
@@ -161,12 +166,12 @@ impl App {
         self.watch_thread_expiry(guild);
     }
 
-    /// Open `channel`'s menu where its row is right-clicked.
-    fn channel_menu_on(self: &Rc<Self>, row: &gtk::ListBoxRow, channel: Snowflake) {
+    /// Open `table`'s menu for `channel` where its row is right-clicked.
+    fn menu_on(self: &Rc<Self>, row: &gtk::ListBoxRow, table: menus::Table<ChannelTarget>, channel: Snowflake) {
         let (app, row_weak) = (Rc::downgrade(self), row.downgrade());
         menus::on_secondary(row, move |x, y| {
             let (Some(app), Some(row)) = (app.upgrade(), row_weak.upgrade()) else { return };
-            menus::popup(&app, menus::CHANNEL, ChannelTarget(channel), &row, At::Point(x, y));
+            menus::popup(&app, table, ChannelTarget(channel), &row, At::Point(x, y));
         });
     }
 
