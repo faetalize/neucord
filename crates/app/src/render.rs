@@ -39,11 +39,15 @@ pub struct Context<'a> {
     pub spoilers: Option<Spoilers>,
     /// The text is only emoji, shown large.
     pub jumbo: bool,
+    /// Opens a mentioned user's profile, from the text they are in.
+    pub on_mention: Option<MentionHandler>,
 }
+
+pub type MentionHandler = Rc<dyn Fn(u64, &rich_text::RichText)>;
 
 impl<'a> Context<'a> {
     pub fn new(names: &'a Names, images: Option<&'a Images>) -> Self {
-        Context { names, images, spoilers: None, jumbo: false }
+        Context { names, images, spoilers: None, jumbo: false, on_mention: None }
     }
 }
 
@@ -325,6 +329,8 @@ struct Inline<'a> {
     emoji: Vec<(rich_text::Image, Emoji)>,
     spoilers: Vec<(Range<u32>, usize)>,
     links: Vec<(Range<u32>, String)>,
+    /// A mention is a link to its user (see [`rich_text::USER_LINK`]).
+    mentions: bool,
     /// The number the next spoiler gets, counted across the whole message.
     next_spoiler: usize,
 }
@@ -340,6 +346,7 @@ impl<'a> Inline<'a> {
             emoji: Vec::new(),
             spoilers: Vec::new(),
             links: Vec::new(),
+            mentions: cx.on_mention.is_some(),
             next_spoiler,
         }
     }
@@ -433,9 +440,13 @@ impl<'a> Inline<'a> {
             }
             Span::Entity(entity) => {
                 let (background, foreground) = ACCENT.with(|accent| accent.borrow().clone());
+                let start = self.len;
                 self.tag(&format!("<span background=\"{background}\" bgalpha=\"25%\" foreground=\"{foreground}\">"));
                 self.text(&format!("\u{a0}{}\u{a0}", entity_text(entity, self.names)));
                 self.tag("</span>");
+                if let (Entity::User(id), true) = (entity, self.mentions) {
+                    self.links.push((start..self.len, format!("{}{id}", rich_text::USER_LINK)));
+                }
             }
         }
     }
@@ -460,6 +471,9 @@ impl<'a> Inline<'a> {
         let numbers: Vec<usize> = self.spoilers.iter().map(|(_, n)| *n).collect();
         let spoilers = self.spoilers.into_iter().map(|(range, n)| (range, revealed(&n))).collect();
         let text = RichText::new(&self.markup, images, spoilers, self.links);
+        if let Some(on_mention) = cx.on_mention.clone() {
+            text.connect_mention(move |user, text| on_mention(user, text));
+        }
         if let Some(memory) = &cx.spoilers {
             let on_reveal = memory.on_reveal.clone();
             text.connect_reveal(move |i| on_reveal(numbers[i]));

@@ -12,13 +12,15 @@ use std::time::Duration;
 
 use adw::prelude::*;
 use discord::member_list::{self, Change, Slot};
-use discord::relationships::Status;
+use discord::relationships::{Presence, Status};
 use discord::subscriptions::view_ranges;
 use discord::{Snowflake, User};
-use gtk::glib;
+use gtk::{gdk, glib};
 
 use super::App;
 use super::friends::presence_dot;
+use super::menus;
+use super::profile::UserTarget;
 use super::state::Target;
 use super::widgets::avatar_widget;
 use crate::render;
@@ -409,7 +411,7 @@ impl App {
     }
 
     /// What the row at `position` shows.
-    fn member_row(&self, position: usize) -> gtk::Widget {
+    fn member_row(self: &Rc<Self>, position: usize) -> gtk::Widget {
         let state = self.state.borrow();
         match &*self.members.shown.borrow() {
             Some(Target::Server { guild, list, .. }) => {
@@ -419,9 +421,8 @@ impl App {
                     Some(Slot::Member(member)) => {
                         let roles = state.members.roles(guild.id, member.user.id).unwrap_or(&member.roles);
                         let colour = guild.member_colour(roles);
-                        let detail = member.presence.text.as_deref();
                         let owner = guild.owner_id == Some(member.user.id);
-                        self.person(&member.user, member.name(), colour, member.presence.status, detail, owner)
+                        self.person(&member.user, Some(guild.id), member.name(), colour, &member.presence, owner)
                     }
                     _ => placeholder(),
                 }
@@ -434,13 +435,12 @@ impl App {
                 }
                 let Some(user) = people.get(position - 1) else { return placeholder() };
                 // We know how our friends are, and ours is that we are here.
-                let status = match user.id == me.id {
-                    true => Status::Online,
-                    false => state.relationships.presence(user.id).status,
-                };
-                let presence = state.relationships.presence(user.id);
+                let mut presence = state.relationships.presence(user.id);
+                if user.id == me.id {
+                    presence.status = Status::Online;
+                }
                 let owner = channel.owner_id == Some(user.id);
-                self.person(user, user.display_name(), None, status, presence.text.as_deref(), owner)
+                self.person(user, None, user.display_name(), None, &presence, owner)
             }
             None => placeholder(),
         }
@@ -449,14 +449,15 @@ impl App {
     /// A person's row: their picture and status, name, what they are up to,
     /// and what marks them.
     fn person(
-        &self,
+        self: &Rc<Self>,
         user: &User,
+        guild: Option<Snowflake>,
         name: &str,
         colour: Option<discord::members::RoleColour>,
-        status: Status,
-        detail: Option<&str>,
+        presence: &Presence,
         owner: bool,
     ) -> gtk::Widget {
+        let (status, detail) = (presence.status, presence.text.as_deref());
         let row =
             gtk::Box::builder().spacing(12).margin_start(12).margin_end(12).margin_top(4).margin_bottom(4).build();
         if status == Status::Offline {
@@ -503,6 +504,33 @@ impl App {
         if user.bot {
             row.append(&gtk::Label::builder().label("APP").valign(gtk::Align::Center).css_classes(["caption"]).build());
         }
+        let target = {
+            let (this, user, row, presence) = (Rc::downgrade(self), user.clone(), row.downgrade(), presence.clone());
+            move || {
+                let (this, row) = (this.upgrade()?, row.upgrade()?);
+                let channel = this.state.borrow().channel;
+                let (user, presence) = (user.clone(), Some(presence.clone()));
+                Some((this, UserTarget { user, guild, channel, presence, anchor: row.upcast() }))
+            }
+        };
+        let click = gtk::GestureClick::builder().button(gdk::BUTTON_PRIMARY).build();
+        click.connect_released({
+            let target = target.clone();
+            move |_, _, _, _| {
+                if let Some((this, target)) = target() {
+                    this.show_profile(&target, false);
+                }
+            }
+        });
+        row.add_controller(click);
+        menus::on_secondary(&row, {
+            let row = row.downgrade();
+            move |x, y| {
+                if let (Some(row), Some((this, target))) = (row.upgrade(), target()) {
+                    this.user_menu(target, row.upcast_ref(), menus::At::Point(x, y));
+                }
+            }
+        });
         row.upcast()
     }
 }

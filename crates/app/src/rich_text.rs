@@ -30,6 +30,9 @@ pub struct Image {
 
 type RevealHandler = Box<dyn Fn(usize)>;
 
+/// Where a link to a person goes: a mention's range of text has it.
+pub const USER_LINK: &str = "neucord:user/";
+
 mod imp {
     use super::*;
 
@@ -227,6 +230,22 @@ impl RichText {
         self.queue_draw();
     }
 
+    /// Called with the user and the text when a mention of one is clicked
+    /// (a [`USER_LINK`] among the links), not dragged over.
+    pub fn connect_mention(&self, f: impl Fn(u64, &RichText) + 'static) {
+        let click = gtk::GestureClick::builder().button(gdk::BUTTON_PRIMARY).build();
+        click.connect_released({
+            let this = self.downgrade();
+            move |_, _, x, y| {
+                let Some(this) = this.upgrade() else { return };
+                if let Some(user) = this.mention_at(x, y) {
+                    f(user, &this);
+                }
+            }
+        });
+        self.add_controller(click);
+    }
+
     /// Called with a spoiler's number when the reader reveals it.
     pub fn connect_reveal(&self, f: impl Fn(usize) + 'static) {
         *self.imp().on_reveal.borrow_mut() = Some(Box::new(f));
@@ -252,7 +271,17 @@ impl RichText {
     }
 
     /// Where the link under a point goes, unless a spoiler still hides it.
+    /// A mention goes to a person, not to a link.
     pub fn link_at(&self, x: f64, y: f64) -> Option<String> {
+        self.target_at(x, y).filter(|url| !url.starts_with(USER_LINK))
+    }
+
+    /// The user mentioned under a point, unless a spoiler still hides it.
+    pub fn mention_at(&self, x: f64, y: f64) -> Option<u64> {
+        self.target_at(x, y)?.strip_prefix(USER_LINK)?.parse().ok()
+    }
+
+    fn target_at(&self, x: f64, y: f64) -> Option<String> {
         if self.hidden_spoiler_at(x, y).is_some() {
             return None;
         }

@@ -441,6 +441,7 @@ impl App {
                     avatar: None,
                     bot: false,
                     system: false,
+                    discriminator: None,
                 }),
                 _ => None,
             };

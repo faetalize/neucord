@@ -247,6 +247,12 @@ pub enum Event {
     },
     /// Unfriended, unblocked, or a request withdrawn or ignored.
     RelationshipRemove(Snowflake),
+    /// A note of ours on someone changed, from any of our sessions (see
+    /// [`crate::notes`]); none for one that was emptied.
+    UserNoteUpdate {
+        user_id: Snowflake,
+        note: Option<String>,
+    },
     /// A presence changed. With a server, it came with our subscription to
     /// it (see [`crate::subscriptions`]).
     PresenceUpdate {
@@ -815,6 +821,10 @@ fn dispatch(state: &State, name: &str, data: Value) {
             Some(id) => Event::RelationshipRemove(id),
             None => return,
         },
+        "USER_NOTE_UPDATE" => match parse_id(&data["id"]) {
+            Some(user_id) => Event::UserNoteUpdate { user_id, note: data["note"].as_str().map(String::from) },
+            None => return,
+        },
         // Friends' presences, and per-server ones; only `user.id` is certain.
         "PRESENCE_UPDATE" => match parse_id(&data["user"]["id"]) {
             Some(user_id) => Event::PresenceUpdate {
@@ -1341,6 +1351,18 @@ mod tests {
         dispatch(&state, "PRESENCE_UPDATE", json!({"user": {"id": "6"}, "status": "online"}));
         let Ok(Event::PresenceUpdate { guild_id, .. }) = rx.try_recv() else { panic!("no presence") };
         assert_eq!(guild_id, None);
+    }
+
+    #[test]
+    fn a_note_changed_elsewhere() {
+        let (state, rx) = fresh_state();
+        dispatch(&state, "USER_NOTE_UPDATE", json!({"id": "6", "note": "met at a meetup"}));
+        let Ok(Event::UserNoteUpdate { user_id, note }) = rx.try_recv() else { panic!("no note") };
+        assert_eq!((user_id, note.as_deref()), (Snowflake(6), Some("met at a meetup")));
+        // The client stores what is missing as no note.
+        dispatch(&state, "USER_NOTE_UPDATE", json!({"id": "6"}));
+        let Ok(Event::UserNoteUpdate { note, .. }) = rx.try_recv() else { panic!("no note") };
+        assert_eq!(note, None);
     }
 
     #[test]

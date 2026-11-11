@@ -164,6 +164,7 @@ impl App {
                 let cell = MessageRow::new(item);
                 item.set_child(Some(&cell));
                 attach_message_menu(&this, item, &cell);
+                attach_author(&this, item, &cell);
                 attach_message_actions(&this, &cell);
                 if let Some(this) = this.upgrade() {
                     let mut rows = this.rows.borrow_mut();
@@ -1491,9 +1492,26 @@ fn attach_message_menu(this: &std::rc::Weak<App>, item: &gtk::ListItem, cell: &M
         }
     });
     menus::on_secondary(row, {
-        let (open, row) = (open.clone(), row.downgrade());
+        let (open, row, this, item, cell) =
+            (open.clone(), row.downgrade(), this.clone(), item.downgrade(), cell.downgrade());
         move |x, y| {
             let row = row.upgrade();
+            // On the author's name or avatar it is theirs, as in the client.
+            if let (Some(row), Some(this), Some(item), Some(cell)) =
+                (&row, this.upgrade(), item.upgrade(), cell.upgrade())
+                && let Some(anchor) = author_at(&cell, row, x, y)
+                && let Some(target) = this.author_target(&item, anchor)
+            {
+                this.user_menu(target, row.upcast_ref(), At::Point(x, y));
+                return;
+            }
+            if let (Some(row), Some(this), Some(item)) = (&row, this.upgrade(), item.upgrade())
+                && let Some((text, user)) = mention_at(row.upcast_ref(), x, y)
+                && let Some(target) = this.mention_target(&item, user, text.upcast())
+            {
+                this.user_menu(target, row.upcast_ref(), At::Point(x, y));
+                return;
+            }
             let link = row.as_ref().and_then(|row| link_at(row.upcast_ref(), x, y));
             let sticker = row.as_ref().and_then(|row| sticker_at(row.upcast_ref(), x, y));
             open(At::Point(x, y), link, sticker);
@@ -1504,6 +1522,51 @@ fn attach_message_menu(this: &std::rc::Weak<App>, item: &gtk::ListItem, cell: &M
     let actions = gio::SimpleActionGroup::new();
     actions.add_action(&action);
     cell.insert_action_group("message", Some(&actions));
+}
+
+/// The widget of `cell` that shows its author at `(x, y)` in `row`: their name,
+/// or their avatar.
+fn author_at(cell: &MessageRow, row: &gtk::Box, x: f64, y: f64) -> Option<gtk::Widget> {
+    let parts = cell.parts();
+    let hit = row.pick(x, y, gtk::PickFlags::DEFAULT)?;
+    let within = |outer: &gtk::Widget| hit == *outer || hit.is_ancestor(outer);
+    let (name, avatar) = (parts.name.clone().upcast::<gtk::Widget>(), parts.gutter.clone().upcast::<gtk::Widget>());
+    if parts.header.is_visible() && within(&name) {
+        Some(name)
+    } else if parts.shows_avatar() && within(&avatar) {
+        Some(avatar)
+    } else {
+        None
+    }
+}
+
+/// Open the author's profile when their name or avatar is clicked.
+fn attach_author(this: &std::rc::Weak<App>, item: &gtk::ListItem, cell: &MessageRow) {
+    let parts = cell.parts();
+    parts.name.set_cursor_from_name(Some("pointer"));
+    for anchor in [parts.name.clone().upcast::<gtk::Widget>(), parts.gutter.clone().upcast()] {
+        let click = gtk::GestureClick::builder().button(gdk::BUTTON_PRIMARY).build();
+        click.connect_released({
+            let (this, item, cell, anchor) = (this.clone(), item.downgrade(), cell.downgrade(), anchor.downgrade());
+            move |_, _, x, y| {
+                let (Some(this), Some(item), Some(cell), Some(anchor)) =
+                    (this.upgrade(), item.upgrade(), cell.upgrade(), anchor.upgrade())
+                else {
+                    return;
+                };
+                // Only the avatar of a run's first message is one to click.
+                let parts = cell.parts();
+                let shown = match anchor == parts.name.clone().upcast::<gtk::Widget>() {
+                    true => parts.header.is_visible(),
+                    false => parts.shows_avatar() && anchor.contains(x, y),
+                };
+                if let (true, Some(target)) = (shown, this.author_target(&item, anchor)) {
+                    this.show_profile(&target, false);
+                }
+            }
+        });
+        anchor.add_controller(click);
+    }
 }
 
 /// Make the Edit, Reply and More buttons act on whichever message `cell` shows.
@@ -1567,6 +1630,19 @@ fn link_at(row: &gtk::Widget, x: f64, y: f64) -> Option<String> {
             && !label.parent().is_some_and(|p| p.is::<RichText>())
         {
             return label.current_uri().map(String::from);
+        }
+        widget = w.parent();
+    }
+    None
+}
+
+/// The text of `row` that mentions someone at `(x, y)`, and who.
+fn mention_at(row: &gtk::Widget, x: f64, y: f64) -> Option<(RichText, u64)> {
+    let mut widget = row.pick(x, y, gtk::PickFlags::DEFAULT);
+    while let Some(w) = widget.filter(|w| w != row) {
+        if let Some(text) = w.downcast_ref::<RichText>() {
+            let point = row.compute_point(text, &graphene::Point::new(x as f32, y as f32))?;
+            return text.mention_at(point.x() as f64, point.y() as f64).map(|user| (text.clone(), user));
         }
         widget = w.parent();
     }
@@ -1772,6 +1848,52 @@ impl App {
         parts.shown.replace(Some((message.clone(), epoch)));
     }
 
+    /// Who the message `item` shows is by, for a profile or a menu pointing at `anchor`.
+    fn author_target(&self, item: &gtk::ListItem, anchor: gtk::Widget) -> Option<super::profile::UserTarget> {
+        let message = item.item().and_downcast::<glib::BoxedAnyObject>()?;
+        let message = message.borrow::<Message>();
+        let shown = message.thread_starter().unwrap_or(&message);
+        let guild = self.state.borrow().find_channel(shown.channel_id).and_then(|(guild, _)| guild.map(|g| g.id));
+        Some(super::profile::UserTarget {
+            user: shown.author.clone(),
+            guild,
+            channel: Some(shown.channel_id),
+            presence: None,
+            anchor,
+        })
+    }
+
+    /// The user `id` mentioned in the message `item` shows, for a profile or a
+    /// menu pointing at `anchor`. Discord resolves the users a message
+    /// mentions; for one it didn't, the profile fills them in.
+    fn mention_target(&self, item: &gtk::ListItem, id: u64, anchor: gtk::Widget) -> Option<super::profile::UserTarget> {
+        let message = item.item().and_downcast::<glib::BoxedAnyObject>()?;
+        let message = message.borrow::<Message>();
+        self.mention_of(&message.mentions, message.channel_id, id, anchor)
+    }
+
+    /// [`Self::mention_target`] for the users and channel of a message.
+    fn mention_of(
+        &self,
+        mentions: &[discord::User],
+        channel: Snowflake,
+        id: u64,
+        anchor: gtk::Widget,
+    ) -> Option<super::profile::UserTarget> {
+        let state = self.state.borrow();
+        let user = mentions.iter().find(|u| u.id.0 == id).cloned().unwrap_or_else(|| discord::User {
+            id: Snowflake(id),
+            username: state.users.get(&id).cloned().unwrap_or_else(|| id.to_string()),
+            global_name: None,
+            avatar: None,
+            bot: false,
+            system: false,
+            discriminator: None,
+        });
+        let guild = state.find_channel(channel).and_then(|(guild, _)| guild.map(|g| g.id));
+        Some(super::profile::UserTarget { user, guild, channel: Some(channel), presence: None, anchor })
+    }
+
     /// Open the menu for `message`, whose row is `row`, at `at` there.
     fn message_menu(
         self: &Rc<Self>,
@@ -1805,6 +1927,17 @@ impl App {
         Spoilers { revealed, on_reveal: Rc::new(on_reveal) }
     }
 
+    /// What a click on a mention in `message` does: open their profile.
+    fn mention_opener(self: &Rc<Self>, message: &Message) -> render::MentionHandler {
+        let (this, mentions, channel) = (Rc::downgrade(self), message.mentions.clone(), message.channel_id);
+        Rc::new(move |id, text| {
+            let Some(this) = this.upgrade() else { return };
+            if let Some(target) = this.mention_of(&mentions, channel, id, text.clone().upcast()) {
+                this.show_profile(&target, false);
+            }
+        })
+    }
+
     /// What a message says, and shows: its text, attachments and embeds. Its
     /// buttons and menus work if `live`: not in a forward.
     fn message_content(self: &Rc<Self>, body: &gtk::Box, message: &Message, names: &Names, live: bool) {
@@ -1815,6 +1948,7 @@ impl App {
         let cx = Context {
             spoilers: Some(self.spoilers(message.id)),
             jumbo: discord::markup::is_jumbo(&spans),
+            on_mention: live.then(|| self.mention_opener(message)),
             ..Context::new(names, Some(&self.images))
         };
         if discord::embed::hides_content(&message.content, &embeds, media.inline_embed_media) {
