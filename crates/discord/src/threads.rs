@@ -98,6 +98,20 @@ fn ack_fallback(guild: &Guild, thread: &Channel) -> i64 {
     since.max(joined_guild)
 }
 
+/// How many of a forum's active posts are unread by the forum's own mark:
+/// posts with something unread in them and a message after the last one we
+/// acked in the forum (`ForumPostUnreadCountStore` in 435470), which is what
+/// Mark As Read is greyed by. A forum we never acked has none.
+pub fn forum_unread_posts(guild: &Guild, forum: &Channel, read: &ReadStates) -> usize {
+    let Some(acked) = read.acked(forum.id) else { return 0 };
+    guild
+        .threads
+        .iter()
+        .filter(|t| t.parent_id == Some(forum.id) && t.is_active_thread())
+        .filter(|t| t.last_message_id.is_some_and(|last| last > acked) && is_unread(guild, t, read))
+        .count()
+}
+
 /// Whether the client acks what we read in `thread` (`canTrackUnreads` in
 /// 218461): not in an archived thread.
 pub fn is_ackable(thread: &Channel) -> bool {
@@ -337,6 +351,25 @@ mod tests {
 
     fn read_all(guild: &Guild) -> ReadStates {
         read_upto(guild, &[])
+    }
+
+    #[test]
+    fn a_forums_unread_posts_are_those_newer_than_its_own_mark() {
+        let g =
+            guild(json!([thread(1, 15, HOUR), thread(2, 15, 2 * HOUR), thread(3, 15, 3 * HOUR), thread(4, 10, HOUR)]));
+        let forum = g.channel(Snowflake(15)).unwrap();
+        // The first two posts are unread; the third and the thread in another channel are read.
+        let mut read = read_upto(&g, &[(0, NOW - 4 * HOUR), (1, NOW - 4 * HOUR)]);
+        assert_eq!(forum_unread_posts(&g, forum, &read), 0, "never acked");
+        read.ack(forum.id, at(NOW - 90 * 60_000));
+        assert_eq!(forum_unread_posts(&g, forum, &read), 1, "only the first has a message after the forum's mark");
+        let first = &g.threads[0];
+        read.ack(first.id, first.last_message_id.unwrap());
+        assert_eq!(forum_unread_posts(&g, forum, &read), 0, "a post we read ourselves");
+        read.ack(first.id, at(NOW - 4 * HOUR));
+        read.mark_unread(first.id, at(NOW - 4 * HOUR), 0);
+        read.ack(forum.id, at(NOW));
+        assert_eq!(forum_unread_posts(&g, forum, &read), 0, "marked read");
     }
 
     #[test]

@@ -710,19 +710,41 @@ impl Rest {
         Ok(())
     }
 
-    /// Save notification settings: for a server through the bulk endpoint, for
-    /// the DMs (`None`) to their own (931260).
+    /// Save notification settings: for a server through the bulk endpoint, with
+    /// the folds not yet saved (`folds`, see [`notification_edit::with_folds`]);
+    /// for the DMs (`None`) to their own, with nothing else (931260).
     pub async fn save_notification_settings(
         &self,
         guild: Option<Snowflake>,
         settings: serde_json::Value,
+        folds: &[(Snowflake, Snowflake, bool)],
     ) -> Result<(), Error> {
         let _: serde_json::Value = match guild {
             Some(guild) => {
-                self.request(call!(SAVE_GUILD_SETTINGS_BULK), Some(notification_edit::bulk(guild, settings))).await?
+                let body = notification_edit::with_folds(notification_edit::bulk(guild, settings), folds);
+                self.request(call!(SAVE_GUILD_SETTINGS_BULK), Some(body)).await?
             }
             None => self.request(call!(SAVE_GUILD_SETTINGS, guild = "@me"), Some(settings)).await?,
         };
+        Ok(())
+    }
+
+    /// Save the folds that no settings request carried (`saveUserGuildSettingsBulk`
+    /// with nothing else, 931260).
+    pub async fn save_folds(&self, folds: &[(Snowflake, Snowflake, bool)]) -> Result<(), Error> {
+        let body = notification_edit::with_folds(json!({"guilds": {}}), folds);
+        let _: serde_json::Value = self.request(call!(SAVE_GUILD_SETTINGS_BULK), Some(body)).await?;
+        Ok(())
+    }
+
+    /// Change our mute or level in a thread we joined (`setNotificationSettings`
+    /// in 7909). Not retried after a 429, as the client doesn't
+    /// (`failImmediatelyWhenRateLimited`).
+    pub async fn save_thread_settings(&self, thread: Snowflake, settings: serde_json::Value) -> Result<(), Error> {
+        let sending = Sending { retry_rate_limit: false, ..Sending::default() };
+        let (status, response) =
+            self.send_with(call!(THREAD_MEMBER_SETTINGS, channel = thread), Some(settings), sending).await?;
+        let _: serde_json::Value = Self::answer(status, &response)?;
         Ok(())
     }
 

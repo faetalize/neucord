@@ -113,6 +113,9 @@ struct ChannelOverride {
     mute_config: Option<MuteConfig>,
     #[serde(default = "inherit")]
     message_notifications: u8,
+    /// `NEW_FORUM_THREADS_ON`/`_OFF` (355097), which a forum's New Posts switch sets.
+    #[serde(default)]
+    flags: u64,
 }
 
 /// One server's settings, or the DM settings when `guild_id` is `None`.
@@ -136,6 +139,10 @@ pub struct GuildSettings {
     #[serde(default)]
     notify_highlights: u8,
     #[serde(default)]
+    hide_muted_channels: bool,
+    #[serde(default)]
+    mute_scheduled_events: bool,
+    #[serde(default)]
     channel_overrides: Vec<ChannelOverride>,
 }
 
@@ -151,6 +158,8 @@ impl GuildSettings {
             suppress_roles: false,
             mobile_push: true,
             notify_highlights: 0,
+            hide_muted_channels: false,
+            mute_scheduled_events: false,
             channel_overrides: Vec::new(),
         }
     }
@@ -241,6 +250,43 @@ impl NotificationSettings {
 
     pub fn mobile_push(&self, guild: Snowflake) -> bool {
         self.by_guild.get(&Some(guild)).is_none_or(|s| s.mobile_push)
+    }
+
+    /// Mute New Events is on (`isMuteScheduledEventsEnabled`, 543465).
+    pub fn mute_scheduled_events(&self, guild: Snowflake) -> bool {
+        self.by_guild.get(&Some(guild)).is_some_and(|s| s.mute_scheduled_events)
+    }
+
+    /// Hide Muted Channels is on (`isGuildCollapsed`, 543465).
+    pub fn hide_muted_channels(&self, guild: Snowflake) -> bool {
+        self.by_guild.get(&Some(guild)).is_some_and(|s| s.hide_muted_channels)
+    }
+
+    /// A channel's own mute is running: the set the sidebar hides muted
+    /// channels by (`getMutedChannels`), which a muted category isn't part of
+    /// for its channels.
+    pub fn channel_muted_itself(&self, guild: Snowflake, channel: Snowflake, now_unix: i64) -> bool {
+        self.mute_state(Some(guild), Some(channel), now_unix).on
+    }
+
+    /// Whether a forum's new posts notify (`getNewForumThreadsCreated`,
+    /// 543465): what its New Posts switch set, else whether the forum
+    /// notifies for every message.
+    pub fn new_forum_posts(&self, place: &Place) -> bool {
+        let flags = self.by_guild.get(&place.guild).and_then(|s| s.channel(place.channel)).map_or(0, |o| o.flags);
+        if flags & forum_flags::NEW_POSTS_ON != 0 {
+            true
+        } else if flags & forum_flags::NEW_POSTS_OFF != 0 {
+            false
+        } else {
+            self.level(place) == Level::All
+        }
+    }
+
+    /// A channel's own override flags, which `message_notifications` saves
+    /// alongside (`getChannelIdFlags`).
+    pub fn channel_flags(&self, guild: Snowflake, channel: Snowflake) -> u64 {
+        self.by_guild.get(&Some(guild)).and_then(|s| s.channel(channel)).map_or(0, |o| o.flags)
     }
 
     /// A USER_GUILD_SETTINGS_UPDATE: replaces that server's settings.
@@ -405,10 +451,16 @@ fn mentions(message: &Message, me: Snowflake, my_roles: &[Snowflake], no_everyon
 }
 
 /// Our thread member's flags: which messages in the thread notify.
-mod thread_flags {
+pub mod thread_flags {
     pub const ALL_MESSAGES: u64 = 1 << 1;
     pub const ONLY_MENTIONS: u64 = 1 << 2;
     pub const NO_MESSAGES: u64 = 1 << 3;
+}
+
+/// A channel override's flags (355097's `NEW_FORUM_THREADS_ON` and `_OFF`).
+pub mod forum_flags {
+    pub const NEW_POSTS_ON: u64 = 1 << 14;
+    pub const NEW_POSTS_OFF: u64 = 1 << 13;
 }
 
 #[cfg(test)]
@@ -482,6 +534,38 @@ mod tests {
         // The DMs are the entry with no server.
         s.apply(None, &json!({"channel_overrides": {"98": {"muted": true}}}));
         assert!(s.channel_muted(&place(None, 98, None), NOW));
+    }
+
+    #[test]
+    fn the_switches_of_a_server_read_and_apply() {
+        let mut s = NotificationSettings::from_ready(&json!([
+            {"guild_id": "1", "hide_muted_channels": true, "mute_scheduled_events": false,
+             "channel_overrides": [{"channel_id": "12", "muted": true, "message_notifications": 3, "flags": 8192}]}
+        ]));
+        assert!(s.hide_muted_channels(Snowflake(1)) && !s.mute_scheduled_events(Snowflake(1)));
+        assert!(!s.hide_muted_channels(Snowflake(2)), "no entry: off");
+        s.apply(Some(Snowflake(1)), &json!({"hide_muted_channels": false, "mute_scheduled_events": true}));
+        assert!(!s.hide_muted_channels(Snowflake(1)) && s.mute_scheduled_events(Snowflake(1)));
+        assert!(s.channel_muted_itself(Snowflake(1), Snowflake(12), NOW));
+        assert!(!s.channel_muted_itself(Snowflake(1), Snowflake(13), NOW));
+        assert_eq!(s.channel_flags(Snowflake(1), Snowflake(12)), 8192, "kept through a change");
+    }
+
+    #[test]
+    fn a_forums_new_posts_follow_its_switch_else_its_level() {
+        let mut s = NotificationSettings::from_ready(&json!([
+            {"guild_id": "1", "message_notifications": 1,
+             "channel_overrides": [{"channel_id": "20", "message_notifications": 3, "flags": 16384},
+                                   {"channel_id": "21", "message_notifications": 0, "flags": 8192}]}
+        ]));
+        let forum = |id| place(Some(1), id, None);
+        assert!(s.new_forum_posts(&forum(20)), "switched on over a mentions-only server");
+        assert!(!s.new_forum_posts(&forum(21)), "switched off over all messages");
+        assert!(!s.new_forum_posts(&forum(22)), "no switch: the server's level, mentions");
+        s.apply(Some(Snowflake(1)), &json!({"message_notifications": 0}));
+        assert!(s.new_forum_posts(&forum(22)), "no switch: all messages");
+        s.apply(Some(Snowflake(1)), &json!({"channel_overrides": {"20": {"flags": 8192}}}));
+        assert!(!s.new_forum_posts(&forum(20)));
     }
 
     #[test]

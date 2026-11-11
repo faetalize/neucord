@@ -6,6 +6,8 @@
 use serde_json::{Value, json};
 
 use crate::Snowflake;
+use crate::experiments::Experiments;
+use crate::notifications::{Level, forum_flags, thread_flags};
 
 /// The mute durations the menus offer, in seconds, with their labels
 /// (`MINUTES_15`.. `ALWAYS` in 355097, in the order 995102 lists them). `-1`
@@ -43,6 +45,48 @@ pub fn channel(channel: Snowflake, settings: Value) -> Value {
 /// own endpoint instead.
 pub fn bulk(guild: Snowflake, settings: Value) -> Value {
     json!({"guilds": {guild.to_string(): settings}})
+}
+
+/// The body of a settings request with the folds that aren't saved yet in it,
+/// as `saveUserGuildSettingsBulk` adds them (931260): each category's
+/// `collapsed`, in its override under its own server, whichever server the
+/// request is for. `folds` are `(server, category, folded)`.
+pub fn with_folds(mut body: Value, folds: &[(Snowflake, Snowflake, bool)]) -> Value {
+    for &(guild, category, folded) in folds {
+        body["guilds"][guild.to_string()]["channel_overrides"][category.to_string()]["collapsed"] = json!(folded);
+    }
+    body
+}
+
+/// Which messages in a joined thread notify, as the thread member's `flags`
+/// (`EU` in 37411), with the level each stands for.
+pub const THREAD_LEVELS: [(u64, Level, &str); 3] = [
+    (thread_flags::ALL_MESSAGES, Level::All, "All Messages"),
+    (thread_flags::ONLY_MENTIONS, Level::Mentions, "Only @mentions"),
+    (thread_flags::NO_MESSAGES, Level::Nothing, "Nothing"),
+];
+
+/// A thread's level as the request sends it: the flags alone, with nothing
+/// of the member's other bits (`setNotificationSettings` in 7909).
+pub fn thread_level(flags: u64) -> Value {
+    json!({"flags": flags})
+}
+
+/// A forum's channel override with New Posts switched, keeping its other
+/// flags (`setForumThreadsCreated` in 832712).
+pub fn new_posts(current: u64, on: bool) -> Value {
+    let (set, clear) = if on {
+        (forum_flags::NEW_POSTS_ON, forum_flags::NEW_POSTS_OFF)
+    } else {
+        (forum_flags::NEW_POSTS_OFF, forum_flags::NEW_POSTS_ON)
+    };
+    json!({"flags": (current & !clear) | set})
+}
+
+/// Whether the menus offer Mark Unread on a channel: the experiment's
+/// variant 1 (511904), off for accounts Discord didn't put in it.
+pub fn offers_mark_channel_unread(experiments: &Experiments, me: Snowflake) -> bool {
+    experiments.apex_user(me, "2026-08-mark-channel-unread").is_some_and(|a| a.variant == 1)
 }
 
 /// A read state `read-states/ack-bulk` takes (218461's `BULK_ACK`).
@@ -145,5 +189,54 @@ mod tests {
     #[test]
     fn marking_unread_is_a_manual_ack_with_the_mentions_after() {
         assert_eq!(unread_body(2), json!({"manual": true, "mention_count": 2}));
+    }
+
+    #[test]
+    fn unsaved_folds_ride_with_any_servers_settings() {
+        let body = bulk(Snowflake(1), channel(Snowflake(10), mute(-1, &at("2026-11-11T10:00:00Z"))));
+        let sent = with_folds(body, &[(Snowflake(1), Snowflake(10), true), (Snowflake(2), Snowflake(20), false)]);
+        assert_eq!(
+            sent,
+            json!({"guilds": {
+                "1": {"channel_overrides": {"10": {
+                    "muted": true,
+                    "mute_config": {"selected_time_window": -1, "end_time": null},
+                    "collapsed": true
+                }}},
+                "2": {"channel_overrides": {"20": {"collapsed": false}}},
+            }})
+        );
+        assert_eq!(with_folds(json!({"guilds": {}}), &[]), json!({"guilds": {}}));
+    }
+
+    #[test]
+    fn a_threads_level_is_its_flags_alone() {
+        assert_eq!(thread_level(THREAD_LEVELS[1].0), json!({"flags": 4}));
+        let flags: Vec<u64> = THREAD_LEVELS.iter().map(|l| l.0).collect();
+        assert_eq!(flags, [2, 4, 8]);
+    }
+
+    #[test]
+    fn new_posts_flips_its_two_flags_and_keeps_the_rest() {
+        let other = 1 << 3;
+        assert_eq!(new_posts(other, true), json!({"flags": other | 16_384}));
+        assert_eq!(new_posts(other | 16_384, false), json!({"flags": other | 8192}));
+        assert_eq!(new_posts(other | 8192, true), json!({"flags": other | 16_384}));
+        assert_eq!(new_posts(0, false), json!({"flags": 8192}));
+    }
+
+    #[test]
+    fn mark_unread_on_channels_is_variant_one_of_its_experiment() {
+        let assigned = |variant: i64| {
+            Experiments::from_ready(&json!({"apex_experiments": {"assignments": {"1": {"7": {"assignments": [
+                [crate::experiments::murmur3("2026-08-mark-channel-unread"), variant, 0, 1]
+            ]}}}}}))
+        };
+        let offered = |e: &Experiments| offers_mark_channel_unread(e, Snowflake(7));
+        assert!(!offered(&Experiments::default()), "not in it");
+        assert!(!offered(&assigned(0)), "control");
+        assert!(offered(&assigned(1)));
+        assert!(!offered(&assigned(2)), "a variant it doesn't define");
+        assert!(!offers_mark_channel_unread(&assigned(1), Snowflake(8)), "someone else's");
     }
 }

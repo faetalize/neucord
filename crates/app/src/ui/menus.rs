@@ -68,6 +68,9 @@ pub(super) struct Item<T: 'static, C: 'static = App> {
 pub(super) enum Kind<T: 'static, C: 'static = App> {
     /// Runs when chosen.
     Action(fn(&Rc<C>, &T)),
+    /// An action the official client shows greyed out while `enabled` says no
+    /// (Mark As Read with nothing to read), rather than leave out.
+    Gated { enabled: fn(&C, &T) -> bool, run: fn(&Rc<C>, &T) },
     /// A checkbox, ticked as `checked` says; `set` gets its new state.
     Check { checked: fn(&C, &T) -> bool, set: fn(&Rc<C>, &T, bool) },
     /// More sections, opened from this item. It shows only with something
@@ -197,13 +200,29 @@ pub(super) const SEARCH_RESULT: Table<MessageTarget> = &[
 
 /// A thread's menu, from its row in the sidebar or the browser and the box
 /// under the message that started it: what Neucord has of the client's
-/// (949488), and from a forum post's card. Join Thread and Edit Tags are in
-/// the group of the thread's actions, Pin Post and Unpin Post in the
+/// (949488), and from a forum post's card. Mark As Read comes first, Join
+/// Thread and Edit Tags are in the group of the thread's actions, the mute
+/// and Notification Settings follow it, Pin Post and Unpin Post are in the
 /// moderators', Leave Thread after. Edit Tags and the pins show on forum
-/// posts only. Remove From Thread is on a thread's members (202643), whose
-/// list Neucord doesn't show yet.
-pub(super) const THREAD: Table<threads::ThreadTarget> =
-    &[&[threads::JOIN_THREAD, forum::EDIT_TAGS], &[forum::PIN_POST, forum::UNPIN_POST], &[threads::LEAVE_THREAD]];
+/// posts only, and the mute and settings greyed on a thread we haven't
+/// joined. Remove From Thread is on a thread's members (202643), whose list
+/// Neucord doesn't show yet.
+pub(super) const THREAD: Table<threads::ThreadTarget> = &[
+    &[notify_menus::MARK_THREAD_READ, notify_menus::MARK_THREAD_UNREAD],
+    &[threads::JOIN_THREAD, forum::EDIT_TAGS],
+    &[
+        notify_menus::MUTE_THREAD,
+        notify_menus::UNMUTE_THREAD,
+        notify_menus::MUTE_THREAD_OFF,
+        notify_menus::MUTE_POST,
+        notify_menus::UNMUTE_POST,
+        notify_menus::MUTE_POST_OFF,
+        notify_menus::THREAD_NOTIFICATIONS,
+        notify_menus::THREAD_NOTIFICATIONS_OFF,
+    ],
+    &[forum::PIN_POST, forum::UNPIN_POST],
+    &[threads::LEAVE_THREAD],
+];
 
 /// A forum's tag, on its filter (`forum-tag`, 960015): Copy Tag ID, in
 /// Developer Mode like every copy of an id.
@@ -212,13 +231,13 @@ pub(super) const FORUM_TAG: Table<forum::Tagged> = &[&[forum::COPY_TAG_ID]];
 /// A channel's menu, from its row in the sidebar: what Neucord has of the
 /// client's (428631 for voice and stage channels, 823255 for the others), in
 /// its order. Copy Link is among the channel's actions, Open Chat among the
-/// voice ones, and Copy Channel ID is last. Mark As Read comes first and Mute
-/// and Notification Settings follow the channel's actions. Mark Unread is
-/// offered by an experiment (`2026-08-mark-channel-unread`, off unless the
-/// account has it), which Neucord doesn't read yet. The rest needs what
-/// Neucord doesn't have yet: joining and what happens in a call is #12's.
+/// voice ones, and Copy Channel ID is last. Mark As Read comes first, in the
+/// place of Mark Unread where the experiment gives it (`2026-08-mark-channel-unread`),
+/// and Mute and Notification Settings follow the channel's actions. The rest
+/// needs what Neucord doesn't have yet: joining and what happens in a call is
+/// #12's.
 pub(super) const CHANNEL: Table<sidebar::ChannelTarget> = &[
-    &[notify_menus::MARK_CHANNEL_READ],
+    &[notify_menus::MARK_CHANNEL_READ, notify_menus::MARK_CHANNEL_UNREAD],
     &[sidebar::COPY_CHANNEL_LINK],
     &[sidebar::OPEN_CHAT],
     &[notify_menus::MUTE_CHANNEL, notify_menus::UNMUTE_CHANNEL, notify_menus::CHANNEL_NOTIFICATIONS],
@@ -227,24 +246,37 @@ pub(super) const CHANNEL: Table<sidebar::ChannelTarget> = &[
 
 /// A category's menu, from its heading in the sidebar: Mark As Read, Mute
 /// Category and Notification Settings, as the client has them among items
-/// Neucord has no use for yet (collapsing, editing).
+/// Neucord has no use for yet (editing). Muting folds the category, and
+/// clicking its heading does too.
 pub(super) const CATEGORY: Table<sidebar::ChannelTarget> = &[
     &[notify_menus::MARK_CHANNEL_READ],
     &[notify_menus::MUTE_CATEGORY, notify_menus::UNMUTE_CATEGORY, notify_menus::CHANNEL_NOTIFICATIONS],
 ];
 
-/// A server icon's menu (871638): Mark As Read, then Mute Server and
-/// Notification Settings, which the client groups together. What else the
-/// menu holds needs what Neucord doesn't have yet.
+/// A server icon's menu (871638): Mark As Read, then Mute Server,
+/// Notification Settings and Hide Muted Channels, which the client groups
+/// together. What else the menu holds needs what Neucord doesn't have yet.
 pub(super) const GUILD: Table<notify_menus::GuildTarget> = &[
     &[notify_menus::MARK_GUILD_READ],
-    &[notify_menus::MUTE_GUILD, notify_menus::UNMUTE_GUILD, notify_menus::GUILD_NOTIFICATIONS],
+    &[
+        notify_menus::MUTE_GUILD,
+        notify_menus::UNMUTE_GUILD,
+        notify_menus::GUILD_NOTIFICATIONS,
+        notify_menus::HIDE_MUTED_CHANNELS,
+    ],
 ];
+
+/// A server folder's menu, from its button in the rail (865815): Mark Folder
+/// As Read. Moving it, its settings and collapsing all folders need the
+/// folder arrangement Neucord only reads.
+pub(super) const FOLDER: Table<notify_menus::FolderTarget> = &[&[notify_menus::MARK_FOLDER_READ]];
 
 /// A DM's or group DM's menu (385913, 4027): Mark As Read first, and Mute
 /// Conversation in a group of its own.
-pub(super) const DIRECT_MESSAGE: Table<sidebar::ChannelTarget> =
-    &[&[notify_menus::MARK_CHANNEL_READ], &[notify_menus::MUTE_CONVERSATION, notify_menus::UNMUTE_CONVERSATION]];
+pub(super) const DIRECT_MESSAGE: Table<sidebar::ChannelTarget> = &[
+    &[notify_menus::MARK_CHANNEL_READ, notify_menus::MARK_CHANNEL_UNREAD],
+    &[notify_menus::MUTE_CONVERSATION, notify_menus::UNMUTE_CONVERSATION],
+];
 
 /// A person's menu, opened from a message's author, a mention and a member
 /// list row: what Neucord has of the official client's (`user-context`,
@@ -328,8 +360,11 @@ fn fill<T: 'static, C: 'static>(
             match entry {
                 Entry::Item(item) if !(item.shows)(cx, target) => {}
                 Entry::Item(item) => match &item.kind {
-                    Kind::Action(activate) => {
+                    Kind::Action(activate) | Kind::Gated { run: activate, .. } => {
                         let action = gio::SimpleAction::new(item.name, None);
+                        if let Kind::Gated { enabled, .. } = &item.kind {
+                            action.set_enabled(enabled(cx, target));
+                        }
                         let (cx, target, activate) = (Rc::downgrade(cx), target.clone(), *activate);
                         action.connect_activate(move |_, _| {
                             if let Some(cx) = cx.upgrade() {
@@ -600,6 +635,15 @@ mod tests {
         shows: |_, _| true,
         kind: Kind::Action(|cx, target| log(cx, format!("shown {target}"))),
     });
+    const GREYED: Entry<Target, Cx> = Entry::Item(Item {
+        name: "greyed",
+        label: "Greyed",
+        shows: |_, _| true,
+        kind: Kind::Gated {
+            enabled: |_, target| *target == "on",
+            run: |cx, target| log(cx, format!("greyed {target}")),
+        },
+    });
     const HIDDEN: Entry<Target, Cx> =
         Entry::Item(Item { name: "hidden", label: "Hidden", shows: |_, _| false, kind: Kind::Action(|_, _| {}) });
     const MUTED: Entry<Target, Cx> = Entry::Item(Item {
@@ -633,6 +677,7 @@ mod tests {
     const EMPTY: Entry<Target, Cx> =
         Entry::Item(Item { name: "empty", label: "Empty", shows: |_, _| true, kind: Kind::Submenu(&[&[HIDDEN]]) });
     const TABLE: Table<Target, Cx> = &[&[SHOWN, HIDDEN], &[HIDDEN, EMPTY], &[MUTED, SETTINGS], &[ROLES, MUTE_FOR]];
+    const GATED: Table<Target, Cx> = &[&[GREYED, SHOWN]];
 
     fn label(menu: &gio::MenuModel, n: i32) -> Option<String> {
         menu.item_attribute_value(n, "label", Some(glib::VariantTy::STRING))?.get()
@@ -656,6 +701,22 @@ mod tests {
         assert_eq!(section(&settings, 0).n_items(), 2);
         // Names from Discord keep their underscores.
         assert_eq!(label(&section(menu.upcast_ref(), 2), 0).as_deref(), Some("mod__team"));
+    }
+
+    #[test]
+    fn a_gated_item_shows_greyed_until_it_may_run() {
+        let cx = Rc::new(Cx::default());
+        for (target, enabled) in [("off", false), ("on", true)] {
+            let (menu, actions, _) = build(&cx, GATED, target);
+            let section = section(menu.upcast_ref(), 0);
+            assert_eq!(section.n_items(), 2, "shown either way");
+            assert_eq!(actions.lookup_action("greyed").map(|a| a.is_enabled()), Some(enabled));
+            // A greyed action is not run, as GTK's menus see to; an enabled one is.
+            actions.activate_action("greyed", None);
+            let ran = cx.log.borrow().iter().filter(|l| l.starts_with("greyed")).count();
+            assert_eq!(ran, usize::from(enabled));
+            cx.log.borrow_mut().clear();
+        }
     }
 
     /// The names of a table's entries, section by section.

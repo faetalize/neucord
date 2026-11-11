@@ -12,6 +12,7 @@ pub mod backoff;
 pub mod badge;
 pub mod cdn;
 pub mod channel_icon;
+pub mod channel_list;
 pub mod commands;
 pub mod component;
 pub mod cooldowns;
