@@ -90,6 +90,57 @@ pub struct UnicodeEmoji {
     /// Its group in the picker. Skin tone variants and the tone swatches
     /// have none: they only have names to convert.
     pub category: Option<Category>,
+    /// Where the variant for each [`Tone`] is in the catalog, for the emoji
+    /// that have one (a hand, a person).
+    tones: [Option<usize>; 5],
+}
+
+/// A skin tone, the account's default one being a setting
+/// (`text_and_images.diversity_surrogate`, which holds the modifier).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Light,
+    MediumLight,
+    Medium,
+    MediumDark,
+    Dark,
+}
+
+impl Tone {
+    pub const ALL: [Tone; 5] = [Tone::Light, Tone::MediumLight, Tone::Medium, Tone::MediumDark, Tone::Dark];
+
+    /// The Fitzpatrick modifier, U+1F3FB to U+1F3FF.
+    pub fn modifier(self) -> &'static str {
+        ["\u{1F3FB}", "\u{1F3FC}", "\u{1F3FD}", "\u{1F3FE}", "\u{1F3FF}"][self as usize]
+    }
+
+    /// The tone a setting's modifier is; none for the default (an empty
+    /// string) and for anything that is not one.
+    pub fn from_modifier(modifier: &str) -> Option<Tone> {
+        Tone::ALL.into_iter().find(|t| t.modifier() == modifier)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Tone::Light => "Light Skin Tone",
+            Tone::MediumLight => "Medium-Light Skin Tone",
+            Tone::Medium => "Medium Skin Tone",
+            Tone::MediumDark => "Medium-Dark Skin Tone",
+            Tone::Dark => "Dark Skin Tone",
+        }
+    }
+}
+
+impl UnicodeEmoji {
+    /// This emoji in `tone`, or itself if it has no skin tones: what the
+    /// client shows and sends for it once a default tone is set
+    /// (`defaultDiversityChild`, 7584).
+    pub fn toned(&'static self, tone: Option<Tone>) -> &'static UnicodeEmoji {
+        match tone.and_then(|t| self.tones[t as usize]) {
+            Some(index) => &catalog().emoji[index],
+            None => self,
+        }
+    }
 }
 
 /// The picker's groups of Unicode emoji.
@@ -181,11 +232,14 @@ fn catalog() -> &'static Catalog {
                     for name in &emoji[parent].names {
                         by_name.entry(format!("{name}::skin-tone-{}", tones.unwrap_or_default())).or_insert(index);
                     }
+                    if let Some(tone) = tones.and_then(|t| t.parse::<usize>().ok()).filter(|t| (1..=5).contains(t)) {
+                        emoji[parent].tones[tone - 1] = Some(index);
+                    }
                 }
                 _ => {}
             }
             let category = if variant.is_some() { None } else { category };
-            emoji.push(UnicodeEmoji { glyph, names, category });
+            emoji.push(UnicodeEmoji { glyph, names, category, tones: [None; 5] });
         }
         Catalog { emoji, by_name }
     })
@@ -208,6 +262,12 @@ pub fn unicode_label(glyph: &str) -> String {
 /// settings carry).
 pub fn unicode_in(category: Category) -> impl Iterator<Item = &'static UnicodeEmoji> {
     catalog().emoji.iter().filter(move |e| e.category == Some(category))
+}
+
+/// Whether any Unicode emoji has skin tones: where the picker offers to
+/// choose one.
+pub fn has_tones(emoji: &UnicodeEmoji) -> bool {
+    emoji.tones.iter().any(Option::is_some)
 }
 
 /// The emoji of the picker and searches: every one with a group.
@@ -700,6 +760,32 @@ mod tests {
         assert!(joy.iter().any(|i| matches!(i, Item::Unicode(e) if e.glyph == "😂")));
         assert!(joy.iter().all(|i| !matches!(i, Item::Unicode(e) if e.category.is_none())), "no variants");
         assert!(free.search("zzzzqq", 10).unlocked.is_empty());
+    }
+
+    #[test]
+    fn a_default_tone_picks_the_variant_where_there_is_one() {
+        let thumbs = unicode("thumbsup").unwrap();
+        assert!(has_tones(thumbs));
+        assert_eq!(thumbs.toned(None).glyph, "👍");
+        assert_eq!(thumbs.toned(Some(Tone::Medium)).glyph, "👍🏽");
+        assert_eq!(thumbs.toned(Some(Tone::Dark)).glyph, "👍🏿");
+        let grinning = unicode("grinning").unwrap();
+        assert!(!has_tones(grinning));
+        assert_eq!(grinning.toned(Some(Tone::Light)).glyph, "😀", "nothing to tone");
+        // A pair of hands has tones of its own for each, which no single tone picks.
+        let handshake = unicode("handshake").unwrap();
+        assert_eq!(handshake.toned(Some(Tone::Light)).glyph, "🤝🏻");
+    }
+
+    #[test]
+    fn tones_are_their_modifiers() {
+        assert_eq!(Tone::from_modifier("🏽"), Some(Tone::Medium));
+        assert_eq!(Tone::from_modifier(""), None);
+        assert_eq!(Tone::from_modifier("x"), None);
+        for tone in Tone::ALL {
+            assert_eq!(Tone::from_modifier(tone.modifier()), Some(tone));
+        }
+        assert_eq!(unicode("skin-tone-3").map(|e| e.glyph), Some(Tone::Medium.modifier()));
     }
 
     #[test]

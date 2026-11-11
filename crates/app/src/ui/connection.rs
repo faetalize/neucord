@@ -368,6 +368,8 @@ impl App {
             required_action,
             experiments,
             session_id,
+            gates,
+            unavailable_guilds,
             voice_states,
         } = ready;
         self.learn_users(private_channels.iter().flat_map(|c| &c.recipients));
@@ -408,6 +410,8 @@ impl App {
             state.nitro = nitro;
             state.experiments = experiments;
             state.session_id = session_id;
+            state.gates = gates;
+            state.unavailable_guilds = unavailable_guilds;
             state.voice = voice_states;
             // A new session: every index is out of date, and no command is waiting on this one.
             state.commands.session_started();

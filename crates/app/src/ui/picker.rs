@@ -69,6 +69,8 @@ pub(super) struct Hooks {
     pub(super) scrolled: Option<OnScroll>,
     /// The back button, and Escape while it shows, go back.
     pub(super) back: Option<Rc<dyn Fn()>>,
+    /// A control beside the search box, such as the emoji picker's skin tone.
+    pub(super) trailing: Option<gtk::Widget>,
 }
 
 /// An open picker, for what is outside it to steer.
@@ -242,6 +244,9 @@ pub(super) fn open_with<T: Clone + 'static>(
     header.append(&back);
     search.set_hexpand(true);
     header.append(&search);
+    if let Some(trailing) = hooks.trailing {
+        header.append(&trailing);
+    }
     let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
     content.append(&header);
     content.append(&scroller);

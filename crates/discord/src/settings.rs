@@ -13,6 +13,8 @@
 use serde_json::Value;
 
 use crate::Snowflake;
+use crate::emoji::Tone;
+use crate::gates::Gates;
 
 /// One entry of `guild_folders`. Entries with no `id` are not real folders:
 /// they only place a single server in the order.
@@ -197,6 +199,9 @@ pub struct Notifications {
     pub friend_online: bool,
     pub friend_anniversary: bool,
     pub profile_updates: bool,
+    /// People we know start streaming in small servers.
+    pub go_live: bool,
+    pub upcoming_event: bool,
 }
 
 impl Default for Notifications {
@@ -206,6 +211,8 @@ impl Default for Notifications {
             friend_online: true,
             friend_anniversary: true,
             profile_updates: true,
+            go_live: true,
+            upcoming_event: true,
         }
     }
 }
@@ -216,6 +223,8 @@ pub struct NotificationsPatch {
     pub friend_online: Option<bool>,
     pub friend_anniversary: Option<bool>,
     pub profile_updates: Option<bool>,
+    pub go_live: Option<bool>,
+    pub upcoming_event: Option<bool>,
 }
 
 impl Notifications {
@@ -224,26 +233,235 @@ impl Notifications {
         self.friend_online = patch.friend_online.unwrap_or(self.friend_online);
         self.friend_anniversary = patch.friend_anniversary.unwrap_or(self.friend_anniversary);
         self.profile_updates = patch.profile_updates.unwrap_or(self.profile_updates);
+        self.go_live = patch.go_live.unwrap_or(self.go_live);
+        self.upcoming_event = patch.upcoming_event.unwrap_or(self.upcoming_event);
     }
 }
 
-/// Who may join the games the account plays.
+/// Whether the notification settings offer "A server has an upcoming event":
+/// the client shows the toggle for variants 1 to 3 of the user experiment
+/// `2026-04-upcoming-server-event` and hides it otherwise (960111).
+pub fn upcoming_event_toggle(experiments: &crate::experiments::Experiments, me: Snowflake) -> bool {
+    experiments.apex_user(me, "2026-04-upcoming-server-event").is_some_and(|a| (1..=3).contains(&a.variant))
+}
+
+/// How much of the profile others see (`profile_visibility`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProfileVisibility {
+    FriendsOnly,
+    FriendsAndSmallServers,
+    /// What an account that never chose has: the client reads `UNSET` as this.
+    #[default]
+    FriendsAndAllServers,
+}
+
+impl ProfileVisibility {
+    pub const ALL: [ProfileVisibility; 3] =
+        [Self::FriendsAndAllServers, Self::FriendsAndSmallServers, Self::FriendsOnly];
+
+    pub fn from_raw(raw: u64) -> Option<Self> {
+        match raw {
+            0 | 3 => Some(Self::FriendsAndAllServers),
+            2 => Some(Self::FriendsAndSmallServers),
+            1 => Some(Self::FriendsOnly),
+            _ => None,
+        }
+    }
+
+    pub fn raw(self) -> u64 {
+        match self {
+            Self::FriendsOnly => 1,
+            Self::FriendsAndSmallServers => 2,
+            Self::FriendsAndAllServers => 3,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FriendsAndAllServers => "Friends & All Servers",
+            Self::FriendsAndSmallServers => "Friends & Small Servers Only",
+            Self::FriendsOnly => "Friends Only",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::FriendsAndAllServers => "",
+            Self::FriendsAndSmallServers => {
+                "Your full profile is visible to friends and any server you join with 200 or fewer members. Everyone else sees a limited version."
+            }
+            Self::FriendsOnly => "Your full profile is visible to friends. Everyone else sees a limited version.",
+        }
+    }
+}
+
+/// Who may send friend requests, as the bits of `friend_source_flags`
+/// (`friendSourceFlags`; the client's default, everyone, is 14).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FriendSources(pub u32);
+
+impl FriendSources {
+    const MUTUAL_FRIENDS: u32 = 2;
+    const MUTUAL_GUILDS: u32 = 4;
+    const NO_RELATION: u32 = 8;
+    const EVERYONE: u32 = 14;
+
+    pub fn everyone(self) -> bool {
+        self.0 & Self::EVERYONE == Self::EVERYONE
+    }
+
+    /// Friends of friends: all of everyone is also that.
+    pub fn mutual_friends(self) -> bool {
+        self.everyone() || self.0 & Self::MUTUAL_FRIENDS == Self::MUTUAL_FRIENDS
+    }
+
+    pub fn mutual_servers(self) -> bool {
+        self.everyone() || self.0 & Self::MUTUAL_GUILDS == Self::MUTUAL_GUILDS
+    }
+
+    /// Server members can send requests and nobody else beyond friends of
+    /// friends: DMs and friend requests then have one switch.
+    pub fn only_server_members(self) -> bool {
+        self.0 & Self::MUTUAL_GUILDS == Self::MUTUAL_GUILDS && !self.everyone()
+    }
+
+    /// The flags after switching "Everyone" (`14` or `14 & ~NO_RELATION`).
+    pub fn with_everyone(on: bool) -> Self {
+        FriendSources(if on { Self::EVERYONE } else { Self::EVERYONE & !Self::NO_RELATION })
+    }
+
+    /// Switching one of the two: on sets its bit, off clears it and
+    /// "no relation" with it.
+    pub fn with_mutual_friends(self, on: bool) -> Self {
+        self.with(Self::MUTUAL_FRIENDS, on)
+    }
+
+    pub fn with_mutual_servers(self, on: bool) -> Self {
+        self.with(Self::MUTUAL_GUILDS, on)
+    }
+
+    fn with(self, bit: u32, on: bool) -> Self {
+        FriendSources(if on { self.0 | bit } else { self.0 & !bit & !Self::NO_RELATION })
+    }
+}
+
+/// The servers the lists of restrictions name, as the client reads them
+/// (`getRestrictedGuildIds` and its kin, 115063): when no server is
+/// unavailable, those we are no longer in are dropped.
+pub fn live_servers(ids: &[Snowflake], ours: &[Snowflake], unavailable: usize) -> Vec<Snowflake> {
+    let mut seen = std::collections::HashSet::new();
+    ids.iter().copied().filter(|id| (unavailable != 0 || ours.contains(id)) && seen.insert(*id)).collect()
+}
+
+/// `servers` with `server` in it or out of it, in the order a set built from
+/// them gives.
+pub fn with_server(servers: &[Snowflake], server: Snowflake, listed: bool) -> Vec<Snowflake> {
+    let mut servers = servers.to_vec();
+    match (listed, servers.contains(&server)) {
+        (true, false) => servers.push(server),
+        (false, true) => servers.retain(|s| *s != server),
+        _ => {}
+    }
+    servers
+}
+
+/// Who may join the games the account plays, who may message and send
+/// requests, and how much of the profile is shown.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Privacy {
     pub friends_join_game: bool,
     pub voice_participants_join_game: bool,
+    pub friend_sources: FriendSources,
+    /// `default_guilds_restricted_v2`: servers' members may not message us
+    /// unless the server says so. The older `default_guilds_restricted` is
+    /// the answer where this was never set.
+    pub servers_restricted: Option<bool>,
+    pub servers_restricted_before: bool,
+    /// Servers that differ from that default.
+    pub restricted_servers: Vec<Snowflake>,
+    /// Messages from people we may not know go to requests.
+    pub message_requests_restricted: Option<bool>,
+    pub message_request_restricted_servers: Vec<Snowflake>,
+    pub profile_visibility: ProfileVisibility,
 }
 
 impl Default for Privacy {
     fn default() -> Self {
-        Privacy { friends_join_game: true, voice_participants_join_game: true }
+        Privacy {
+            friends_join_game: true,
+            voice_participants_join_game: true,
+            friend_sources: FriendSources(FriendSources::EVERYONE),
+            servers_restricted: None,
+            servers_restricted_before: false,
+            restricted_servers: Vec::new(),
+            message_requests_restricted: None,
+            message_request_restricted_servers: Vec::new(),
+            profile_visibility: ProfileVisibility::default(),
+        }
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+impl Privacy {
+    /// Whether members of servers may not message us by default
+    /// (`useDefaultRestricted`, 428031).
+    pub fn servers_restricted(&self) -> bool {
+        self.servers_restricted.unwrap_or(self.servers_restricted_before)
+    }
+}
+
+/// What a switch of the server privacy rows shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Row {
+    pub on: bool,
+    pub disabled: bool,
+}
+
+impl Privacy {
+    /// "Direct Messages": on lets a server's members message us. For the
+    /// account's default (`server` none) or for one server.
+    pub fn direct_messages(&self, gates: &Gates, server: Option<Snowflake>) -> Row {
+        match server {
+            None => Row { on: !self.servers_restricted(), disabled: gates.parent_linked },
+            Some(server) => Row { on: !self.restricted_servers.contains(&server), disabled: false },
+        }
+    }
+
+    /// "Message requests", on where messages from people we may not know are
+    /// filtered into requests. The client turns it on for the accounts it must
+    /// (`useDisabled` and `useValue` of the row in 960111): it cannot be
+    /// changed where direct messages are off, or by a teen where the region
+    /// forces it, or with a parent linked.
+    pub fn message_requests(&self, gates: &Gates, server: Option<Snowflake>) -> Row {
+        let restricted = self.message_requests_restricted.unwrap_or(false);
+        let (value, disabled) = match server {
+            None => {
+                let direct_messages_off = self.servers_restricted();
+                let value = if gates.parent_linked { !restricted } else { !direct_messages_off && !restricted };
+                (value, direct_messages_off || gates.parent_linked)
+            }
+            Some(server) => {
+                let off = self.restricted_servers.contains(&server);
+                (!off && !self.message_request_restricted_servers.contains(&server), off)
+            }
+        };
+        Row { on: gates.message_requests_forced || value, disabled: disabled || gates.message_requests_forced }
+    }
+}
+
+/// The privacy settings a payload mentions. The lists and the plain fields
+/// come with their whole message, so a message that leaves one out says it
+/// is empty or off.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PrivacyPatch {
     pub friends_join_game: Option<bool>,
     pub voice_participants_join_game: Option<bool>,
+    pub friend_sources: Option<FriendSources>,
+    pub servers_restricted: Option<bool>,
+    pub servers_restricted_before: Option<bool>,
+    pub restricted_servers: Option<Vec<Snowflake>>,
+    pub message_requests_restricted: Option<bool>,
+    pub message_request_restricted_servers: Option<Vec<Snowflake>>,
+    pub profile_visibility: Option<ProfileVisibility>,
 }
 
 impl Privacy {
@@ -251,6 +469,17 @@ impl Privacy {
         self.friends_join_game = patch.friends_join_game.unwrap_or(self.friends_join_game);
         self.voice_participants_join_game =
             patch.voice_participants_join_game.unwrap_or(self.voice_participants_join_game);
+        self.friend_sources = patch.friend_sources.unwrap_or(self.friend_sources);
+        self.servers_restricted = patch.servers_restricted.or(self.servers_restricted);
+        self.servers_restricted_before = patch.servers_restricted_before.unwrap_or(self.servers_restricted_before);
+        if let Some(servers) = patch.restricted_servers {
+            self.restricted_servers = servers;
+        }
+        self.message_requests_restricted = patch.message_requests_restricted.or(self.message_requests_restricted);
+        if let Some(servers) = patch.message_request_restricted_servers {
+            self.message_request_restricted_servers = servers;
+        }
+        self.profile_visibility = patch.profile_visibility.unwrap_or(self.profile_visibility);
     }
 }
 
@@ -427,6 +656,9 @@ pub struct Settings {
     /// The language the account is set to (`localization.locale`); `None`
     /// until someone picks one.
     pub locale: Option<String>,
+    /// The skin tone emoji with tones show and send in; none is the default
+    /// yellow.
+    pub skin_tone: Option<Tone>,
 }
 
 /// The settings a payload mentions; the rest are `None`.
@@ -442,6 +674,8 @@ pub struct SettingsPatch {
     pub status: Option<StatusSettings>,
     /// The `localization` message: its locale, if it has one.
     pub localization: Option<Option<String>>,
+    /// `diversity_surrogate`: the tone, or none for the default.
+    pub skin_tone: Option<Option<Tone>>,
 }
 
 impl SettingsPatch {
@@ -477,6 +711,9 @@ impl Settings {
         }
         if let Some(locale) = patch.localization {
             self.locale = locale;
+        }
+        if let Some(tone) = patch.skin_tone {
+            self.skin_tone = tone;
         }
     }
 
@@ -634,6 +871,98 @@ mod tests {
         assert_eq!(initial(Some(now + 20_000_000), true), ClearAfter::Today, "more than four hours");
         assert_eq!(initial(Some(now + 600_000), false), ClearAfter::Today, "ends on another date");
         assert_eq!(initial(Some(now - 5), true), ClearAfter::Minutes30, "already over");
+    }
+
+    #[test]
+    fn the_upcoming_event_toggle_is_for_the_variants_that_show_it() {
+        let assign = |variant: i64| {
+            crate::experiments::Experiments::from_ready(&json!({ "apex_experiments": { "assignments": { "1": { "10": {
+                "assignments": [[crate::experiments::murmur3("2026-04-upcoming-server-event"), variant, 0, 1]]
+            } } } } }))
+        };
+        let me = Snowflake(10);
+        assert!(!upcoming_event_toggle(&assign(0), me), "the control group");
+        assert!([1, 2, 3].into_iter().all(|v| upcoming_event_toggle(&assign(v), me)));
+        assert!(!upcoming_event_toggle(&assign(4), me));
+        assert!(!upcoming_event_toggle(&Default::default(), me), "not assigned: the default config hides it");
+    }
+
+    #[test]
+    fn the_server_privacy_switches_show_what_the_client_does() {
+        let ids = |v: &[u64]| v.iter().copied().map(Snowflake).collect::<Vec<_>>();
+        let free = Gates::default();
+        let mut privacy = Privacy::default();
+
+        // A new account: everything allowed, nothing disabled.
+        assert_eq!(privacy.direct_messages(&free, None), Row { on: true, disabled: false });
+        assert_eq!(privacy.message_requests(&free, None), Row { on: true, disabled: false });
+
+        // Messages restricted by default: DMs off, and message requests off with them and not to change.
+        privacy.servers_restricted = Some(true);
+        assert_eq!(privacy.direct_messages(&free, None), Row { on: false, disabled: false });
+        assert_eq!(privacy.message_requests(&free, None), Row { on: false, disabled: true });
+        // The older setting answers where the new was never set, which the new overrides.
+        privacy.servers_restricted = None;
+        privacy.servers_restricted_before = true;
+        assert!(!privacy.direct_messages(&free, None).on);
+        privacy.servers_restricted = Some(false);
+        assert!(privacy.direct_messages(&free, None).on);
+
+        // Message requests set off for everyone.
+        privacy.message_requests_restricted = Some(true);
+        assert_eq!(privacy.message_requests(&free, None), Row { on: false, disabled: false });
+
+        // A parent holds DMs and shows message requests by their own setting.
+        let parent = Gates { parent_linked: true, ..Gates::default() };
+        assert_eq!(privacy.direct_messages(&parent, None), Row { on: true, disabled: true });
+        assert_eq!(privacy.message_requests(&parent, None), Row { on: false, disabled: true });
+
+        // A teen's region forces message requests on.
+        let forced = Gates { message_requests_forced: true, ..Gates::default() };
+        assert_eq!(privacy.message_requests(&forced, None), Row { on: true, disabled: true });
+
+        // One server: its own lists.
+        let mut privacy = Privacy {
+            restricted_servers: ids(&[5]),
+            message_request_restricted_servers: ids(&[6]),
+            ..Privacy::default()
+        };
+        let one = |server, p: &Privacy| {
+            (p.direct_messages(&free, Some(Snowflake(server))), p.message_requests(&free, Some(Snowflake(server))))
+        };
+        assert_eq!(one(5, &privacy), (Row { on: false, disabled: false }, Row { on: false, disabled: true }));
+        assert_eq!(one(6, &privacy), (Row { on: true, disabled: false }, Row { on: false, disabled: false }));
+        assert_eq!(one(7, &privacy), (Row { on: true, disabled: false }, Row { on: true, disabled: false }));
+        privacy.message_requests_restricted = Some(true);
+        assert!(one(7, &privacy).1.on, "a server's row ignores the default");
+    }
+
+    #[test]
+    fn friend_requests_switch_like_the_client_does() {
+        let all = FriendSources(14);
+        assert!(all.everyone() && all.mutual_friends() && all.mutual_servers(), "everyone is all three");
+        // Everyone off keeps both of the others.
+        let rest = FriendSources::with_everyone(false);
+        assert_eq!(rest, FriendSources(6));
+        assert!(!rest.everyone() && rest.mutual_friends() && rest.mutual_servers());
+        assert_eq!(FriendSources::with_everyone(true), all);
+        // Turning one of the others off takes "no relation" with it, so everyone goes too.
+        assert_eq!(all.with_mutual_friends(false), FriendSources(4));
+        assert_eq!(all.with_mutual_servers(false), FriendSources(2));
+        assert_eq!(FriendSources(4).with_mutual_friends(true), FriendSources(6));
+        assert_eq!(FriendSources(0).with_mutual_servers(true), FriendSources(4));
+        assert!(FriendSources(4).only_server_members());
+        assert!(!all.only_server_members() && !FriendSources(2).only_server_members());
+    }
+
+    #[test]
+    fn the_servers_a_restriction_names_are_ones_we_are_in() {
+        let ids = |v: &[u64]| v.iter().copied().map(Snowflake).collect::<Vec<_>>();
+        assert_eq!(live_servers(&ids(&[1, 2, 2, 9]), &ids(&[1, 2, 3]), 0), ids(&[1, 2]), "9 is a server we left");
+        assert_eq!(live_servers(&ids(&[1, 9]), &ids(&[1]), 1), ids(&[1, 9]), "an unavailable server may be 9");
+        assert_eq!(with_server(&ids(&[1, 2]), Snowflake(3), true), ids(&[1, 2, 3]));
+        assert_eq!(with_server(&ids(&[1, 2, 3]), Snowflake(2), false), ids(&[1, 3]));
+        assert_eq!(with_server(&ids(&[1, 2, 3]), Snowflake(2), true), ids(&[1, 2, 3]), "a set holds it once, in place");
     }
 
     #[test]

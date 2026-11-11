@@ -116,6 +116,8 @@ pub struct SettingsSync {
     to_save: BTreeMap<u32, Vec<u8>>,
     /// The generation of the save waiting for its timer.
     timer: Option<u64>,
+    /// How long that timer was set for.
+    timer_delay: Duration,
     rate_limited: bool,
     offline_data_version: Option<u64>,
     generation: u64,
@@ -129,6 +131,7 @@ impl SettingsSync {
     fn schedule(&mut self, after: Duration) -> Schedule {
         self.generation += 1;
         self.timer = Some(self.generation);
+        self.timer_delay = after;
         Schedule { generation: self.generation, after }
     }
 
@@ -171,18 +174,26 @@ impl SettingsSync {
         }
     }
 
-    /// Change a setting. The client waits no time before saving a setting
-    /// the user changed (`INFREQUENT_USER_ACTION`), so a save is due at
-    /// once, unless one is waiting to retry after a rate limit.
+    /// Change a setting. The client waits no time before saving most
+    /// settings the user changed (`INFREQUENT_USER_ACTION`), so a save is due
+    /// at once, unless one is waiting to retry after a rate limit. A setting
+    /// with a delay (see [`Setting::delay`]) leaves a timer that is already
+    /// set alone, as `markDirty` does, unless the timer is for longer.
     pub fn edit(&mut self, setting: Setting) -> Option<Edited> {
         let proto = self.proto.as_deref()?;
+        let delay = setting.delay();
         let (group, written) = setting.written(proto)?;
         let merged = settings_proto::replace_groups(proto, &[(group, &written)])?;
         let patch = SettingsPatch::from_proto_bytes(&settings_proto::replace_groups(&[], &[(group, &written)])?)?;
         self.proto = Some(merged);
         self.to_save.insert(group, written);
-        let schedule =
-            if self.timer.is_some() && self.rate_limited { None } else { Some(self.schedule(Duration::ZERO)) };
+        // A change with no wait always starts the timer over, which makes no
+        // difference where the timer is for no wait too.
+        let sooner = delay < self.timer_delay || delay.is_zero();
+        let schedule = match self.timer {
+            Some(_) if self.rate_limited || !sooner => None,
+            _ => Some(self.schedule(delay)),
+        };
         Some(Edited { patch, schedule })
     }
 
@@ -323,6 +334,32 @@ mod tests {
         let save = sync.save(edited.schedule.unwrap().generation).unwrap();
         let status = [bytes_field(1, &bytes_field(1, b"dnd")), bytes_field(5, &varint_field(1, 3))].concat();
         assert_eq!(sent(&save), bytes_field(11, &status));
+    }
+
+    #[test]
+    fn a_delayed_setting_waits_and_a_quicker_one_goes_ahead_of_it() {
+        use crate::emoji::Tone;
+        let mut sync = loaded();
+        let skin = sync.edit(Setting::SkinTone(Some(Tone::Medium))).unwrap();
+        let waiting = skin.schedule.unwrap();
+        assert_eq!(waiting.after, Duration::from_secs(10), "FREQUENT_USER_ACTION");
+        assert_eq!(skin.patch.skin_tone, Some(Some(Tone::Medium)), "shown at once");
+
+        // Another delayed change leaves the timer alone: it does not wait longer.
+        let again = sync.edit(Setting::SkinTone(Some(Tone::Dark))).unwrap();
+        assert_eq!(again.schedule, None);
+
+        // One with no wait replaces it, and takes the skin tone with it.
+        let quick = sync.edit(Setting::GifAutoPlay(false)).unwrap().schedule.unwrap();
+        assert_eq!(quick.after, Duration::ZERO);
+        assert!(sync.save(waiting.generation).is_none());
+        let save = sync.save(quick.generation).unwrap();
+        let sent = sent(&save);
+        let message = Message::parse(&sent).unwrap();
+        assert!(message.bytes(TEXT_AND_IMAGES).is_some());
+        let text = Message::parse(message.bytes(TEXT_AND_IMAGES).unwrap()).unwrap();
+        assert_eq!(text.string_value(1), Some(Tone::Dark.modifier()), "the later tone");
+        assert_eq!(text.bool_value(GIF_AUTO_PLAY), Some(false));
     }
 
     #[test]

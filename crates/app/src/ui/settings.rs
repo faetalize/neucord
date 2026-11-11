@@ -14,7 +14,7 @@ use adw::prelude::*;
 use discord::Setting;
 use discord::locales::{self, LOCALES};
 use discord::rest::Rest;
-use discord::settings::{ReactionNotifications, Settings, SettingsPatch, StickerAnimation};
+use discord::settings::{self, ReactionNotifications, Settings, SettingsPatch, StickerAnimation};
 use discord::settings_sync::{Save, SaveError, Schedule};
 use gtk::glib;
 
@@ -23,7 +23,7 @@ use super::state::State;
 use crate::config::{self, Key};
 
 /// Sets a row to the settings.
-type Show = Box<dyn Fn(&Settings)>;
+pub(super) type Show = Box<dyn Fn(&Settings)>;
 
 /// The open window. Settings that change elsewhere (another client, or the
 /// answer to a save) show in it through `show`.
@@ -33,11 +33,11 @@ pub(super) struct Window {
 }
 
 /// The rows of the window being built, and what sets each from the settings.
-struct Form {
-    app: Weak<App>,
+pub(super) struct Form {
+    pub(super) app: Weak<App>,
     /// Rows are set from the settings, which must not save them again.
-    updating: Rc<Cell<bool>>,
-    shows: Vec<Show>,
+    pub(super) updating: Rc<Cell<bool>>,
+    pub(super) shows: Vec<Show>,
 }
 
 impl Form {
@@ -106,7 +106,7 @@ fn option_switch(
     group.add(&row);
 }
 
-fn group(title: &str, description: &str) -> adw::PreferencesGroup {
+pub(super) fn group(title: &str, description: &str) -> adw::PreferencesGroup {
     adw::PreferencesGroup::builder().title(title).description(description).build()
 }
 
@@ -205,6 +205,27 @@ impl App {
             |s| s.notifications.profile_updates,
             Setting::ProfileUpdatesNotifications,
         );
+        form.switch(
+            &notify,
+            "People I know start streaming in small servers",
+            "",
+            |s| s.notifications.go_live,
+            Setting::GoLiveNotifications,
+        );
+        // Only for the accounts Discord is trying it on.
+        let upcoming = {
+            let state = self.state.borrow();
+            state.me.as_ref().is_some_and(|me| settings::upcoming_event_toggle(&state.experiments, me.id))
+        };
+        if upcoming {
+            form.switch(
+                &notify,
+                "A server has an upcoming event",
+                "",
+                |s| s.notifications.upcoming_event,
+                Setting::UpcomingEventNotifications,
+            );
+        }
         let notifications = page("Notifications", "preferences-system-notifications-symbolic", &[&notify]);
 
         let joining = group("Game joining", "Neucord shares no games, so this is for your other clients.");
@@ -222,7 +243,8 @@ impl App {
             |s| s.privacy.voice_participants_join_game,
             Setting::VoiceParticipantsJoinGame,
         );
-        let privacy = page("Privacy", "channel-secure-symbolic", &[&joining]);
+        let [messaging, requests, profile] = self.privacy_groups(&mut form);
+        let privacy = page("Privacy", "channel-secure-symbolic", &[&messaging, &requests, &profile, &joining]);
 
         let language = group("Language", "Neucord shows English whatever this is; your other clients follow it.");
         form.choice(
@@ -315,6 +337,15 @@ impl App {
         };
         show(&self.state.borrow().settings);
         Window { dialog, show: Box::new(show) }
+    }
+
+    /// What a question about a setting is put to: the window, which covers
+    /// the app's own.
+    pub(super) fn settings_parent(&self) -> gtk::Widget {
+        match self.settings_window.borrow().as_ref() {
+            Some(window) => window.dialog.clone().upcast(),
+            None => self.window.clone().upcast(),
+        }
     }
 
     /// The state of a session that hasn't begun, with the options and
