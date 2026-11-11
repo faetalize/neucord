@@ -1732,7 +1732,7 @@ impl App {
             body.append(&render::render(&[], &cx, edited));
         }
         if let Some(poll) = &message.poll {
-            body.append(&polls::poll(poll, &self.images));
+            body.append(&polls::poll(self, message, poll));
         }
         let voice = message.is_voice_message();
         // A poll's attachments are its answers' images, which the official

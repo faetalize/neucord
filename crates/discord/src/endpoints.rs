@@ -24,6 +24,8 @@ pub(crate) const REMOVE_EMOJI_REACTIONS: Endpoint = Endpoint::delete("/channels/
 pub(crate) const REMOVE_REACTIONS: Endpoint = Endpoint::delete("/channels/{channel}/messages/{message}/reactions");
 pub(crate) const CREATE_ATTACHMENT: Endpoint = Endpoint::post("/channels/{channel}/attachments");
 pub(crate) const DELETE_UPLOAD: Endpoint = Endpoint::delete("/attachments/{+uploaded_filename}");
+pub(crate) const VOTE: Endpoint = Endpoint::put("/channels/{channel}/polls/{message}/answers/@me");
+pub(crate) const END_POLL: Endpoint = Endpoint::post("/channels/{channel}/polls/{message}/expire");
 pub(crate) const TYPING: Endpoint = Endpoint::post("/channels/{channel}/typing");
 pub(crate) const ACK: Endpoint = Endpoint::post("/channels/{channel}/messages/{message}/ack");
 pub(crate) const EDIT_CHANNEL: Endpoint = Endpoint::patch("/channels/{channel}");
@@ -187,6 +189,9 @@ mod tests {
         assert_eq!((call.method(), call.path()), ("POST", "/channels/1/messages/2/ack"));
         assert_eq!(call!(MESSAGES, channel).query("limit=50").path(), "/channels/1/messages?limit=50");
         assert_eq!(call!(LOGIN).path(), "/auth/login");
+        let (vote, end) = (call!(VOTE, channel, message = 4), call!(END_POLL, channel, message = 4));
+        assert_eq!((vote.method(), vote.path()), ("PUT", "/channels/1/polls/4/answers/@me"));
+        assert_eq!((end.method(), end.path()), ("POST", "/channels/1/polls/4/expire"));
     }
 
     #[test]

@@ -97,6 +97,16 @@ changed for unrelated reasons only needs a note in the issue.
   the box untrimmed, and what it sends drops only trailing empty lines
   (`ignoreTrailingEmptyNodes` in 84046's submit); a crossposted one asks
   first (91624).
+- **Voting on polls** (`Poll::view`, `Poll::set_my_votes`, `permissions::vote_held_back`,
+  `polls::END_POLL`). The requests, and what tapping, submitting and ending
+  do, are watched (`handlePollAnswerTapped`, `handlePollSubmitVote`,
+  `handlePollActionTapped`, `endPollEarly`). Not watched: what a voter is
+  offered, `T` and the view in 951727 (anchor `tapShouldOpenVotersModal`: when
+  answers can be tapped, which button shows and when Vote is enabled, which
+  a quarantine or a timeout turns off); the counts changing before Discord
+  answers, `D` in 180662 (anchor `optimistic`: what we had and drop goes
+  first, then the new picks); and who is offered End Poll Now, in 761304
+  (anchor `end-poll-early`: our own poll, until its expiry).
 - **Forum and media channels take no message** (the forum page in
   `select_channel`, `permissions::can_send`, `update_notice_bar`). Neucord
   shows no box there, loads nothing and refuses to send, whatever Send
