@@ -22,6 +22,7 @@ mod members;
 mod menus;
 mod message_row;
 mod notify;
+mod notify_menus;
 mod panes;
 mod picker;
 mod poll_composer;
