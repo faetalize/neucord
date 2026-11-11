@@ -12,6 +12,7 @@ mod create_thread;
 mod edits;
 mod embeds;
 mod emoji;
+mod favorites;
 mod forum;
 mod friends;
 mod gifs;

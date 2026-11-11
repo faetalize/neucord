@@ -21,9 +21,10 @@ use super::menus::{Choice, Choices, Entry, Item, Kind as MenuKind, Style, Table}
 use super::polls;
 use crate::timelines;
 
-/// Opens the emoji picker, as the client's does. Its quick reactions and the
-/// frequent emoji it lists first come from the favourites and usage the
-/// client syncs as protobuf settings, which Neucord doesn't read.
+/// Opens the emoji picker, as the client's does. The picker lists the
+/// favourites and the emoji used most first (the usage is the account's
+/// other clients'), but the client's quick reactions beside the menu, which
+/// come from the same settings, aren't here.
 pub(super) const ADD_REACTION: Entry<MessageTarget> = Entry::Item(Item {
     name: "add-reaction",
     label: "Add _Reaction",
