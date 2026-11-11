@@ -33,7 +33,7 @@ const WAITING: i32 = 48;
 
 /// Only in Developer Mode, like the rest of the picker's menu (233503).
 fn developer(app: &App) -> bool {
-    app.state.borrow().developer_mode
+    app.state.borrow().settings.developer_mode
 }
 
 fn sticker(target: &Target) -> Option<&discord::Sticker> {

@@ -16,7 +16,7 @@ use discord::permissions;
 use discord::post_creation;
 use discord::read_state::ReadStates;
 use discord::relationships::Relationships;
-use discord::settings::{GuildFolder, MediaSettings, RailEntry};
+use discord::settings::{RailEntry, Settings};
 use discord::stickers::Packs;
 use discord::subscriptions::Subscriptions;
 use discord::thread_creation;
@@ -87,8 +87,6 @@ pub(super) struct State {
     /// DMs and group DMs, message requests included.
     pub(super) private_channels: Vec<Channel>,
     pub(super) relationships: Relationships,
-    /// The user's server folders, which also order the rail.
-    pub(super) guild_folders: Vec<GuildFolder>,
     /// Folders the user expanded in the rail (by folder id).
     pub(super) open_folders: std::collections::HashSet<u64>,
     /// The open guild; `None` is Home, the DM list.
@@ -126,15 +124,12 @@ pub(super) struct State {
     pub(super) notes: discord::notes::Notes,
     pub(super) read: ReadStates,
     pub(super) notifications: NotificationSettings,
-    /// How embeds and media show.
-    pub(super) media: MediaSettings,
-    /// Menus offer to copy ids.
-    pub(super) developer_mode: bool,
+    /// The account's client settings: server folders (which also order the
+    /// rail), how media shows, Developer Mode, compact display.
+    pub(super) settings: Settings,
     /// The message menu's last groups come in the order the client uses
     /// where the media takedown regulation is TIDA.
     pub(super) media_takedown_regulated: bool,
-    /// Compact message display, which sizes history pages.
-    pub(super) message_display_compact: bool,
     /// Acks waiting to be sent: channel → newest message read.
     pub(super) pending_acks: HashMap<Snowflake, Snowflake>,
     /// How long until we may post again in each channel.
@@ -163,7 +158,7 @@ pub(super) struct State {
 impl State {
     pub(super) fn rail_layout(&self) -> Vec<RailEntry> {
         let ids: Vec<Snowflake> = self.guilds.iter().map(|g| g.id).collect();
-        discord::settings::rail_layout(&self.guild_folders, &ids)
+        discord::settings::rail_layout(&self.settings.guild_folders, &ids)
     }
 
     /// The servers as the client's emoji and sticker pickers list them: the

@@ -121,6 +121,25 @@ export function compare(old, cur, uses) {
     affects.push(`- ${code(name)}: ${change}\n  - was: ${value(before)}\n  - now: ${value(after)}`);
   }
 
+  // The protobuf messages in watch.json carry settings Neucord reads and
+  // writes by field number: a number that means something else, or a type
+  // that changed, makes Neucord read or write the wrong setting.
+  const fieldsOf = (definitions) => Object.assign({}, ...(definitions ?? []));
+  for (const name of Object.keys({ ...old.protos, ...cur.protos }).sort()) {
+    const [before, after] = [old.protos?.[name], cur.protos?.[name]];
+    if (!old.protos || same(before, after) || newlyWatched(before, after)) continue;
+    if (!after?.length) {
+      affects.push(`- ${code(name)}: not found`);
+      continue;
+    }
+    const [was, now] = [fieldsOf(before), fieldsOf(after)];
+    for (const number of Object.keys(was)) {
+      if (!(number in now)) affects.push(`- ${code(name)}: field ${number} (${code(was[number])}) removed`);
+      else if (was[number] !== now[number])
+        affects.push(`- ${code(name)}: field ${number} ${code(was[number])} → ${code(now[number])}`);
+    }
+  }
+
   // Neucord keeps the client's names for Unicode emoji, for `:name:` to
   // write them. Snapshots from before they were recorded have none.
   if (cur.emoji && uses.emoji !== cur.emoji) {
@@ -199,6 +218,13 @@ export function compare(old, cur, uses) {
     events.filter((e) => !(e in cur.gateway)).map((e) => `- ${code(e)}`),
   );
   section("Enum members added", additions);
+  const fields = [];
+  for (const name of old.protos ? Object.keys(cur.protos ?? {}).sort() : []) {
+    const [was, now] = [fieldsOf(old.protos[name]), fieldsOf(cur.protos[name])];
+    const added = Object.keys(now).filter((n) => !(n in was) && old.protos[name]?.length);
+    if (added.length > 0) fields.push(`- ${code(name)}: ${added.map((n) => `${n} ${code(now[n])}`).join(", ")}`);
+  }
+  section("Protobuf fields added", fields);
   // What Discord is building and shipping: an experiment that goes away
   // usually means its feature reached everyone, or was dropped.
   if (old.experiments) {

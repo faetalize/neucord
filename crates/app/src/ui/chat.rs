@@ -160,7 +160,7 @@ pub(super) const OPEN_MEDIA_LINK: Entry<MessageTarget> =
 pub(super) const COPY_MESSAGE_ID: Entry<MessageTarget> = Entry::Item(Item {
     name: "copy-message-id",
     label: "Copy Message _ID",
-    shows: |app, target| app.state.borrow().developer_mode && target.sticker().is_none(),
+    shows: |app, target| app.state.borrow().settings.developer_mode && target.sticker().is_none(),
     kind: menus::Kind::Action(copy_message_id),
 });
 
@@ -169,7 +169,7 @@ pub(super) const COPY_MESSAGE_ID: Entry<MessageTarget> = Entry::Item(Item {
 pub(super) const COPY_AUTHOR_ID: Entry<MessageTarget> = Entry::Item(Item {
     name: "copy-author-id",
     label: "Copy Author I_D",
-    shows: |app, _| app.state.borrow().developer_mode,
+    shows: |app, _| app.state.borrow().settings.developer_mode,
     kind: menus::Kind::Action(|app, target| app.copy(&target.message.author.id.to_string())),
 });
 
@@ -1008,7 +1008,7 @@ impl App {
         Viewport {
             height: self.window.height(),
             text_scale: if dpi > 0 { f64::from(dpi) / (96.0 * 1024.0) } else { 1.0 },
-            compact: self.state.borrow().message_display_compact,
+            compact: self.state.borrow().settings.message_display_compact,
         }
     }
 
@@ -2019,7 +2019,7 @@ impl App {
         sticker: Option<Snowflake>,
         media: Option<usize>,
     ) {
-        let settings = self.state.borrow().media;
+        let settings = self.state.borrow().settings.media;
         let media = media.and_then(|n| {
             let shown = message.thread_starter().unwrap_or(&message);
             discord::media::items(shown, &settings).into_iter().nth(n)
@@ -2066,7 +2066,7 @@ impl App {
     /// What a message says, and shows: its text, attachments and embeds. Its
     /// buttons and menus work if `live`: not in a forward.
     fn message_content(self: &Rc<Self>, body: &gtk::Box, message: &Message, names: &Names, live: bool) {
-        let media = self.state.borrow().media;
+        let media = self.state.borrow().settings.media;
         let edited = message.edited_timestamp.is_some();
         let embeds = discord::embed::visible(message, &media);
         let spans = message.markup();
