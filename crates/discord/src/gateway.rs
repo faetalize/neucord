@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use soup::prelude::*;
 
+use crate::channel_list::Collapsed;
 use crate::component::Component;
 use crate::embed::Embed;
 use crate::emoji::GuildEmoji;
@@ -68,6 +69,8 @@ pub struct Ready {
     pub relationships: Relationships,
     pub read_states: ReadStates,
     pub notification_settings: NotificationSettings,
+    /// Which categories are folded.
+    pub collapsed: Collapsed,
     /// Server folders and order; empty if the user never arranged servers.
     pub guild_folders: Vec<GuildFolder>,
     pub media_settings: MediaSettings,
@@ -711,6 +714,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 relationships: Relationships::from_ready(&data),
                 read_states: ReadStates::from_ready(&data["read_state"]),
                 notification_settings: NotificationSettings::from_ready(&data["user_guild_settings"]),
+                collapsed: Collapsed::from_ready(&data["user_guild_settings"]),
                 guild_folders: settings::guild_folders(&data["user_settings"]).unwrap_or_default(),
                 media_settings: {
                     let mut media = MediaSettings::default();
