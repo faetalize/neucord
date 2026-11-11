@@ -135,6 +135,12 @@ impl Images {
         self.set(picture, &discord::cdn::proxy_sized(url, width, height), animated);
     }
 
+    /// The image at `url`, first frame only: for what takes a still, such as
+    /// a notification's icon.
+    pub async fn texture(&self, url: &str) -> Option<gdk::Texture> {
+        gdk::Texture::from_bytes(&self.load_bytes(url).await?).ok()
+    }
+
     /// Encoded bytes for a URL: memory → disk → network, filling caches.
     async fn load_bytes(&self, url: &str) -> Option<glib::Bytes> {
         if let Some(bytes) = self.0.memory.borrow_mut().get(url) {
@@ -209,6 +215,12 @@ impl Images {
         for path in lru::over_budget(files, VIDEO_BUDGET) {
             let _ = std::fs::remove_file(path);
         }
+    }
+
+    /// A file's bytes, cached nowhere: for saving and copying, which want
+    /// the original once.
+    pub async fn fetch(&self, url: &str) -> Option<glib::Bytes> {
+        self.download(url).await
     }
 
     async fn download(&self, url: &str) -> Option<glib::Bytes> {

@@ -109,6 +109,22 @@ impl App {
             match event {
                 Event::Ready(ready) => self.on_ready(*ready),
                 Event::GuildCreate(guild) => self.on_guild(guild),
+                Event::GuildVoiceStates { guild_id, states } => {
+                    self.state.borrow_mut().voice.replace_guild(guild_id, states);
+                    self.refresh_badges();
+                }
+                Event::VoiceStates(updates) => {
+                    let mut changed = false;
+                    {
+                        let mut state = self.state.borrow_mut();
+                        for update in updates {
+                            changed |= state.voice.apply(update);
+                        }
+                    }
+                    if changed {
+                        self.refresh_badges();
+                    }
+                }
                 Event::PrivateChannelCreate(channel) | Event::PrivateChannelUpdate(channel) => {
                     self.on_private_channel(channel)
                 }
@@ -196,7 +212,11 @@ impl App {
                 Event::TypingStart { channel_id, user_id, user } => self.on_typing(channel_id, user_id, user.as_ref()),
                 Event::MessageCreate(message) => self.on_message(*message),
                 Event::MessageUpdate(edit) => self.on_message_update(edit),
-                Event::Interaction { nonce, outcome } => self.on_interaction(nonce, outcome),
+                Event::Interaction { nonce, outcome, reason } => self.on_interaction(nonce, outcome, reason),
+                Event::InteractionCreated { nonce } => self.command_created(nonce),
+                Event::Autocomplete { nonce, choices } => self.on_autocomplete(nonce, &choices),
+                Event::CommandIndexChanged { guild, version } => self.command_index_changed(guild, version),
+                Event::UserApplicationChanged => self.state.borrow_mut().commands.user_changed(),
                 Event::MessageDelete { id, channel_id } => self.on_message_delete(id, channel_id),
                 Event::MessageDeleteBulk { ids, channel_id } => self.on_message_delete_bulk(ids, channel_id),
                 Event::PollVote { channel_id, message_id, votes, added, many } => {
@@ -257,6 +277,8 @@ impl App {
                     self.state.borrow_mut().profiles.doubt(user_id);
                     self.state.borrow_mut().relationships.update(user_id, nickname);
                     self.relationships_changed(false);
+                    // What we call them shows in DMs.
+                    self.refresh_rows();
                 }
                 Event::RelationshipRemove(user_id) => {
                     self.withdraw_friend_request(user_id);
@@ -272,6 +294,7 @@ impl App {
                         self.queue_friends_refresh();
                         // A group DM's friends.
                         self.refresh_member_rows();
+                        self.refresh_profile_views();
                     }
                 }
                 Event::NotificationSettingsUpdate(settings) => {
@@ -340,6 +363,7 @@ impl App {
             required_action,
             experiments,
             session_id,
+            voice_states,
         } = ready;
         self.learn_users(private_channels.iter().flat_map(|c| &c.recipients));
         self.learn_users(
@@ -377,6 +401,10 @@ impl App {
             state.nitro = nitro;
             state.experiments = experiments;
             state.session_id = session_id;
+            state.voice = voice_states;
+            // A new session: every index is out of date, and no command is waiting on this one.
+            state.commands.session_started();
+            state.running.clear();
             let store = (!state.persisted).then(|| (state.token.clone(), user.username.clone()));
             state.persisted = true;
             state.users.insert(user.id.0, user.display_name().to_string());
@@ -501,6 +529,7 @@ impl App {
     fn relationships_changed(self: &Rc<Self>, blocks_changed: bool) {
         self.refresh_badges();
         self.queue_friends_refresh();
+        self.refresh_profile_views();
         if blocks_changed {
             self.refresh_typing();
             self.refresh_rows();

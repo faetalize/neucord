@@ -156,4 +156,6 @@ textview.composer-input, textview.composer-input text { background: none; }
 .embed-author-icon { border-radius: 12px; }
 .embed-footer-icon { border-radius: 10px; }
 .embed-play { min-width: 48px; min-height: 48px; }
+/* The media viewer dims the window and reads light on it, in either theme. */
+.media-viewer { background-color: alpha(black, 0.85); color: white; }
 .spoiler-cover { margin-top: 4px; padding: 24px 40px; border-radius: 8px; font-weight: bold; }

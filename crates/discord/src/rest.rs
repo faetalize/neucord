@@ -11,15 +11,18 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use soup::prelude::*;
 
+use crate::commands::Target;
 use crate::endpoints::{Call, call};
 use crate::forum::Search;
 use crate::gifs::{Gif, Picker, Request, Tile, Tiles};
 use crate::interaction::{Failure, Press};
 use crate::invalid::{Change, InvalidRequests};
 use crate::model::Emoji;
+use crate::post_creation;
 use crate::profile::{self, Profile};
 use crate::reactions::{Location, Refusal};
 use crate::scheduled::{self, Scheduled};
+use crate::search;
 use crate::settings_proto;
 use crate::settings_sync::{Save, SaveError, Saved};
 use crate::stickers::Pack;
@@ -45,6 +48,11 @@ const MAX_RATE_LIMIT_RETRIES: u32 = 1;
 
 /// How long the client lets an interaction request take (`timeout` in 964363).
 const INTERACTION_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How many times the client asks for a command index (`c` in 577700), and
+/// how long it waits when Discord says 202, still building it.
+const INDEX_REQUESTS: u32 = 3;
+const INDEX_BUILDING_WAIT: Duration = Duration::from_secs(5);
 
 /// The longest a request waits on a 429 before trying again. Past this it
 /// fails instead: a retry sent early would only be refused again.
@@ -76,6 +84,16 @@ impl Page {
             Page::Around(id) => format!("limit={limit}&around={id}"),
         }
     }
+}
+
+/// How a search was answered.
+#[derive(Debug)]
+pub enum Searched {
+    Page(search::Page),
+    /// Discord is indexing the server or DM first; `Retry-After`, if sent.
+    Indexing {
+        retry_after: Option<String>,
+    },
 }
 
 /// Send a message as a reply.
@@ -218,6 +236,28 @@ impl Rest {
         Ok(messages)
     }
 
+    /// A page of search results, or word that Discord is still indexing
+    /// (a 202), as `fetch` in 177068 tells them apart. `attempts` is how
+    /// many times it has been asked again, which the client writes into the
+    /// query itself.
+    pub async fn search_messages(&self, request: &search::Request, attempts: u32) -> Result<Searched, Error> {
+        let query = request.query(attempts);
+        let call = match request.context {
+            search::Context::Guild(guild) => call!(SEARCH_GUILD_MESSAGES, guild).query(&query),
+            search::Context::Channel(channel) => call!(SEARCH_CHANNEL_MESSAGES, channel).query(&query),
+        };
+        let (status, response, retry_after) = self.send_full(call, None, Sending::default()).await?;
+        match status {
+            202 => Ok(Searched::Indexing { retry_after }),
+            _ => {
+                let answer: Value = Self::answer(status, &response)?;
+                search::Page::from_value(&answer)
+                    .map(Searched::Page)
+                    .ok_or_else(|| Error::Protocol("search results without a total".into()))
+            }
+        }
+    }
+
     /// Look up any user by id, to name a mention whose user we have not seen.
     pub async fn user(&self, id: Snowflake) -> Result<crate::User, Error> {
         self.request(call!(USER, user = id), None).await
@@ -228,6 +268,12 @@ impl Rest {
         let call = call!(USER_PROFILE, user = request.user).query(&request.query());
         let answer: Value = self.request(call, None).await?;
         Profile::from_value(&answer).ok_or_else(|| Error::Protocol("a profile without a user".into()))
+    }
+
+    /// The friends we share with `user`, which the panel asks for when its
+    /// section opens (`q0` in 803306). They come as users.
+    pub async fn mutual_friends(&self, user: Snowflake) -> Result<Vec<crate::User>, Error> {
+        self.request(call!(MUTUAL_FRIENDS, user), None).await
     }
 
     /// Our note on `user`, which doesn't exist (a 404) until we write one.
@@ -558,6 +604,59 @@ impl Rest {
         }
     }
 
+    /// Fetch the apps and commands of `target` (`E` in 577700). A 202 means
+    /// Discord is still building it and a 429 says how long to wait; the
+    /// client asks up to three times, waiting as told, and gives up on
+    /// anything else.
+    pub async fn command_index(&self, target: Target) -> Option<Value> {
+        for made in 1..=INDEX_REQUESTS {
+            let call = match target {
+                Target::Guild(guild) => call!(COMMAND_INDEX_GUILD, guild),
+                Target::Channel(channel) => call!(COMMAND_INDEX_CHANNEL, channel),
+                Target::User => call!(COMMAND_INDEX_USER),
+            };
+            let sending = Sending { retry_rate_limit: false, ..Sending::default() };
+            let (status, response) = self.send_with(call, None, sending).await.ok()?;
+            let wait = match status {
+                202 => INDEX_BUILDING_WAIT,
+                429 => {
+                    let after = serde_json::from_slice::<Value>(&response).ok()?["retry_after"].as_f64()?;
+                    Duration::from_secs_f64(after.max(0.0))
+                }
+                200..=299 => return serde_json::from_slice(&response).ok(),
+                _ => return None,
+            };
+            if made < INDEX_REQUESTS {
+                glib::timeout_future(wait).await;
+            }
+        }
+        None
+    }
+
+    /// Run a command: `POST /interactions` with `body`
+    /// ([`crate::commands::Run::body`]). Sent through the client's message
+    /// queue, which waits out a 429 and sends it again (`createResponseHandler`
+    /// in 870801). A success only means Discord took it; what the app answers
+    /// comes on the gateway.
+    pub async fn run_command(&self, body: Value) -> Result<(), Failure> {
+        match self.send_with(call!(INTERACT), Some(body), Sending::default()).await {
+            Ok((status, _)) if (200..300).contains(&status) => Ok(()),
+            Ok((status, response)) => Err(Failure::from_response(status, &response)),
+            Err(_) => Err(Failure::default()),
+        }
+    }
+
+    /// Ask an app for choices to an option (`WL` in 721768): the same
+    /// request, given three seconds, and its answer comes on the gateway.
+    pub async fn autocomplete(&self, body: Value) -> Result<(), Failure> {
+        let sent = self.send_with(call!(INTERACT), Some(body), Sending::default());
+        match glib::future_with_timeout(INTERACTION_TIMEOUT, sent).await {
+            Ok(Ok((status, _))) if (200..300).contains(&status) => Ok(()),
+            Ok(Ok((status, response))) => Err(Failure::from_response(status, &response)),
+            _ => Err(Failure::default()),
+        }
+    }
+
     /// Start a thread in `channel`, from `message` if given, with what
     /// [`crate::thread_creation::body`] makes. The thread arrives on the
     /// gateway as well.
@@ -572,6 +671,13 @@ impl Rest {
             None => call!(CREATE_THREAD, channel),
         };
         self.request(call, Some(body)).await
+    }
+
+    /// Start a post in the forum or media channel `forum`, with what
+    /// [`crate::post_creation::body`] makes: the same request as a thread's,
+    /// with its query. The post arrives on the gateway as well.
+    pub async fn create_post(&self, forum: Snowflake, body: serde_json::Value) -> Result<Channel, Error> {
+        self.request(create_post_call(forum), Some(body)).await
     }
 
     /// Mark everything in `channel` up to `message` as read, for all our clients.
@@ -880,6 +986,12 @@ fn archived_threads_call(search: &Search) -> Call {
     call!(SEARCH_THREADS, channel = search.channel).query(&search.query())
 }
 
+/// The request that starts a post: a thread's endpoint, with the query the
+/// client adds (`createForumPost` in 971389).
+fn create_post_call(forum: Snowflake) -> Call {
+    call!(CREATE_THREAD, channel = forum).query(post_creation::QUERY)
+}
+
 /// The request for who reacted: `limit`, `after` when paging, and `type`,
 /// in the order `ao` writes them.
 fn reactors_call(channel: Snowflake, message: Snowflake, emoji: &Emoji, limit: u32, after: Option<Snowflake>) -> Call {
@@ -1033,9 +1145,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        Captcha, Page, Reply, ReplyPing, add_reaction_call, archived_threads_call, base_headers, edit_body,
-        edit_scheduled_body, is_md5, join_thread_call, leave_thread_call, message_body, poll_body, rate_limit_wait,
-        reactors_call, remove_reaction_call, save_answer, schedule_body, vote_body,
+        Captcha, Page, Reply, ReplyPing, add_reaction_call, archived_threads_call, base_headers, create_post_call,
+        edit_body, edit_scheduled_body, is_md5, join_thread_call, leave_thread_call, message_body, poll_body,
+        rate_limit_wait, reactors_call, remove_reaction_call, save_answer, schedule_body, vote_body,
     };
     use crate::endpoints::call;
     use crate::model::Emoji;
@@ -1146,6 +1258,10 @@ mod tests {
              &tag_setting=match_some&offset=25"
         );
         assert_eq!(call!(GET_CHANNEL, channel = thread).path(), "/channels/7");
+        // A post is the thread request with the query `createForumPost` adds; a plain thread has none.
+        let post = create_post_call(thread);
+        assert_eq!((post.method(), post.path()), ("POST", "/channels/7/threads?use_nested_fields=true"));
+        assert_eq!(call!(CREATE_THREAD, channel = thread).path(), "/channels/7/threads");
     }
 
     #[test]
