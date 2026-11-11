@@ -164,6 +164,12 @@ pub(super) struct State {
     pub(super) unavailable_guilds: usize,
     /// Saving changes to `settings`.
     pub(super) sync: discord::settings_sync::SettingsSync,
+    /// The favourite emoji and the counts of use, once loaded (the first time
+    /// the emoji picker opens), and how they are saved.
+    pub(super) frecency: discord::frecency::Frecency,
+    pub(super) frecency_sync: discord::settings_sync::SettingsSync<discord::frecency::Frecent>,
+    /// The first load is on its way.
+    pub(super) frecency_loading: bool,
     /// What the gateway was last told we show as.
     pub(super) presence: discord::presence::PresenceReporter,
     /// Which presence update is waiting for its turn; a newer one replaces it.

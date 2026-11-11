@@ -247,6 +247,35 @@ impl<'a> Message<'a> {
         values
     }
 
+    /// A repeated string, a field for each.
+    pub fn strings(&self, number: u32) -> Vec<&'a str> {
+        self.fields
+            .iter()
+            .filter_map(|(n, wire)| match (*n == number, wire) {
+                (true, Wire::Bytes(bytes)) => std::str::from_utf8(bytes).ok(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A repeated varint, whether sent packed or one by one.
+    pub fn varints(&self, number: u32) -> Vec<u64> {
+        let mut values = Vec::new();
+        for (n, wire) in &self.fields {
+            match (*n == number, wire) {
+                (true, Wire::Varint(v)) => values.push(*v),
+                (true, Wire::Bytes(bytes)) => {
+                    let mut rest = *bytes;
+                    while let Some(v) = varint(&mut rest) {
+                        values.push(v);
+                    }
+                }
+                _ => {}
+            }
+        }
+        values
+    }
+
     /// The repeated messages of a field.
     pub fn messages(&self, number: u32) -> Vec<Message<'a>> {
         self.fields
@@ -338,6 +367,16 @@ pub(crate) mod tests {
     fn the_last_of_a_repeated_single_wins() {
         let buf = [varint_field(1, 1), varint_field(1, 0)].concat();
         assert_eq!(Message::parse(&buf).unwrap().bool(1), Some(false));
+    }
+
+    #[test]
+    fn repeated_strings_and_varints() {
+        let buf =
+            [bytes_field(1, b"a"), bytes_field(1, b"bc"), bytes_field(2, &[1, 0x80, 1]), varint_field(2, 9)].concat();
+        let message = Message::parse(&buf).unwrap();
+        assert_eq!(message.strings(1), vec!["a", "bc"]);
+        assert_eq!(message.varints(2), vec![1, 128, 9], "packed, then loose");
+        assert!(message.strings(3).is_empty());
     }
 
     #[test]

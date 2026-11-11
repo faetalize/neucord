@@ -18,11 +18,51 @@
 //! the edit was made against is out of date.
 
 use std::collections::BTreeMap;
+use std::marker::PhantomData;
 use std::time::Duration;
 
 use crate::protobuf::Message;
 use crate::settings::SettingsPatch;
 use crate::settings_proto::{self, Setting};
+
+/// One of the two settings protos the client saves the same way: what its
+/// edits are, how they read back, and its `type` in the requests.
+pub trait Kind {
+    /// A change to make.
+    type Setting;
+    /// What a payload says of the settings.
+    type Patch;
+    /// `UserSettingsType`: 1 is `PreloadedUserSettings`, 2 is
+    /// `FrecencyUserSettings`.
+    const TYPE: u8;
+
+    /// The message the setting lives in, with the setting in it (see
+    /// [`Setting::written`]), and its field number.
+    fn written(setting: Self::Setting, proto: &[u8]) -> Option<(u32, Vec<u8>)>;
+    fn delay(setting: &Self::Setting) -> Duration;
+    fn patch(proto: &[u8]) -> Option<Self::Patch>;
+}
+
+/// `PreloadedUserSettings`, which READY carries.
+pub struct Preloaded;
+
+impl Kind for Preloaded {
+    type Setting = Setting;
+    type Patch = SettingsPatch;
+    const TYPE: u8 = 1;
+
+    fn written(setting: Setting, proto: &[u8]) -> Option<(u32, Vec<u8>)> {
+        setting.written(proto)
+    }
+
+    fn delay(setting: &Setting) -> Duration {
+        setting.delay()
+    }
+
+    fn patch(proto: &[u8]) -> Option<SettingsPatch> {
+        SettingsPatch::from_proto_bytes(proto)
+    }
+}
 
 /// The longest the client waits to retry after a rate limit, whatever
 /// `Retry-After` says.
@@ -41,10 +81,12 @@ pub struct Schedule {
     pub after: Duration,
 }
 
-/// One `PATCH /users/@me/settings-proto/1`.
+/// One `PATCH /users/@me/settings-proto/{type}`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Save {
-    /// The partial `PreloadedUserSettings`, base64.
+    /// Which settings proto, see [`Kind::TYPE`].
+    pub kind: u8,
+    /// The partial settings proto, base64.
     pub settings: String,
     /// Only for an offline edit.
     pub required_data_version: Option<u64>,
@@ -55,7 +97,7 @@ pub struct Save {
 impl Save {
     #[cfg(test)]
     pub(crate) fn test(settings: &str, required_data_version: Option<u64>) -> Self {
-        Save { settings: settings.to_owned(), required_data_version, sent: BTreeMap::new() }
+        Save { kind: 1, settings: settings.to_owned(), required_data_version, sent: BTreeMap::new() }
     }
 
     /// The request's body, `settings` then `required_data_version`.
@@ -94,23 +136,22 @@ pub enum SaveError {
 /// A change made locally: what to show now, and a save to start if none is
 /// waiting.
 #[derive(Debug, PartialEq)]
-pub struct Edited {
-    pub patch: SettingsPatch,
+pub struct Edited<P = SettingsPatch> {
+    pub patch: P,
     pub schedule: Option<Schedule>,
 }
 
 /// The settings after Discord answered: all of them, with any change made
 /// since the save was sent put back on top.
 #[derive(Debug, PartialEq)]
-pub struct Applied {
-    pub patch: SettingsPatch,
+pub struct Applied<P = SettingsPatch> {
+    pub patch: P,
     pub schedule: Option<Schedule>,
 }
 
-#[derive(Default)]
-pub struct SettingsSync {
-    /// `PreloadedUserSettings` as the account has it, edits included. Until
-    /// READY there is none, and nothing can be edited.
+pub struct SettingsSync<K: Kind = Preloaded> {
+    /// The settings proto as the account has it, edits included. Until it is
+    /// loaded there is none, and nothing can be edited.
     proto: Option<Vec<u8>>,
     /// The messages edited and not saved yet, by field number (`protoToSave`).
     to_save: BTreeMap<u32, Vec<u8>>,
@@ -121,11 +162,32 @@ pub struct SettingsSync {
     rate_limited: bool,
     offline_data_version: Option<u64>,
     generation: u64,
+    kind: PhantomData<K>,
 }
 
-impl SettingsSync {
+impl<K: Kind> Default for SettingsSync<K> {
+    fn default() -> Self {
+        SettingsSync {
+            proto: None,
+            to_save: BTreeMap::new(),
+            timer: None,
+            timer_delay: Duration::ZERO,
+            rate_limited: false,
+            offline_data_version: None,
+            generation: 0,
+            kind: PhantomData,
+        }
+    }
+}
+
+impl<K: Kind> SettingsSync<K> {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether the settings are loaded.
+    pub fn is_loaded(&self) -> bool {
+        self.proto.is_some()
     }
 
     fn schedule(&mut self, after: Duration) -> Schedule {
@@ -179,12 +241,12 @@ impl SettingsSync {
     /// at once, unless one is waiting to retry after a rate limit. A setting
     /// with a delay (see [`Setting::delay`]) leaves a timer that is already
     /// set alone, as `markDirty` does, unless the timer is for longer.
-    pub fn edit(&mut self, setting: Setting) -> Option<Edited> {
+    pub fn edit(&mut self, setting: K::Setting) -> Option<Edited<K::Patch>> {
         let proto = self.proto.as_deref()?;
-        let delay = setting.delay();
-        let (group, written) = setting.written(proto)?;
+        let delay = K::delay(&setting);
+        let (group, written) = K::written(setting, proto)?;
         let merged = settings_proto::replace_groups(proto, &[(group, &written)])?;
-        let patch = SettingsPatch::from_proto_bytes(&settings_proto::replace_groups(&[], &[(group, &written)])?)?;
+        let patch = K::patch(&settings_proto::replace_groups(&[], &[(group, &written)])?)?;
         self.proto = Some(merged);
         self.to_save.insert(group, written);
         // A change with no wait always starts the timer over, which makes no
@@ -210,6 +272,7 @@ impl SettingsSync {
         let groups: Vec<(u32, &[u8])> = self.to_save.iter().map(|(n, g)| (*n, g.as_slice())).collect();
         let partial = settings_proto::replace_groups(&[], &groups)?;
         Some(Save {
+            kind: K::TYPE,
             settings: settings_proto::encode(&partial),
             required_data_version: self.offline_data_version,
             sent: self.to_save.clone(),
@@ -219,7 +282,7 @@ impl SettingsSync {
     /// Discord took `save` and answered with `saved`. Its settings replace
     /// ours, and a change made while it was on its way is put back and
     /// saved next, which the client's copy would lose.
-    pub fn saved(&mut self, save: &Save, saved: &Saved) -> Option<Applied> {
+    pub fn saved(&mut self, save: &Save, saved: &Saved) -> Option<Applied<K::Patch>> {
         // An answer that comes after logging out is for no one.
         self.proto.as_ref()?;
         self.offline_data_version = None;
@@ -228,7 +291,7 @@ impl SettingsSync {
         let proto = saved.settings.as_deref()?;
         let groups: Vec<(u32, &[u8])> = self.to_save.iter().map(|(n, g)| (*n, g.as_slice())).collect();
         let proto = settings_proto::replace_groups(proto, &groups)?;
-        let patch = SettingsPatch::from_proto_bytes(&proto)?;
+        let patch = K::patch(&proto)?;
         self.proto = Some(proto);
         let schedule = if self.to_save.is_empty() { None } else { Some(self.schedule(Duration::ZERO)) };
         Some(Applied { patch, schedule })
@@ -250,13 +313,13 @@ impl SettingsSync {
 
     /// Discord refused the settings as invalid; `proto` is what it holds.
     /// Edits not saved are dropped.
-    pub fn reloaded(&mut self, proto: Vec<u8>) -> Option<SettingsPatch> {
+    pub fn reloaded(&mut self, proto: Vec<u8>) -> Option<K::Patch> {
         self.proto.as_ref()?;
         self.to_save.clear();
         self.timer = None;
         self.rate_limited = false;
         self.offline_data_version = None;
-        let patch = SettingsPatch::from_proto_bytes(&proto);
+        let patch = K::patch(&proto);
         self.proto = Some(proto);
         patch
     }
@@ -291,8 +354,8 @@ mod tests {
         .concat()
     }
 
-    fn loaded() -> SettingsSync {
-        let mut sync = SettingsSync::new();
+    fn loaded() -> SettingsSync<Preloaded> {
+        let mut sync = SettingsSync::<Preloaded>::new();
         assert_eq!(sync.connected(account()), None);
         sync
     }
@@ -307,7 +370,7 @@ mod tests {
 
     #[test]
     fn nothing_is_edited_before_ready() {
-        assert!(SettingsSync::new().edit(Setting::GifAutoPlay(false)).is_none());
+        assert!(SettingsSync::<Preloaded>::new().edit(Setting::GifAutoPlay(false)).is_none());
     }
 
     #[test]
@@ -474,7 +537,7 @@ mod tests {
         let mut sync = loaded();
         let schedule = sync.edit(Setting::GifAutoPlay(false)).unwrap().schedule.unwrap();
         let save = sync.save(schedule.generation).unwrap();
-        let mut sync = SettingsSync::new();
+        let mut sync = SettingsSync::<Preloaded>::new();
         assert!(sync.saved(&save, &Saved { settings: Some(account()), out_of_date: false }).is_none());
         assert!(sync.reloaded(account()).is_none());
         assert!(sync.edit(Setting::GifAutoPlay(false)).is_none(), "still not loaded");
