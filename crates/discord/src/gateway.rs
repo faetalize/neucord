@@ -198,11 +198,31 @@ pub enum Event {
         ids: Vec<Snowflake>,
         channel_id: Snowflake,
     },
-    /// Discord answered the interaction we sent as `nonce`.
+    /// Discord answered the interaction we sent as `nonce`. A failure may
+    /// carry the reason Discord gives (`reason_code`; 2 is a timeout).
     Interaction {
         nonce: Snowflake,
         outcome: Outcome,
+        reason: Option<u64>,
     },
+    /// Discord took the interaction we sent as `nonce` (`INTERACTION_CREATE`);
+    /// the app has yet to answer.
+    InteractionCreated {
+        nonce: Snowflake,
+    },
+    /// An app's choices for an option being autocompleted, for the request
+    /// we sent as `nonce`.
+    Autocomplete {
+        nonce: Snowflake,
+        choices: Value,
+    },
+    /// A server's apps or commands changed; `version` is what the index is at now.
+    CommandIndexChanged {
+        guild: Snowflake,
+        version: Option<String>,
+    },
+    /// An app was installed to or removed from the account.
+    UserApplicationChanged,
     /// Votes on a poll's answers, as `(answer_id, user_id)`: added, or taken back.
     /// `many` is a `MESSAGE_POLL_VOTE_ADD_MANY`, which the client counts
     /// without its DM rule.
@@ -1000,8 +1020,22 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 "INTERACTION_FAILURE" => Outcome::Failure,
                 _ => Outcome::Form,
             };
-            Event::Interaction { nonce, outcome }
+            let reason = data["reason_code"].as_u64().filter(|_| outcome == Outcome::Failure);
+            Event::Interaction { nonce, outcome, reason }
         }
+        "INTERACTION_CREATE" => {
+            let Some(nonce) = parse_id(&data["nonce"]) else { return };
+            Event::InteractionCreated { nonce }
+        }
+        "APPLICATION_COMMAND_AUTOCOMPLETE_RESPONSE" => {
+            let Some(nonce) = parse_id(&data["nonce"]) else { return };
+            Event::Autocomplete { nonce, choices: data["choices"].clone() }
+        }
+        "GUILD_APPLICATION_COMMAND_INDEX_UPDATE" => {
+            let Some(guild) = parse_id(&data["guild_id"]) else { return };
+            Event::CommandIndexChanged { guild, version: data["version"].as_str().map(str::to_owned) }
+        }
+        "USER_APPLICATION_UPDATE" | "USER_APPLICATION_REMOVE" => Event::UserApplicationChanged,
         "MESSAGE_DELETE" => {
             let (Some(id), Some(channel_id)) = (parse_id(&data["id"]), parse_id(&data["channel_id"])) else {
                 return;

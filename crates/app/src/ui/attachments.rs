@@ -7,10 +7,13 @@ use std::rc::Rc;
 
 use discord::settings::MediaSettings;
 use discord::{Attachment, Snowflake, Sticker};
-use gtk::glib;
 use gtk::prelude::*;
+use gtk::{gio, glib};
 
+use super::App;
+use super::chat::MessageTarget;
 use super::embeds::{behind_spoiler, fitted_picture};
+use super::menus::{Entry, Item, Kind};
 use crate::images::Images;
 
 /// The official client's box for a single image or video attachment.
@@ -243,6 +246,48 @@ fn voice_message(attachment: &Attachment, images: &Images) -> gtk::Widget {
     row.upcast()
 }
 
+/// Save File, on a voice message (761304, where the client hands the audio's
+/// URL to the browser to download). The desktop's file chooser asks where,
+/// and the file the player keeps is copied there, fetched first if it wasn't
+/// played: the same request playing makes.
+pub(super) const SAVE_FILE: Entry<MessageTarget> = Entry::Item(Item {
+    name: "save-file",
+    label: "Save _File",
+    shows: |_, target| target.shown().voice_audio().is_some(),
+    kind: Kind::Action(|app, target| {
+        if let Some(audio) = target.shown().voice_audio() {
+            save_file(app, &audio);
+        }
+    }),
+});
+
+fn save_file(app: &Rc<App>, audio: &Attachment) {
+    let dialog = gtk::FileDialog::builder().title("Save File").initial_name(save_name(&audio.filename)).build();
+    let (app, url) = (app.clone(), audio.url.clone());
+    glib::spawn_future_local(async move {
+        // Cancelling is no error.
+        let Ok(destination) = dialog.save_future(Some(&app.window)).await else { return };
+        let saved = match app.images.file(&url).await {
+            Some(path) => {
+                let copy = gio::File::for_path(path).copy_future(
+                    &destination,
+                    gio::FileCopyFlags::OVERWRITE,
+                    glib::Priority::DEFAULT,
+                );
+                copy.0.await.is_ok()
+            }
+            None => false,
+        };
+        app.toast(if saved { "File Saved" } else { "Unable to save file" });
+    });
+}
+
+/// What the chooser offers as the name: the file's, without any folders.
+fn save_name(filename: &str) -> &str {
+    let name = filename.rsplit(['/', '\\']).next().unwrap_or_default();
+    if name.is_empty() { "voice-message.ogg" } else { name }
+}
+
 fn play_button(tooltip: &str) -> gtk::Button {
     gtk::Button::builder()
         .icon_name("media-playback-start-symbolic")
@@ -269,4 +314,18 @@ fn file(attachment: &Attachment) -> gtk::Widget {
         markup += &format!("  <span fgalpha=\"55%\" size=\"small\">{}</span>", glib::format_size(size));
     }
     gtk::Label::builder().use_markup(true).label(markup).xalign(0.0).build().upcast()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::save_name;
+
+    #[test]
+    fn the_chooser_offers_a_file_name_and_no_folders() {
+        assert_eq!(save_name("voice-message.ogg"), "voice-message.ogg");
+        assert_eq!(save_name("../../etc/voice-message.ogg"), "voice-message.ogg");
+        assert_eq!(save_name("a\\b.ogg"), "b.ogg");
+        assert_eq!(save_name(""), "voice-message.ogg");
+        assert_eq!(save_name("dir/"), "voice-message.ogg");
+    }
 }
