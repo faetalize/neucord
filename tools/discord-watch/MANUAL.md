@@ -90,13 +90,27 @@ changed for unrelated reasons only needs a note in the issue.
   request, its error codes, the permission bits and `HAS_THREAD` are watched
   (`POST CHANNEL_THREADS` carries the body of both endpoints). Not watched:
   who is offered it, `C`, `n` and `Tb` in 406704 (anchor
-  `CREATE_PRIVATE_THREADS`); the form in 289287 (anchor
+  `CREATE_PRIVATE_THREADS`), and that the attach button outlives the message
+  box turned off for want of Send Messages, as long as either thread
+  permission holds (`canCreateThreads` in 989161, anchor
+  `requireCreateTherads`); the form in 289287 (anchor
   `useDefaultThreadName`), which wants a name unless the thread is from a
   message and caps it at 100; the default name `V` in 971389 (anchor
   `rawTitle`), the archive time `Gl` in 268761 (anchor
   `defaultAutoArchiveDuration`) and the `location`s, "Plus Button" in 747926
   and "Message" in 519222. The first message goes into the thread once the
   gateway has brought it (`Y` in 971389).
+- **Starting a post** (`post_creation.rs`, `ui/forum_post.rs`). `REQUIRE_TAG`
+  and the error codes are watched, and `POST CHANNEL_THREADS` is, but the
+  snapshot holds only a plain thread's fields: the client builds a post's
+  request with a joined URL, so its query `use_nested_fields=true` and body
+  (`name`, `auto_archive_duration`, `applied_tags`, `message`) are `W` in
+  971389 (anchor `applied_tags`). Also not watched: who sees the form, `AI`
+  in 406704 (Send Messages in the forum, never in a channel of moderator
+  reports); and the form in 745431 (anchor `FOCUS_COMPOSER_TITLE`): a title
+  of up to 100, something to say or a file, at most five tags (`iT`), the
+  tags only Manage Threads may apply left out (`OT` in 691060, anchor
+  `moderated`), and the slowmode that starts when the request answers (`Y`).
 - **Editing and deleting** (`permissions::can_edit`, `can_delete`;
   `ui/edits.rs`, `edits::decide`). The requests are watched (`editMessage`, `deleteMessage`,
   `unarchiveThreadIfNecessary`), as are `canDeleteOwnMessage` and
@@ -130,6 +144,24 @@ changed for unrelated reasons only needs a note in the issue.
   to pick sends when chosen, several when the list closes with a change); and
   what turns components off, `v` in 911408 (anchor
   `getInteractionComponentState`) with `O` and the menu limits in 257249.
+- **Slash commands** (`commands.rs`, `ui/slash.rs`, `Rest::command_index`,
+  `run_command`, `autocomplete`). The endpoints, the gateway events, the
+  index and autocomplete stores (`ApplicationCommandIndexStore` holds how
+  commands are found and ordered) and `handleCommand`, the run's request, are
+  watched. Not watched: where a command may be used, `zl` in 46477 (anchor
+  `MISSING_BASE_PERMISSIONS`) with the place's permissions, `Bh` in 240591
+  (anchor `hasBaseAccessPermissions`), and the rule types, 1 role, 2 user, 3
+  channel (`RA` in 392054); how a command and its sub-commands are
+  listed and what is kept of them, `Lz` in 168186 (anchor `subCommandPath`);
+  what a run sends for each option, `A` in 545152 (anchor
+  `APPLICATION_COMMAND_USED`), and the checks a value passes, `J` in 300541
+  (anchor `allowEmptyValues`); which words the suggestions look up, `Yn` in
+  664929 (anchor `hasSpaceTerminator`); where the menus offer commands: the
+  Apps item, 173500 (anchor `command-search`), shows in `TEXTUAL` channels
+  (478437) but not media threads, with the user commands in 107632 and the
+  message commands in 761304; and Use Apps in the attach menu, 316576 (anchor
+  `canUseApplicationCommands`), which a pending reply hides, and which the
+  App Launcher replaces while the Apps button is off.
 - **`ansi` code blocks** (`markup::ansi`, `render::ansi_markup`). Which codes
   read, and how: the parser in 626551 (anchor `brightMagenta`): the style
   codes it takes, in what order a sequence's resets and sets apply, that every
@@ -225,7 +257,7 @@ changed for unrelated reasons only needs a note in the issue.
 - **Captchas** (`Captcha` in `rest.rs`, `ui/captcha.rs`). The retry is
   watched (`interceptResponse`). The fields read are in 295562, and the
   services in 319400 (hCaptcha, reCAPTCHA, reCAPTCHA Enterprise, Turnstile).
-- **QR login retries** (`on_qr`, `qr_failed` in `ui/login.rs`;
+- **QR login retries** (`on_qr`, `retry_qr` in `ui/login.rs`;
   `remote_auth.rs`). How often Neucord reconnects to the remote auth
   gateway. Client: 785161 (logger `useAuthWebsocket`), with the backoff in
   158390.
@@ -375,7 +407,26 @@ changed for unrelated reasons only needs a note in the issue.
   (anchor `guild_connections`) with 920268 (anchor `GUILD_APP`) picks
   `connections_role_id`. A note is asked for once a session by 612630 (anchor
   `USER_NOTE_LOAD_START`) wherever one renders, the popout (243166) and the
-  user menu (497600) included.
+  user menu (497600) included. The panel beside a DM (`ok` in 289287, anchor
+  `UserProfileSidebarRenderer`) asks for `type=sidebar` with mutual servers,
+  and for anyone but a bot either the friends or just their count, by the
+  experiment `rD` there (`2026-06-user-profile-sidebar-redesign`, variant 1,
+  read through `experiments.rs`). The list of mutual friends is asked for
+  once its section opens and the held one isn't as long as the count (229187,
+  anchor `isFetchingFriends`). A decoration's image is the shop's by `sku_id`
+  or else the preset's by `asset`, none once it lapses (`D` in 486020, with
+  `getCollectiblesItemAssetUrl` in 746002). A banner's `size` is the smallest
+  of the list `kr` picks from (776231, anchor `3072, 4096`; `cdn::SIZES`)
+  that holds its width times the screen's scale: the popout's `bannerWidth`
+  (watched), the panel's, or the popout's in the redesign (`specOverrides` in
+  289287).
+- **What a settings change puts in the save** (`Setting::written`,
+  `SettingsSync::edit`). The save, its timing and the schema are watched
+  (`updateAsync`, `markDirty`, `persistChanges`, the protos). Not watched, as
+  both are unnamed: `a` in 159201 (anchor `Unknown proto field name`) copies
+  the whole message the setting lives in, unknown fields included, and `RK`
+  in 761821 (anchor `mergePartial`) replaces an edited message in the set to
+  save instead of merging into it.
 
 ## Notifications and unread state
 
@@ -407,6 +458,12 @@ changed for unrelated reasons only needs a note in the issue.
   `mark-channel-unread`) for channels, 57907 and 375500 for threads, 20883 for
   messages. Which channels the sidebar lists, by Hide Muted Channels (153594)
   and folds: `computeState` in 791513 (anchor `hideMutedChannels`).
+- **The unread count** (`badge.rs`, `State::rail_signature`), on the icon and
+  in the title. The sum and the dot are in the app component of 852799
+  (anchor `getDisableUnreadBadge`): every server's and DM's mentions plus
+  friend requests, or a dot when that is 0 and a server is unread. The title
+  prefix is `notificationCount` in 726249, and Linux's icon takes only the
+  count (`setBadgeCount` in 253400).
 - **What adds a mention** (`counts_mention`, `is_dropped`).
   `MESSAGE_CREATE` in 218461 (anchor `mentionCount++`): nothing from a
   blocked author or command user (`isBlockedOrIgnoredForMessage`, watched
@@ -445,6 +502,28 @@ changed for unrelated reasons only needs a note in the issue.
   channels, and threads outside forums. A box under a message shows only for
   a known thread of a message with `HAS_THREAD` (`r8` in 679636).
 
+- **Searching messages** (`search.rs`, `Rest::search_messages`,
+  `ui/search.rs`). The two endpoints and every field they send are
+  snapshotted, `fetchMessages` and `SearchMessageStore` are watched. Not
+  watched: the 202 retry and its `attempts` field (`fetch` in 177068, anchor
+  `retry-after`), the filters and their patterns (224467, anchor
+  `attachment_extension`; the offered ones in 5990), how tokens become the
+  query (`Zf` in 822382, anchor `min_id`), when it sends (`te` in 586944,
+  anchor `PERFORM_SEARCH`: Enter, 500 ms, and not while one is under way),
+  the sort and page requests (`E`, `N` in 252715), the 10 000 results of 400
+  pages (477654), where a DM or a server is searched
+  (775427, anchor `isCrossDmSearchEnabled`) and the result menu (847342).
+  The setting that searches every DM at once is a POST to
+  `/users/@me/messages/search/tabs` (956467), which Neucord doesn't send.
+- **The quick switcher** (`switcher.rs`, `ui/switcher.rs`). The empty
+  state (`QuickSwitcherStore`), the channel, server and group DM queries,
+  the single-kind refetch and the unread, mention and speaker lists are
+  watched by name. Not watched: the prefixes and what each result opens (`k`
+  and `H` in 793322, anchor `USER_GLOBAL`), `mod+k` and `mod+t` (161388,
+  anchor `QUICKSWITCHER_SHOW`), the scoring (`eT` and `eC` in 997625, anchor
+  `isFullMatch`, with `ep`'s boosters), and how people rank (the worker,
+  787578, anchor `USER_RESULTS`).
+
 - **Channels we can't view** (`Guild::sidebar`, `permissions::access`).
   Neucord lists, counts unread, opens and posts only where it has a
   channel's `accessPermissions`: View Channel, and Connect too in voice and
@@ -480,8 +559,30 @@ changed for unrelated reasons only needs a note in the issue.
   `CHANNEL` in 901123. Copy Message ID is 50268, only in Developer Mode
   (`developer_mode` in the JSON user settings). Copy for the selection
   (373963) and Copy Link and Open Link (777933) are desktop-only there.
+  Save File (`save-voice-message-audio` in 761304) is for a voice message
+  that has an attachment, and takes the first.
   Neucord leaves out the analytics these send (`MESSAGE_LINK_COPIED`,
-  `CONTEXT_MENU_LINK_COPIED`).
+  `CONTEXT_MENU_LINK_COPIED`). The media group before the links (Copy Image,
+  Save Image, 115184) and the names a link gets (Link, Image Link, Media
+  Link; the regexes in 777933) come with `media.rs`, below; a forum with
+  `HIDE_MEDIA_DOWNLOAD_OPTIONS` (watched) hides both, through 207133.
+- **The media viewer** (`media.rs`, `cdn::modal_url`, `ui/viewer.rs`,
+  `ui/video.rs`). Client: the modal is 2323 (anchor `MediaViewerModal`).
+  Its box is `A` in 967758 (the 24, 76, 176, 544, 88 and 36 around it), the
+  picture's size is `AE` in 776231 (anchor `getAttachmentImageLadderConfig`,
+  an experiment: with it on, sizes snap to a ladder Neucord doesn't know) fed
+  by `getRatio` in 619517, zoom is 2.5 and the original it loads is `XW` in
+  803316. What opens together, and as what, is `renderAttachments` in 679636
+  (anchor `Media Mosaic`: only with several; an extension decides, 273185,
+  which `Rr` in 731068 reads) and `renderImage` in 265705; a video needs its
+  size and a proxied file (541041). Which types copy and save is in 253400
+  (`canCopyImage`, `canSaveImage`, `saveImage`, watched). The video controls'
+  rules are 153440 (a click unmutes what began muted, `0`-`9` seek, ended
+  stays paused) and 587481 (the volume and mute kept).
+- **What people are called in a server** (`State::name_in`, `Members`).
+  Client: 562153 (anchor `getNickname`): a server's nickname, in a DM what we
+  call a friend, else the name they go by. Their picture there replaces
+  their own.
 - **The user menu and who has a profile** (`USER` in `ui/menus.rs`,
   `User::non_user_bot`). Client: 841549 picks the menu by channel, the server
   variant is 107632 (`user-context`), which keeps its order. A system account

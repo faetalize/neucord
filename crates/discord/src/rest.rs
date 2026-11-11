@@ -11,6 +11,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use soup::prelude::*;
 
+use crate::commands::Target;
 use crate::endpoints::{Call, call};
 use crate::forum::Search;
 use crate::gifs::{Gif, Picker, Request, Tile, Tiles};
@@ -18,9 +19,13 @@ use crate::interaction::{Failure, Press};
 use crate::invalid::{Change, InvalidRequests};
 use crate::model::Emoji;
 use crate::notification_edit;
+use crate::post_creation;
 use crate::profile::{self, Profile};
 use crate::reactions::{Location, Refusal};
 use crate::scheduled::{self, Scheduled};
+use crate::search;
+use crate::settings_proto;
+use crate::settings_sync::{Save, SaveError, Saved};
 use crate::stickers::Pack;
 use crate::threads::ArchivedPage;
 use crate::uploads::Sent;
@@ -33,11 +38,22 @@ pub const STRANGER_NOT_CONFIRMED: u64 = 80013;
 /// run out for us. Its 429 says how long is left in `retry_after`.
 pub const SLOWMODE_RATE_LIMITED: u64 = 20016;
 
+/// Error code for settings Discord took for ones that cannot be.
+pub const INVALID_USER_SETTINGS_DATA: u64 = 50105;
+
+/// The `type` of `PreloadedUserSettings` among the settings protos.
+const PRELOADED_USER_SETTINGS: u8 = 1;
+
 /// One HTTP 429 retry is enough for interactive use; further limits surface as errors.
 const MAX_RATE_LIMIT_RETRIES: u32 = 1;
 
 /// How long the client lets an interaction request take (`timeout` in 964363).
 const INTERACTION_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How many times the client asks for a command index (`c` in 577700), and
+/// how long it waits when Discord says 202, still building it.
+const INDEX_REQUESTS: u32 = 3;
+const INDEX_BUILDING_WAIT: Duration = Duration::from_secs(5);
 
 /// The longest a request waits on a 429 before trying again. Past this it
 /// fails instead: a retry sent early would only be refused again.
@@ -69,6 +85,16 @@ impl Page {
             Page::Around(id) => format!("limit={limit}&around={id}"),
         }
     }
+}
+
+/// How a search was answered.
+#[derive(Debug)]
+pub enum Searched {
+    Page(search::Page),
+    /// Discord is indexing the server or DM first; `Retry-After`, if sent.
+    Indexing {
+        retry_after: Option<String>,
+    },
 }
 
 /// Send a message as a reply.
@@ -211,6 +237,28 @@ impl Rest {
         Ok(messages)
     }
 
+    /// A page of search results, or word that Discord is still indexing
+    /// (a 202), as `fetch` in 177068 tells them apart. `attempts` is how
+    /// many times it has been asked again, which the client writes into the
+    /// query itself.
+    pub async fn search_messages(&self, request: &search::Request, attempts: u32) -> Result<Searched, Error> {
+        let query = request.query(attempts);
+        let call = match request.context {
+            search::Context::Guild(guild) => call!(SEARCH_GUILD_MESSAGES, guild).query(&query),
+            search::Context::Channel(channel) => call!(SEARCH_CHANNEL_MESSAGES, channel).query(&query),
+        };
+        let (status, response, retry_after) = self.send_full(call, None, Sending::default()).await?;
+        match status {
+            202 => Ok(Searched::Indexing { retry_after }),
+            _ => {
+                let answer: Value = Self::answer(status, &response)?;
+                search::Page::from_value(&answer)
+                    .map(Searched::Page)
+                    .ok_or_else(|| Error::Protocol("search results without a total".into()))
+            }
+        }
+    }
+
     /// Look up any user by id, to name a mention whose user we have not seen.
     pub async fn user(&self, id: Snowflake) -> Result<crate::User, Error> {
         self.request(call!(USER, user = id), None).await
@@ -223,6 +271,12 @@ impl Rest {
         Profile::from_value(&answer).ok_or_else(|| Error::Protocol("a profile without a user".into()))
     }
 
+    /// The friends we share with `user`, which the panel asks for when its
+    /// section opens (`q0` in 803306). They come as users.
+    pub async fn mutual_friends(&self, user: Snowflake) -> Result<Vec<crate::User>, Error> {
+        self.request(call!(MUTUAL_FRIENDS, user), None).await
+    }
+
     /// Our note on `user`, which doesn't exist (a 404) until we write one.
     pub async fn note(&self, user: Snowflake) -> Result<Option<String>, Error> {
         let answer: Value = self.request(call!(NOTE, user), None).await?;
@@ -231,6 +285,24 @@ impl Rest {
 
     pub async fn set_note(&self, user: Snowflake, note: &str) -> Result<(), Error> {
         self.request(call!(SET_NOTE, user), Some(json!({ "note": note }))).await
+    }
+
+    /// The account's settings as Discord has them, a `PreloadedUserSettings`:
+    /// what the client loads again when Discord refuses what it saved
+    /// (`loadIfNecessary` in 594061).
+    pub async fn settings_proto(&self) -> Result<Vec<u8>, Error> {
+        let answer: Value = self.request(call!(SETTINGS_PROTO, kind = PRELOADED_USER_SETTINGS), None).await?;
+        let settings = answer["settings"].as_str().ok_or_else(|| Error::Protocol("settings without a proto".into()))?;
+        Ok(settings_proto::decode(settings))
+    }
+
+    /// Save edited settings, as `persistChanges` does in 594061: the body is
+    /// `settings` and, for an offline edit, `required_data_version`.
+    pub async fn save_settings(&self, save: &Save) -> Result<Saved, SaveError> {
+        let call = call!(SAVE_SETTINGS_PROTO, kind = PRELOADED_USER_SETTINGS);
+        let (status, response, retry_after) =
+            self.send_full(call, Some(save.body()), Sending::default()).await.map_err(SaveError::Other)?;
+        save_answer(status, &response, retry_after)
     }
 
     /// Discord's standard sticker packs, as the client fetches them when the
@@ -533,6 +605,59 @@ impl Rest {
         }
     }
 
+    /// Fetch the apps and commands of `target` (`E` in 577700). A 202 means
+    /// Discord is still building it and a 429 says how long to wait; the
+    /// client asks up to three times, waiting as told, and gives up on
+    /// anything else.
+    pub async fn command_index(&self, target: Target) -> Option<Value> {
+        for made in 1..=INDEX_REQUESTS {
+            let call = match target {
+                Target::Guild(guild) => call!(COMMAND_INDEX_GUILD, guild),
+                Target::Channel(channel) => call!(COMMAND_INDEX_CHANNEL, channel),
+                Target::User => call!(COMMAND_INDEX_USER),
+            };
+            let sending = Sending { retry_rate_limit: false, ..Sending::default() };
+            let (status, response) = self.send_with(call, None, sending).await.ok()?;
+            let wait = match status {
+                202 => INDEX_BUILDING_WAIT,
+                429 => {
+                    let after = serde_json::from_slice::<Value>(&response).ok()?["retry_after"].as_f64()?;
+                    Duration::from_secs_f64(after.max(0.0))
+                }
+                200..=299 => return serde_json::from_slice(&response).ok(),
+                _ => return None,
+            };
+            if made < INDEX_REQUESTS {
+                glib::timeout_future(wait).await;
+            }
+        }
+        None
+    }
+
+    /// Run a command: `POST /interactions` with `body`
+    /// ([`crate::commands::Run::body`]). Sent through the client's message
+    /// queue, which waits out a 429 and sends it again (`createResponseHandler`
+    /// in 870801). A success only means Discord took it; what the app answers
+    /// comes on the gateway.
+    pub async fn run_command(&self, body: Value) -> Result<(), Failure> {
+        match self.send_with(call!(INTERACT), Some(body), Sending::default()).await {
+            Ok((status, _)) if (200..300).contains(&status) => Ok(()),
+            Ok((status, response)) => Err(Failure::from_response(status, &response)),
+            Err(_) => Err(Failure::default()),
+        }
+    }
+
+    /// Ask an app for choices to an option (`WL` in 721768): the same
+    /// request, given three seconds, and its answer comes on the gateway.
+    pub async fn autocomplete(&self, body: Value) -> Result<(), Failure> {
+        let sent = self.send_with(call!(INTERACT), Some(body), Sending::default());
+        match glib::future_with_timeout(INTERACTION_TIMEOUT, sent).await {
+            Ok(Ok((status, _))) if (200..300).contains(&status) => Ok(()),
+            Ok(Ok((status, response))) => Err(Failure::from_response(status, &response)),
+            _ => Err(Failure::default()),
+        }
+    }
+
     /// Start a thread in `channel`, from `message` if given, with what
     /// [`crate::thread_creation::body`] makes. The thread arrives on the
     /// gateway as well.
@@ -547,6 +672,13 @@ impl Rest {
             None => call!(CREATE_THREAD, channel),
         };
         self.request(call, Some(body)).await
+    }
+
+    /// Start a post in the forum or media channel `forum`, with what
+    /// [`crate::post_creation::body`] makes: the same request as a thread's,
+    /// with its query. The post arrives on the gateway as well.
+    pub async fn create_post(&self, forum: Snowflake, body: serde_json::Value) -> Result<Channel, Error> {
+        self.request(create_post_call(forum), Some(body)).await
     }
 
     /// Mark everything in `channel` up to `message` as read, for all our clients.
@@ -851,6 +983,29 @@ impl Rest {
     }
 }
 
+/// What Discord answers to a settings save, as `persistChanges` reads it:
+/// the settings and whether they were out of date on success, and for a
+/// failure the two cases it handles itself.
+fn save_answer(status: u32, response: &[u8], retry_after: Option<String>) -> Result<Saved, SaveError> {
+    match status {
+        200..=299 => {
+            let answer: Value = serde_json::from_slice(response).map_err(|e| SaveError::Other(e.into()))?;
+            Ok(Saved {
+                settings: answer["settings"].as_str().map(settings_proto::decode),
+                out_of_date: answer["out_of_date"].as_bool().unwrap_or(false),
+            })
+        }
+        429 => Err(SaveError::RateLimited { retry_after }),
+        400 if serde_json::from_slice::<Value>(response)
+            .is_ok_and(|v| v["code"].as_u64() == Some(INVALID_USER_SETTINGS_DATA)) =>
+        {
+            Err(SaveError::Invalid)
+        }
+        // Not a success, so this is the error.
+        _ => Err(SaveError::Other(Rest::answer::<Value>(status, response).unwrap_err())),
+    }
+}
+
 /// The request that adds our reaction: the emoji in the path, and as the
 /// query `location` and `type`, 0 being a normal reaction.
 fn add_reaction_call(channel: Snowflake, message: Snowflake, emoji: &Emoji, location: Location) -> Call {
@@ -889,6 +1044,12 @@ fn leave_thread_call(thread: Snowflake, location: &str) -> Call {
 /// `loadArchivedThreads` writes it ([`Search::query`]).
 fn archived_threads_call(search: &Search) -> Call {
     call!(SEARCH_THREADS, channel = search.channel).query(&search.query())
+}
+
+/// The request that starts a post: a thread's endpoint, with the query the
+/// client adds (`createForumPost` in 971389).
+fn create_post_call(forum: Snowflake) -> Call {
+    call!(CREATE_THREAD, channel = forum).query(post_creation::QUERY)
 }
 
 /// The request for who reacted: `limit`, `after` when paging, and `type`,
@@ -1044,13 +1205,14 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        Captcha, Page, Reply, ReplyPing, add_reaction_call, archived_threads_call, base_headers, edit_body,
-        edit_scheduled_body, is_md5, join_thread_call, leave_thread_call, message_body, poll_body, rate_limit_wait,
-        reactors_call, remove_reaction_call, schedule_body, vote_body,
+        Captcha, Page, Reply, ReplyPing, add_reaction_call, archived_threads_call, base_headers, create_post_call,
+        edit_body, edit_scheduled_body, is_md5, join_thread_call, leave_thread_call, message_body, poll_body,
+        rate_limit_wait, reactors_call, remove_reaction_call, save_answer, schedule_body, vote_body,
     };
     use crate::endpoints::call;
     use crate::model::Emoji;
     use crate::reactions::Location;
+    use crate::settings_sync::{Save, SaveError};
     use crate::uploads::Sent;
     use crate::uploads::Voice;
     use crate::{Message, Snowflake, identity};
@@ -1156,6 +1318,10 @@ mod tests {
              &tag_setting=match_some&offset=25"
         );
         assert_eq!(call!(GET_CHANNEL, channel = thread).path(), "/channels/7");
+        // A post is the thread request with the query `createForumPost` adds; a plain thread has none.
+        let post = create_post_call(thread);
+        assert_eq!((post.method(), post.path()), ("POST", "/channels/7/threads?use_nested_fields=true"));
+        assert_eq!(call!(CREATE_THREAD, channel = thread).path(), "/channels/7/threads");
     }
 
     #[test]
@@ -1332,5 +1498,35 @@ mod tests {
 
         assert!(Captcha::from_response(br#"{"captcha_key": ["captcha-required"]}"#).is_none(), "no site key");
         assert!(Captcha::from_response(br#"{"code": 50035, "message": "Invalid Form Body"}"#).is_none());
+    }
+
+    #[test]
+    fn saving_settings_sends_what_persist_changes_does() {
+        let call = call!(SAVE_SETTINGS_PROTO, kind = 1);
+        assert_eq!((call.method(), call.path()), ("PATCH", "/users/@me/settings-proto/1"));
+        let save = Save::test("Cg==", None);
+        assert_eq!(save.body(), json!({ "settings": "Cg==" }), "no version for an edit made online");
+        let offline = Save::test("Cg==", Some(41));
+        assert_eq!(offline.body(), json!({ "settings": "Cg==", "required_data_version": 41 }));
+    }
+
+    #[test]
+    fn a_save_answers_with_the_settings() {
+        let ok = save_answer(200, br#"{"settings":"CAE=","out_of_date":true}"#, None).unwrap();
+        assert_eq!((ok.settings, ok.out_of_date), (Some(vec![0x08, 1]), true));
+        let ok = save_answer(200, br#"{"settings":"CAE="}"#, None).unwrap();
+        assert!(!ok.out_of_date);
+        assert_eq!(save_answer(200, b"{}", None).unwrap().settings, None);
+    }
+
+    #[test]
+    fn the_failures_a_save_handles_itself() {
+        let limited = save_answer(429, b"{}", Some("12".into())).unwrap_err();
+        assert!(matches!(limited, SaveError::RateLimited { retry_after: Some(s) } if s == "12"));
+        let invalid = save_answer(400, br#"{"code":50105,"message":"Invalid settings"}"#, None).unwrap_err();
+        assert!(matches!(invalid, SaveError::Invalid));
+        let other = save_answer(400, br#"{"code":50035}"#, None).unwrap_err();
+        assert!(matches!(other, SaveError::Other(crate::Error::Http { status: 400, .. })));
+        assert!(matches!(save_answer(500, b"", None).unwrap_err(), SaveError::Other(_)));
     }
 }

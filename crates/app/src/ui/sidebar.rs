@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 use discord::channel_icon::{self, Glyph, Mark};
 use discord::notifications::Place;
+use discord::voice_states::VoiceState;
 use discord::{Channel, Snowflake};
 use gtk::prelude::*;
 use gtk::{glib, pango};
@@ -51,7 +52,7 @@ pub(super) const OPEN_CHAT: Entry<ChannelTarget> = Entry::Item(Item {
 pub(super) const COPY_CHANNEL_ID: Entry<ChannelTarget> = Entry::Item(Item {
     name: "copy-channel-id",
     label: "Copy Channel _ID",
-    shows: |app, _| app.state.borrow().developer_mode,
+    shows: |app, _| app.state.borrow().settings.developer_mode,
     kind: Kind::Action(|app, target| app.copy(&target.0.to_string())),
 });
 
@@ -162,6 +163,11 @@ impl App {
                 } else if state.is_unread(channel) {
                     row.add_css_class("unread");
                 }
+                if channel.kind == discord::ChannelKind::Voice {
+                    for voice in state.voice.in_channel(guild.id, channel.id, |v| state.voice_name(v)) {
+                        self.append_voice_state(&state, voice);
+                    }
+                }
                 let threads = state.sidebar_threads(guild, channel);
                 for (i, thread) in threads.iter().enumerate() {
                     self.append_thread(&state, thread, i + 1 == threads.len());
@@ -178,6 +184,29 @@ impl App {
             let (Some(app), Some(row)) = (app.upgrade(), row_weak.upgrade()) else { return };
             menus::popup(&app, table, ChannelTarget(channel), &row, At::Point(x, y));
         });
+    }
+
+    /// Someone connected to the voice channel above, in line with its name.
+    fn append_voice_state(&self, state: &super::state::State, voice: &VoiceState) {
+        let name = state.voice_name(voice);
+        let row = gtk::Box::builder().spacing(6).margin_start(GLYPH_WIDTH + 6).build();
+        row.append(&match &voice.user {
+            Some(user) => avatar_widget(user, VOICE_AVATAR, Some(&self.images)),
+            None => adw::Avatar::new(VOICE_AVATAR, Some(&name), true).upcast(),
+        });
+        row.append(
+            &gtk::Label::builder().label(&name).xalign(0.0).hexpand(true).ellipsize(pango::EllipsizeMode::End).build(),
+        );
+        let marks = [
+            (voice.self_stream, "video-display-symbolic", "Live"),
+            (voice.self_video, "camera-video-symbolic", "Camera on"),
+            (voice.muted(), "microphone-disabled-symbolic", "Muted"),
+            (voice.deafened(), "audio-volume-muted-symbolic", "Deafened"),
+        ];
+        for (_, icon, tooltip) in marks.into_iter().filter(|(on, ..)| *on) {
+            row.append(&gtk::Image::builder().icon_name(icon).tooltip_text(tooltip).build());
+        }
+        self.append_row(&row, None, false);
     }
 
     /// A thread's row, under its parent's, joined to it by a line; `last`
@@ -265,10 +294,13 @@ impl App {
 /// The width of a symbolic icon at the default size.
 const GLYPH_WIDTH: i32 = 16;
 
+/// A voice channel participant's avatar.
+const VOICE_AVATAR: i32 = 20;
+
 /// The kind of channel, in front of its name. Text channels show a `#`, which
 /// the theme has no icon for. Every glyph is as wide as an icon, so the names
 /// line up; a size group would measure every row on each rebuild.
-fn glyph_widget(glyph: Glyph) -> gtk::Widget {
+pub(super) fn glyph_widget(glyph: Glyph) -> gtk::Widget {
     let (icon, tooltip) = match glyph {
         Glyph::Text => {
             return gtk::Label::builder()

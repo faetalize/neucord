@@ -5,12 +5,17 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use discord::settings::MediaSettings;
+use discord::settings::{MediaSettings, StickerAnimation};
 use discord::{Attachment, Snowflake, Sticker};
-use gtk::glib;
 use gtk::prelude::*;
+use gtk::{gio, glib};
 
+use super::App;
+use super::chat::MessageTarget;
 use super::embeds::{behind_spoiler, fitted_picture};
+use super::menus::{Entry, Item, Kind};
+use super::video::{Options, Player};
+use super::viewer::MediaCx;
 use crate::images::Images;
 
 /// The official client's box for a single image or video attachment.
@@ -32,7 +37,13 @@ enum Shown {
 }
 
 /// One attachment of a message, `voice` if the message is a voice message.
-pub(super) fn attachment(attachment: &Attachment, voice: bool, images: &Images, media: &MediaSettings) -> gtk::Widget {
+pub(super) fn attachment(
+    attachment: &Attachment,
+    voice: bool,
+    images: &Images,
+    media: &MediaSettings,
+    view: &MediaCx,
+) -> gtk::Widget {
     let inline = media.inline_attachment_media;
     let shown = if voice && attachment.is_audio() {
         Shown::Voice
@@ -46,22 +57,23 @@ pub(super) fn attachment(attachment: &Attachment, voice: bool, images: &Images, 
     } else {
         return file(attachment);
     };
-    let build = move |attachment: &Attachment, images: &Images| match shown {
+    let build = move |attachment: &Attachment, images: &Images, view: &MediaCx| match shown {
         Shown::Voice => voice_message(attachment, images),
         Shown::Audio => audio(attachment, images),
-        Shown::Image { autoplay } => image(attachment, images, autoplay),
-        Shown::Video => video(attachment, images),
+        Shown::Image { autoplay } => image(attachment, images, autoplay, view),
+        Shown::Video => video(attachment, images, view),
     };
     if attachment.is_spoiler() {
-        let (attachment, images) = (attachment.clone(), images.clone());
-        behind_spoiler(move || build(&attachment, &images))
+        let (attachment, images, view) = (attachment.clone(), images.clone(), view.clone());
+        behind_spoiler(move || build(&attachment, &images, &view))
     } else {
-        build(attachment, images)
+        build(attachment, images, view)
     }
 }
 
-/// A sticker, or for one we can't draw, its name.
-pub(super) fn sticker(sticker: &Sticker, images: &Images, autoplay: bool) -> gtk::Widget {
+/// A sticker, or for one we can't draw, its name. An animated one moves as
+/// `animation` says: always, only under the pointer, or never.
+pub(super) fn sticker(sticker: &Sticker, images: &Images, animation: StickerAnimation) -> gtk::Widget {
     let size = Sticker::SIZE;
     let request = crate::images::request_size((size as i32, size as i32), images.scale(), None).0;
     let Some((url, animated)) = sticker.image(request) else {
@@ -78,7 +90,24 @@ pub(super) fn sticker(sticker: &Sticker, images: &Images, autoplay: bool) -> gtk
     fitted.picture.set_css_classes(&[]);
     fitted.picture.set_tooltip_text(Some(&sticker.name));
     fitted.picture.set_alternative_text(Some(&sticker.name));
-    images.set(&fitted.picture, &url, animated && autoplay);
+    images.set(&fitted.picture, &url, animated && animation == StickerAnimation::Always);
+    if animated && animation == StickerAnimation::OnInteraction {
+        let motion = gtk::EventControllerMotion::new();
+        let play = |on: bool| {
+            let (picture, images, url) = (fitted.picture.downgrade(), images.clone(), url.clone());
+            move |_: &gtk::EventControllerMotion| {
+                if let Some(picture) = picture.upgrade() {
+                    images.set(&picture, &url, on);
+                }
+            }
+        };
+        motion.connect_enter({
+            let play = play(true);
+            move |motion, _, _| play(motion)
+        });
+        motion.connect_leave(play(false));
+        fitted.frame.add_controller(motion);
+    }
     // So a right-click on it can say which one.
     fitted.frame.set_widget_name(&format!("{STICKER_NAME}{}", sticker.id));
     fitted.frame.upcast()
@@ -92,19 +121,23 @@ pub(super) fn sticker_id(widget: &gtk::Widget) -> Option<Snowflake> {
     widget.widget_name().strip_prefix(STICKER_NAME)?.parse().ok().map(Snowflake)
 }
 
-/// An inline image, scaled to fit a reasonable box.
-fn image(attachment: &Attachment, images: &Images, autoplay: bool) -> gtk::Widget {
+/// An inline image, scaled to fit a reasonable box. Clicking it opens the
+/// viewer.
+fn image(attachment: &Attachment, images: &Images, autoplay: bool, view: &MediaCx) -> gtk::Widget {
     let fitted = fitted_picture(attachment.width, attachment.height, MAX_W, MAX_H);
     fitted.picture.set_css_classes(&["attachment-image"]);
     // Through the media proxy when we can, which sends it at the size shown.
     let url = attachment.proxy_url.as_deref().unwrap_or(&attachment.url);
     let original = attachment.width.zip(attachment.height);
     images.set_sized(&fitted.picture, url, fitted.size, original, autoplay && attachment.is_animated());
+    view.link(&fitted.frame, view.attachment(attachment.id));
     fitted.frame.upcast()
 }
 
-/// A video, its box kept for it, fetched and played once clicked.
-fn video(attachment: &Attachment, images: &Images) -> gtk::Widget {
+/// A video, its box kept for it, fetched and played once clicked. Among
+/// other media of its message it opens the viewer instead, as the client's
+/// does, and its fullscreen button does.
+fn video(attachment: &Attachment, images: &Images, view: &MediaCx) -> gtk::Widget {
     let frame = gtk::Overlay::builder().halign(gtk::Align::Start).build();
     let fitted = fitted_picture(attachment.width, attachment.height, MAX_W, MAX_H);
     fitted.picture.set_css_classes(&["attachment-image"]);
@@ -117,20 +150,36 @@ fn video(attachment: &Attachment, images: &Images) -> gtk::Widget {
         .css_classes(["osd", "circular", "embed-play"])
         .build();
     frame.add_overlay(&play);
+    let index = view.attachment(attachment.id);
+    view.name(&frame, index);
     play.connect_clicked({
         let frame = frame.downgrade();
-        let (images, url) = (images.clone(), attachment.url.clone());
+        let (images, view) = (images.clone(), view.clone());
+        // The viewer plays what the proxy serves, so it is this.
+        let url = attachment.proxy_url.clone().unwrap_or_else(|| attachment.url.clone());
         move |button| {
+            if let Some(index) = index.filter(|&index| view.together(index) > 1) {
+                return view.open(index, 0.0);
+            }
             button.set_sensitive(false);
-            let (frame, button, images, url) = (frame.clone(), button.downgrade(), images.clone(), url.clone());
+            let (frame, button, images, url, view) =
+                (frame.clone(), button.downgrade(), images.clone(), url.clone(), view.clone());
             glib::spawn_future_local(async move {
                 let path = images.file(&url).await;
                 let (Some(frame), Some(button)) = (frame.upgrade(), button.upgrade()) else { return };
                 let Some(path) = path else { return button.set_sensitive(true) };
                 frame.remove_overlay(&button);
-                let player = gtk::Video::builder().autoplay(true).css_classes(["attachment-image"]).build();
-                player.set_filename(Some(&path));
-                frame.add_overlay(&player);
+                let options =
+                    Options { autoplay: true, start: 0.0, fullscreen: index.is_some(), classes: &["attachment-image"] };
+                let player = Player::new(&path, &options);
+                if let Some(index) = index {
+                    let control = player.control();
+                    player.fullscreen_button().connect_clicked(move |_| {
+                        control.pause();
+                        view.open(index, control.position());
+                    });
+                }
+                frame.add_overlay(player.widget());
             });
         }
     });
@@ -243,6 +292,48 @@ fn voice_message(attachment: &Attachment, images: &Images) -> gtk::Widget {
     row.upcast()
 }
 
+/// Save File, on a voice message (761304, where the client hands the audio's
+/// URL to the browser to download). The desktop's file chooser asks where,
+/// and the file the player keeps is copied there, fetched first if it wasn't
+/// played: the same request playing makes.
+pub(super) const SAVE_FILE: Entry<MessageTarget> = Entry::Item(Item {
+    name: "save-file",
+    label: "Save _File",
+    shows: |_, target| target.shown().voice_audio().is_some(),
+    kind: Kind::Action(|app, target| {
+        if let Some(audio) = target.shown().voice_audio() {
+            save_file(app, &audio);
+        }
+    }),
+});
+
+fn save_file(app: &Rc<App>, audio: &Attachment) {
+    let dialog = gtk::FileDialog::builder().title("Save File").initial_name(save_name(&audio.filename)).build();
+    let (app, url) = (app.clone(), audio.url.clone());
+    glib::spawn_future_local(async move {
+        // Cancelling is no error.
+        let Ok(destination) = dialog.save_future(Some(&app.window)).await else { return };
+        let saved = match app.images.file(&url).await {
+            Some(path) => {
+                let copy = gio::File::for_path(path).copy_future(
+                    &destination,
+                    gio::FileCopyFlags::OVERWRITE,
+                    glib::Priority::DEFAULT,
+                );
+                copy.0.await.is_ok()
+            }
+            None => false,
+        };
+        app.toast(if saved { "File Saved" } else { "Unable to save file" });
+    });
+}
+
+/// What the chooser offers as the name: the file's, without any folders.
+fn save_name(filename: &str) -> &str {
+    let name = filename.rsplit(['/', '\\']).next().unwrap_or_default();
+    if name.is_empty() { "voice-message.ogg" } else { name }
+}
+
 fn play_button(tooltip: &str) -> gtk::Button {
     gtk::Button::builder()
         .icon_name("media-playback-start-symbolic")
@@ -269,4 +360,18 @@ fn file(attachment: &Attachment) -> gtk::Widget {
         markup += &format!("  <span fgalpha=\"55%\" size=\"small\">{}</span>", glib::format_size(size));
     }
     gtk::Label::builder().use_markup(true).label(markup).xalign(0.0).build().upcast()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::save_name;
+
+    #[test]
+    fn the_chooser_offers_a_file_name_and_no_folders() {
+        assert_eq!(save_name("voice-message.ogg"), "voice-message.ogg");
+        assert_eq!(save_name("../../etc/voice-message.ogg"), "voice-message.ogg");
+        assert_eq!(save_name("a\\b.ogg"), "b.ogg");
+        assert_eq!(save_name(""), "voice-message.ogg");
+        assert_eq!(save_name("dir/"), "voice-message.ogg");
+    }
 }
