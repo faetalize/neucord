@@ -9,7 +9,7 @@ use gtk::glib;
 use gtk::prelude::*;
 
 use super::App;
-use super::state::{Page, State, now_ms};
+use super::state::{Page, now_ms};
 
 impl App {
     pub(super) fn logout(self: &Rc<Self>) {
@@ -326,7 +326,7 @@ impl App {
                         state.resume = resume;
                     }
                     if Event::is_fatal_close(code) {
-                        *self.state.borrow_mut() = State::default();
+                        *self.state.borrow_mut() = self.fresh_state();
                         glib::spawn_future_local(async {
                             let _ = session::clear_token().await;
                         });
