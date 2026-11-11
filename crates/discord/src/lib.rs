@@ -7,6 +7,7 @@
 pub mod account;
 pub mod apng;
 pub mod auth;
+pub mod backoff;
 pub mod cdn;
 pub mod channel_icon;
 pub mod component;
@@ -79,6 +80,12 @@ pub enum Error {
     Protocol(String),
     /// Discord turned a login down, and said why.
     Rejected(String),
+    /// The account is scheduled for deletion. The client asks whether to
+    /// cancel that, and logs in again with `undelete` if so.
+    ScheduledForDeletion,
+    /// Discord suspended the account and gave this token, with which
+    /// [`Rest::suspended_standing`] reads why.
+    Suspended(String),
     /// Key generation or decryption failed, for QR login.
     Crypto(openssl::error::ErrorStack),
     /// The secret service (keyring) failed.
@@ -106,6 +113,8 @@ impl std::fmt::Display for Error {
             Error::Decode(e) => write!(f, "unexpected data from Discord: {e}"),
             Error::Protocol(e) => write!(f, "unexpected data from Discord: {e}"),
             Error::Rejected(why) => f.write_str(why),
+            Error::ScheduledForDeletion => f.write_str("This account is scheduled for deletion."),
+            Error::Suspended(_) => f.write_str("Discord has suspended this account."),
             Error::Crypto(e) => write!(f, "encryption error: {e}"),
             Error::Keyring(e) => write!(f, "keyring error: {e}"),
             Error::Captcha => write!(f, "Discord asked for a captcha, and it wasn't solved"),
