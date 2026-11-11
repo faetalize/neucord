@@ -539,6 +539,7 @@ impl App {
             self.rebuild_sidebar();
         }
         self.permissions_changed(Some(guild_id));
+        self.thread_arrivals();
     }
 
     /// A thread was deleted. If it was open, its parent opens instead.

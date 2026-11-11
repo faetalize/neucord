@@ -18,6 +18,7 @@ use discord::relationships::Relationships;
 use discord::settings::{GuildFolder, MediaSettings, RailEntry};
 use discord::stickers::Packs;
 use discord::subscriptions::Subscriptions;
+use discord::thread_creation;
 use discord::threads;
 use discord::typing::Typing;
 use discord::verification::Account;
@@ -265,6 +266,37 @@ impl State {
         match (self.find_channel(id), &self.account) {
             (Some((guild, channel)), Some(me)) => permissions::can_reply(guild, channel, me, now_unix()),
             _ => false,
+        }
+    }
+
+    /// Whether the attach menu offers Create Thread in the channel (see
+    /// [`thread_creation::offered_in_attach_menu`]).
+    pub(super) fn offers_thread_in_attach_menu(&self, id: Snowflake) -> bool {
+        match (self.find_channel(id), &self.account) {
+            (Some((Some(guild), channel)), Some(me)) => {
+                thread_creation::offered_in_attach_menu(guild, channel, me, now_unix())
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a thread may be started from `message` (see
+    /// [`thread_creation::can_start`]).
+    pub(super) fn can_start_thread_from(&self, message: &Message) -> bool {
+        match (self.find_channel(message.channel_id), &self.account) {
+            (Some((Some(guild), channel)), Some(me)) => {
+                thread_creation::can_start(guild, channel, Some(message), me, now_unix())
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a new thread in the channel may be private (see
+    /// [`thread_creation::Privacy`]).
+    pub(super) fn thread_privacy(&self, id: Snowflake) -> thread_creation::Privacy {
+        match (self.find_channel(id), &self.account) {
+            (Some((Some(guild), channel)), Some(me)) => thread_creation::Privacy::of(guild, channel, me, now_unix()),
+            _ => thread_creation::Privacy::Public,
         }
     }
 

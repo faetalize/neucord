@@ -8,6 +8,7 @@ mod chat;
 mod components;
 mod composer;
 mod connection;
+mod create_thread;
 mod edits;
 mod embeds;
 mod emoji;
@@ -114,6 +115,8 @@ pub struct App {
     timeout_end: RefCell<Option<glib::SourceId>>,
     /// Fires when a thread the sidebar lists would drop out of it.
     thread_expiry: RefCell<Option<glib::SourceId>>,
+    /// Threads we started and are waiting for the gateway to bring.
+    thread_waiters: RefCell<Vec<(Snowflake, async_channel::Sender<()>)>>,
     /// What opening a forum or media channel shows, until #70 lists posts.
     forum_page: adw::StatusPage,
     forum_title: widgets::Title,
@@ -283,6 +286,7 @@ impl App {
             notice_tick: RefCell::default(),
             timeout_end: RefCell::default(),
             thread_expiry: RefCell::default(),
+            thread_waiters: RefCell::default(),
             forum_page: adw::StatusPage::builder()
                 .title("No Posts Shown")
                 .description("Neucord can't list posts yet. Posts you've joined are under the channel in the sidebar.")

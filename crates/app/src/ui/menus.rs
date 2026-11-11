@@ -16,8 +16,8 @@ use gtk::{gdk, gio, glib};
 use super::App;
 use super::chat::{self, MessageTarget};
 use super::{
-    composer, edits, emoji, gifs, picker, poll_composer, polls, reactions, reactors, scheduling, stickers, uploads,
-    voice,
+    composer, create_thread, edits, emoji, gifs, picker, poll_composer, polls, reactions, reactors, scheduling,
+    stickers, uploads, voice,
 };
 
 /// One entry of a menu, for what it was opened on: a `T`. `C` is what
@@ -81,11 +81,11 @@ pub(super) enum Style {
 pub(super) type Table<T, C = App> = &'static [&'static [Entry<T, C>]];
 
 /// A message's menu: what Neucord has of the official client's (761304),
-/// in its order.
+/// in its order. Create Thread follows Forward, which Neucord has no entry for.
 const MESSAGE: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
     &[reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
-    &[edits::EDIT, composer::REPLY],
+    &[edits::EDIT, composer::REPLY, create_thread::MESSAGE_MENU],
     &[chat::COPY_TEXT, chat::COPY_MESSAGE_LINK, polls::END_POLL],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
     &[chat::COPY_LINK, chat::OPEN_LINK],
@@ -98,7 +98,7 @@ const MESSAGE: Table<MessageTarget> = &[
 const MESSAGE_REGULATED: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
     &[reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
-    &[edits::EDIT, composer::REPLY],
+    &[edits::EDIT, composer::REPLY, create_thread::MESSAGE_MENU],
     &[chat::COPY_TEXT, chat::COPY_MESSAGE_LINK, polls::END_POLL],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
     &[chat::COPY_MESSAGE_ID, stickers::MESSAGE_DETAILS],
@@ -115,11 +115,13 @@ pub(super) fn message(regulated: bool) -> Table<MessageTarget> {
 /// (`channel-attach`, 316576) with what Neucord has of it. Upload a File and
 /// Upload Text as File show where files may be attached, Record Voice Message
 /// where the experiment and Send Voice Messages allow it (`canRecordVoiceMessage`),
-/// Create Poll where polls may be posted (`canPostPolls`), Schedule Message
-/// where we may post (`vK` in 566908), and the rest are other features'.
+/// Create Thread where threads may be started (`canStartThreads`), Create Poll
+/// where polls may be posted (`canPostPolls`), Schedule Message where we may
+/// post (`vK` in 566908), and the rest are other features'.
 pub(super) const ATTACH: Table<()> = &[&[
     uploads::UPLOAD_FILE,
     uploads::UPLOAD_TEXT,
+    create_thread::ATTACH_MENU,
     poll_composer::CREATE_POLL,
     scheduling::SCHEDULE_MESSAGE,
     voice::RECORD_VOICE,
@@ -512,6 +514,32 @@ mod tests {
         let n = swapped.len();
         swapped.swap(n - 2, n - 1);
         assert_eq!(names(message(true)), swapped);
+    }
+
+    #[test]
+    fn create_thread_sits_where_the_client_puts_it() {
+        let flat = |table: Table<MessageTarget>| names(table).concat();
+        let place = |table, before: &str, after: &str| {
+            let names = flat(table);
+            let at = |name: &str| names.iter().position(|n| *n == name).unwrap();
+            assert_eq!(at("create-thread"), at(before) + 1);
+            assert!(at("create-thread") < at(after));
+        };
+        // After Reply, which the client follows with Forward and then it.
+        place(message(false), "reply", "copy-text");
+        place(message(true), "reply", "copy-text");
+        // The attach menu: after the uploads, before the poll.
+        let attach: Vec<_> = ATTACH[0]
+            .iter()
+            .map(|entry| match entry {
+                Entry::Item(item) => item.name,
+                Entry::Choices(choices) => choices.name,
+            })
+            .collect();
+        let (uploads, thread, poll) = (attach.iter().position(|n| *n == "upload-text"), "create-thread", "create-poll");
+        let at = |name| attach.iter().position(|n| *n == name).unwrap();
+        assert_eq!(Some(at(thread)), uploads.map(|u| u + 1));
+        assert_eq!(at(poll), at(thread) + 1);
     }
 
     #[test]

@@ -47,6 +47,7 @@ pub mod shape;
 pub mod stickers;
 pub mod subscriptions;
 pub mod system;
+pub mod thread_creation;
 pub mod threads;
 pub mod typing;
 pub mod uploads;
