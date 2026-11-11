@@ -391,6 +391,24 @@ changed for unrelated reasons only needs a note in the issue.
   a clear instead for text that is empty trimmed and no emoji, writes a
   server's emoji by id and a Unicode one by its character, and caps the text
   at 128.
+- **The skin tone** (`Setting::SkinTone`, `UnicodeEmoji::toned`). 554375
+  (anchor `diversitySurrogate`) saves it with `FREQUENT_USER_ACTION`, 10 s
+  where most settings wait none (`Setting::delay`), and 7584 (anchor
+  `defaultDiversityChild`) shows and sends an emoji's variant for the tone.
+- **The server privacy rows** (`Privacy::direct_messages`,
+  `Privacy::message_requests`, `ui/privacy.rs`). The schema, the enums and
+  the flag bits are watched. Not watched, all in 960111 (anchors
+  `PERMISSIONS_MESSAGE_REQUESTS_SETTING`, `FRIEND_REQUESTS_EVERYONE_SETTING`):
+  what each row shows and disables, `useValue` and `useDisabled`; that
+  changing a default asks whether to apply it to every server, and writes
+  the list of servers as the whole list or none; that a server's change
+  edits that list without the servers we left, unless one is unavailable
+  (115063, anchor `totalUnavailableGuilds`); the friend request bits, which
+  switch Everyone to 14 or `14 & ~NO_RELATION` and clear a source's bit with
+  `NO_RELATION`. What holds them back is READY's: 834981 (anchor
+  `link_status`) says a parent is linked, 116774 and
+  953298 the region's teen defaults and age gate (anchors
+  `MESSAGE_REQUEST_RESTRICTIONS`, `DM_PRIVACY_SETTINGS`).
 - **When we send our presence** (`presence.rs`). `emitPresenceUpdate`,
   `presenceUpdate` and `SelfPresenceStore` (what the presence is) are
   watched. Not watched: the reporter around `emitPresenceUpdate` in 225123
