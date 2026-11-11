@@ -290,6 +290,7 @@
     "RawGuildEmojiStore",
     "RegionalFeatureConfigStore",
     "RpcNotificationSettingsStore",
+    "SearchMessageStore",
     "SafetyHubStore",
     "SlowmodeStore",
     "StickerMessagePreviewStore",
