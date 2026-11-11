@@ -90,7 +90,10 @@ changed for unrelated reasons only needs a note in the issue.
   request, its error codes, the permission bits and `HAS_THREAD` are watched
   (`POST CHANNEL_THREADS` carries the body of both endpoints). Not watched:
   who is offered it, `C`, `n` and `Tb` in 406704 (anchor
-  `CREATE_PRIVATE_THREADS`); the form in 289287 (anchor
+  `CREATE_PRIVATE_THREADS`), and that the attach button outlives the message
+  box turned off for want of Send Messages, as long as either thread
+  permission holds (`canCreateThreads` in 989161, anchor
+  `requireCreateTherads`); the form in 289287 (anchor
   `useDefaultThreadName`), which wants a name unless the thread is from a
   message and caps it at 100; the default name `V` in 971389 (anchor
   `rawTitle`), the archive time `Gl` in 268761 (anchor
@@ -141,6 +144,19 @@ changed for unrelated reasons only needs a note in the issue.
   to pick sends when chosen, several when the list closes with a change); and
   what turns components off, `v` in 911408 (anchor
   `getInteractionComponentState`) with `O` and the menu limits in 257249.
+- **Slash commands** (`commands.rs`, `ui/slash.rs`, `Rest::command_index`,
+  `run_command`, `autocomplete`). The endpoints, the gateway events, the
+  index and autocomplete stores (`ApplicationCommandIndexStore` holds how
+  commands are found and ordered) and `handleCommand`, the run's request, are
+  watched. Not watched: where a command may be used, `zl` in 46477 (anchor
+  `MISSING_BASE_PERMISSIONS`) with the place's permissions, `Bh` in 240591
+  (anchor `hasBaseAccessPermissions`), and the rule types, 1 role, 2 user, 3
+  channel (`RA` in 392054); how a command and its sub-commands are
+  listed and what is kept of them, `Lz` in 168186 (anchor `subCommandPath`);
+  what a run sends for each option, `A` in 545152 (anchor
+  `APPLICATION_COMMAND_USED`), and the checks a value passes, `J` in 300541
+  (anchor `allowEmptyValues`); which words the suggestions look up, `Yn` in
+  664929 (anchor `hasSpaceTerminator`).
 - **`ansi` code blocks** (`markup::ansi`, `render::ansi_markup`). Which codes
   read, and how: the parser in 626551 (anchor `brightMagenta`): the style
   codes it takes, in what order a sequence's resets and sets apply, that every
@@ -236,7 +252,7 @@ changed for unrelated reasons only needs a note in the issue.
 - **Captchas** (`Captcha` in `rest.rs`, `ui/captcha.rs`). The retry is
   watched (`interceptResponse`). The fields read are in 295562, and the
   services in 319400 (hCaptcha, reCAPTCHA, reCAPTCHA Enterprise, Turnstile).
-- **QR login retries** (`on_qr`, `qr_failed` in `ui/login.rs`;
+- **QR login retries** (`on_qr`, `retry_qr` in `ui/login.rs`;
   `remote_auth.rs`). How often Neucord reconnects to the remote auth
   gateway. Client: 785161 (logger `useAuthWebsocket`), with the backoff in
   158390.
@@ -386,7 +402,19 @@ changed for unrelated reasons only needs a note in the issue.
   (anchor `guild_connections`) with 920268 (anchor `GUILD_APP`) picks
   `connections_role_id`. A note is asked for once a session by 612630 (anchor
   `USER_NOTE_LOAD_START`) wherever one renders, the popout (243166) and the
-  user menu (497600) included.
+  user menu (497600) included. The panel beside a DM (`ok` in 289287, anchor
+  `UserProfileSidebarRenderer`) asks for `type=sidebar` with mutual servers,
+  and for anyone but a bot either the friends or just their count, by the
+  experiment `rD` there (`2026-06-user-profile-sidebar-redesign`, variant 1,
+  read through `experiments.rs`). The list of mutual friends is asked for
+  once its section opens and the held one isn't as long as the count (229187,
+  anchor `isFetchingFriends`). A decoration's image is the shop's by `sku_id`
+  or else the preset's by `asset`, none once it lapses (`D` in 486020, with
+  `getCollectiblesItemAssetUrl` in 746002). A banner's `size` is the smallest
+  of the list `kr` picks from (776231, anchor `3072, 4096`; `cdn::SIZES`)
+  that holds its width times the screen's scale: the popout's `bannerWidth`
+  (watched), the panel's, or the popout's in the redesign (`specOverrides` in
+  289287).
 
 ## Notifications and unread state
 
@@ -493,8 +521,14 @@ changed for unrelated reasons only needs a note in the issue.
   `CHANNEL` in 901123. Copy Message ID is 50268, only in Developer Mode
   (`developer_mode` in the JSON user settings). Copy for the selection
   (373963) and Copy Link and Open Link (777933) are desktop-only there.
+  Save File (`save-voice-message-audio` in 761304) is for a voice message
+  that has an attachment, and takes the first.
   Neucord leaves out the analytics these send (`MESSAGE_LINK_COPIED`,
   `CONTEXT_MENU_LINK_COPIED`).
+- **What people are called in a server** (`State::name_in`, `Members`).
+  Client: 562153 (anchor `getNickname`): a server's nickname, in a DM what we
+  call a friend, else the name they go by. Their picture there replaces
+  their own.
 - **The user menu and who has a profile** (`USER` in `ui/menus.rs`,
   `User::non_user_bot`). Client: 841549 picks the menu by channel, the server
   variant is 107632 (`user-context`), which keeps its order. A system account

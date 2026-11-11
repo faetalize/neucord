@@ -3,7 +3,8 @@
 //!
 //! We always request an explicit extension so the bytes are a format
 //! gdk-pixbuf decodes (PNG for static, GIF for animated): `a_`-prefixed hashes
-//! are animated. `size` must be a power of two in 16..=4096.
+//! are animated. `size` is a power of two in 16..=4096, or another size the
+//! client asks for ([`asset_size`]).
 
 const CDN: &str = "https://cdn.discordapp.com";
 
@@ -33,6 +34,29 @@ pub fn banner_url(user_id: u64, hash: &str, size: u16) -> String {
 
 pub fn member_banner_url(guild_id: u64, user_id: u64, hash: &str, size: u16) -> String {
     format!("{CDN}/guilds/{guild_id}/users/{user_id}/banners/{hash}.png?size={size}")
+}
+
+/// An avatar decoration of the collectibles shop, as a still image.
+pub fn decoration_url(sku: &str) -> String {
+    format!("{CDN}/media/v1/collectibles-shop/{sku}/static")
+}
+
+/// One of the older preset decorations, as a still image.
+pub fn decoration_preset_url(asset: &str, size: u16) -> String {
+    format!("{CDN}/avatar-decoration-presets/{asset}.png?size={size}&passthrough=false")
+}
+
+/// The sizes the client asks the CDN for (the list `kr` in 776231 picks
+/// from, anchored by `3072, 4096`).
+const SIZES: [u16; 31] = [
+    16, 20, 22, 24, 28, 32, 40, 44, 48, 56, 60, 64, 80, 96, 100, 128, 160, 240, 256, 300, 320, 480, 512, 600, 640,
+    1024, 1280, 1536, 2048, 3072, 4096,
+];
+
+/// The size to ask for an image shown `px` pixels wide: the smallest the
+/// client asks for that holds it, or the largest if none does.
+pub fn asset_size(px: u32) -> u16 {
+    SIZES.iter().copied().find(|&size| u32::from(size) >= px).unwrap_or(SIZES[SIZES.len() - 1])
 }
 
 pub fn badge_icon_url(icon: &str) -> String {
@@ -235,7 +259,20 @@ mod tests {
             member_banner_url(9, 5, "b", 600),
             "https://cdn.discordapp.com/guilds/9/users/5/banners/b.png?size=600"
         );
+        assert_eq!(decoration_url("5"), "https://cdn.discordapp.com/media/v1/collectibles-shop/5/static");
+        assert_eq!(
+            decoration_preset_url("a_x", 128),
+            "https://cdn.discordapp.com/avatar-decoration-presets/a_x.png?size=128&passthrough=false"
+        );
         assert_eq!(badge_icon_url("i"), "https://cdn.discordapp.com/badge-icons/i.png");
+    }
+
+    #[test]
+    fn asset_size_is_the_clients_next_size_up() {
+        // The popout's banner is 300 wide, the panel's 340, on a screen of scale 1 and 2.
+        assert_eq!([300, 340, 600, 680].map(asset_size), [300, 480, 600, 1024]);
+        assert_eq!([1, 16, 17].map(asset_size), [16, 16, 20]);
+        assert_eq!(asset_size(5000), 4096);
     }
 
     #[test]

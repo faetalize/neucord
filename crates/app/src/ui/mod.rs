@@ -34,6 +34,7 @@ mod requests;
 mod scheduling;
 mod search;
 mod sidebar;
+mod slash;
 mod state;
 mod stickers;
 mod switcher;
@@ -149,6 +150,8 @@ pub struct App {
     toasts: adw::ToastOverlay,
     /// The voice message being recorded, or waiting to be sent.
     voice: voice::Voice,
+    /// The command being filled in, and the suggestions for it.
+    slash: slash::Slash,
     /// "Editing message" above the composer.
     edit_bar: gtk::Box,
     /// The message the composer is editing, if any.
@@ -173,6 +176,8 @@ pub struct App {
     reactors_view: RefCell<Option<Rc<reactors::View>>>,
     /// The thread browser, while it's open.
     threads_view: RefCell<Option<Rc<threads::View>>>,
+    /// The profiles on screen: the popout and the panel beside a DM.
+    profile_views: RefCell<profile::Views>,
     /// Opens the thread browser, from the chat's header.
     threads_button: gtk::Button,
     /// Opens the message search, from the chat's header.
@@ -204,6 +209,10 @@ pub struct App {
 
 impl App {
     pub fn new(app: &adw::Application) -> Rc<Self> {
+        // GTK 4 doesn't speak xdg-decoration (it never asks a compositor to
+        // draw the frame), so the window is always drawn client-side, and the
+        // title bar is the header bar every page carries, with the window
+        // controls in the order the desktop's button layout gives.
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("Neucord")
@@ -333,6 +342,7 @@ impl App {
             scheduling: scheduling::Scheduling::new(),
             toasts: adw::ToastOverlay::new(),
             voice: voice::Voice::new(),
+            slash: slash::Slash::new(),
             // Styled as the reply bar, which takes its place while editing.
             edit_bar: gtk::Box::builder().spacing(8).visible(false).css_classes(["reply-bar"]).build(),
             editing: RefCell::default(),
@@ -348,6 +358,7 @@ impl App {
             row_epoch: Cell::default(),
             reactors_view: RefCell::default(),
             threads_view: RefCell::default(),
+            profile_views: RefCell::default(),
             threads_button: gtk::Button::builder()
                 .icon_name("chat-message-new-symbolic")
                 .tooltip_text("Threads")

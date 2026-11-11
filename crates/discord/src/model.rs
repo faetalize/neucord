@@ -552,7 +552,7 @@ impl Member {
 }
 
 /// An ISO 8601 time, in seconds since 1970, a part second counting as whole.
-fn unix_rounded_up(value: &Value) -> Option<i64> {
+pub(crate) fn unix_rounded_up(value: &Value) -> Option<i64> {
     let time = glib::DateTime::from_iso8601(value.as_str()?, Some(&glib::TimeZone::utc())).ok()?;
     Some(time.to_unix() + i64::from(time.microsecond() > 0))
 }
@@ -986,6 +986,18 @@ pub struct InteractionMetadata {
 pub struct MessageMember {
     #[serde(default)]
     pub roles: Vec<Snowflake>,
+    #[serde(default)]
+    pub nick: Option<String>,
+    #[serde(default)]
+    pub avatar: Option<String>,
+}
+
+impl MessageMember {
+    /// What shows of them (see [`crate::members::Known`]).
+    pub fn known(&self) -> crate::members::Known {
+        let text = |v: &Option<String>| v.clone().filter(|s| !s.is_empty());
+        crate::members::Known { roles: self.roles.clone(), nick: text(&self.nick), avatar: text(&self.avatar) }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -1002,6 +1014,9 @@ impl Message {
     const SUPPRESS_EMBEDS: u64 = 1 << 2;
     const HAS_THREAD: u64 = 1 << 5;
     const EPHEMERAL: u64 = 1 << 6;
+    const LOADING: u64 = 1 << 7;
+    /// How long an app has to follow up a deferred answer (`p` in 964363).
+    const DEFERRED_FOR_MS: i64 = 15 * 60 * 1000;
     pub const IS_VOICE_MESSAGE: u64 = 1 << 13;
     const IS_COMPONENTS_V2: u64 = 1 << 15;
 
@@ -1019,6 +1034,14 @@ impl Message {
     /// A recorded voice message: its audio attachment plays with a waveform.
     pub fn is_voice_message(&self) -> bool {
         self.flags & Self::IS_VOICE_MESSAGE != 0
+    }
+
+    /// The audio Save File saves from a voice message, or from the one this
+    /// forwards: its first attachment, as the client takes it (761304).
+    pub fn voice_audio(&self) -> Option<Attachment> {
+        let forwarded = self.forwarded();
+        let message = forwarded.as_ref().unwrap_or(self);
+        message.is_voice_message().then(|| message.attachments.first().cloned()).flatten()
     }
 
     /// Published from an announcement channel to the servers following it,
@@ -1058,6 +1081,17 @@ impl Message {
     /// Only we can see it: an app's private answer.
     pub fn is_ephemeral(&self) -> bool {
         self.flags & Self::EPHEMERAL != 0
+    }
+
+    /// An app has taken a command and is yet to answer it.
+    pub fn is_loading(&self) -> bool {
+        self.flags & Self::LOADING != 0
+    }
+
+    /// A deferred answer the app never followed up, fifteen minutes on
+    /// (`fK` in 964363).
+    pub fn is_timed_out(&self, now_ms: i64) -> bool {
+        self.is_loading() && self.id.unix_ms() + Self::DEFERRED_FOR_MS < now_ms
     }
 
     const FORWARD: u8 = 1;
@@ -1403,12 +1437,30 @@ mod tests {
     }
 
     #[test]
+    fn a_message_says_how_its_author_shows_in_the_server() {
+        let message = ours(serde_json::json!({"member": {"roles": ["4"], "nick": "Nick", "avatar": ""}}));
+        let known = message.member.unwrap().known();
+        assert_eq!((known.roles, known.nick.as_deref(), known.avatar), (vec![Snowflake(4)], Some("Nick"), None));
+    }
+
+    #[test]
     fn a_linked_role_is_told_by_its_tags() {
         let role = |tags: Value| serde_json::from_value::<Role>(serde_json::json!({"id": "3", "tags": tags})).unwrap();
         assert!(role(serde_json::json!({"guild_connections": null})).linked);
         assert!(!role(serde_json::json!({"bot_id": "9"})).linked);
         assert!(!role(Value::Null).linked);
         assert!(!serde_json::from_value::<Role>(serde_json::json!({"id": "3"})).unwrap().linked);
+    }
+
+    #[test]
+    fn an_app_that_has_not_answered_has_fifteen_minutes() {
+        use serde_json::json;
+        let loading = ours(json!({"type": 20, "flags": 1 << 7}));
+        let sent = loading.id.unix_ms();
+        assert!(loading.is_loading() && !loading.is_ephemeral());
+        assert!(!loading.is_timed_out(sent + 14 * 60 * 1000));
+        assert!(loading.is_timed_out(sent + 16 * 60 * 1000));
+        assert!(!ours(json!({"type": 20})).is_timed_out(sent + 16 * 60 * 1000), "answered");
     }
 
     #[test]
@@ -1922,5 +1974,27 @@ mod tests {
         MessageEdit { components: Some(update.clone()), ..Default::default() }.apply(&mut m);
         assert_eq!(m.components, update);
         assert!(!m.local.can_queue(), "what is on its way stays until Discord answers");
+    }
+
+    #[test]
+    fn a_voice_messages_audio_is_its_first_attachment() {
+        let attachments = serde_json::json!([
+            {"id": "1", "filename": "voice-message.ogg", "url": "https://cdn.example/a"},
+            {"id": "2", "filename": "other.ogg", "url": "https://cdn.example/b"}
+        ]);
+        let audio = |flags: u64| ours(serde_json::json!({"flags": flags, "attachments": attachments})).voice_audio();
+        assert_eq!(audio(Message::IS_VOICE_MESSAGE).map(|a| a.id), Some(Snowflake(1)));
+        assert_eq!(audio(0).map(|a| a.id), None, "an ordinary upload is no voice message");
+        assert!(
+            ours(serde_json::json!({"flags": Message::IS_VOICE_MESSAGE})).voice_audio().is_none(),
+            "nothing to save"
+        );
+
+        let forward = ours(serde_json::json!({
+            "message_reference": {"type": 1, "message_id": "7", "channel_id": "9"},
+            "message_snapshots": [{"message": {"type": 0, "content": "", "timestamp": "", "flags": Message::IS_VOICE_MESSAGE,
+                                               "attachments": attachments}}]
+        }));
+        assert_eq!(forward.voice_audio().map(|a| a.id), Some(Snowflake(1)), "a forward saves what it forwards");
     }
 }

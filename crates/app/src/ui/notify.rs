@@ -15,7 +15,7 @@ impl App {
         let Some(app) = self.window.application().filter(|_| self.notifications_allowed()) else { return };
         let (title, body) = {
             let state = self.state.borrow();
-            let author = message.author.display_name();
+            let author = &state.name_in(message.channel_id, &message.author);
             let title = match state.find_channel(message.channel_id) {
                 Some((Some(guild), channel)) => {
                     format!("{author} (#{}, {})", channel.name.as_deref().unwrap_or("unnamed"), guild.name)

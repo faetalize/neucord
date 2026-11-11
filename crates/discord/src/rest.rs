@@ -11,6 +11,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use soup::prelude::*;
 
+use crate::commands::Target;
 use crate::endpoints::{Call, call};
 use crate::forum::Search;
 use crate::gifs::{Gif, Picker, Request, Tile, Tiles};
@@ -39,6 +40,11 @@ const MAX_RATE_LIMIT_RETRIES: u32 = 1;
 
 /// How long the client lets an interaction request take (`timeout` in 964363).
 const INTERACTION_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How many times the client asks for a command index (`c` in 577700), and
+/// how long it waits when Discord says 202, still building it.
+const INDEX_REQUESTS: u32 = 3;
+const INDEX_BUILDING_WAIT: Duration = Duration::from_secs(5);
 
 /// The longest a request waits on a 429 before trying again. Past this it
 /// fails instead: a retry sent early would only be refused again.
@@ -254,6 +260,12 @@ impl Rest {
         let call = call!(USER_PROFILE, user = request.user).query(&request.query());
         let answer: Value = self.request(call, None).await?;
         Profile::from_value(&answer).ok_or_else(|| Error::Protocol("a profile without a user".into()))
+    }
+
+    /// The friends we share with `user`, which the panel asks for when its
+    /// section opens (`q0` in 803306). They come as users.
+    pub async fn mutual_friends(&self, user: Snowflake) -> Result<Vec<crate::User>, Error> {
+        self.request(call!(MUTUAL_FRIENDS, user), None).await
     }
 
     /// Our note on `user`, which doesn't exist (a 404) until we write one.
@@ -562,6 +574,59 @@ impl Rest {
             Ok(Ok((status, _))) if (200..300).contains(&status) => Ok(()),
             Ok(Ok((status, response))) => Err(Failure::from_response(status, &response)),
             // No answer in time, or none at all: nothing to say why.
+            _ => Err(Failure::default()),
+        }
+    }
+
+    /// Fetch the apps and commands of `target` (`E` in 577700). A 202 means
+    /// Discord is still building it and a 429 says how long to wait; the
+    /// client asks up to three times, waiting as told, and gives up on
+    /// anything else.
+    pub async fn command_index(&self, target: Target) -> Option<Value> {
+        for made in 1..=INDEX_REQUESTS {
+            let call = match target {
+                Target::Guild(guild) => call!(COMMAND_INDEX_GUILD, guild),
+                Target::Channel(channel) => call!(COMMAND_INDEX_CHANNEL, channel),
+                Target::User => call!(COMMAND_INDEX_USER),
+            };
+            let sending = Sending { retry_rate_limit: false, ..Sending::default() };
+            let (status, response) = self.send_with(call, None, sending).await.ok()?;
+            let wait = match status {
+                202 => INDEX_BUILDING_WAIT,
+                429 => {
+                    let after = serde_json::from_slice::<Value>(&response).ok()?["retry_after"].as_f64()?;
+                    Duration::from_secs_f64(after.max(0.0))
+                }
+                200..=299 => return serde_json::from_slice(&response).ok(),
+                _ => return None,
+            };
+            if made < INDEX_REQUESTS {
+                glib::timeout_future(wait).await;
+            }
+        }
+        None
+    }
+
+    /// Run a command: `POST /interactions` with `body`
+    /// ([`crate::commands::Run::body`]). Sent through the client's message
+    /// queue, which waits out a 429 and sends it again (`createResponseHandler`
+    /// in 870801). A success only means Discord took it; what the app answers
+    /// comes on the gateway.
+    pub async fn run_command(&self, body: Value) -> Result<(), Failure> {
+        match self.send_with(call!(INTERACT), Some(body), Sending::default()).await {
+            Ok((status, _)) if (200..300).contains(&status) => Ok(()),
+            Ok((status, response)) => Err(Failure::from_response(status, &response)),
+            Err(_) => Err(Failure::default()),
+        }
+    }
+
+    /// Ask an app for choices to an option (`WL` in 721768): the same
+    /// request, given three seconds, and its answer comes on the gateway.
+    pub async fn autocomplete(&self, body: Value) -> Result<(), Failure> {
+        let sent = self.send_with(call!(INTERACT), Some(body), Sending::default());
+        match glib::future_with_timeout(INTERACTION_TIMEOUT, sent).await {
+            Ok(Ok((status, _))) if (200..300).contains(&status) => Ok(()),
+            Ok(Ok((status, response))) => Err(Failure::from_response(status, &response)),
             _ => Err(Failure::default()),
         }
     }
