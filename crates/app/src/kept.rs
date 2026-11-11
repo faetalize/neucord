@@ -120,6 +120,27 @@ mod tests {
     }
 
     #[test]
+    fn a_reaction_arriving_or_going_doesnt_fit() {
+        use discord::model::Emoji;
+        use discord::reactions::Kind;
+        let fire = Emoji { id: None, name: Some("🔥".into()), animated: false };
+        let shown = message(json!({}));
+        let kept = made(&shown);
+        let mut reacted = shown.clone();
+        reacted.add_reaction(&fire, false, Kind::Normal, &[], false);
+        assert!(!kept.fits(&reacted, 4), "a pill to add");
+
+        let kept = made(&reacted);
+        let mut counted = reacted.clone();
+        counted.add_reaction(&fire, true, Kind::Normal, &[], false);
+        assert!(!kept.fits(&counted, 4), "a count and a pill we lit");
+        let mut gone = reacted.clone();
+        gone.remove_reaction(&fire, false, Kind::Normal);
+        assert!(!kept.fits(&gone, 4), "a pill to take away");
+        assert!(kept.fits(&reacted.clone(), 4), "no change, no rebuild");
+    }
+
+    #[test]
     fn dropping_the_one_used_longest_ago() {
         let mut kept = Kept::new(2);
         kept.put(1, "a");

@@ -38,6 +38,8 @@ const GROUP_WINDOW_SECS: i64 = 7 * 60;
 pub(super) struct MessageTarget {
     /// The row's message.
     pub(super) message: Message,
+    /// The row, which what the menu opens goes over.
+    pub(super) row: gtk::Widget,
     /// The text selected in it, as Ctrl+C would copy it.
     pub(super) selection: Option<String>,
     /// Where the link the menu was opened on goes.
@@ -1680,8 +1682,10 @@ impl App {
             if let Some(outcome) = discord::poll::outcome(message) {
                 content.append(&polls::outcome(&outcome, &self.images));
             }
+            self.append_reactions(content, message);
         } else {
             self.message_content(content, shown, &self.message_names(shown));
+            self.append_reactions(content, message);
         }
         // Empty, it would still take the body's spacing.
         content.set_visible(content.first_child().is_some());
@@ -1690,7 +1694,8 @@ impl App {
 
     /// Open the menu for `message`, whose row is `row`, at `at` there.
     fn message_menu(self: &Rc<Self>, row: &gtk::Box, message: Message, at: At, link: Option<String>) {
-        let target = MessageTarget { selection: selection_in(row.upcast_ref()), link, message };
+        let target =
+            MessageTarget { selection: selection_in(row.upcast_ref()), link, message, row: row.clone().upcast() };
         let regulated = self.state.borrow().media_takedown_regulated;
         menus::popup(self, menus::message(regulated), target, row, at);
     }

@@ -22,7 +22,7 @@ use std::ops::{BitAnd, BitOr};
 
 use serde::{Deserialize, Deserializer};
 
-use crate::verification::Account;
+use crate::verification::{self, Account};
 use crate::{Channel, ChannelKind, Guild, Message};
 
 /// A set of Discord's permission bits.
@@ -496,6 +496,43 @@ pub fn can_delete(guild: Option<&Guild>, channel: &Channel, message: &Message, m
     message.is_deletable_by(me.id, manage) && can_change(guild, channel, me, now) && !report
 }
 
+/// What the client offers of reactions in a channel (`A` in 707985, with
+/// what `cO` in 679636 feeds it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reacting {
+    /// Add one with an emoji nobody has used on the message: the add button,
+    /// and Add Reaction in the message menu.
+    pub create: bool,
+    /// Click the reactions already there to add or take back ours. This
+    /// needs no Add Reactions.
+    pub update: bool,
+}
+
+/// Whether `me` may react in `channel`, one of `guild`'s or a DM, at `now`.
+/// Everything wants a channel messages can still be changed in
+/// ([`can_change`]) that isn't a media thread, and a server that isn't
+/// holding us back with verification. A new reaction wants Add Reactions
+/// too, but a DM wants nothing; neither is for the system DM. Clicking one
+/// there is also off while timed out or quarantined by automod.
+pub fn reacting(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64) -> Reacting {
+    let system = channel.is_system_dm();
+    let open = can_change(guild, channel, me, now) && channel.kind != ChannelKind::MediaThread;
+    let chat = guild.is_none_or(|g| verification::gate(g, me, now).is_none());
+    let add = guild.is_none_or(|g| chat && in_channel(g, channel, me, now).contains(Permissions::ADD_REACTIONS));
+    let held_back = guild.is_some_and(|g| {
+        g.timed_out_until.is_some_and(|until| until > now) || g.member_flags & AUTOMOD_QUARANTINED != 0
+    });
+    Reacting { create: open && chat && add && !system, update: open && chat && !system && !held_back }
+}
+
+/// Whether `me` may remove other people's reactions in `channel`: Manage
+/// Messages there, where messages [`can_change`] (761304's menu entries and
+/// the list of who reacted in 112753).
+pub fn can_remove_reactions(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64) -> bool {
+    let manage = guild.is_some_and(|g| in_channel(g, channel, me, now).contains(Permissions::MANAGE_MESSAGES));
+    manage && can_change(guild, channel, me, now)
+}
+
 /// Whether messages in `channel` can be edited or deleted at all (`Id` in
 /// 406704): anywhere but an archived thread, unless it's unlocked and we
 /// [`can_unarchive`] it, as an edit or delete there reopens it first
@@ -890,6 +927,92 @@ mod tests {
         guild.my_roles.push(Snowflake(MOD));
         assert!(can_unarchive(&guild, &thread, &me, 0) && can_reply(Some(&guild), &thread, &me, 0));
         assert!(!can_unarchive(&guild, guild.channel(Snowflake(9)).unwrap(), &me, 0), "not a thread");
+    }
+
+    const REACT: Permissions = Permissions::ADD_REACTIONS;
+
+    fn reacting_in(guild: &Guild, channel: &Channel) -> (bool, bool) {
+        let r = reacting(Some(guild), channel, &me(), 99);
+        (r.create, r.update)
+    }
+
+    #[test]
+    fn a_new_reaction_takes_add_reactions_and_an_old_one_doesnt() {
+        let mut guild = guild();
+        let open = channel(&[]);
+        assert_eq!(reacting_in(&guild, &open), (false, true));
+        guild.roles[2].permissions = REACT;
+        assert_eq!(reacting_in(&guild, &open), (true, true));
+        let denied = channel(&[(MEMBER, REACT, Permissions::NONE)]);
+        assert_eq!(reacting_in(&guild, &denied), (false, true));
+    }
+
+    #[test]
+    fn dms_need_no_permission_but_not_the_system_dm() {
+        let dm = |user: serde_json::Value| -> Channel {
+            serde_json::from_value(json!({"id": "9", "type": 1, "recipients": [user]})).unwrap()
+        };
+        let friend = reacting(None, &dm(json!({"id": "2", "username": "u"})), &me(), 0);
+        assert_eq!(friend, Reacting { create: true, update: true });
+        let system = reacting(None, &dm(json!({"id": "2", "username": "u", "system": true})), &me(), 0);
+        assert_eq!(system, Reacting { create: false, update: false });
+    }
+
+    #[test]
+    fn a_timeout_or_quarantine_stops_clicking_reactions() {
+        let mut guild = guild();
+        guild.roles[2].permissions = REACT;
+        let open = channel(&[]);
+        guild.timed_out_until = Some(100);
+        assert_eq!(reacting_in(&guild, &open), (false, false));
+        guild.timed_out_until = Some(99);
+        assert_eq!(reacting_in(&guild, &open), (true, true), "over");
+        guild.timed_out_until = None;
+        guild.member_flags = 1 << 7;
+        assert_eq!(reacting_in(&guild, &open), (false, false));
+    }
+
+    #[test]
+    fn verification_holds_reactions_back_with_everything_else() {
+        let mut guild = guild();
+        guild.roles[0].permissions = VIEW | SEND | HISTORY | REACT;
+        guild.my_roles.clear();
+        let open = channel(&[]);
+        assert_eq!(reacting_in(&guild, &open), (true, true));
+        guild.verification.level = crate::verification::VerificationLevel::Low;
+        let unclaimed = Account { email: false, ..me() };
+        assert_eq!(reacting(Some(&guild), &open, &unclaimed, 99), Reacting { create: false, update: false });
+        assert_eq!(reacting(Some(&guild), &open, &me(), 99), Reacting { create: true, update: true });
+    }
+
+    #[test]
+    fn archived_threads_react_only_where_they_reopen() {
+        let archived = json!({"thread_metadata": {"archived": true, "locked": false}});
+        let parent = channel(&[(GUILD, Permissions::NONE, IN_THREADS | REACT)]);
+        let (guild, thread) = with_thread(parent.clone(), 11, archived.clone());
+        assert_eq!(reacting_in(&guild, &thread), (true, true), "reacting reopens it");
+        let (guild, thread) = with_thread(channel(&[(GUILD, SEND, IN_THREADS | REACT)]), 11, archived);
+        assert_eq!(reacting_in(&guild, &thread), (false, false), "Send Messages in the parent alone can't");
+        let (guild, media) = with_thread(parent, 19, joined());
+        assert_eq!(reacting_in(&guild, &media), (false, false), "a media thread only reads");
+    }
+
+    #[test]
+    fn removing_others_reactions_takes_manage_messages() {
+        let mut guild = guild();
+        let open = channel(&[]);
+        assert!(!can_remove_reactions(Some(&guild), &open, &me(), 0));
+        guild.my_roles.push(Snowflake(MOD));
+        assert!(can_remove_reactions(Some(&guild), &open, &me(), 0));
+        assert!(!can_remove_reactions(None, &open, &me(), 0), "a DM has no moderators");
+        let archived = json!({"thread_metadata": {"archived": true, "locked": false}});
+        let (mut guild, thread) = with_thread(channel(&[(GUILD, Permissions::NONE, IN_THREADS)]), 11, archived);
+        guild.roles[1].permissions = guild.roles[1].permissions | IN_THREADS;
+        guild.my_roles.push(Snowflake(MOD));
+        assert!(can_remove_reactions(Some(&guild), &thread, &me(), 0), "reopened first");
+        guild.roles[1].permissions = Permissions::MANAGE_MESSAGES;
+        let (_, locked) = with_thread(channel(&[]), 11, json!({"thread_metadata": {"archived": true, "locked": true}}));
+        assert!(!can_remove_reactions(Some(&guild), &locked, &me(), 0), "a locked archive stays shut");
     }
 
     /// A message by `author` in channel `channel`, of `kind`.

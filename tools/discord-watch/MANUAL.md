@@ -254,6 +254,24 @@ changed for unrelated reasons only needs a note in the issue.
   at once only from an empty box with no files and no sticker waiting, else
   the sticker waits and goes with the message (`nm` in 989161, anchor
   `getStickerPreview`).
+- **Reacting** (`reactions.rs`, `Rest::add_reaction`, `ui/reactions.rs`,
+  `ui/reactors.rs`). The counting on a message (`addReaction`,
+  `removeReaction` and the other methods named in `watch.json`), the paths
+  and the events are watched, the requests' fields aren't: `C` in 649963
+  (anchor `Message Inline Button`) builds the call, so the table doesn't see
+  `location` and `type` on the add, `location` and `burst` on the take-back
+  (`userId` in its path for someone else's), `limit`, `after` and `type` on
+  who reacted (`ao`), or the `location` each caller names (`qN`). `S` there
+  is the retry, also of the moderators' removals (`Go`, `Jf`): one wait of
+  `parseInt(retry-after)` seconds on a 429, one immediate retry of anything
+  but a 403, and a 403 ends it (`TOO_MANY_REACTIONS` also warns). Who may
+  react is `A` in 707985 (anchor `disableReactionUpdates`); the message menu
+  (Add Reaction, View Reactions, Remove Reactions, Remove All Reactions;
+  Manage Messages for the last two) is `en` and the entries in 761304
+  (anchor `add-reaction`); who reacted asks for 3 once a pointer has rested
+  500 ms on a reaction (`eM` in 30492) and 100 a page in the list (112753,
+  anchor `loadMore`). `+:name:` is `reaction` in 751258 (anchor
+  `hasPresent`), which sends no message.
 
 ## Notifications and unread state
 

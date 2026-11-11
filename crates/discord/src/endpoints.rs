@@ -13,6 +13,15 @@ pub(crate) const MESSAGES: Endpoint = Endpoint::get("/channels/{channel}/message
 pub(crate) const SEND_MESSAGE: Endpoint = Endpoint::post("/channels/{channel}/messages");
 pub(crate) const EDIT_MESSAGE: Endpoint = Endpoint::patch("/channels/{channel}/messages/{message}");
 pub(crate) const DELETE_MESSAGE: Endpoint = Endpoint::delete("/channels/{channel}/messages/{message}");
+// Kept on one line for discord-watch, past what rustfmt would.
+#[rustfmt::skip]
+pub(crate) const ADD_REACTION: Endpoint = Endpoint::put("/channels/{channel}/messages/{message}/reactions/{+emoji}/@me");
+pub(crate) const REACTORS: Endpoint = Endpoint::get("/channels/{channel}/messages/{message}/reactions/{+emoji}");
+#[rustfmt::skip]
+pub(crate) const REMOVE_REACTION: Endpoint = Endpoint::delete("/channels/{channel}/messages/{message}/reactions/{+emoji}/0/{+user}");
+#[rustfmt::skip]
+pub(crate) const REMOVE_EMOJI_REACTIONS: Endpoint = Endpoint::delete("/channels/{channel}/messages/{message}/reactions/{+emoji}");
+pub(crate) const REMOVE_REACTIONS: Endpoint = Endpoint::delete("/channels/{channel}/messages/{message}/reactions");
 pub(crate) const CREATE_ATTACHMENT: Endpoint = Endpoint::post("/channels/{channel}/attachments");
 pub(crate) const DELETE_UPLOAD: Endpoint = Endpoint::delete("/attachments/{+uploaded_filename}");
 pub(crate) const TYPING: Endpoint = Endpoint::post("/channels/{channel}/typing");
@@ -190,6 +199,25 @@ mod tests {
         // Reactions put emoji in the path: unicode, or `name:id` for custom ones.
         assert_eq!(call!(USER, user = "🔥").path(), "/users/%F0%9F%94%A5");
         assert_eq!(call!(USER, user = "blob:12/3").path(), "/users/blob%3A12%2F3");
+    }
+
+    #[test]
+    fn reactions_name_their_emoji_as_a_browser_writes_the_path() {
+        let (channel, message) = (1, 2);
+        let emoji = "blob:12";
+        let call = call!(ADD_REACTION, channel, message, emoji);
+        assert_eq!((call.method(), call.path()), ("PUT", "/channels/1/messages/2/reactions/blob:12/@me"));
+        let emoji = "🔥";
+        let user = "@me";
+        let call = call!(REMOVE_REACTION, channel, message, emoji, user);
+        assert_eq!((call.method(), call.path()), ("DELETE", "/channels/1/messages/2/reactions/%F0%9F%94%A5/0/@me"));
+        let user = 7;
+        let call = call!(REMOVE_REACTION, channel, message, emoji, user);
+        assert_eq!(call.path(), "/channels/1/messages/2/reactions/%F0%9F%94%A5/0/7");
+        let call = call!(REMOVE_EMOJI_REACTIONS, channel, message, emoji);
+        assert_eq!((call.method(), call.path()), ("DELETE", "/channels/1/messages/2/reactions/%F0%9F%94%A5"));
+        assert_eq!(call!(REACTORS, channel, message, emoji).method(), "GET");
+        assert_eq!(call!(REMOVE_REACTIONS, channel, message).path(), "/channels/1/messages/2/reactions");
     }
 
     // Run here at runtime; call! runs them at compile time.

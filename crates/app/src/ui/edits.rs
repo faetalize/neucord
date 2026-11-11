@@ -230,8 +230,9 @@ impl App {
         });
     }
 
-    /// Reopen `channel` first if it's a thread an edit or delete reopens.
-    async fn reopen(&self, rest: &Rest, channel: Snowflake) -> Result<(), discord::Error> {
+    /// Reopen `channel` first if it's a thread an edit, delete or reaction
+    /// reopens.
+    pub(super) async fn reopen(&self, rest: &Rest, channel: Snowflake) -> Result<(), discord::Error> {
         let needed = self.state.borrow().unarchives_first(channel);
         if needed { rest.unarchive_thread(channel).await } else { Ok(()) }
     }

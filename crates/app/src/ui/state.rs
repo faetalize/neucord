@@ -103,6 +103,8 @@ pub(super) struct State {
     pub(super) users: HashMap<u64, String>,
     /// User ids we have already tried to fetch, to avoid repeat requests.
     pub(super) fetched_users: std::collections::HashSet<u64>,
+    /// Who reacted with what, as far as we know.
+    pub(super) reactors: discord::reactions::Reactors,
     pub(super) read: ReadStates,
     pub(super) notifications: NotificationSettings,
     /// How embeds and media show.
@@ -262,6 +264,24 @@ impl State {
     pub(super) fn can_delete(&self, message: &Message) -> bool {
         match (self.find_channel(message.channel_id), &self.account) {
             (Some((guild, channel)), Some(me)) => permissions::can_delete(guild, channel, message, me, now_unix()),
+            _ => false,
+        }
+    }
+
+    /// What the client offers of reactions in the channel (see
+    /// [`permissions::reacting`]).
+    pub(super) fn reacting(&self, id: Snowflake) -> permissions::Reacting {
+        match (self.find_channel(id), &self.account) {
+            (Some((guild, channel)), Some(me)) => permissions::reacting(guild, channel, me, now_unix()),
+            _ => permissions::Reacting { create: false, update: false },
+        }
+    }
+
+    /// Whether we may remove other people's reactions in the channel (see
+    /// [`permissions::can_remove_reactions`]).
+    pub(super) fn can_remove_reactions(&self, id: Snowflake) -> bool {
+        match (self.find_channel(id), &self.account) {
+            (Some((guild, channel)), Some(me)) => permissions::can_remove_reactions(guild, channel, me, now_unix()),
             _ => false,
         }
     }

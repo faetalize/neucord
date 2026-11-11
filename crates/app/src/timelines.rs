@@ -77,6 +77,20 @@ impl Timelines {
         self.channels.get(&channel)
     }
 
+    /// Change the message `id` of `channel` wherever it is kept, shown or
+    /// held, and say where: its store and place. Events reach every channel
+    /// we hold, since the client keeps them current and trusts that.
+    pub fn change(
+        &self,
+        channel: Snowflake,
+        id: Snowflake,
+        change: impl FnOnce(&mut Message),
+    ) -> Option<(gio::ListStore, u32)> {
+        let store = self.get(channel)?.store.clone();
+        let position = edit(&store, id, change)?;
+        Some((store, position))
+    }
+
     pub fn get_mut(&mut self, channel: Snowflake) -> Option<&mut Timeline> {
         self.channels.get_mut(&channel)
     }
@@ -304,6 +318,24 @@ mod tests {
         assert_eq!(store.item(1).unwrap(), before);
         assert_eq!(find(&store, Snowflake(2)).unwrap().1.content, "edited");
         assert_eq!(edit(&store, Snowflake(4), |_| unreachable!()), None);
+    }
+
+    #[test]
+    fn a_change_reaches_a_channel_that_isnt_shown() {
+        let mut timelines = Timelines::default();
+        let (shown, held) = (Snowflake(1), Snowflake(2));
+        for channel in [shown, held] {
+            let timeline = timelines.open(channel);
+            timeline.store.append(&boxed(msg(7, "hi")));
+        }
+        let fire = discord::model::Emoji { id: None, name: Some("🔥".into()), animated: false };
+        let react = |m: &mut Message| m.add_reaction(&fire, false, discord::reactions::Kind::Normal, &[], true);
+        let (store, position) = timelines.change(held, Snowflake(7), react).unwrap();
+        assert_eq!(position, 0);
+        assert_eq!(find(&store, Snowflake(7)).unwrap().1.reactions.len(), 1);
+        assert!(find(&timelines.get(shown).unwrap().store, Snowflake(7)).unwrap().1.reactions.is_empty());
+        assert!(timelines.change(Snowflake(3), Snowflake(7), |_| unreachable!()).is_none(), "a channel we don't hold");
+        assert!(timelines.change(held, Snowflake(8), |_| unreachable!()).is_none(), "a message we don't hold");
     }
 
     fn ids(store: &gio::ListStore) -> Vec<u64> {

@@ -190,6 +190,16 @@ impl App {
                 Event::PollVote { channel_id, message_id, votes, added, many } => {
                     self.on_poll_vote(channel_id, message_id, votes, added, many)
                 }
+                Event::Reaction(reacted) => self.on_reaction(&reacted),
+                Event::ReactionsAdded { channel_id, message_id, reactions } => {
+                    self.on_reactions_added(channel_id, message_id, &reactions)
+                }
+                Event::ReactionsCleared { channel_id, message_id } => {
+                    self.on_reactions_cleared(channel_id, message_id, None)
+                }
+                Event::EmojiReactionsCleared { channel_id, message_id, emoji } => {
+                    self.on_reactions_cleared(channel_id, message_id, Some(&emoji))
+                }
                 Event::MessageAck { channel_id, message_id } => {
                     self.state.borrow_mut().read.ack(channel_id, message_id);
                     self.withdraw_notification(channel_id);
@@ -297,6 +307,7 @@ impl App {
     pub(super) fn on_ready(self: &Rc<Self>, ready: Ready) {
         // A new session: what we hold for each channel may have missed events.
         self.timelines.borrow_mut().held.opened();
+        self.state.borrow_mut().reactors.clear();
         let Ready {
             user,
             account,

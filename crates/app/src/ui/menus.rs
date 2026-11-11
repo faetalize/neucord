@@ -15,13 +15,12 @@ use gtk::{gdk, gio, glib};
 
 use super::App;
 use super::chat::{self, MessageTarget};
-use super::{composer, edits, emoji, picker, stickers, uploads, voice};
+use super::{composer, edits, emoji, picker, reactions, reactors, stickers, uploads, voice};
 
 /// One entry of a menu, for what it was opened on: a `T`. `C` is what
 /// entries read and act through: the app, or a stand-in in tests.
 pub(super) enum Entry<T: 'static, C: 'static = App> {
     Item(Item<T, C>),
-    #[cfg_attr(not(test), expect(dead_code, reason = "for the entries #5, #10 and #13 bring"))]
     Choices(Choices<T, C>),
 }
 
@@ -39,11 +38,10 @@ pub(super) enum Kind<T: 'static, C: 'static = App> {
     /// Runs when chosen.
     Action(fn(&Rc<C>, &T)),
     /// A checkbox, ticked as `checked` says; `set` gets its new state.
-    #[cfg_attr(not(test), expect(dead_code, reason = "for the entries #5, #10 and #13 bring"))]
+    #[cfg_attr(not(test), expect(dead_code, reason = "for the entries #10 and #13 bring"))]
     Check { checked: fn(&C, &T) -> bool, set: fn(&Rc<C>, &T, bool) },
     /// More sections, opened from this item. It shows only with something
     /// in them.
-    #[cfg_attr(not(test), expect(dead_code, reason = "for the entries #5, #10 and #13 bring"))]
     Submenu(Table<T, C>),
 }
 
@@ -66,7 +64,7 @@ pub(super) struct Choice {
     pub(super) ticked: bool,
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "for the entries #5, #10 and #13 bring"))]
+#[cfg_attr(not(test), expect(dead_code, reason = "for the entries #10 and #13 bring"))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Style {
     Plain,
@@ -83,9 +81,10 @@ pub(super) type Table<T, C = App> = &'static [&'static [Entry<T, C>]];
 /// in its order.
 const MESSAGE: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
+    &[reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
     &[edits::EDIT, composer::REPLY],
     &[chat::COPY_TEXT, chat::COPY_MESSAGE_LINK],
-    &[edits::DELETE],
+    &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
     &[chat::COPY_LINK, chat::OPEN_LINK],
     &[chat::COPY_MESSAGE_ID],
 ];
@@ -95,9 +94,10 @@ const MESSAGE: Table<MessageTarget> = &[
 /// between them holds nothing Neucord has.
 const MESSAGE_REGULATED: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
+    &[reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
     &[edits::EDIT, composer::REPLY],
     &[chat::COPY_TEXT, chat::COPY_MESSAGE_LINK],
-    &[edits::DELETE],
+    &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
     &[chat::COPY_MESSAGE_ID],
     &[chat::COPY_LINK, chat::OPEN_LINK],
 ];

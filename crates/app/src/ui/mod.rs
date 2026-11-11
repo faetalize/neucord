@@ -22,6 +22,8 @@ mod panes;
 mod picker;
 mod polls;
 mod rail;
+mod reactions;
+mod reactors;
 mod requests;
 mod sidebar;
 mod state;
@@ -148,6 +150,8 @@ pub struct App {
     /// Counts changes to what every message's content is drawn from (names,
     /// colours, settings), so rows know to make theirs again.
     row_epoch: Cell<u64>,
+    /// The list of who reacted, while it is open.
+    reactors_view: RefCell<Option<Rc<reactors::View>>>,
     /// The content of messages whose rows have moved on to others, for when
     /// they come back (see [`chat::KeptContent`]).
     kept_content: RefCell<crate::kept::Kept<Snowflake, chat::KeptContent>>,
@@ -308,6 +312,7 @@ impl App {
             unread_divider: glib::WeakRef::new(),
             highlight: Cell::default(),
             row_epoch: Cell::default(),
+            reactors_view: RefCell::default(),
             kept_content: RefCell::new(crate::kept::Kept::new(chat::KEPT_CONTENT)),
             rows: RefCell::default(),
             scroll_loader: RefCell::default(),
