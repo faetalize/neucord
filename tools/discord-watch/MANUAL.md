@@ -461,7 +461,23 @@ changed for unrelated reasons only needs a note in the issue.
   (`developer_mode` in the JSON user settings). Copy for the selection
   (373963) and Copy Link and Open Link (777933) are desktop-only there.
   Neucord leaves out the analytics these send (`MESSAGE_LINK_COPIED`,
-  `CONTEXT_MENU_LINK_COPIED`).
+  `CONTEXT_MENU_LINK_COPIED`). The media group before the links (Copy Image,
+  Save Image, 115184) and the names a link gets (Link, Image Link, Media
+  Link; the regexes in 777933) come with `media.rs`, below; a forum with
+  `HIDE_MEDIA_DOWNLOAD_OPTIONS` (watched) hides both, through 207133.
+- **The media viewer** (`media.rs`, `cdn::modal_url`, `ui/viewer.rs`,
+  `ui/video.rs`). Client: the modal is 2323 (anchor `MediaViewerModal`).
+  Its box is `A` in 967758 (the 24, 76, 176, 544, 88 and 36 around it), the
+  picture's size is `AE` in 776231 (anchor `getAttachmentImageLadderConfig`,
+  an experiment: with it on, sizes snap to a ladder Neucord doesn't know) fed
+  by `getRatio` in 619517, zoom is 2.5 and the original it loads is `XW` in
+  803316. What opens together, and as what, is `renderAttachments` in 679636
+  (anchor `Media Mosaic`: only with several; an extension decides, 273185,
+  which `Rr` in 731068 reads) and `renderImage` in 265705; a video needs its
+  size and a proxied file (541041). Which types copy and save is in 253400
+  (`canCopyImage`, `canSaveImage`, `saveImage`, watched). The video controls'
+  rules are 153440 (a click unmutes what began muted, `0`-`9` seek, ended
+  stays paused) and 587481 (the volume and mute kept).
 - **The user menu and who has a profile** (`USER` in `ui/menus.rs`,
   `User::non_user_bot`). Client: 841549 picks the menu by channel, the server
   variant is 107632 (`user-context`), which keeps its order. A system account

@@ -17,7 +17,7 @@
     ],
     "ApplicationIntegrationType": ["GUILD_INSTALL", "USER_INSTALL"],
     "ButtonStyle": ["PRIMARY", "SECONDARY", "SUCCESS", "DESTRUCTIVE", "LINK", "PREMIUM"],
-    "ChannelFlags": ["IS_SCHEDULED_FOR_DELETION", "PINNED", "IS_MODERATOR_REPORT_CHANNEL"],
+    "ChannelFlags": ["IS_SCHEDULED_FOR_DELETION", "PINNED", "IS_MODERATOR_REPORT_CHANNEL", "HIDE_MEDIA_DOWNLOAD_OPTIONS"],
     "ChannelType": [
       "DM",
       "GROUP_DM",
@@ -129,7 +129,9 @@
     "allowNoMessages",
     "buildHeadersForMd5",
     "buildOriginalMd5Headers",
+    "canCopyImage",
     "canDeleteOwnMessage",
+    "canSaveImage",
     "canRetry",
     "canStreamQuality",
     "canTrackUnreads",

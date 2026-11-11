@@ -11,6 +11,8 @@ use gtk::glib;
 use gtk::prelude::*;
 
 use super::embeds::{behind_spoiler, fitted_picture};
+use super::video::{Options, Player};
+use super::viewer::MediaCx;
 use crate::images::Images;
 
 /// The official client's box for a single image or video attachment.
@@ -32,7 +34,13 @@ enum Shown {
 }
 
 /// One attachment of a message, `voice` if the message is a voice message.
-pub(super) fn attachment(attachment: &Attachment, voice: bool, images: &Images, media: &MediaSettings) -> gtk::Widget {
+pub(super) fn attachment(
+    attachment: &Attachment,
+    voice: bool,
+    images: &Images,
+    media: &MediaSettings,
+    view: &MediaCx,
+) -> gtk::Widget {
     let inline = media.inline_attachment_media;
     let shown = if voice && attachment.is_audio() {
         Shown::Voice
@@ -46,17 +54,17 @@ pub(super) fn attachment(attachment: &Attachment, voice: bool, images: &Images, 
     } else {
         return file(attachment);
     };
-    let build = move |attachment: &Attachment, images: &Images| match shown {
+    let build = move |attachment: &Attachment, images: &Images, view: &MediaCx| match shown {
         Shown::Voice => voice_message(attachment, images),
         Shown::Audio => audio(attachment, images),
-        Shown::Image { autoplay } => image(attachment, images, autoplay),
-        Shown::Video => video(attachment, images),
+        Shown::Image { autoplay } => image(attachment, images, autoplay, view),
+        Shown::Video => video(attachment, images, view),
     };
     if attachment.is_spoiler() {
-        let (attachment, images) = (attachment.clone(), images.clone());
-        behind_spoiler(move || build(&attachment, &images))
+        let (attachment, images, view) = (attachment.clone(), images.clone(), view.clone());
+        behind_spoiler(move || build(&attachment, &images, &view))
     } else {
-        build(attachment, images)
+        build(attachment, images, view)
     }
 }
 
@@ -92,19 +100,23 @@ pub(super) fn sticker_id(widget: &gtk::Widget) -> Option<Snowflake> {
     widget.widget_name().strip_prefix(STICKER_NAME)?.parse().ok().map(Snowflake)
 }
 
-/// An inline image, scaled to fit a reasonable box.
-fn image(attachment: &Attachment, images: &Images, autoplay: bool) -> gtk::Widget {
+/// An inline image, scaled to fit a reasonable box. Clicking it opens the
+/// viewer.
+fn image(attachment: &Attachment, images: &Images, autoplay: bool, view: &MediaCx) -> gtk::Widget {
     let fitted = fitted_picture(attachment.width, attachment.height, MAX_W, MAX_H);
     fitted.picture.set_css_classes(&["attachment-image"]);
     // Through the media proxy when we can, which sends it at the size shown.
     let url = attachment.proxy_url.as_deref().unwrap_or(&attachment.url);
     let original = attachment.width.zip(attachment.height);
     images.set_sized(&fitted.picture, url, fitted.size, original, autoplay && attachment.is_animated());
+    view.link(&fitted.frame, view.attachment(attachment.id));
     fitted.frame.upcast()
 }
 
-/// A video, its box kept for it, fetched and played once clicked.
-fn video(attachment: &Attachment, images: &Images) -> gtk::Widget {
+/// A video, its box kept for it, fetched and played once clicked. Among
+/// other media of its message it opens the viewer instead, as the client's
+/// does, and its fullscreen button does.
+fn video(attachment: &Attachment, images: &Images, view: &MediaCx) -> gtk::Widget {
     let frame = gtk::Overlay::builder().halign(gtk::Align::Start).build();
     let fitted = fitted_picture(attachment.width, attachment.height, MAX_W, MAX_H);
     fitted.picture.set_css_classes(&["attachment-image"]);
@@ -117,20 +129,36 @@ fn video(attachment: &Attachment, images: &Images) -> gtk::Widget {
         .css_classes(["osd", "circular", "embed-play"])
         .build();
     frame.add_overlay(&play);
+    let index = view.attachment(attachment.id);
+    view.name(&frame, index);
     play.connect_clicked({
         let frame = frame.downgrade();
-        let (images, url) = (images.clone(), attachment.url.clone());
+        let (images, view) = (images.clone(), view.clone());
+        // The viewer plays what the proxy serves, so it is this.
+        let url = attachment.proxy_url.clone().unwrap_or_else(|| attachment.url.clone());
         move |button| {
+            if let Some(index) = index.filter(|&index| view.together(index) > 1) {
+                return view.open(index, 0.0);
+            }
             button.set_sensitive(false);
-            let (frame, button, images, url) = (frame.clone(), button.downgrade(), images.clone(), url.clone());
+            let (frame, button, images, url, view) =
+                (frame.clone(), button.downgrade(), images.clone(), url.clone(), view.clone());
             glib::spawn_future_local(async move {
                 let path = images.file(&url).await;
                 let (Some(frame), Some(button)) = (frame.upgrade(), button.upgrade()) else { return };
                 let Some(path) = path else { return button.set_sensitive(true) };
                 frame.remove_overlay(&button);
-                let player = gtk::Video::builder().autoplay(true).css_classes(["attachment-image"]).build();
-                player.set_filename(Some(&path));
-                frame.add_overlay(&player);
+                let options =
+                    Options { autoplay: true, start: 0.0, fullscreen: index.is_some(), classes: &["attachment-image"] };
+                let player = Player::new(&path, &options);
+                if let Some(index) = index {
+                    let control = player.control();
+                    player.fullscreen_button().connect_clicked(move |_| {
+                        control.pause();
+                        view.open(index, control.position());
+                    });
+                }
+                frame.add_overlay(player.widget());
             });
         }
     });

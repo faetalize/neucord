@@ -39,6 +39,8 @@ mod threads;
 mod typing;
 mod unread;
 mod uploads;
+mod video;
+mod viewer;
 mod voice;
 mod widgets;
 
@@ -142,6 +144,8 @@ pub struct App {
     scheduling: scheduling::Scheduling,
     /// Says how a request went, for the ones with nothing else to show it.
     toasts: adw::ToastOverlay,
+    /// Shows the pictures and videos of messages over the window.
+    viewer: viewer::Viewer,
     /// The voice message being recorded, or waiting to be sent.
     voice: voice::Voice,
     /// "Editing message" above the composer.
@@ -320,6 +324,7 @@ impl App {
             drafts: uploads::Drafts::new(),
             scheduling: scheduling::Scheduling::new(),
             toasts: adw::ToastOverlay::new(),
+            viewer: viewer::Viewer::new(),
             voice: voice::Voice::new(),
             // Styled as the reply bar, which takes its place while editing.
             edit_bar: gtk::Box::builder().spacing(8).visible(false).css_classes(["reply-bar"]).build(),
@@ -396,7 +401,10 @@ impl App {
         self.stack.add_named(&self.build_login(), Some("login"));
         self.stack.add_named(&self.build_main(), Some("main"));
         self.stack.add_named(&self.build_blocked(), Some("blocked"));
-        self.toasts.set_child(Some(&self.stack));
+        // The viewer covers everything but the toasts, which say how it went.
+        let layers = gtk::Overlay::builder().child(&self.stack).build();
+        layers.add_overlay(self.viewer.widget());
+        self.toasts.set_child(Some(&layers));
         self.window.set_content(Some(&self.toasts));
 
         let logout = gio::ActionEntry::builder("logout")
