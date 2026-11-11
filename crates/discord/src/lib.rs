@@ -5,6 +5,7 @@
 //! GTK, so the UI can be replaced without touching this crate.
 
 pub mod account;
+pub mod animation;
 pub mod apng;
 pub mod auth;
 pub mod backoff;

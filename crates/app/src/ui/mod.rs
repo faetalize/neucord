@@ -56,7 +56,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use discord::{Snowflake, session};
-use gtk::{gio, glib, pango};
+use gtk::{gdk, gio, glib, pango};
 
 use crate::config::{self, Store};
 use crate::images::Images;
@@ -473,6 +473,46 @@ impl App {
         });
     }
 
+    /// Tell the animations when the window loses focus, is hidden or is
+    /// covered, and when the system asks for less motion. Focus is the
+    /// compositor's say (the toplevel's `FOCUSED`), which a tooltip or popup
+    /// taking the keyboard doesn't change as `is-active` can.
+    fn track_motion(&self) {
+        let motion = self.images.motion().clone();
+        let sync = {
+            let (motion, window) = (motion.clone(), self.window.downgrade());
+            move || {
+                let Some(window) = window.upgrade() else { return };
+                let state = window.surface().and_downcast::<gdk::Toplevel>().map(|t| t.state());
+                let focused = state.map_or_else(|| window.is_active(), |s| s.contains(gdk::ToplevelState::FOCUSED));
+                let covered =
+                    state.is_some_and(|s| s.intersects(gdk::ToplevelState::MINIMIZED | gdk::ToplevelState::SUSPENDED));
+                motion.set_focused(focused && window.is_visible() && !covered);
+            }
+        };
+        self.window.connect_visible_notify({
+            let sync = sync.clone();
+            move |_| sync()
+        });
+        self.window.connect_realize({
+            let sync = sync.clone();
+            move |window| {
+                if let Some(toplevel) = window.surface().and_downcast::<gdk::Toplevel>() {
+                    let sync = sync.clone();
+                    toplevel.connect_state_notify(move |_| sync());
+                }
+                sync();
+            }
+        });
+        sync();
+
+        let settings = gtk::Settings::for_display(&WidgetExt::display(&self.window));
+        motion.set_reduced(!settings.is_gtk_enable_animations());
+        settings.connect_gtk_enable_animations_notify(move |settings| {
+            motion.set_reduced(!settings.is_gtk_enable_animations());
+        });
+    }
+
     fn build(self: &Rc<Self>) {
         self.stack.add_named(&self.build_loading(), Some("loading"));
         self.stack.add_named(&self.build_login(), Some("login"));
@@ -551,6 +591,8 @@ impl App {
             // The client binds both (`mod+k`, `mod+t`).
             app.set_accels_for_action("win.quick-switcher", &["<Control>k", "<Control>t"]);
         }
+
+        self.track_motion();
 
         // Coming back to the open channel reads it.
         let read_open = {

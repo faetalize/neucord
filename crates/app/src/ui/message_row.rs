@@ -4,6 +4,7 @@
 //! does, then kept.
 
 use std::cell::{Cell, OnceCell, RefCell};
+use std::rc::Rc;
 
 use discord::{Message, Snowflake};
 use gtk::glib;
@@ -54,6 +55,9 @@ pub(super) struct Parts {
     /// The line above a reply.
     pub(super) reply: RefCell<Option<gtk::Widget>>,
     pub(super) gutter: gtk::Box,
+    /// The id of the first message of the group the row's message is in, for
+    /// the avatar to move when any message of it is under the pointer.
+    pub(super) group: Rc<Cell<u64>>,
     /// The avatar, and whose (id and picture) it is.
     avatar: RefCell<Option<(Snowflake, Option<String>, gtk::Widget)>>,
     /// A system message's icon, in the avatar's place.
@@ -146,6 +150,7 @@ impl MessageRow {
             row,
             reply: RefCell::new(None),
             gutter,
+            group: Rc::default(),
             avatar: RefCell::new(None),
             icon: OnceCell::new(),
             header,

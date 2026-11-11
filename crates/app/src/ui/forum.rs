@@ -1046,7 +1046,7 @@ impl App {
                 .valign(gtk::Align::Center)
                 .build();
             if let Some((url, original)) = &card.media {
-                self.images.set_sized(&picture, url, size, *original, false);
+                self.images.set_sized(&picture, url, size, *original);
             }
             picture
         };

@@ -24,6 +24,7 @@ use super::profile::UserTarget;
 use super::state::Target;
 use super::widgets::avatar_widget_in;
 use crate::config;
+use crate::images::Row;
 use crate::render;
 
 /// How long the list rests before the ranges it shows are sent, as the
@@ -506,7 +507,7 @@ impl App {
         let state = self.state.borrow();
         let server = guild.and_then(|g| Some((g, state.members.avatar(g, user.id)?)));
         let avatar = gtk::Overlay::builder()
-            .child(&avatar_widget_in(user, 32, Some(&self.images), server))
+            .child(&avatar_widget_in(user, 32, Some(&self.images), server, Row::Parent))
             .valign(gtk::Align::Center)
             .build();
         avatar.add_overlay(&presence_dot(status));
