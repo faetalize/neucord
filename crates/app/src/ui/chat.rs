@@ -335,6 +335,10 @@ impl App {
                                 n.should_notify_in_thread(thread, &parent, &message, me, &roles, now_unix())
                             })
                         }
+                        // A call's chat, which we never join.
+                        Some((Some(_), c)) if c.kind.is_vocal() => {
+                            place.is_some_and(|p| state.notifications.should_notify_in_vocal(&p, pinged, now_unix()))
+                        }
                         _ => place.is_some_and(|p| state.notifications.should_notify(&p, pinged, now_unix())),
                     };
                 let counted =
@@ -711,6 +715,7 @@ impl App {
                 Some(dm) if dm.kind == discord::ChannelKind::Dm => format!("@ {}", dm.title()),
                 Some(group) if group.kind == discord::ChannelKind::GroupDm => group.title(),
                 Some(thread) if thread.kind.is_thread() => name,
+                Some(call) if call.kind.is_vocal() => name,
                 _ => format!("# {name}"),
             };
             let forum = found.is_some_and(|c| c.kind.is_forum_like());

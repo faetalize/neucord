@@ -17,7 +17,7 @@ use super::App;
 use super::chat::{self, MessageTarget};
 use super::{
     composer, create_thread, edits, emoji, gifs, picker, poll_composer, polls, reactions, reactors, scheduling,
-    stickers, threads, uploads, voice,
+    sidebar, stickers, threads, uploads, voice,
 };
 
 /// One entry of a menu, for what it was opened on: a `T`. `C` is what
@@ -117,6 +117,15 @@ pub(super) fn message(regulated: bool) -> Table<MessageTarget> {
 /// Thread after the moderators'. Remove From Thread is on a thread's members
 /// (202643), whose list Neucord doesn't show yet.
 pub(super) const THREAD: Table<threads::ThreadTarget> = &[&[threads::JOIN_THREAD], &[threads::LEAVE_THREAD]];
+
+/// A channel's menu, from its row in the sidebar: what Neucord has of the
+/// client's (428631 for voice and stage channels, 823255 for the others), in
+/// its order. Copy Link is among the channel's actions, Open Chat among the
+/// voice ones, and Copy Channel ID is last. The rest needs what Neucord
+/// doesn't have yet: Mark As Read, Mute and Notification Settings are #13's,
+/// joining and what happens in a call is #12's.
+pub(super) const CHANNEL: Table<sidebar::ChannelTarget> =
+    &[&[sidebar::COPY_CHANNEL_LINK], &[sidebar::OPEN_CHAT], &[sidebar::COPY_CHANNEL_ID]];
 
 /// The attach button's menu, opened from the button: the official client's
 /// (`channel-attach`, 316576) with what Neucord has of it. Upload a File and

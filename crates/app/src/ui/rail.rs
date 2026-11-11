@@ -207,8 +207,11 @@ impl App {
             let mut state = self.state.borrow_mut();
             state.guild = Some(id);
             state.guilds.iter().find(|g| g.id == id).and_then(|g| {
-                // A channel with messages first, rather than a forum.
-                let channels: Vec<_> = state.sidebar(g).into_iter().flat_map(|(_, c)| c).collect();
+                // A channel with messages first, rather than a forum. Never a
+                // call's chat: the client's default channel (`getDefaultChannel`
+                // in 808728) takes the first selectable one.
+                let channels: Vec<_> =
+                    state.sidebar(g).into_iter().flat_map(|(_, c)| c).filter(|c| !c.kind.is_vocal()).collect();
                 channels.iter().find(|c| !c.kind.is_forum_like()).or(channels.first()).map(|c| c.id)
             })
         };

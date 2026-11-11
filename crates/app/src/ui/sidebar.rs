@@ -9,10 +9,51 @@ use gtk::prelude::*;
 use gtk::{glib, pango};
 
 use super::App;
+use super::menus::{self, At, Entry, Item, Kind};
 use super::state::{Page, now_ms, now_unix};
 use super::thread_line::ThreadLine;
 use super::widgets::{avatar_widget, badge, round_picture};
 use crate::images::Images;
+
+/// What a channel row's menu acts on.
+pub(super) struct ChannelTarget(pub(super) Snowflake);
+
+/// Copy Link, on any channel (886393, in the channel's actions).
+pub(super) const COPY_CHANNEL_LINK: Entry<ChannelTarget> = Entry::Item(Item {
+    name: "copy-channel-link",
+    label: "Copy _Link",
+    shows: |_, _| true,
+    kind: Kind::Action(|app, target| {
+        let link = app.state.borrow().find_channel(target.0).map(|(guild, c)| c.link(guild.map(|g| g.id)));
+        if let Some(link) = link {
+            app.copy(&link);
+        }
+    }),
+});
+
+/// Open Chat, on a voice or stage channel (428631): the client's other way
+/// into the chat, which it shows with Connect. Without View Channel too the
+/// row isn't listed, so `can_view` stands for both.
+pub(super) const OPEN_CHAT: Entry<ChannelTarget> = Entry::Item(Item {
+    name: "open-chat",
+    label: "Open _Chat",
+    shows: |app, target| {
+        let state = app.state.borrow();
+        state.find_channel(target.0).is_some_and(|(_, c)| c.kind.is_vocal()) && state.can_view(target.0)
+    },
+    kind: Kind::Action(|app, target| {
+        app.select_channel(target.0);
+        app.show_content();
+    }),
+});
+
+/// Copy Channel ID, only in Developer Mode (50268).
+pub(super) const COPY_CHANNEL_ID: Entry<ChannelTarget> = Entry::Item(Item {
+    name: "copy-channel-id",
+    label: "Copy Channel _ID",
+    shows: |app, _| app.state.borrow().developer_mode,
+    kind: Kind::Action(|app, target| app.copy(&target.0.to_string())),
+});
 
 /// What a sidebar row opens.
 #[derive(Clone, Copy)]
@@ -93,6 +134,7 @@ impl App {
                     row.append(&badge);
                 }
                 let row = self.append_row(&row, Some(Target::Channel(channel.id)), state.channel == Some(channel.id));
+                self.channel_menu_on(&row, channel.id);
                 let place = Place {
                     guild: Some(guild.id),
                     guild_default: guild.default_message_notifications,
@@ -111,6 +153,15 @@ impl App {
             }
         }
         self.watch_thread_expiry(guild);
+    }
+
+    /// Open `channel`'s menu where its row is right-clicked.
+    fn channel_menu_on(self: &Rc<Self>, row: &gtk::ListBoxRow, channel: Snowflake) {
+        let (app, row_weak) = (Rc::downgrade(self), row.downgrade());
+        menus::on_secondary(row, move |x, y| {
+            let (Some(app), Some(row)) = (app.upgrade(), row_weak.upgrade()) else { return };
+            menus::popup(&app, menus::CHANNEL, ChannelTarget(channel), &row, At::Point(x, y));
+        });
     }
 
     /// A thread's row, under its parent's, joined to it by a line; `last`

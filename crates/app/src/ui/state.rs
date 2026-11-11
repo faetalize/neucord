@@ -22,7 +22,7 @@ use discord::thread_creation;
 use discord::threads;
 use discord::typing::Typing;
 use discord::verification::Account;
-use discord::{Channel, Gateway, Guild, Message, Rest, Resume, Snowflake, User};
+use discord::{Channel, ChannelKind, Gateway, Guild, Message, Rest, Resume, Snowflake, User};
 use gtk::glib;
 
 use super::friends::Tab;
@@ -436,13 +436,13 @@ impl State {
         thread.member.as_ref().is_some_and(|m| m.is_muted(now_unix()))
     }
 
-    /// The server's text channels we can view, in no order.
-    fn visible_text<'a>(&'a self, guild: &'a Guild) -> impl Iterator<Item = &'a Channel> {
+    /// The server's channels we can view whose kind `kind` accepts, in no order.
+    fn visible<'a>(&'a self, guild: &'a Guild, kind: fn(ChannelKind) -> bool) -> impl Iterator<Item = &'a Channel> {
         let now = now_unix();
         guild
             .channels
             .iter()
-            .filter(move |c| c.kind.is_text() && self.account.as_ref().is_some_and(|me| guild.can_view(c, me, now)))
+            .filter(move |c| kind(c.kind) && self.account.as_ref().is_some_and(|me| guild.can_view(c, me, now)))
     }
 
     pub(super) fn place(&self, id: Snowflake) -> Option<Place> {
@@ -471,7 +471,7 @@ impl State {
         let mut unread = false;
         let mut mentions = 0;
         // Channels we can't view count for nothing, as in the client.
-        for channel in self.visible_text(guild) {
+        for channel in self.visible(guild, ChannelKind::is_text) {
             mentions += self.read.mentions(channel.id);
             if !unread && !guild_muted && self.is_unread(channel) {
                 let place =
@@ -479,6 +479,9 @@ impl State {
                 unread = !self.notifications.channel_muted(&place, now);
             }
         }
+        // A call's chat adds its mentions but never a dot of its own
+        // (`isGuildVocal() && 0 === t` in 458294).
+        mentions += self.visible(guild, ChannelKind::is_vocal).map(|c| self.read.mentions(c.id)).sum::<u32>();
         // Threads we've joined count too, unless muted, whatever their parent.
         for thread in threads::joined_active(guild) {
             mentions += self.read.mentions(thread.id);
@@ -698,6 +701,20 @@ mod tests {
         state.guilds[0].set_role(everyone("66560"));
         assert!(state.can_read_history(Snowflake(9)));
         assert!(!state.can_read_history(Snowflake(77)), "not a channel we know");
+    }
+
+    #[test]
+    fn a_calls_chat_counts_mentions_for_the_server_but_never_an_unread_dot() {
+        let mut state = open_server(None, json!({"type": 2, "last_message_id": "200"}));
+        state.guilds[0].set_role(serde_json::from_value(json!({"id": "1", "permissions": "1049600"})).unwrap());
+        state.read = ReadStates::from_ready(&json!([{"id": "9", "last_message_id": "100", "mention_count": 0}]));
+        assert!(state.is_unread(&state.guilds[0].channels[0]), "the chat has something new");
+        assert_eq!(state.guild_badge(&state.guilds[0]), (false, 0), "which the server doesn't show");
+        state.read = ReadStates::from_ready(&json!([{"id": "9", "last_message_id": "100", "mention_count": 2}]));
+        assert_eq!(state.guild_badge(&state.guilds[0]), (false, 2), "a mention does count");
+        // The same chat in a text channel lights the dot.
+        state.guilds[0].channels[0].kind = ChannelKind::Text;
+        assert_eq!(state.guild_badge(&state.guilds[0]), (true, 2));
     }
 
     #[test]

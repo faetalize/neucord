@@ -354,11 +354,6 @@ changed for unrelated reasons only needs a note in the issue.
   thread member's flags, else nothing under a muted parent, else the
   parent's level. In threads, the decision ignores what the server
   suppresses, and our thread mute (`JoinedThreadsStore`) silences all.
-- **The unread dot** (`guild_badge` in `ui/state.rs`). The channel rule is
-  watched (`getGuildChannelUnreadState`). The per-server build is in 458294
-  (`GuildReadStateStore`), which adds the active threads we've joined
-  (`getActiveJoinedThreadsForGuild`): their mentions, and a dot unless the
-  thread or the server is muted, whatever their parent.
 - **What adds a mention** (`counts_mention`, `is_dropped`).
   `MESSAGE_CREATE` in 218461 (anchor `mentionCount++`): nothing from a
   blocked author or command user (`isBlockedOrIgnoredForMessage`, watched
@@ -400,12 +395,17 @@ changed for unrelated reasons only needs a note in the issue.
 - **Channels we can't view** (`Guild::sidebar`, `permissions::access`).
   Neucord lists, counts unread, opens and posts only where it has a
   channel's `accessPermissions`: View Channel, and Connect too in voice and
-  stage channels, whose text chats a notification or a forward can open.
+  stage channels, whose text chats it lists and opens without a call.
   Client: 95701 defines them, and the unread state in 458294 skips a
   channel without them.
 - **System messages that show nothing** (the last arm of `system::kind`).
   Client: the type-to-renderer map in 117096 (logger `SystemMessage`), where
   a type that maps to `void 0` or isn't listed draws nothing.
+- **The channel menu** (`CHANNEL` in `ui/menus.rs`). Client: 428631 builds it
+  for voice and stage channels and 823255 for the others; Neucord keeps their
+  sections and order. Open Chat shows for `isGuildVocal()` channels with
+  Connect; Copy Link is 886393 (the link is `af` in 147036), Copy Channel ID is
+  50268, in Developer Mode.
 - **Which embeds draw** (`EmbedKind`, `visible`). The filter is watched
   (`renderEmbeds`). The type sets are in 581619, and the type enum in
   508602. Which links count as Conjure projects (`is_conjure_project_link`)
