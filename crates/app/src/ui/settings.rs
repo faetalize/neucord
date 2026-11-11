@@ -341,6 +341,7 @@ impl App {
             self.rebuild_rail();
         }
         if media {
+            self.images.motion().set_media(self.state.borrow().settings.media);
             self.refresh_rows();
         }
         self.settings_replaced();

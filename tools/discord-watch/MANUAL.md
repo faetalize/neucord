@@ -493,6 +493,18 @@ changed for unrelated reasons only needs a note in the issue.
   channels, and threads outside forums. A box under a message shows only for
   a known thread of a message with `HAS_THREAD` (`r8` in 679636).
 
+- **When media moves** (`discord::animation`, `images/play.rs`). Everything
+  waits for window focus. Avatars and GIFs: the hook in 45837 (anchor
+  `useReducedMotion`), where the pointer or `gifAutoPlay` moves them; which
+  surface lets its row count as the pointer is each avatar hook call's
+  `animateOnHover` (549587 for messages, anchor `ANIMATE_CHAT_AVATAR`). Server
+  icons: the hovered flag into `getIconURL` in 396655 (anchor
+  `guildbar.AVATAR_SIZE`). Emoji: 565645 (anchor `registerAnimatedElementRef`)
+  and the visibility manager in 830178, whose cap of 100 is in the watched
+  `handleVisible` and `potentiallyAnimateNewNode`. Stickers: `Qn` in 378058.
+  The reduced-motion overrides are in 955572 (anchor
+  `REDUCED_MOTION_STICKERS`).
+
 - **Searching messages** (`search.rs`, `Rest::search_messages`,
   `ui/search.rs`). The two endpoints and every field they send are
   snapshotted, `fetchMessages` and `SearchMessageStore` are watched. Not
@@ -506,6 +518,7 @@ changed for unrelated reasons only needs a note in the issue.
   (775427, anchor `isCrossDmSearchEnabled`) and the result menu (847342).
   The setting that searches every DM at once is a POST to
   `/users/@me/messages/search/tabs` (956467), which Neucord doesn't send.
+
 - **The quick switcher** (`switcher.rs`, `ui/switcher.rs`). The empty
   state (`QuickSwitcherStore`), the channel, server and group DM queries,
   the single-kind refetch and the unread, mention and speaker lists are

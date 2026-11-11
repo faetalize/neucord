@@ -149,6 +149,19 @@ impl MediaSettings {
         set(&mut self.animate_emoji, patch.animate_emoji);
         self.animate_stickers = patch.animate_stickers.unwrap_or(self.animate_stickers);
     }
+
+    /// What the settings come to while the system asks for less motion: the
+    /// client overrides these three the moment it learns of the preference
+    /// (`ACCESSIBILITY_SET_PREFERS_REDUCED_MOTION`), whatever the account
+    /// chose.
+    pub fn reduced_motion(self) -> Self {
+        MediaSettings {
+            gif_auto_play: false,
+            animate_emoji: false,
+            animate_stickers: StickerAnimation::OnInteraction,
+            ..self
+        }
+    }
 }
 
 /// Whose reactions to our messages notify us.
@@ -404,6 +417,15 @@ mod tests {
         assert_eq!(patch.animate_stickers, Some(StickerAnimation::Never));
         let patch = MediaPatch::from_settings(&json!({"animate_stickers": 9}));
         assert_eq!(patch.animate_stickers, None, "a value the client does not know");
+    }
+
+    #[test]
+    fn reduced_motion_overrides_whatever_the_account_chose() {
+        let chose = MediaSettings { animate_stickers: StickerAnimation::Never, ..MediaSettings::default() };
+        let reduced = chose.reduced_motion();
+        assert!(!reduced.gif_auto_play && !reduced.animate_emoji);
+        assert_eq!(reduced.animate_stickers, StickerAnimation::OnInteraction, "the client sets it, even from Never");
+        assert!(reduced.render_embeds, "nothing else changes");
     }
 
     #[test]

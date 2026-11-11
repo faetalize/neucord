@@ -14,6 +14,7 @@ use gtk::glib;
 use qrcodegen::{QrCode, QrCodeEcc};
 
 use super::{App, bare_page, widgets};
+use crate::images::Row;
 
 pub(super) struct Page {
     /// "password" or "mfa".
@@ -530,7 +531,7 @@ impl App {
         while let Some(child) = scanned.first_child() {
             scanned.remove(&child);
         }
-        let avatar = widgets::avatar_widget(user, 40, Some(&self.images));
+        let avatar = widgets::avatar_widget(user, 40, Some(&self.images), Row::None);
         avatar.set_halign(gtk::Align::Center);
         scanned.append(&avatar);
         scanned.append(

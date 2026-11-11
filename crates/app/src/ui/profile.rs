@@ -19,6 +19,7 @@ use super::friends::presence_dot;
 use super::menus::{Choice, Choices, Entry, Item, Kind, Style};
 use super::state::{State, now_ms};
 use super::widgets::{avatar_from, avatar_widget};
+use crate::images::Row;
 use crate::render::{self, Context, Names};
 
 /// Where a profile or its menu was asked for, and whose it is.
@@ -474,7 +475,7 @@ impl View {
             // would be an empty box.
             let (frame, picture) = fixed_picture(-1, height, gtk::ContentFit::Cover);
             frame.set_visible(false);
-            app.images.load(&url, false, {
+            app.images.load(&url, {
                 let (frame, view) = (frame.downgrade(), Rc::downgrade(self));
                 move |paintable| {
                     picture.set_paintable(Some(&paintable));
@@ -504,7 +505,7 @@ impl View {
 
         let header = gtk::Box::builder().spacing(12).margin_top(12).margin_start(12).margin_end(12).build();
         let avatar = gtk::Overlay::builder()
-            .child(&avatar_from(&name, AVATAR, Some(&app.images), picture))
+            .child(&avatar_from(&name, AVATAR, Some(&app.images), picture, Row::None))
             .valign(gtk::Align::Start)
             .overflow(gtk::Overflow::Visible)
             .build();
@@ -517,7 +518,7 @@ impl View {
             frame.set_halign(gtk::Align::Center);
             frame.set_valign(gtk::Align::Center);
             frame.set_can_target(false);
-            app.images.set(&picture, &url, false);
+            app.images.set(&picture, &url);
             avatar.add_overlay(&frame);
             avatar.set_measure_overlay(&frame, false);
         }
@@ -684,7 +685,7 @@ impl View {
                 let row = gtk::Box::builder().spacing(8).build();
                 let (icon, picture) = fixed_picture(24, 24, gtk::ContentFit::Cover);
                 if let Some(hash) = &guild.icon {
-                    app.images.set(&picture, &discord::cdn::guild_icon_url(guild.id.0, hash, 64), false);
+                    app.images.set(&picture, &discord::cdn::guild_icon_url(guild.id.0, hash, 64));
                 }
                 row.append(&icon);
                 row.append(
@@ -742,7 +743,7 @@ impl View {
             .get(friend.id)
             .map_or_else(|| friend.display_name().to_owned(), |r| r.name().to_owned());
         let row = gtk::Box::builder().spacing(8).build();
-        row.append(&avatar_widget(friend, 24, Some(&app.images)));
+        row.append(&avatar_widget(friend, 24, Some(&app.images), Row::None));
         row.append(&gtk::Label::builder().label(&name).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).build());
         let button = gtk::Button::builder().child(&row).css_classes(["flat"]).build();
         button.connect_clicked({
@@ -909,7 +910,7 @@ fn section(heading: &str, body: &impl IsA<gtk::Widget>) -> gtk::Widget {
 fn badge_picture(app: &Rc<App>, badge: &Badge) -> gtk::Widget {
     let (frame, picture) = fixed_picture(BADGE, BADGE, gtk::ContentFit::Contain);
     frame.set_tooltip_text(Some(&badge.description));
-    app.images.set(&picture, &discord::cdn::badge_icon_url(&badge.icon), false);
+    app.images.set(&picture, &discord::cdn::badge_icon_url(&badge.icon));
     frame
 }
 
