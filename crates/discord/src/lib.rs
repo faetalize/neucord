@@ -28,6 +28,7 @@ pub mod interaction;
 mod invalid;
 pub mod limits;
 pub mod markup;
+pub mod media;
 pub mod member_list;
 pub mod members;
 pub mod model;
