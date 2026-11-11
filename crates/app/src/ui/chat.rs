@@ -737,6 +737,7 @@ impl App {
             let mut state = self.state.borrow_mut();
             let left = state.channel.filter(|&c| c != id);
             state.channel = Some(id);
+            super::switcher::visited(&mut state, id);
             state.page = None;
             let found = state.find_channel(id).map(|(_, c)| c);
             let name = found.and_then(|c| c.name.clone()).unwrap_or_default();

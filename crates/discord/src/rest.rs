@@ -17,6 +17,7 @@ use crate::gifs::{Gif, Picker, Request, Tile, Tiles};
 use crate::interaction::{Failure, Press};
 use crate::invalid::{Change, InvalidRequests};
 use crate::model::Emoji;
+use crate::post_creation;
 use crate::profile::{self, Profile};
 use crate::reactions::{Location, Refusal};
 use crate::scheduled::{self, Scheduled};
@@ -581,6 +582,13 @@ impl Rest {
         self.request(call, Some(body)).await
     }
 
+    /// Start a post in the forum or media channel `forum`, with what
+    /// [`crate::post_creation::body`] makes: the same request as a thread's,
+    /// with its query. The post arrives on the gateway as well.
+    pub async fn create_post(&self, forum: Snowflake, body: serde_json::Value) -> Result<Channel, Error> {
+        self.request(create_post_call(forum), Some(body)).await
+    }
+
     /// Mark everything in `channel` up to `message` as read, for all our clients.
     pub async fn ack(&self, channel: Snowflake, message: Snowflake) -> Result<(), Error> {
         let body = json!({ "token": null });
@@ -864,6 +872,12 @@ fn archived_threads_call(search: &Search) -> Call {
     call!(SEARCH_THREADS, channel = search.channel).query(&search.query())
 }
 
+/// The request that starts a post: a thread's endpoint, with the query the
+/// client adds (`createForumPost` in 971389).
+fn create_post_call(forum: Snowflake) -> Call {
+    call!(CREATE_THREAD, channel = forum).query(post_creation::QUERY)
+}
+
 /// The request for who reacted: `limit`, `after` when paging, and `type`,
 /// in the order `ao` writes them.
 fn reactors_call(channel: Snowflake, message: Snowflake, emoji: &Emoji, limit: u32, after: Option<Snowflake>) -> Call {
@@ -1017,9 +1031,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        Captcha, Page, Reply, ReplyPing, add_reaction_call, archived_threads_call, base_headers, edit_body,
-        edit_scheduled_body, is_md5, join_thread_call, leave_thread_call, message_body, poll_body, rate_limit_wait,
-        reactors_call, remove_reaction_call, schedule_body, vote_body,
+        Captcha, Page, Reply, ReplyPing, add_reaction_call, archived_threads_call, base_headers, create_post_call,
+        edit_body, edit_scheduled_body, is_md5, join_thread_call, leave_thread_call, message_body, poll_body,
+        rate_limit_wait, reactors_call, remove_reaction_call, schedule_body, vote_body,
     };
     use crate::endpoints::call;
     use crate::model::Emoji;
@@ -1129,6 +1143,10 @@ mod tests {
              &tag_setting=match_some&offset=25"
         );
         assert_eq!(call!(GET_CHANNEL, channel = thread).path(), "/channels/7");
+        // A post is the thread request with the query `createForumPost` adds; a plain thread has none.
+        let post = create_post_call(thread);
+        assert_eq!((post.method(), post.path()), ("POST", "/channels/7/threads?use_nested_fields=true"));
+        assert_eq!(call!(CREATE_THREAD, channel = thread).path(), "/channels/7/threads");
     }
 
     #[test]
