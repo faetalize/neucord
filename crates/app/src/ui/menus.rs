@@ -16,9 +16,36 @@ use gtk::{gdk, gio, glib};
 use super::App;
 use super::chat::{self, MessageTarget};
 use super::{
-    composer, create_thread, edits, emoji, forum, gifs, notify_menus, picker, poll_composer, polls, profile, reactions,
-    reactors, scheduling, sidebar, stickers, threads, uploads, voice,
+    attachments, composer, create_thread, edits, emoji, forum, gifs, notify_menus, picker, poll_composer, polls,
+    profile, reactions, reactors, scheduling, sidebar, stickers, threads, uploads, viewer, voice,
 };
+
+/// An item that copies or opens a link, shown when the link `$link` finds in
+/// a `$T` is of `$kind` (777933 names a link by what it points to, so the
+/// table lists one item for each name and only the one that fits shows),
+/// and `$hidden` doesn't hide the media options.
+macro_rules! link_item {
+    ($T:ty, $name:literal, $label:literal, $kind:expr, $act:path, $link:expr, $hidden:expr) => {
+        $crate::ui::menus::Entry::<$T>::Item($crate::ui::menus::Item {
+            name: $name,
+            label: $label,
+            shows: |app, target| match ($link)(target) {
+                Some(url) => {
+                    discord::media::link_kind(url) == $kind
+                        && discord::media::link_allowed(url)
+                        && !($hidden)(app, target)
+                }
+                None => false,
+            },
+            kind: $crate::ui::menus::Kind::Action(|app, target| {
+                if let Some(url) = ($link)(target) {
+                    $act(app, url)
+                }
+            }),
+        })
+    };
+}
+pub(super) use link_item;
 
 /// One entry of a menu, for what it was opened on: a `T`. `C` is what
 /// entries read and act through: the app, or a stand-in in tests.
@@ -80,19 +107,22 @@ pub(super) type Table<T, C = App> = &'static [&'static [Entry<T, C>]];
 
 /// A message's menu: what Neucord has of the official client's (761304),
 /// in its order. Create Thread follows Forward, which Neucord has no entry for.
+/// The media group (Copy Image, Save Image, Save File) comes before the link
+/// group, which names a link by what it points to.
 const MESSAGE: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
     &[reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
     &[edits::EDIT, composer::REPLY, create_thread::MESSAGE_MENU],
     &[chat::COPY_TEXT, notify_menus::MARK_UNREAD, chat::COPY_MESSAGE_LINK, polls::END_POLL],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
-    &[chat::COPY_LINK, chat::OPEN_LINK],
+    &[chat::COPY_IMAGE, chat::SAVE_IMAGE, attachments::SAVE_FILE],
+    &LINKS,
     &[chat::COPY_MESSAGE_ID, stickers::MESSAGE_DETAILS],
 ];
 
 /// [`MESSAGE`] where the media takedown regulation is TIDA: the client (761304)
-/// puts the Copy ID group (50268) before the link group (777933). The group
-/// between them holds nothing Neucord has.
+/// puts the Copy ID group (50268) before the media group and the link group
+/// (777933).
 const MESSAGE_REGULATED: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
     &[reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
@@ -100,7 +130,33 @@ const MESSAGE_REGULATED: Table<MessageTarget> = &[
     &[chat::COPY_TEXT, notify_menus::MARK_UNREAD, chat::COPY_MESSAGE_LINK, polls::END_POLL],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
     &[chat::COPY_MESSAGE_ID, stickers::MESSAGE_DETAILS],
-    &[chat::COPY_LINK, chat::OPEN_LINK],
+    &[chat::COPY_IMAGE, chat::SAVE_IMAGE, attachments::SAVE_FILE],
+    &LINKS,
+];
+
+/// The link group: Copy and Open, under the name the link's type gives each
+/// (only one of the three shows).
+const LINKS: [Entry<MessageTarget>; 6] = [
+    chat::COPY_LINK,
+    chat::COPY_IMAGE_LINK,
+    chat::COPY_MEDIA_LINK,
+    chat::OPEN_LINK,
+    chat::OPEN_IMAGE_LINK,
+    chat::OPEN_MEDIA_LINK,
+];
+
+/// The picture or video in the media viewer (`image-context`, 177079):
+/// Copy Image and Save Image, then the link of what is shown.
+pub(super) const VIEWER_MEDIA: Table<viewer::Target> = &[
+    &[viewer::COPY_IMAGE, viewer::SAVE_IMAGE],
+    &[
+        viewer::COPY_LINK,
+        viewer::COPY_IMAGE_LINK,
+        viewer::COPY_MEDIA_LINK,
+        viewer::OPEN_LINK,
+        viewer::OPEN_IMAGE_LINK,
+        viewer::OPEN_MEDIA_LINK,
+    ],
 ];
 
 /// The message menu for an account: `regulated` is READY's media takedown
@@ -108,6 +164,16 @@ const MESSAGE_REGULATED: Table<MessageTarget> = &[
 pub(super) fn message(regulated: bool) -> Table<MessageTarget> {
     if regulated { MESSAGE_REGULATED } else { MESSAGE }
 }
+
+/// What a search result's menu offers of the official client's (847342), in
+/// its order. Copy and Search with Google (a selection), Pin Message and Mark
+/// Unread aren't here: a result's text can't be selected, and Neucord has
+/// neither of the others yet. There is no reply, reaction or edit.
+pub(super) const SEARCH_RESULT: Table<MessageTarget> = &[
+    &[chat::COPY_MESSAGE_LINK, edits::DELETE],
+    &[chat::COPY_LINK, chat::OPEN_LINK],
+    &[chat::COPY_MESSAGE_ID, chat::COPY_AUTHOR_ID],
+];
 
 /// A thread's menu, from its row in the sidebar or the browser and the box
 /// under the message that started it: what Neucord has of the client's
@@ -561,19 +627,22 @@ mod tests {
     }
 
     #[test]
-    fn message_menu_puts_the_id_before_the_links_where_media_takedown_is_regulated() {
+    fn message_menu_puts_the_id_before_the_media_and_links_where_media_takedown_is_regulated() {
         let ends = |regulated| {
             let names = names(message(regulated));
-            names[names.len() - 2..].to_vec()
+            names[names.len() - 3..].to_vec()
         };
         let id = || vec!["copy-message-id", "message-details"];
-        assert_eq!(ends(false), [vec!["copy-link", "open-link"], id()]);
-        assert_eq!(ends(true), [id(), vec!["copy-link", "open-link"]]);
-        // The two groups swap and nothing else moves.
-        let mut swapped = names(message(false));
-        let n = swapped.len();
-        swapped.swap(n - 2, n - 1);
-        assert_eq!(names(message(true)), swapped);
+        let media = || vec!["copy-image", "save-image", "save-file"];
+        let links = || {
+            ["copy-link", "copy-image-link", "copy-media-link", "open-link", "open-image-link", "open-media-link"]
+                .to_vec()
+        };
+        assert_eq!(ends(false), [media(), links(), id()]);
+        assert_eq!(ends(true), [id(), media(), links()]);
+        // The three groups move and nothing else does.
+        let n = names(message(false)).len();
+        assert_eq!(names(message(true))[..n - 3], names(message(false))[..n - 3]);
     }
 
     #[test]

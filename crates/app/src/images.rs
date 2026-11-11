@@ -211,6 +211,12 @@ impl Images {
         }
     }
 
+    /// A file's bytes, cached nowhere: for saving and copying, which want
+    /// the original once.
+    pub async fn fetch(&self, url: &str) -> Option<glib::Bytes> {
+        self.download(url).await
+    }
+
     async fn download(&self, url: &str) -> Option<glib::Bytes> {
         let message = soup::Message::new("GET", url).ok()?;
         let bytes = self.0.session.send_and_read_future(&message, glib::Priority::DEFAULT).await.ok()?;

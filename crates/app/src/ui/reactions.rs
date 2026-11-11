@@ -96,7 +96,7 @@ impl App {
     /// Whether Add Reaction shows for `message`.
     pub(super) fn offers_add_reaction(&self, message: &Message) -> bool {
         let state = self.state.borrow();
-        state.media.render_reactions && state.reacting(message.channel_id).create
+        state.settings.media.render_reactions && state.reacting(message.channel_id).create
     }
 
     /// Put the reactions under `message` at the end of `content`.
@@ -120,7 +120,7 @@ impl App {
         let pills = message.reaction_pills();
         let (show, access) = {
             let state = self.state.borrow();
-            (state.media.render_reactions, state.reacting(message.channel_id))
+            (state.settings.media.render_reactions, state.reacting(message.channel_id))
         };
         if !show || pills.is_empty() {
             return None;

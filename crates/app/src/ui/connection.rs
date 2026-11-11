@@ -4,6 +4,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
+use discord::settings::Settings;
 use discord::{Channel, Event, Gateway, Guild, Member, Ready, Rest, Snowflake, session};
 use gtk::glib;
 use gtk::prelude::*;
@@ -196,7 +197,11 @@ impl App {
                 Event::TypingStart { channel_id, user_id, user } => self.on_typing(channel_id, user_id, user.as_ref()),
                 Event::MessageCreate(message) => self.on_message(*message),
                 Event::MessageUpdate(edit) => self.on_message_update(edit),
-                Event::Interaction { nonce, outcome } => self.on_interaction(nonce, outcome),
+                Event::Interaction { nonce, outcome, reason } => self.on_interaction(nonce, outcome, reason),
+                Event::InteractionCreated { nonce } => self.command_created(nonce),
+                Event::Autocomplete { nonce, choices } => self.on_autocomplete(nonce, &choices),
+                Event::CommandIndexChanged { guild, version } => self.command_index_changed(guild, version),
+                Event::UserApplicationChanged => self.state.borrow_mut().commands.user_changed(),
                 Event::MessageDelete { id, channel_id } => self.on_message_delete(id, channel_id),
                 Event::MessageDeleteBulk { ids, channel_id } => self.on_message_delete_bulk(ids, channel_id),
                 Event::PollVote { channel_id, message_id, votes, added, many } => {
@@ -234,12 +239,23 @@ impl App {
                     self.state.borrow_mut().required_action = action;
                     self.apply_required_action();
                 }
-                Event::MediaSettingsUpdate(patch) => {
-                    self.state.borrow_mut().media.apply(patch);
-                    self.refresh_rows();
+                Event::SettingsUpdate { patch, replace } => {
+                    let (media, folders) = {
+                        let mut state = self.state.borrow_mut();
+                        let before = (state.settings.media, state.settings.guild_folders.clone());
+                        if replace {
+                            state.settings = Settings::default();
+                        }
+                        state.settings.apply(patch);
+                        (before.0 != state.settings.media, before.1 != state.settings.guild_folders)
+                    };
+                    if folders {
+                        self.rebuild_rail();
+                    }
+                    if media {
+                        self.refresh_rows();
+                    }
                 }
-                Event::DeveloperModeUpdate(on) => self.state.borrow_mut().developer_mode = on,
-                Event::MessageDisplayCompactUpdate(on) => self.state.borrow_mut().message_display_compact = on,
                 Event::RelationshipAdd { relationship, notify } => {
                     self.learn_users(std::iter::once(&relationship.user));
                     let blocked = relationship.kind == discord::relationships::Kind::Blocked;
@@ -260,6 +276,8 @@ impl App {
                     self.state.borrow_mut().profiles.doubt(user_id);
                     self.state.borrow_mut().relationships.update(user_id, nickname);
                     self.relationships_changed(false);
+                    // What we call them shows in DMs.
+                    self.refresh_rows();
                 }
                 Event::RelationshipRemove(user_id) => {
                     self.withdraw_friend_request(user_id);
@@ -275,11 +293,8 @@ impl App {
                         self.queue_friends_refresh();
                         // A group DM's friends.
                         self.refresh_member_rows();
+                        self.refresh_profile_views();
                     }
-                }
-                Event::GuildFoldersUpdate(folders) => {
-                    self.state.borrow_mut().guild_folders = folders;
-                    self.rebuild_rail();
                 }
                 Event::NotificationSettingsUpdate(settings) => {
                     self.state.borrow_mut().notifications.update(settings);
@@ -339,11 +354,8 @@ impl App {
             relationships,
             read_states,
             notification_settings,
-            guild_folders,
-            media_settings,
-            developer_mode,
+            settings,
             media_takedown_regulated,
-            message_display_compact,
             required_action,
             experiments,
             session_id,
@@ -375,17 +387,17 @@ impl App {
             state.notes.clear();
             state.typing.clear();
             state.read = read_states;
-            state.guild_folders = guild_folders;
             state.notifications = notification_settings;
-            state.media = media_settings;
-            state.developer_mode = developer_mode;
+            state.settings = settings;
             state.media_takedown_regulated = media_takedown_regulated;
-            state.message_display_compact = message_display_compact;
             state.required_action = required_action;
             state.account = Some(account);
             state.nitro = nitro;
             state.experiments = experiments;
             state.session_id = session_id;
+            // A new session: every index is out of date, and no command is waiting on this one.
+            state.commands.session_started();
+            state.running.clear();
             let store = (!state.persisted).then(|| (state.token.clone(), user.username.clone()));
             state.persisted = true;
             state.users.insert(user.id.0, user.display_name().to_string());
@@ -506,6 +518,7 @@ impl App {
     fn relationships_changed(self: &Rc<Self>, blocks_changed: bool) {
         self.refresh_badges();
         self.queue_friends_refresh();
+        self.refresh_profile_views();
         if blocks_changed {
             self.refresh_typing();
             self.refresh_rows();
