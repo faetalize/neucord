@@ -69,8 +69,31 @@ pub struct MediaSettings {
     pub inline_attachment_media: bool,
     /// Play GIFs without hovering them.
     pub gif_auto_play: bool,
+    /// Play animated emoji without hovering them.
+    pub animate_emoji: bool,
+    /// When animated stickers play.
+    pub animate_stickers: StickerAnimation,
     /// Show the reactions under messages.
     pub render_reactions: bool,
+}
+
+/// `animate_stickers`, as the client's `AnimateStickers` enum numbers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StickerAnimation {
+    Always,
+    OnInteraction,
+    Never,
+}
+
+impl StickerAnimation {
+    fn from_number(n: u64) -> Option<Self> {
+        match n {
+            0 => Some(Self::Always),
+            1 => Some(Self::OnInteraction),
+            2 => Some(Self::Never),
+            _ => None,
+        }
+    }
 }
 
 impl Default for MediaSettings {
@@ -80,6 +103,8 @@ impl Default for MediaSettings {
             inline_embed_media: true,
             inline_attachment_media: true,
             gif_auto_play: true,
+            animate_emoji: true,
+            animate_stickers: StickerAnimation::Always,
             render_reactions: true,
         }
     }
@@ -93,6 +118,8 @@ pub struct MediaPatch {
     pub inline_embed_media: Option<bool>,
     pub inline_attachment_media: Option<bool>,
     pub gif_auto_play: Option<bool>,
+    pub animate_emoji: Option<bool>,
+    pub animate_stickers: Option<StickerAnimation>,
     pub render_reactions: Option<bool>,
 }
 
@@ -104,6 +131,11 @@ impl MediaPatch {
             inline_embed_media: flag("inline_embed_media"),
             inline_attachment_media: flag("inline_attachment_media"),
             gif_auto_play: flag("gif_auto_play"),
+            animate_emoji: flag("animate_emoji"),
+            animate_stickers: settings
+                .get("animate_stickers")
+                .and_then(Value::as_u64)
+                .and_then(StickerAnimation::from_number),
             render_reactions: flag("render_reactions"),
         }
     }
@@ -120,7 +152,22 @@ impl MediaSettings {
         set(&mut self.inline_embed_media, patch.inline_embed_media);
         set(&mut self.inline_attachment_media, patch.inline_attachment_media);
         set(&mut self.gif_auto_play, patch.gif_auto_play);
+        set(&mut self.animate_emoji, patch.animate_emoji);
+        self.animate_stickers = patch.animate_stickers.unwrap_or(self.animate_stickers);
         set(&mut self.render_reactions, patch.render_reactions);
+    }
+
+    /// What the settings come to while the system asks for less motion: the
+    /// client overrides these three the moment it learns of the preference
+    /// (`ACCESSIBILITY_SET_PREFERS_REDUCED_MOTION`), whatever the account
+    /// chose.
+    pub fn reduced_motion(self) -> Self {
+        MediaSettings {
+            gif_auto_play: false,
+            animate_emoji: false,
+            animate_stickers: StickerAnimation::OnInteraction,
+            ..self
+        }
     }
 }
 
@@ -208,6 +255,29 @@ mod tests {
         media.apply(MediaPatch::from_settings(&json!({"render_reactions": false})));
         assert!(!media.render_reactions && !media.gif_auto_play, "each setting alone");
         assert!(MediaPatch::from_settings(&json!({"guild_folders": []})).is_empty());
+    }
+
+    #[test]
+    fn animation_settings() {
+        let patch = MediaPatch::from_settings(&json!({"animate_emoji": false, "animate_stickers": 1}));
+        assert_eq!((patch.animate_emoji, patch.animate_stickers), (Some(false), Some(StickerAnimation::OnInteraction)));
+        let mut media = MediaSettings::default();
+        media.apply(patch);
+        assert!(!media.animate_emoji && media.gif_auto_play);
+        assert_eq!(media.animate_stickers, StickerAnimation::OnInteraction);
+        for (n, expected) in [(0, StickerAnimation::Always), (2, StickerAnimation::Never)] {
+            assert_eq!(MediaPatch::from_settings(&json!({"animate_stickers": n})).animate_stickers, Some(expected));
+        }
+        assert_eq!(MediaPatch::from_settings(&json!({"animate_stickers": 7})).animate_stickers, None, "unknown value");
+    }
+
+    #[test]
+    fn reduced_motion_overrides_whatever_the_account_chose() {
+        let chose = MediaSettings { animate_stickers: StickerAnimation::Never, ..MediaSettings::default() };
+        let reduced = chose.reduced_motion();
+        assert!(!reduced.gif_auto_play && !reduced.animate_emoji);
+        assert_eq!(reduced.animate_stickers, StickerAnimation::OnInteraction, "the client sets it, even from Never");
+        assert!(reduced.render_embeds, "nothing else changes");
     }
 
     #[test]

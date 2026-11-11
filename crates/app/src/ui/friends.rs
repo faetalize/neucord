@@ -13,6 +13,7 @@ use gtk::glib;
 use super::App;
 use super::state::Page;
 use super::widgets::{Title, avatar_widget};
+use crate::images::Row;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Tab {
@@ -291,7 +292,7 @@ impl App {
             .build();
 
         let avatar = gtk::Overlay::builder()
-            .child(&avatar_widget(user, 32, Some(&self.images)))
+            .child(&avatar_widget(user, 32, Some(&self.images), Row::Parent))
             .valign(gtk::Align::Center)
             .build();
         if relationship.kind == Kind::Friend {

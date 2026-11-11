@@ -18,6 +18,7 @@ use super::menus::{Entry, Item, Kind as MenuKind};
 use super::polls;
 use super::reactions::emoji_label;
 use super::widgets::avatar_widget;
+use crate::images::Row;
 use crate::timelines;
 
 /// How long a pointer rests on a reaction before we ask who reacted (`eM` in
@@ -254,7 +255,7 @@ impl View {
         for user in users {
             let line =
                 gtk::Box::builder().spacing(10).margin_top(6).margin_bottom(6).margin_start(8).margin_end(8).build();
-            line.append(&avatar_widget(&user, 32, Some(&app.images)));
+            line.append(&avatar_widget(&user, 32, Some(&app.images), Row::Parent));
             let name =
                 app.state.borrow().users.get(&user.id.0).cloned().unwrap_or_else(|| user.display_name().to_owned());
             let text = gtk::Box::builder()

@@ -13,7 +13,7 @@ use super::menus::{self, At, Entry, Item, Kind};
 use super::state::{Page, now_ms, now_unix};
 use super::thread_line::ThreadLine;
 use super::widgets::{avatar_widget, badge, round_picture};
-use crate::images::Images;
+use crate::images::{Images, Row};
 
 /// What a channel row's menu acts on.
 pub(super) struct ChannelTarget(pub(super) Snowflake);
@@ -304,10 +304,10 @@ pub(super) fn dm_icon(channel: &Channel, images: &Images) -> gtk::Widget {
     let icon: gtk::Widget = match (channel.kind, channel.recipients.first(), channel.icon.as_deref()) {
         (discord::ChannelKind::GroupDm, _, Some(hash)) => {
             let picture = round_picture(SIZE);
-            images.set(&picture, &discord::cdn::group_dm_icon_url(channel.id.0, hash, 64), false);
+            images.set(&picture, &discord::cdn::group_dm_icon_url(channel.id.0, hash, 64));
             picture.upcast()
         }
-        (discord::ChannelKind::Dm, Some(user), _) => avatar_widget(user, SIZE, Some(images)),
+        (discord::ChannelKind::Dm, Some(user), _) => avatar_widget(user, SIZE, Some(images), Row::Parent),
         _ => adw::Avatar::new(SIZE, Some(&channel.title()), true).upcast(),
     };
     icon.set_valign(gtk::Align::Center);

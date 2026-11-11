@@ -232,7 +232,12 @@ impl App {
                     self.apply_required_action();
                 }
                 Event::MediaSettingsUpdate(patch) => {
-                    self.state.borrow_mut().media.apply(patch);
+                    let media = {
+                        let mut state = self.state.borrow_mut();
+                        state.media.apply(patch);
+                        state.media
+                    };
+                    self.images.motion().set_media(media);
                     self.refresh_rows();
                 }
                 Event::DeveloperModeUpdate(on) => self.state.borrow_mut().developer_mode = on,
@@ -375,6 +380,7 @@ impl App {
             state.guild_folders = guild_folders;
             state.notifications = notification_settings;
             state.media = media_settings;
+            self.images.motion().set_media(media_settings);
             state.developer_mode = developer_mode;
             state.media_takedown_regulated = media_takedown_regulated;
             state.message_display_compact = message_display_compact;

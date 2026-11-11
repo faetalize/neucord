@@ -22,6 +22,7 @@ use super::message_row::{MessageRow, Parts};
 use super::state::{Unread, now_ms, now_unix};
 use super::widgets::avatar_widget;
 use super::{attachments, components, polls};
+use crate::images::Row;
 use crate::kept::Made;
 use crate::render::{Context, Names, Spoilers};
 use crate::rich_text::RichText;
@@ -166,6 +167,7 @@ impl App {
                 attach_message_menu(&this, item, &cell);
                 attach_author(&this, item, &cell);
                 attach_message_actions(&this, &cell);
+                attach_group_hover(&this, &cell);
                 if let Some(this) = this.upgrade() {
                     let mut rows = this.rows.borrow_mut();
                     rows.retain(|row| row.upgrade().is_some());
@@ -505,6 +507,13 @@ impl App {
         }
     }
 
+    /// Say which group of messages the pointer is on, for `cell` showing one.
+    fn publish_hovered_group(&self, cell: &MessageRow) {
+        let first =
+            cell.parts().item.upgrade().and_then(|item| group_start(&self.messages(), item.position())).map(|id| id.0);
+        self.images.motion().set_hovered_group(first);
+    }
+
     /// Fill `item`'s row in for the message it holds now.
     fn bind_row(self: &Rc<Self>, item: &gtk::ListItem) {
         let cell = item.child().and_downcast::<MessageRow>().expect("message row");
@@ -529,6 +538,10 @@ impl App {
             return;
         }
         self.fill_message_row(parts, &message, previous.as_ref().filter(|_| !divided), &messages);
+        // A row filled in under the pointer gets no enter event for it.
+        if cell.state_flags().contains(gtk::StateFlags::PRELIGHT) {
+            self.publish_hovered_group(&cell);
+        }
     }
 
     /// Fill in again the rows showing `len` messages of `store` from `start`,
@@ -1574,6 +1587,43 @@ fn attach_author(this: &std::rc::Weak<App>, item: &gtk::ListItem, cell: &Message
 }
 
 /// Make the Edit, Reply and More buttons act on whichever message `cell` shows.
+/// The pointer on a message moves the avatar of its group, as in the client,
+/// where `Motion` tells every avatar whether its group is under the pointer.
+fn attach_group_hover(this: &std::rc::Weak<App>, cell: &MessageRow) {
+    let hover = gtk::EventControllerMotion::new();
+    hover.connect_enter({
+        let (this, cell) = (this.clone(), cell.downgrade());
+        move |_, _, _| {
+            if let (Some(this), Some(cell)) = (this.upgrade(), cell.upgrade()) {
+                this.publish_hovered_group(&cell);
+            }
+        }
+    });
+    hover.connect_leave({
+        let this = this.clone();
+        move |_| {
+            if let Some(this) = this.upgrade() {
+                this.images.motion().set_hovered_group(None);
+            }
+        }
+    });
+    cell.add_controller(hover);
+}
+
+/// The first message of the group that `position` is in.
+fn group_start(messages: &gio::ListStore, position: u32) -> Option<Snowflake> {
+    let mut at = position;
+    let mut message = timelines::message_at(messages, at)?;
+    while let Some(before) = at.checked_sub(1) {
+        let previous = timelines::message_at(messages, before)?;
+        if !is_grouped(&message, Some(&previous)) {
+            break;
+        }
+        (at, message) = (before, previous);
+    }
+    Some(message.id)
+}
+
 fn attach_message_actions(this: &std::rc::Weak<App>, cell: &MessageRow) {
     let parts = cell.parts();
     let shown = |cell: &glib::WeakRef<MessageRow>| {
@@ -1753,6 +1803,9 @@ impl App {
             return;
         }
         let grouped = kind == Kind::Normal && is_grouped(message, previous);
+        if !grouped {
+            parts.group.set(message.id.0);
+        }
         let mut classes = vec!["message"];
         if !grouped {
             classes.push("first");
@@ -1781,7 +1834,9 @@ impl App {
         match system {
             Some(system) => parts.show_icon(system_icon(system.icon)),
             None if grouped => parts.hide_gutter(),
-            None => parts.show_avatar(&shown.author, || avatar_widget(&shown.author, 40, Some(&self.images))),
+            None => parts.show_avatar(&shown.author, || {
+                avatar_widget(&shown.author, 40, Some(&self.images), Row::Group(parts.group.clone()))
+            }),
         }
         parts.header.set_visible(system.is_none() && !grouped);
         if parts.header.is_visible() {
@@ -1975,7 +2030,7 @@ impl App {
             body.append(&attachments::attachment(attachment, voice, &self.images, &media));
         }
         for sticker in &message.sticker_items {
-            body.append(&attachments::sticker(sticker, &self.images, media.gif_auto_play));
+            body.append(&attachments::sticker(sticker, &self.images));
         }
         // A link in a spoiler covers all the message's embeds, as in Discord.
         let spoilered = discord::embed::has_spoilered_link(&message.content);
@@ -2118,7 +2173,7 @@ impl App {
                 if blocked {
                     preview.append(&gtk::Image::from_icon_name("mail-reply-sender-symbolic"));
                 } else {
-                    preview.append(&avatar_widget(&original.author, 16, Some(&self.images)));
+                    preview.append(&avatar_widget(&original.author, 16, Some(&self.images), Row::None));
                 }
                 // Discord marks replies that pinged the author with an @.
                 let pinged = message.mentions.iter().any(|u| u.id == original.author.id);

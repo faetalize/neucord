@@ -16,6 +16,7 @@ use super::friends::presence_dot;
 use super::menus::{Choice, Choices, Entry, Item, Kind, Style};
 use super::state::now_ms;
 use super::widgets::avatar_from;
+use crate::images::Row;
 use crate::render::{self, Context, Names};
 
 /// Where a profile or its menu was asked for, and whose it is.
@@ -280,7 +281,7 @@ impl Popout {
                 .height_request(BANNER_HEIGHT)
                 .overflow(gtk::Overflow::Hidden)
                 .build();
-            app.images.set(&picture, &url, false);
+            app.images.set(&picture, &url);
             column.append(&picture);
         }
 
@@ -301,7 +302,7 @@ impl Popout {
 
         let header = gtk::Box::builder().spacing(12).margin_top(12).margin_start(12).margin_end(12).build();
         let avatar = gtk::Overlay::builder()
-            .child(&avatar_from(&name, AVATAR, Some(&app.images), picture))
+            .child(&avatar_from(&name, AVATAR, Some(&app.images), picture, Row::None))
             .valign(gtk::Align::Start)
             .build();
         if let Some(status) = &status {
@@ -506,7 +507,7 @@ fn badge_picture(app: &Rc<App>, badge: &Badge) -> gtk::Widget {
         .content_fit(gtk::ContentFit::Contain)
         .tooltip_text(&badge.description)
         .build();
-    app.images.set(&picture, &discord::cdn::badge_icon_url(&badge.icon), false);
+    app.images.set(&picture, &discord::cdn::badge_icon_url(&badge.icon));
     picture.upcast()
 }
 

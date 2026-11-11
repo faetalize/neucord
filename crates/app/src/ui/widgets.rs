@@ -1,9 +1,10 @@
 //! Small widgets shared across the UI.
 
 use discord::User;
+use discord::animation::Subject;
 use gtk::prelude::*;
 
-use crate::images::Images;
+use crate::images::{Images, Row};
 
 /// A mention count, or nothing for zero.
 pub(super) fn badge(count: u32) -> Option<gtk::Label> {
@@ -26,10 +27,12 @@ pub(super) fn initials(name: &str) -> String {
 }
 
 /// A round avatar of `size` px: the user's picture over their initials, which
-/// show while it loads, or the initials alone when they have no picture.
-pub(super) fn avatar_widget(user: &User, size: i32, images: Option<&Images>) -> gtk::Widget {
+/// show while it loads, or the initials alone when they have no picture. An
+/// animated one is a still, moving under the pointer, and for `row`'s
+/// pointer too if the account plays GIFs.
+pub(super) fn avatar_widget(user: &User, size: i32, images: Option<&Images>, row: Row) -> gtk::Widget {
     let picture = user.avatar.as_deref().map(|hash| (discord::cdn::avatar_url(user.id.0, hash, 64), hash));
-    avatar_from(user.display_name(), size, images, picture)
+    avatar_from(user.display_name(), size, images, picture, row)
 }
 
 /// [`avatar_widget`] for a picture at `url`, animated if its hash says so.
@@ -38,6 +41,7 @@ pub(super) fn avatar_from(
     size: i32,
     images: Option<&Images>,
     picture: Option<(String, &str)>,
+    row: Row,
 ) -> gtk::Widget {
     let initials = adw::Avatar::new(size, Some(name), true);
     let (Some((url, hash)), Some(images)) = (picture, images) else {
@@ -45,7 +49,11 @@ pub(super) fn avatar_from(
     };
     let overlay = gtk::Overlay::builder().child(&initials).build();
     let picture = round_picture(size);
-    images.set(&picture, &url, discord::cdn::is_animated(hash));
+    if discord::cdn::is_animated(hash) {
+        images.set_moving(&picture, &discord::cdn::still(&url), &url, Subject::Avatar, row);
+    } else {
+        images.set(&picture, &url);
+    }
     overlay.add_overlay(&picture);
     overlay.upcast()
 }

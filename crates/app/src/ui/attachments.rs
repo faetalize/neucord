@@ -5,13 +5,14 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use discord::animation::Subject;
 use discord::settings::MediaSettings;
 use discord::{Attachment, Snowflake, Sticker};
 use gtk::glib;
 use gtk::prelude::*;
 
 use super::embeds::{behind_spoiler, fitted_picture};
-use crate::images::Images;
+use crate::images::{Images, Row};
 
 /// The official client's box for a single image or video attachment.
 const MAX_W: f64 = 550.0;
@@ -27,7 +28,7 @@ pub(super) const WAVE_HEIGHT: i32 = 32;
 enum Shown {
     Voice,
     Audio,
-    Image { autoplay: bool },
+    Image,
     Video,
 }
 
@@ -42,14 +43,14 @@ pub(super) fn attachment(attachment: &Attachment, voice: bool, images: &Images, 
         // Before images: a video of no stated type has dimensions too.
         Shown::Video
     } else if attachment.is_image() && inline {
-        Shown::Image { autoplay: media.gif_auto_play }
+        Shown::Image
     } else {
         return file(attachment);
     };
     let build = move |attachment: &Attachment, images: &Images| match shown {
         Shown::Voice => voice_message(attachment, images),
         Shown::Audio => audio(attachment, images),
-        Shown::Image { autoplay } => image(attachment, images, autoplay),
+        Shown::Image => image(attachment, images),
         Shown::Video => video(attachment, images),
     };
     if attachment.is_spoiler() {
@@ -61,7 +62,7 @@ pub(super) fn attachment(attachment: &Attachment, voice: bool, images: &Images, 
 }
 
 /// A sticker, or for one we can't draw, its name.
-pub(super) fn sticker(sticker: &Sticker, images: &Images, autoplay: bool) -> gtk::Widget {
+pub(super) fn sticker(sticker: &Sticker, images: &Images) -> gtk::Widget {
     let size = Sticker::SIZE;
     let request = crate::images::request_size((size as i32, size as i32), images.scale(), None).0;
     let Some((url, animated)) = sticker.image(request) else {
@@ -78,7 +79,11 @@ pub(super) fn sticker(sticker: &Sticker, images: &Images, autoplay: bool) -> gtk
     fitted.picture.set_css_classes(&[]);
     fitted.picture.set_tooltip_text(Some(&sticker.name));
     fitted.picture.set_alternative_text(Some(&sticker.name));
-    images.set(&fitted.picture, &url, animated && autoplay);
+    if animated {
+        images.set_moving(&fitted.picture, &url, &url, Subject::Sticker, Row::Parent);
+    } else {
+        images.set(&fitted.picture, &url);
+    }
     // So a right-click on it can say which one.
     fitted.frame.set_widget_name(&format!("{STICKER_NAME}{}", sticker.id));
     fitted.frame.upcast()
@@ -93,13 +98,17 @@ pub(super) fn sticker_id(widget: &gtk::Widget) -> Option<Snowflake> {
 }
 
 /// An inline image, scaled to fit a reasonable box.
-fn image(attachment: &Attachment, images: &Images, autoplay: bool) -> gtk::Widget {
+fn image(attachment: &Attachment, images: &Images) -> gtk::Widget {
     let fitted = fitted_picture(attachment.width, attachment.height, MAX_W, MAX_H);
     fitted.picture.set_css_classes(&["attachment-image"]);
     // Through the media proxy when we can, which sends it at the size shown.
     let url = attachment.proxy_url.as_deref().unwrap_or(&attachment.url);
     let original = attachment.width.zip(attachment.height);
-    images.set_sized(&fitted.picture, url, fitted.size, original, autoplay && attachment.is_animated());
+    if attachment.is_animated() {
+        images.set_sized_moving(&fitted.picture, url, fitted.size, original, Subject::Gif, Row::None);
+    } else {
+        images.set_sized(&fitted.picture, url, fitted.size, original);
+    }
     fitted.frame.upcast()
 }
 

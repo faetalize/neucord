@@ -23,6 +23,7 @@ use super::menus;
 use super::profile::UserTarget;
 use super::state::Target;
 use super::widgets::avatar_widget;
+use crate::images::Row;
 use crate::render;
 
 /// How long the list rests before the ranges it shows are sent, as the
@@ -464,7 +465,7 @@ impl App {
             row.add_css_class("dimmed");
         }
         let avatar = gtk::Overlay::builder()
-            .child(&avatar_widget(user, 32, Some(&self.images)))
+            .child(&avatar_widget(user, 32, Some(&self.images), Row::Parent))
             .valign(gtk::Align::Center)
             .build();
         avatar.add_overlay(&presence_dot(status));

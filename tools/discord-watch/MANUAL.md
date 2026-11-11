@@ -425,6 +425,17 @@ changed for unrelated reasons only needs a note in the issue.
   channels, and threads outside forums. A box under a message shows only for
   a known thread of a message with `HAS_THREAD` (`r8` in 679636).
 
+- **When media moves** (`discord::animation`, `images/play.rs`). Everything
+  waits for window focus. Avatars and GIFs: the hook in 45837 (anchor
+  `useReducedMotion`), where the pointer or `gifAutoPlay` moves them; which
+  surface lets its row count as the pointer is each avatar hook call's
+  `animateOnHover` (549587 for messages, anchor `ANIMATE_CHAT_AVATAR`). Server
+  icons: the hovered flag into `getIconURL` in 396655 (anchor
+  `guildbar.AVATAR_SIZE`). Emoji: 565645 (anchor `registerAnimatedElementRef`)
+  and the visibility manager in 830178, whose cap of 100 is in the watched
+  `handleVisible` and `potentiallyAnimateNewNode`. Stickers: `Qn` in 378058.
+  The reduced-motion overrides are in 955572 (anchor
+  `REDUCED_MOTION_STICKERS`).
 - **Channels we can't view** (`Guild::sidebar`, `permissions::access`).
   Neucord lists, counts unread, opens and posts only where it has a
   channel's `accessPermissions`: View Channel, and Connect too in voice and

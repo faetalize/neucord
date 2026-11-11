@@ -4,13 +4,14 @@
 use std::fmt::Write as _;
 use std::rc::Rc;
 
+use discord::animation::Subject;
 use discord::settings::RailEntry;
 use discord::{Guild, Snowflake};
 use gtk::prelude::*;
 
 use super::App;
 use super::widgets::{initials, set_badge};
-use crate::images::Images;
+use crate::images::{Images, Row};
 
 /// What a rail button stands for, to work out its markers.
 pub(super) enum Mark {
@@ -173,11 +174,17 @@ impl App {
                     .content_fit(gtk::ContentFit::Cover)
                     .overflow(gtk::Overflow::Hidden)
                     .build();
-                self.images.set(
-                    &picture,
-                    &discord::cdn::guild_icon_url(guild.id.0, hash, 64),
-                    discord::cdn::is_animated(hash),
-                );
+                if discord::cdn::is_animated(hash) {
+                    self.images.set_moving(
+                        &picture,
+                        &discord::cdn::guild_icon_still_url(guild.id.0, hash, 64),
+                        &discord::cdn::guild_icon_url(guild.id.0, hash, 64),
+                        Subject::ServerIcon,
+                        Row::None,
+                    );
+                } else {
+                    self.images.set(&picture, &discord::cdn::guild_icon_url(guild.id.0, hash, 64));
+                }
                 button.set_child(Some(&picture));
             }
             None => button.set_label(&initials(&guild.name)),
@@ -294,7 +301,7 @@ pub(super) fn folder_preview(guilds: &[&Guild], images: &Images) -> gtk::Widget 
                     .css_classes(["mini-icon"])
                     .build();
                 // Static frame only: four animations in one button is noise.
-                images.set(&picture, &discord::cdn::guild_icon_still_url(guild.id.0, hash, 32), false);
+                images.set(&picture, &discord::cdn::guild_icon_still_url(guild.id.0, hash, 32));
                 picture.upcast()
             }
             None => gtk::Label::builder()

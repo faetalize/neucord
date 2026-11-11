@@ -43,6 +43,16 @@ pub fn guild_icon_url(guild_id: u64, hash: &str, size: u16) -> String {
     format!("{CDN}/icons/{guild_id}/{hash}.{}?size={size}", ext(hash))
 }
 
+/// The still of a CDN image asked for as a GIF (an avatar, icon or emoji),
+/// the same size as a PNG with its first frame. Any other URL comes back
+/// unchanged.
+pub fn still(url: &str) -> String {
+    match url.strip_prefix(CDN).and_then(|rest| rest.split_once(".gif?")) {
+        Some((path, query)) => format!("{CDN}{path}.png?{query}"),
+        None => url.to_owned(),
+    }
+}
+
 /// A guild icon as a still PNG, even for animated icons (their first frame).
 pub fn guild_icon_still_url(guild_id: u64, hash: &str, size: u16) -> String {
     format!("{CDN}/icons/{guild_id}/{hash}.png?size={size}")
@@ -222,6 +232,20 @@ mod tests {
         assert!(avatar_url(5, "a_1234", 64).ends_with("a_1234.gif?size=64"));
         assert!(is_animated("a_1234"));
         assert!(!is_animated("plain"));
+    }
+
+    #[test]
+    fn stills_of_gifs() {
+        assert_eq!(still(&avatar_url(5, "a_1234", 64)), "https://cdn.discordapp.com/avatars/5/a_1234.png?size=64");
+        assert_eq!(still(&emoji_url(7, true, 48)), "https://cdn.discordapp.com/emojis/7.png?size=48");
+        assert_eq!(
+            still(&member_avatar_url(9, 5, "a_x", 64)),
+            "https://cdn.discordapp.com/guilds/9/users/5/avatars/a_x.png?size=64"
+        );
+        let plain = avatar_url(5, "b", 64);
+        assert_eq!(still(&plain), plain);
+        let elsewhere = "https://example.com/a.gif?size=64";
+        assert_eq!(still(elsewhere), elsewhere, "only the CDN has the PNG");
     }
 
     #[test]

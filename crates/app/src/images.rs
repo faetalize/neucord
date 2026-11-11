@@ -4,10 +4,12 @@
 //!
 //! Encoded bytes are fetched once (memory → disk → network). Still images
 //! decode once per URL into a shared `gdk::Texture`, so rows rebuilt while
-//! scrolling show them at once. GIFs decode per widget into a frame-stepping
-//! paintable so they animate (GTK's `Picture` shows only the first frame
-//! otherwise). Images from Discord's media proxy are requested at the size
-//! they are shown, which keeps both downloads and decodes small.
+//! scrolling show them at once. Animated ones show such a still until the
+//! rules of [`discord::animation`] let them move; they then decode (once per
+//! URL while anyone shows them) into a frame-stepping paintable that ticks
+//! only while it is playing and in view (GTK's `Picture` shows only the first
+//! frame otherwise). Images from Discord's media proxy are requested at the
+//! size they are shown, which keeps both downloads and decodes small.
 //!
 //! The memory caches and the video files are bounded; the image files on
 //! disk are not yet (#18).
@@ -25,8 +27,13 @@ use soup::prelude::*;
 
 mod animated;
 mod lru;
-pub use animated::{AnimatedPaintable, FramePaintable};
+mod play;
+use animated::{AnimatedPaintable, FramePaintable, Lease};
+use discord::animation::Subject;
 use lru::Lru;
+pub use play::{Motion, Row, Update};
+
+use crate::rich_text::RichText;
 
 const MIB: u64 = 1024 * 1024;
 /// Encoded bytes kept in memory, which saves rereading files.
@@ -50,6 +57,9 @@ struct Inner {
     textures: RefCell<Lru<gdk::Texture>>,
     /// The window's scale factor, for asking the proxy for enough pixels.
     scale: Cell<i32>,
+    /// Decoded animations by URL, while some widget still holds one.
+    moving: RefCell<HashMap<String, glib::WeakRef<gdk::Paintable>>>,
+    motion: Motion,
     /// URLs currently being fetched → wakers waiting for the bytes.
     pending: RefCell<HashMap<String, Vec<async_channel::Sender<Option<glib::Bytes>>>>>,
 }
@@ -69,6 +79,8 @@ impl Images {
             memory: RefCell::new(Lru::new(BYTES_BUDGET)),
             textures: RefCell::new(Lru::new(TEXTURE_BUDGET)),
             scale: Cell::new(1),
+            moving: RefCell::default(),
+            motion: Motion::new(),
             pending: RefCell::new(HashMap::new()),
         }))
     }
@@ -82,32 +94,28 @@ impl Images {
         self.0.scale.get()
     }
 
-    /// Fetch and set an image onto `picture`. `animated` selects the GIF path.
-    /// If the picture is dropped before the bytes arrive, nothing happens.
-    pub fn set(&self, picture: &gtk::Picture, url: &str, animated: bool) {
+    /// Fetch and set an image onto `picture`, as a still: the first frame of
+    /// an animation. If the picture is dropped before the bytes arrive,
+    /// nothing happens.
+    pub fn set(&self, picture: &gtk::Picture, url: &str) {
         let weak = picture.downgrade();
-        self.load(url, animated, move |paintable| {
+        self.load(url, move |paintable| {
             if let Some(picture) = weak.upgrade() {
                 picture.set_paintable(Some(&paintable));
             }
         });
     }
 
-    /// Fetch an image and hand it to `done`: at once if it is decoded
-    /// already, else once it has loaded, and never if it fails to.
-    /// `animated` selects the GIF path.
-    pub fn load(&self, url: &str, animated: bool, done: impl FnOnce(gdk::Paintable) + 'static) {
-        if !animated && let Some(texture) = self.0.textures.borrow_mut().get(url) {
+    /// Fetch an image and hand it to `done` as a still: at once if it is
+    /// decoded already, else once it has loaded, and never if it fails to.
+    pub fn load(&self, url: &str, done: impl FnOnce(gdk::Paintable) + 'static) {
+        if let Some(texture) = self.0.textures.borrow_mut().get(url) {
             return done(texture.upcast());
         }
         let url = url.to_owned();
         let this = self.clone();
         glib::spawn_future_local(async move {
             let Some(bytes) = this.load_bytes(&url).await else { return };
-            // Fall through to a still first frame if animation decoding failed.
-            if animated && let Some(paintable) = apng_paintable(&bytes).or_else(|| animated_paintable(&bytes)) {
-                return done(paintable);
-            }
             // Another picture may have decoded it while we waited.
             let cached = this.0.textures.borrow_mut().get(&url);
             let texture = match cached.map_or_else(|| gdk::Texture::from_bytes(&bytes), Ok) {
@@ -123,16 +131,191 @@ impl Images {
     /// Like [`set`](Self::set), but asks Discord's media proxy for the image
     /// at the size it is `shown` at most, never above `original`. Other URLs
     /// load as they are.
-    pub fn set_sized(
+    pub fn set_sized(&self, picture: &gtk::Picture, url: &str, shown: (i32, i32), original: Option<(u32, u32)>) {
+        self.set(picture, &self.sized(url, shown, original));
+    }
+
+    /// [`set_moving`](Self::set_moving) for an image whose still is its own
+    /// first frame, sized as [`set_sized`](Self::set_sized) does.
+    pub fn set_sized_moving(
         &self,
         picture: &gtk::Picture,
         url: &str,
         shown: (i32, i32),
         original: Option<(u32, u32)>,
-        animated: bool,
+        subject: Subject,
+        row: Row,
     ) {
+        let url = self.sized(url, shown, original);
+        self.set_moving(picture, &url, &url, subject, row);
+    }
+
+    fn sized(&self, url: &str, shown: (i32, i32), original: Option<(u32, u32)>) -> String {
         let (width, height) = request_size(shown, self.0.scale.get(), original);
-        self.set(picture, &discord::cdn::proxy_sized(url, width, height), animated);
+        discord::cdn::proxy_sized(url, width, height)
+    }
+
+    /// Call `on_update` with where `widget`'s media stands under the rules
+    /// for `subject`, now and whenever that changes: for media that isn't a
+    /// picture, such as a video.
+    pub fn watch(
+        &self,
+        widget: &impl IsA<gtk::Widget>,
+        subject: Subject,
+        row: Row,
+        on_update: impl Fn(Update) + 'static,
+    ) {
+        play::attach(&self.0.motion, widget, subject, row, 0, on_update);
+    }
+
+    /// What the window, the pointer and the account's settings say about
+    /// moving media.
+    pub fn motion(&self) -> &Motion {
+        &self.0.motion
+    }
+
+    /// Show `still` in `picture`, and the animation at `moving` for as long
+    /// as the rules for `subject` say it should move: the still comes back
+    /// when they stop, and the frames advance only while the picture is in
+    /// view and the window has focus. `row` says whose pointer counts as the
+    /// pointer on it besides its own, where the rules allow.
+    pub fn set_moving(&self, picture: &gtk::Picture, still: &str, moving: &str, subject: Subject, row: Row) {
+        #[derive(Default)]
+        struct Shown {
+            paintable: RefCell<Option<gdk::Paintable>>,
+            lease: RefCell<Option<Lease>>,
+            update: Cell<Option<play::Update>>,
+            loading: Cell<bool>,
+        }
+        let shown = Rc::new(Shown::default());
+        let (this, weak) = (self.clone(), picture.downgrade());
+        let (still, moving) = (still.to_owned(), moving.to_owned());
+        play::attach(&self.0.motion, picture, subject, row, 0, move |update| {
+            let Some(picture) = weak.upgrade() else { return };
+            shown.update.set(Some(update));
+            if !update.moving {
+                *shown.lease.borrow_mut() = None;
+                if shown.paintable.take().is_some() || picture.paintable().is_none() {
+                    this.set(&picture, &still);
+                }
+                return;
+            }
+            let held = shown.paintable.borrow().clone();
+            match held {
+                Some(paintable) => {
+                    *shown.lease.borrow_mut() = update.plays.then(|| animated::play(&paintable)).flatten();
+                }
+                None if !shown.loading.replace(true) => {
+                    let (this, shown, weak, url) = (this.clone(), shown.clone(), weak.clone(), moving.clone());
+                    glib::spawn_future_local(async move {
+                        let paintable = this.moving(&url).await;
+                        shown.loading.set(false);
+                        let (Some(picture), Some(paintable)) = (weak.upgrade(), paintable) else { return };
+                        // It may have stopped moving while it loaded.
+                        let Some(update) = shown.update.get().filter(|u| u.moving) else { return };
+                        picture.set_paintable(Some(&paintable));
+                        *shown.lease.borrow_mut() = update.plays.then(|| animated::play(&paintable)).flatten();
+                        *shown.paintable.borrow_mut() = Some(paintable);
+                    });
+                }
+                None => {}
+            }
+        });
+    }
+
+    /// The custom emoji of `text` (the `n`th image of it, its still and its
+    /// animation if it has one), which move as one under the rules for
+    /// emoji. Animated ones take places from the budget of how many play at
+    /// once.
+    pub fn set_emoji(&self, text: &RichText, emoji: Vec<(usize, String, Option<String>)>) {
+        #[derive(Default)]
+        struct Slot {
+            still: RefCell<Option<gdk::Paintable>>,
+            moving: RefCell<Option<gdk::Paintable>>,
+            lease: RefCell<Option<Lease>>,
+            loading: Cell<bool>,
+        }
+        let mut animated = Vec::new();
+        for (n, still, moving) in emoji {
+            let slot = Rc::new(Slot::default());
+            let weak = text.downgrade();
+            self.load(&still, {
+                let slot = slot.clone();
+                move |paintable| {
+                    // The still may arrive after the animation has been put in.
+                    *slot.still.borrow_mut() = Some(paintable.clone());
+                    if let Some(text) = weak.upgrade()
+                        && slot.moving.borrow().is_none()
+                    {
+                        text.set_image(n, paintable);
+                    }
+                }
+            });
+            if let Some(moving) = moving {
+                animated.push((n, slot, moving));
+            }
+        }
+        if animated.is_empty() {
+            return;
+        }
+        let update = Rc::new(Cell::new(None::<play::Update>));
+        let (this, weak) = (self.clone(), text.downgrade());
+        let count = animated.len() as u32;
+        let animated = Rc::new(animated);
+        play::attach(&self.0.motion, text, Subject::Emoji, Row::Parent, count, move |now| {
+            let Some(text) = weak.upgrade() else { return };
+            update.set(Some(now));
+            for (n, slot, url) in animated.iter() {
+                let n = *n;
+                if !now.moving {
+                    *slot.lease.borrow_mut() = None;
+                    if slot.moving.take().is_some()
+                        && let Some(still) = slot.still.borrow().clone()
+                    {
+                        text.set_image(n, still);
+                    }
+                    continue;
+                }
+                let held = slot.moving.borrow().clone();
+                match held {
+                    Some(paintable) => {
+                        *slot.lease.borrow_mut() = now.plays.then(|| animated::play(&paintable)).flatten();
+                    }
+                    None if !slot.loading.replace(true) => {
+                        let (this, slot, weak, url, update) =
+                            (this.clone(), slot.clone(), weak.clone(), url.clone(), update.clone());
+                        glib::spawn_future_local(async move {
+                            let paintable = this.moving(&url).await;
+                            slot.loading.set(false);
+                            let (Some(text), Some(paintable)) = (weak.upgrade(), paintable) else { return };
+                            let Some(now) = update.get().filter(|u| u.moving) else { return };
+                            text.set_image(n, paintable.clone());
+                            *slot.lease.borrow_mut() = now.plays.then(|| animated::play(&paintable)).flatten();
+                            *slot.moving.borrow_mut() = Some(paintable);
+                        });
+                    }
+                    None => {}
+                }
+            }
+        });
+    }
+
+    /// An animation decoded, shared by every widget that shows it at once.
+    async fn moving(&self, url: &str) -> Option<gdk::Paintable> {
+        let held = |this: &Self| this.0.moving.borrow().get(url).and_then(|weak| weak.upgrade());
+        if let Some(paintable) = held(self) {
+            return Some(paintable);
+        }
+        let bytes = self.load_bytes(url).await?;
+        // Another widget may have decoded it while we waited.
+        if let Some(paintable) = held(self) {
+            return Some(paintable);
+        }
+        let paintable = apng_paintable(&bytes).or_else(|| animated_paintable(&bytes))?;
+        let mut moving = self.0.moving.borrow_mut();
+        moving.retain(|_, weak| weak.upgrade().is_some());
+        moving.insert(url.to_owned(), paintable.downgrade());
+        Some(paintable)
     }
 
     /// Encoded bytes for a URL: memory → disk → network, filling caches.
