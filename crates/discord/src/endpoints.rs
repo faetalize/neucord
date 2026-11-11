@@ -10,6 +10,8 @@
 use std::fmt::Display;
 
 pub(crate) const MESSAGES: Endpoint = Endpoint::get("/channels/{channel}/messages");
+pub(crate) const SEARCH_GUILD_MESSAGES: Endpoint = Endpoint::get("/guilds/{guild}/messages/search");
+pub(crate) const SEARCH_CHANNEL_MESSAGES: Endpoint = Endpoint::get("/channels/{channel}/messages/search");
 pub(crate) const SEND_MESSAGE: Endpoint = Endpoint::post("/channels/{channel}/messages");
 pub(crate) const EDIT_MESSAGE: Endpoint = Endpoint::patch("/channels/{channel}/messages/{message}");
 pub(crate) const DELETE_MESSAGE: Endpoint = Endpoint::delete("/channels/{channel}/messages/{message}");
@@ -269,6 +271,8 @@ mod tests {
     #[should_panic(expected = "doesn't have")]
     fn extra_parameter() {
         OPEN_DM.check(&["user"]);
+        SEARCH_GUILD_MESSAGES.check(&["guild"]);
+        SEARCH_CHANNEL_MESSAGES.check(&["channel"]);
     }
 
     /// discord-watch reads the table as text, so a row written any other way

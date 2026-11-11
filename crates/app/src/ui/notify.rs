@@ -229,6 +229,11 @@ impl App {
     /// Jump to any channel we can view, DM or server (from a notification
     /// click, or a forward's footer).
     pub(super) fn open_channel(self: &Rc<Self>, id: Snowflake) {
+        self.open_channel_at(id, None);
+    }
+
+    /// [`Self::open_channel`], scrolled to `message` if one is given.
+    pub(super) fn open_channel_at(self: &Rc<Self>, id: Snowflake, message: Option<Snowflake>) {
         let found = {
             let mut state = self.state.borrow_mut();
             let guild = state.find_channel(id).filter(|_| state.can_view(id)).map(|(guild, _)| guild.map(|g| g.id));
@@ -240,7 +245,7 @@ impl App {
         self.window.present();
         if found {
             self.rebuild_rail();
-            self.select_channel(id);
+            self.select_channel_at(id, message);
             self.show_content();
         }
     }
