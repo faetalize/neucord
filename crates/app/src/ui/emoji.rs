@@ -30,7 +30,7 @@ pub(super) const AUTOCOMPLETE: usize = 50;
 
 /// Only in Developer Mode, like the rest of the picker's menu (233503).
 fn developer(app: &App) -> bool {
-    app.state.borrow().settings.developer_mode
+    app.account.state.borrow().settings.developer_mode
 }
 
 /// The emoji a menu was opened on.
@@ -106,7 +106,7 @@ impl App {
     /// The emoji `channel` offers: every server's, the channel's own first
     /// and then the rail's order, each checked against what we may do there.
     pub(super) fn emoji_library(&self, channel: Snowflake) -> Library {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let found = state.find_channel(channel);
         let own = found.and_then(|(guild, _)| guild).map(|g| g.id);
         // Server channels need Use External Emojis; a DM needs nothing.
@@ -146,7 +146,7 @@ impl App {
         let library = Rc::new(library);
         let tone = {
             let app = Rc::downgrade(self);
-            move || app.upgrade().and_then(|app| app.state.borrow().settings.skin_tone)
+            move || app.upgrade().and_then(|app| app.account.state.borrow().settings.skin_tone)
         };
         let spec = Spec {
             placeholder: "Search emoji",
@@ -199,7 +199,7 @@ impl App {
     /// The emoji the picker lists first: the favourites, then those used
     /// most (reactions for a reaction picker), as far as `library` has them.
     pub(super) fn emoji_shortcuts(&self, library: &Library, intention: Intention) -> Shortcuts {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.account.state.borrow_mut();
         let favorites = state.frecency.favorite_emojis.iter().filter_map(|key| library.item(key)).collect();
         let stores = &mut state.frecency.stores;
         let history = match intention {
@@ -212,7 +212,7 @@ impl App {
 
     /// How much each emoji was used, for a search to rank by.
     pub(super) fn emoji_scores(&self, intention: Intention) -> Scores {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.account.state.borrow_mut();
         let stores = &mut state.frecency.stores;
         match intention {
             Intention::Chat => stores.emoji.history.scores(now_ms() as u64),
@@ -224,7 +224,7 @@ impl App {
     /// chosen from a list, saved as the client saves it. `chosen` runs once
     /// the choice is made.
     fn tone_button(self: &Rc<Self>, chosen: impl Fn() + Clone + 'static) -> gtk::Widget {
-        let current = self.state.borrow().settings.skin_tone;
+        let current = self.account.state.borrow().settings.skin_tone;
         let sample = |tone: Option<Tone>| discord::emoji::unicode("wave").map_or("👋", |e| e.toned(tone).glyph);
         let button =
             gtk::MenuButton::builder().label(sample(current)).tooltip_text("Skin tone").css_classes(["flat"]).build();
@@ -259,7 +259,7 @@ impl App {
     /// client applies the same Nitro rules (`getEmojiUnavailableReason`,
     /// 690521, with the status intention and no channel).
     pub(super) fn status_emoji_library(&self) -> Library {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         Library::new(state.guilds_in_picker_order(None), &state.limits(), &Place { guild: None, external: true })
     }
 }

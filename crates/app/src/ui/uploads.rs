@@ -275,11 +275,11 @@ impl App {
     /// The open channel, if files may be attached to it now: the message box
     /// shows, no edit has it, and the client would offer attaching there.
     pub(super) fn attach_channel(&self) -> Option<Snowflake> {
-        let channel = self.state.borrow().channel?;
+        let channel = self.account.state.borrow().channel?;
         let allowed = self.composer_box.is_visible()
             && self.editing().is_none()
             && !self.has_voice_draft(channel)
-            && self.state.borrow().can_attach(channel);
+            && self.account.state.borrow().can_attach(channel);
         allowed.then_some(channel)
     }
 
@@ -420,7 +420,7 @@ impl App {
     /// channel has slowmode (316576).
     pub(super) fn choose_files(self: &Rc<Self>) {
         let Some(channel) = self.attach_channel() else { return };
-        let single = self.state.borrow().find_channel(channel).is_some_and(|(_, c)| c.rate_limit_per_user > 0);
+        let single = self.account.state.borrow().find_channel(channel).is_some_and(|(_, c)| c.rate_limit_per_user > 0);
         let dialog = gtk::FileDialog::builder().title("Upload a File").build();
         let this = self.clone();
         glib::spawn_future_local(async move {
@@ -514,7 +514,7 @@ impl App {
             return;
         }
         let limits = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             state.limits().uploads(state.find_channel(channel).and_then(|(guild, _)| guild))
         };
         let queued: Vec<u64> = self.drafts.of(channel).iter().map(|u| u.file.borrow().size).collect();
@@ -612,13 +612,13 @@ impl App {
     /// Start (or start again) uploading, as the client does when a file is
     /// added and, for one that failed, when the message is sent.
     fn start_upload(self: &Rc<Self>, upload: &Rc<Upload>) {
-        let Some(rest) = self.state.borrow().rest.clone() else { return };
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
         let channel = upload.channel;
         upload.set_status(Status::Uploading(0));
         let weak = Rc::downgrade(upload);
         let attempts = upload.attempts.clone();
         // Decided here, from the account's experiments, for the file's turn.
-        let webp = self.state.borrow().limits().webp_conversion();
+        let webp = self.account.state.borrow().limits().webp_conversion();
         let task = glib::spawn_future_local(async move {
             let Some(upload) = weak.upgrade() else { return };
             let file = upload.file.borrow().clone();
@@ -652,7 +652,7 @@ impl App {
 
     /// Take a file out of the draft: its upload stops, or is deleted.
     fn remove_upload(self: &Rc<Self>, channel: Snowflake, upload: &Rc<Upload>) {
-        upload.cancel(self.state.borrow().rest.clone());
+        upload.cancel(self.account.state.borrow().rest.clone());
         if let Some(files) = self.drafts.files.borrow_mut().get_mut(&channel) {
             files.retain(|u| !Rc::ptr_eq(u, upload));
         }
@@ -824,10 +824,10 @@ impl App {
     /// Cancel a send that is still uploading: the files are taken back, and
     /// the uploads that finished are deleted.
     pub(super) fn cancel_sending(self: &Rc<Self>) {
-        let Some(channel) = self.state.borrow().channel else { return };
+        let Some(channel) = self.account.state.borrow().channel else { return };
         let sending = self.drafts.sending.borrow().get(&channel).cloned();
         let Some(sending) = sending.filter(|s| !s.posting.get()) else { return };
-        let rest = self.state.borrow().rest.clone();
+        let rest = self.account.state.borrow().rest.clone();
         for upload in &sending.files {
             upload.cancel(rest.clone());
         }
@@ -858,7 +858,7 @@ impl App {
     /// What a message sent now from `channel` takes along: nothing where the
     /// client wouldn't offer attaching, which also hides the draft.
     pub(super) fn files_for_message(&self, channel: Snowflake) -> Vec<Rc<Upload>> {
-        if !self.state.borrow().can_attach(channel) {
+        if !self.account.state.borrow().can_attach(channel) {
             return Vec::new();
         }
         self.drafts.for_new_message(channel)

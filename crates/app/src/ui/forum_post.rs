@@ -73,7 +73,7 @@ impl App {
     /// The forum whose post form is open and takes files now.
     pub(super) fn post_form_channel(&self) -> Option<Snowflake> {
         let forum = self.post_form.borrow().as_ref()?.forum;
-        self.state.borrow().can_attach_to_post(forum).then_some(forum)
+        self.account.state.borrow().can_attach_to_post(forum).then_some(forum)
     }
 
     /// Show the open form's files as the draft is now.
@@ -86,7 +86,7 @@ impl App {
 
     /// Open the form for a post in `forum`, where the client shows it.
     pub(super) fn open_post_form(self: &Rc<Self>, forum: Snowflake) {
-        if self.post_form.borrow().is_some() || !self.state.borrow().can_post(forum) {
+        if self.post_form.borrow().is_some() || !self.account.state.borrow().can_post(forum) {
             return;
         }
         let form = Rc::new(self.build_post_form(forum));
@@ -100,7 +100,7 @@ impl App {
 
     fn build_post_form(self: &Rc<Self>, forum: Snowflake) -> PostForm {
         let (media, tags, attach) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let media = state.find_channel(forum).is_some_and(|(_, c)| c.kind == ChannelKind::Media);
             (media, state.post_tags(forum), state.can_attach_to_post(forum))
         };
@@ -367,7 +367,7 @@ impl App {
 
     /// What the draft is, for [`post_creation`]'s checks.
     fn post_draft(&self, form: &PostForm, name: &str, text: &str) -> Problems {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let Some((_, forum)) = state.find_channel(form.forum) else { return Problems::default() };
         let draft = Draft { name, text, files: self.drafts.of(form.forum).len(), tags: form.tags.borrow().len() };
         Problems::of(forum, &draft)
@@ -398,7 +398,7 @@ impl App {
 
     fn choose_post_files(self: &Rc<Self>, forum: Snowflake) {
         // The client's picker takes one file at a time where slowmode is on (316576).
-        let single = self.state.borrow().find_channel(forum).is_some_and(|(_, c)| c.rate_limit_per_user > 0);
+        let single = self.account.state.borrow().find_channel(forum).is_some_and(|(_, c)| c.rate_limit_per_user > 0);
         let dialog = gtk::FileDialog::builder().title("Upload a File").build();
         let this = self.clone();
         glib::spawn_future_local(async move {
@@ -507,13 +507,13 @@ impl App {
         let text = translated.text;
         let files = self.drafts.of(form.forum);
         let (rest, forum, limits) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let found = state.find_channel(form.forum);
             let limits = state.limits().uploads(found.and_then(|(guild, _)| guild));
             (state.rest.clone(), found.map(|(_, c)| c.clone()), limits)
         };
         let (Some(rest), Some(forum_channel)) = (rest, forum) else { return };
-        if let Err(too_long) = self.state.borrow().limits().check_length(&text) {
+        if let Err(too_long) = self.account.state.borrow().limits().check_length(&text) {
             let dialog = adw::AlertDialog::new(Some(too_long.heading()), Some(&too_long.body()));
             dialog.add_response("okay", "_Okay");
             return dialog.present(Some(&form.dialog));
@@ -551,7 +551,7 @@ impl App {
                 // The list shows the post when the forum is next open, as the
                 // client resorts it before it opens the post (`RESORT_THREADS`).
                 this.forum_resort_after_post(form.forum);
-                if this.state.borrow().channel == Some(form.forum) {
+                if this.account.state.borrow().channel == Some(form.forum) {
                     this.select_channel(post.id);
                 }
             }

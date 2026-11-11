@@ -34,18 +34,18 @@ const FOLD_SAVE_AFTER: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Where a channel's settings are kept: its server's entry, or the DMs'.
 fn guild_of(app: &App, channel: Snowflake) -> Option<Option<Snowflake>> {
-    app.state.borrow().find_channel(channel).map(|(guild, _)| guild.map(|g| g.id))
+    app.account.state.borrow().find_channel(channel).map(|(guild, _)| guild.map(|g| g.id))
 }
 
 fn kind_of(app: &App, channel: Snowflake) -> Option<ChannelKind> {
-    app.state.borrow().find_channel(channel).map(|(_, c)| c.kind)
+    app.account.state.borrow().find_channel(channel).map(|(_, c)| c.kind)
 }
 
 impl App {
     /// Save settings for a server, or the DMs, here and on Discord.
     fn save_notification_settings(self: &Rc<Self>, guild: Option<Snowflake>, settings: Value) {
         let (rest, folds) = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             state.notifications.apply(guild, &settings);
             // A server's request carries the folds not yet saved, and the timer for them is done with.
             let folds = if guild.is_some() { state.unsaved_folds() } else { Vec::new() };
@@ -70,7 +70,7 @@ impl App {
     /// after the last change, unless a settings request goes sooner and takes
     /// it along (931260).
     pub(super) fn fold_category(self: &Rc<Self>, category: Snowflake, folded: bool) {
-        if !self.state.borrow_mut().collapsed.set(category, folded) {
+        if !self.account.state.borrow_mut().collapsed.set(category, folded) {
             return;
         }
         self.refresh_badges();
@@ -82,7 +82,7 @@ impl App {
             let Some(this) = this.upgrade() else { return };
             this.fold_save.take();
             let (folds, rest) = {
-                let mut state = this.state.borrow_mut();
+                let mut state = this.account.state.borrow_mut();
                 let folds = state.unsaved_folds();
                 state.collapsed.saving();
                 (folds, state.rest.clone())
@@ -100,7 +100,7 @@ impl App {
     /// Change our mute or level in a thread. The client applies nothing here:
     /// Discord answers with our thread member, which the gateway brings.
     fn save_thread_settings(self: &Rc<Self>, thread: Snowflake, settings: Value) {
-        let Some(rest) = self.state.borrow().rest.clone() else { return };
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
         glib::spawn_future_local(async move {
             if let Err(e) = rest.save_thread_settings(thread, settings).await {
                 eprintln!("thread settings {thread}: {e}");
@@ -118,9 +118,9 @@ impl App {
     /// Mark channels read now, one request each (`CHANNEL_ACK` with
     /// `immediate`, from the menu).
     fn mark_channels_read(self: &Rc<Self>, targets: Vec<(Snowflake, Snowflake)>) {
-        let rest = self.state.borrow().rest.clone();
+        let rest = self.account.state.borrow().rest.clone();
         for &(channel, message) in &targets {
-            self.state.borrow_mut().read.ack(channel, message);
+            self.account.state.borrow_mut().read.ack(channel, message);
             self.withdraw_notification(channel);
         }
         self.refresh_badges();
@@ -138,13 +138,13 @@ impl App {
     /// bulk acks.
     fn mark_guilds_read(self: &Rc<Self>, guilds: &[Snowflake]) {
         let (acks, rest) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let acks: Vec<_> =
                 state.guilds.iter().filter(|g| guilds.contains(&g.id)).flat_map(|g| state.guild_acks(g)).collect();
             (acks, state.rest.clone())
         };
         for ack in &acks {
-            self.state.borrow_mut().read.ack(ack.channel, ack.message);
+            self.account.state.borrow_mut().read.ack(ack.channel, ack.message);
             self.withdraw_notification(ack.channel);
         }
         self.refresh_badges();
@@ -163,7 +163,7 @@ impl App {
     /// ours to post in. Neucord leaves out archived threads and ones we
     /// haven't joined, which the client reopens and joins first.
     pub(super) fn offers_mark_unread(&self, target: &MessageTarget) -> bool {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         state
             .find_channel(target.message.channel_id)
             .is_some_and(|(_, c)| !c.kind.is_thread() || (c.is_active_thread() && c.member.is_some()))
@@ -179,7 +179,7 @@ impl App {
     /// Mark Unread on a channel: from its newest message, as the item
     /// (511904) passes it to the same function (439147).
     fn mark_channel_unread(self: &Rc<Self>, channel: Snowflake) {
-        let newest = self.state.borrow().find_channel(channel).and_then(|(_, c)| c.last_message_id);
+        let newest = self.account.state.borrow().find_channel(channel).and_then(|(_, c)| c.last_message_id);
         if let Some(message) = newest {
             self.mark_unread_at(channel, message);
         }
@@ -187,6 +187,7 @@ impl App {
 
     fn mark_unread_at(self: &Rc<Self>, channel: Snowflake, message: Snowflake) {
         let loaded: Vec<discord::Message> = self
+            .account
             .timelines
             .borrow()
             .get(channel)
@@ -195,7 +196,7 @@ impl App {
         let ids: Vec<Snowflake> = loaded.iter().map(|m| m.id).collect();
         let before = notification_edit::unread_before(&ids, message);
         let (mentions, rest) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let Some(me) = state.me() else { return };
             let place = state.place(channel);
             let group_dm = state.find_channel(channel).is_some_and(|(_, c)| c.kind == ChannelKind::GroupDm);
@@ -216,7 +217,7 @@ impl App {
                 .count() as u32;
             (count, state.rest.clone())
         };
-        self.state.borrow_mut().read.mark_unread(channel, before, mentions);
+        self.account.state.borrow_mut().read.mark_unread(channel, before, mentions);
         self.refresh_badges();
         let Some(rest) = rest else { return };
         glib::spawn_future_local(async move {
@@ -248,13 +249,13 @@ macro_rules! read_items {
         pub(super) const $read: Entry<$target> = Entry::Item(Item {
             name: "mark-channel-read",
             label: "Mark As _Read",
-            shows: |app, target| matches!(app.state.borrow().read_item(target.0), Some(ReadItem::Read { .. })),
+            shows: |app, target| matches!(app.account.state.borrow().read_item(target.0), Some(ReadItem::Read { .. })),
             kind: Kind::Gated {
                 enabled: |app, target| {
-                    matches!(app.state.borrow().read_item(target.0), Some(ReadItem::Read { enabled: true }))
+                    matches!(app.account.state.borrow().read_item(target.0), Some(ReadItem::Read { enabled: true }))
                 },
                 run: |app, target| {
-                    let targets = app.state.borrow().ack_targets(target.0);
+                    let targets = app.account.state.borrow().ack_targets(target.0);
                     app.mark_channels_read(targets);
                 },
             },
@@ -262,7 +263,7 @@ macro_rules! read_items {
         pub(super) const $unread: Entry<$target> = Entry::Item(Item {
             name: "mark-channel-unread",
             label: "Mark _Unread",
-            shows: |app, target| matches!(app.state.borrow().read_item(target.0), Some(ReadItem::Unread)),
+            shows: |app, target| matches!(app.account.state.borrow().read_item(target.0), Some(ReadItem::Unread)),
             kind: Kind::Action(|app, target| app.mark_channel_unread(target.0)),
         });
     };
@@ -277,7 +278,7 @@ macro_rules! mute_items {
             name: concat!("mute-", $name),
             label: $mute_label,
             shows: |app, target| {
-                let state = app.state.borrow();
+                let state = app.account.state.borrow();
                 kind_of(app, target.0).is_some_and($kinds)
                     && !state.notifications.mute_state(guild_of(app, target.0).flatten(), Some(target.0), now_unix()).on
             },
@@ -302,6 +303,7 @@ macro_rules! mute_items {
             shows: |app, target| {
                 kind_of(app, target.0).is_some_and($kinds)
                     && app
+                        .account
                         .state
                         .borrow()
                         .notifications
@@ -336,7 +338,7 @@ macro_rules! thread_mute_items {
             name: concat!("mute-", $name),
             label: $mute_label,
             shows: |app, target| {
-                let state = app.state.borrow();
+                let state = app.account.state.borrow();
                 state.is_forum_post(target.0) == $post
                     && state.thread_joined(target.0) == Some(true)
                     && !state.thread_is_muted(target.0)
@@ -356,7 +358,7 @@ macro_rules! thread_mute_items {
             name: concat!("unmute-", $name),
             label: $unmute_label,
             shows: |app, target| {
-                let state = app.state.borrow();
+                let state = app.account.state.borrow();
                 state.is_forum_post(target.0) == $post
                     && state.thread_joined(target.0) == Some(true)
                     && state.thread_is_muted(target.0)
@@ -367,7 +369,7 @@ macro_rules! thread_mute_items {
             name: concat!("mute-", $name, "-unavailable"),
             label: $mute_label,
             shows: |app, target| {
-                let state = app.state.borrow();
+                let state = app.account.state.borrow();
                 state.is_forum_post(target.0) == $post && state.thread_joined(target.0) == Some(false)
             },
             kind: Kind::Gated { enabled: |_, _| false, run: |_, _| {} },
@@ -384,11 +386,11 @@ thread_mute_items!(MUTE_POST, UNMUTE_POST, MUTE_POST_OFF, "post", true, "Mute _P
 pub(super) const THREAD_NOTIFICATIONS: Entry<ThreadTarget> = Entry::Item(Item {
     name: "thread-notifications",
     label: "_Notification Settings",
-    shows: |app, target| app.state.borrow().thread_joined(target.0) == Some(true),
+    shows: |app, target| app.account.state.borrow().thread_joined(target.0) == Some(true),
     kind: Kind::Submenu(&[&[Entry::Choices(Choices {
         name: "thread-level",
         choices: |app, target| {
-            let level = app.state.borrow().thread_notification_level(target.0);
+            let level = app.account.state.borrow().thread_notification_level(target.0);
             THREAD_LEVELS
                 .map(|(flags, l, label)| Choice {
                     value: flags.to_string(),
@@ -409,14 +411,14 @@ pub(super) const THREAD_NOTIFICATIONS: Entry<ThreadTarget> = Entry::Item(Item {
 pub(super) const THREAD_NOTIFICATIONS_OFF: Entry<ThreadTarget> = Entry::Item(Item {
     name: "thread-notifications-unavailable",
     label: "_Notification Settings",
-    shows: |app, target| app.state.borrow().thread_joined(target.0) == Some(false),
+    shows: |app, target| app.account.state.borrow().thread_joined(target.0) == Some(false),
     kind: Kind::Gated { enabled: |_, _| false, run: |_, _| {} },
 });
 
 /// What a channel's notification levels are called (288104): a stage's
 /// "Only @mentions" is "All Live Stages", and a voice channel has none.
 fn level_choices(app: &App, channel: Snowflake) -> Vec<Choice> {
-    let state = app.state.borrow();
+    let state = app.account.state.borrow();
     let Some((guild, c)) = state.find_channel(channel) else { return Vec::new() };
     let own = state.notifications.channel_level_raw(guild.map(|g| g.id), channel);
     let default = if c.parent_id.is_some() { "Use Category Default" } else { "Use Server Default" };
@@ -439,12 +441,12 @@ const NEW_POSTS: Entry<ChannelTarget> = Entry::Item(Item {
     shows: |app, target| kind_of(app, target.0).is_some_and(ChannelKind::is_forum_like),
     kind: Kind::Check {
         checked: |app, target| {
-            let state = app.state.borrow();
+            let state = app.account.state.borrow();
             state.place(target.0).is_some_and(|place| state.notifications.new_forum_posts(&place))
         },
         set: |app, target, on| {
             let flags = {
-                let state = app.state.borrow();
+                let state = app.account.state.borrow();
                 state
                     .place(target.0)
                     .and_then(|p| p.guild)
@@ -487,7 +489,7 @@ pub(super) const MARK_GUILD_READ: Entry<GuildTarget> = Entry::Item(Item {
     shows: |_, _| true,
     kind: Kind::Gated {
         enabled: |app, target| {
-            let state = app.state.borrow();
+            let state = app.account.state.borrow();
             state.guilds.iter().find(|g| g.id == target.0).is_some_and(|g| state.guild_has_news(g))
         },
         run: |app, target| app.mark_guilds_read(&[target.0]),
@@ -502,7 +504,7 @@ pub(super) const MARK_FOLDER_READ: Entry<FolderTarget> = Entry::Item(Item {
     shows: |_, _| true,
     kind: Kind::Gated {
         enabled: |app, target| {
-            let state = app.state.borrow();
+            let state = app.account.state.borrow();
             state.guilds.iter().filter(|g| target.0.contains(&g.id)).any(|g| state.guild_has_news(g))
         },
         run: |app, target| app.mark_guilds_read(&target.0),
@@ -512,7 +514,7 @@ pub(super) const MARK_FOLDER_READ: Entry<FolderTarget> = Entry::Item(Item {
 pub(super) const MUTE_GUILD: Entry<GuildTarget> = Entry::Item(Item {
     name: "mute-guild",
     label: "Mute _Server",
-    shows: |app, target| !app.state.borrow().notifications.mute_state(Some(target.0), None, now_unix()).on,
+    shows: |app, target| !app.account.state.borrow().notifications.mute_state(Some(target.0), None, now_unix()).on,
     kind: Kind::Submenu(&[&[Entry::Choices(Choices {
         name: "mute-guild-for",
         choices: |_, _| durations(),
@@ -528,7 +530,7 @@ pub(super) const MUTE_GUILD: Entry<GuildTarget> = Entry::Item(Item {
 pub(super) const UNMUTE_GUILD: Entry<GuildTarget> = Entry::Item(Item {
     name: "unmute-guild",
     label: "Unmute _Server",
-    shows: |app, target| app.state.borrow().notifications.mute_state(Some(target.0), None, now_unix()).on,
+    shows: |app, target| app.account.state.borrow().notifications.mute_state(Some(target.0), None, now_unix()).on,
     kind: Kind::Action(|app, target| app.save_notification_settings(Some(target.0), json!({"muted": false}))),
 });
 
@@ -541,7 +543,7 @@ pub(super) const GUILD_NOTIFICATIONS: Entry<GuildTarget> = Entry::Item(Item {
         &[Entry::Choices(Choices {
             name: "guild-level",
             choices: |app, target| {
-                let state = app.state.borrow();
+                let state = app.account.state.borrow();
                 let default =
                     state.guilds.iter().find(|g| g.id == target.0).map_or(0, |g| g.default_message_notifications);
                 let raw = state.notifications.guild_level_raw(Some(target.0));
@@ -567,7 +569,7 @@ pub(super) const GUILD_NOTIFICATIONS: Entry<GuildTarget> = Entry::Item(Item {
                 label: "Suppress @everyone and @here",
                 shows: |_, _| true,
                 kind: Kind::Check {
-                    checked: |app, target| app.state.borrow().notifications.suppress_everyone(target.0),
+                    checked: |app, target| app.account.state.borrow().notifications.suppress_everyone(target.0),
                     set: |app, target, on| {
                         app.save_notification_settings(Some(target.0), json!({"suppress_everyone": on}))
                     },
@@ -578,7 +580,7 @@ pub(super) const GUILD_NOTIFICATIONS: Entry<GuildTarget> = Entry::Item(Item {
                 label: "Suppress All Role @mentions",
                 shows: |_, _| true,
                 kind: Kind::Check {
-                    checked: |app, target| app.state.borrow().notifications.suppress_roles(target.0),
+                    checked: |app, target| app.account.state.borrow().notifications.suppress_roles(target.0),
                     set: |app, target, on| {
                         app.save_notification_settings(Some(target.0), json!({"suppress_roles": on}))
                     },
@@ -589,7 +591,7 @@ pub(super) const GUILD_NOTIFICATIONS: Entry<GuildTarget> = Entry::Item(Item {
                 label: "Suppress Highlights",
                 shows: |_, _| true,
                 kind: Kind::Check {
-                    checked: |app, target| app.state.borrow().notifications.suppress_highlights(target.0),
+                    checked: |app, target| app.account.state.borrow().notifications.suppress_highlights(target.0),
                     // Highlights go by `notify_highlights`: 1 disabled, 2 enabled (the client's `guM`).
                     set: |app, target, on| {
                         app.save_notification_settings(
@@ -604,7 +606,7 @@ pub(super) const GUILD_NOTIFICATIONS: Entry<GuildTarget> = Entry::Item(Item {
                 label: "Mute New Events",
                 shows: |_, _| true,
                 kind: Kind::Check {
-                    checked: |app, target| app.state.borrow().notifications.mute_scheduled_events(target.0),
+                    checked: |app, target| app.account.state.borrow().notifications.mute_scheduled_events(target.0),
                     set: |app, target, on| {
                         app.save_notification_settings(Some(target.0), json!({"mute_scheduled_events": on}))
                     },
@@ -616,7 +618,7 @@ pub(super) const GUILD_NOTIFICATIONS: Entry<GuildTarget> = Entry::Item(Item {
             label: "Mobile Push Notifications",
             shows: |_, _| true,
             kind: Kind::Check {
-                checked: |app, target| app.state.borrow().notifications.mobile_push(target.0),
+                checked: |app, target| app.account.state.borrow().notifications.mobile_push(target.0),
                 set: |app, target, on| app.save_notification_settings(Some(target.0), json!({"mobile_push": on})),
             },
         })],
@@ -631,7 +633,7 @@ pub(super) const HIDE_MUTED_CHANNELS: Entry<GuildTarget> = Entry::Item(Item {
     label: "Hide Muted Channels",
     shows: |_, _| true,
     kind: Kind::Check {
-        checked: |app, target| app.state.borrow().notifications.hide_muted_channels(target.0),
+        checked: |app, target| app.account.state.borrow().notifications.hide_muted_channels(target.0),
         set: |app, target, on| app.save_notification_settings(Some(target.0), json!({"hide_muted_channels": on})),
     },
 });

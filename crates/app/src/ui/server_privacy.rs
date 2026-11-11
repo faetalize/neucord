@@ -23,7 +23,7 @@ use super::settings::Show;
 pub(super) const PRIVACY_SETTINGS: Entry<GuildTarget> = Entry::Item(Item {
     name: "server-privacy-settings",
     label: "_Privacy Settings",
-    shows: |app, target| app.state.borrow().guilds.iter().any(|g| g.id == target.0),
+    shows: |app, target| app.account.state.borrow().guilds.iter().any(|g| g.id == target.0),
     kind: Kind::Action(|app, target| app.show_server_privacy(target.0)),
 });
 
@@ -59,6 +59,7 @@ impl App {
             return open.dialog.present(Some(&self.window));
         }
         let Some((name, hub)) = self
+            .account
             .state
             .borrow()
             .guilds
@@ -104,14 +105,18 @@ impl App {
                     direct_messages_text(settings.privacy.friend_sources.only_server_members(), Some(hub));
                 (title.to_owned(), note.to_owned())
             }),
-            Box::new(move |app, settings| settings.privacy.direct_messages(&app.state.borrow().gates, Some(server))),
+            Box::new(move |app, settings| {
+                settings.privacy.direct_messages(&app.account.state.borrow().gates, Some(server))
+            }),
             |app, server, allowed| app.set_direct_messages(Some(server), allowed),
             None,
         );
         row(
             "Message requests",
             Box::new(move |_| ("Message requests".to_owned(), message_requests_note(hub).to_owned())),
-            Box::new(move |app, settings| settings.privacy.message_requests(&app.state.borrow().gates, Some(server))),
+            Box::new(move |app, settings| {
+                settings.privacy.message_requests(&app.account.state.borrow().gates, Some(server))
+            }),
             |app, server, on| app.set_message_requests(Some(server), on),
             Some(super::privacy::GUARDIAN),
         );
@@ -126,7 +131,7 @@ impl App {
             }),
             Box::new(move |_, settings| settings.privacy.activity_status(server)),
             |app, server, on| {
-                let current = app.state.borrow().settings.privacy.activity_restricted_servers.clone();
+                let current = app.account.state.borrow().settings.privacy.activity_restricted_servers.clone();
                 let servers = with_server(&app.live_servers(&current), server, !on);
                 app.change_setting(Setting::ActivityRestrictedServers(servers));
             },
@@ -139,7 +144,7 @@ impl App {
             }),
             Box::new(move |_, settings| settings.privacy.activity_joining(server)),
             |app, server, on| {
-                let current = app.state.borrow().settings.privacy.activity_joining_restricted_servers.clone();
+                let current = app.account.state.borrow().settings.privacy.activity_joining_restricted_servers.clone();
                 let servers = with_server(&app.live_servers(&current), server, !on);
                 app.change_setting(Setting::ActivityJoiningRestrictedServers(servers));
             },
@@ -201,7 +206,7 @@ impl App {
                 updating.set(false);
             }
         };
-        show(&self.state.borrow().settings);
+        show(&self.account.state.borrow().settings);
         dialog.present(Some(&self.window));
         *self.server_privacy.borrow_mut() = Some(Dialog { dialog, toasts, show: Box::new(show) });
     }

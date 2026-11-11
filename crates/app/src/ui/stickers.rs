@@ -33,7 +33,7 @@ const WAITING: i32 = 48;
 
 /// Only in Developer Mode, like the rest of the picker's menu (233503).
 fn developer(app: &App) -> bool {
-    app.state.borrow().settings.developer_mode
+    app.account.state.borrow().settings.developer_mode
 }
 
 fn sticker(target: &Target) -> Option<&discord::Sticker> {
@@ -189,14 +189,14 @@ impl App {
     /// message box shows and no edit has it, as the client's edit box takes
     /// none.
     pub(super) fn sticker_channel(&self) -> Option<Snowflake> {
-        let channel = self.state.borrow().channel?;
+        let channel = self.account.state.borrow().channel?;
         (self.composer_box.is_visible() && self.editing().is_none()).then_some(channel)
     }
 
     /// Where stickers would be sent: the channel's server and what we may
     /// use from others there.
     fn sticker_place(&self, channel: Snowflake) -> Place {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let found = state.find_channel(channel);
         let (emojis, stickers) = match (found, &state.account) {
             // A DM needs no permission.
@@ -218,7 +218,7 @@ impl App {
     /// first and then the rail's order, and the standard packs.
     fn sticker_library(&self, channel: Snowflake) -> Library {
         let place = self.sticker_place(channel);
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let guilds = state.guilds_in_picker_order(place.guild);
         Library::new(guilds, state.sticker_packs.all(), &state.limits(), &place)
     }
@@ -226,7 +226,7 @@ impl App {
     /// Whether `listed` can still be sent in `channel`: what was true when
     /// it was picked may not be, as the box follows our permissions.
     pub(super) fn sticker_sendable(&self, channel: Snowflake, listed: &Listed) -> Result<(), StickerUnavailable> {
-        self.state.borrow().limits().sticker(&listed.origin, &self.sticker_place(channel))
+        self.account.state.borrow().limits().sticker(&listed.origin, &self.sticker_place(channel))
     }
 
     pub(super) fn build_stickers(self: &Rc<Self>, area: &gtk::Box) {
@@ -235,7 +235,7 @@ impl App {
             let this = Rc::downgrade(self);
             move |_| {
                 if let Some(this) = this.upgrade()
-                    && let Some(channel) = this.state.borrow().channel
+                    && let Some(channel) = this.account.state.borrow().channel
                 {
                     this.set_waiting_sticker(channel, None);
                 }
@@ -311,7 +311,7 @@ impl App {
             move || reload()
         });
         let rest = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             let now = (glib::monotonic_time() / 1000) as u64;
             let rest = state.rest.clone().filter(|_| state.sticker_packs.wants_fetch(now));
             if rest.is_some() {
@@ -325,7 +325,7 @@ impl App {
                 match rest.sticker_packs().await {
                     Ok(packs) => {
                         let now = (glib::monotonic_time() / 1000) as u64;
-                        this.state.borrow_mut().sticker_packs.fetched(packs, now);
+                        this.account.state.borrow_mut().sticker_packs.fetched(packs, now);
                         *library.borrow_mut() = Rc::new(this.sticker_library(channel));
                         reload();
                     }
@@ -373,7 +373,7 @@ impl App {
     /// The favourite stickers, then those used most, as far as `library` has them
     /// (`Gc` and `frequently`, 256449).
     fn sticker_lists(&self, library: &Library) -> Lists {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.account.state.borrow_mut();
         let favorites =
             state.frecency.favorite_stickers.iter().filter_map(|&id| library.find(Snowflake(id))).cloned().collect();
         let used = state.frecency.stores.stickers.history.frequently(now_ms() as u64, |_| true);
@@ -388,7 +388,7 @@ impl App {
 
     /// How much each sticker was used, for a search to rank by.
     fn sticker_scores(&self) -> HashMap<String, f64> {
-        self.state.borrow_mut().frecency.stores.stickers.history.scores(now_ms() as u64)
+        self.account.state.borrow_mut().frecency.stores.stickers.history.scores(now_ms() as u64)
     }
 }
 

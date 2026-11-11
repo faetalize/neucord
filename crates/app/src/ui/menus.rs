@@ -17,9 +17,9 @@ use gtk::{gdk, gio, glib};
 use super::App;
 use super::chat::{self, MessageTarget};
 use super::{
-    attachments, composer, create_thread, edits, emoji, forum, gifs, notify_menus, picker, poll_composer, polls,
-    profile, reactions, reactors, scheduling, server_privacy, sidebar, slash, stickers, threads, uploads, viewer,
-    voice,
+    accounts, attachments, composer, create_thread, edits, emoji, forum, gifs, notify_menus, picker, poll_composer,
+    polls, profile, reactions, reactors, scheduling, server_privacy, sidebar, slash, stickers, threads, uploads,
+    viewer, voice,
 };
 
 /// An item that copies or opens a link, shown when the link `$link` finds in
@@ -336,6 +336,10 @@ pub(super) const EXPRESSION_PICKER: Table<picker::Target> = &[&[
 /// A GIF of the picker's results (`gif-picker`, 400017): the client's menu
 /// has Copy Link and nothing else.
 pub(super) const GIF_PICKER: Table<picker::Target> = &[&[gifs::COPY_LINK]];
+
+/// An account's row in the Manage Accounts dialog, from its More Options
+/// button (`manage-multi-account`, 970573): the client's menu is Log out.
+pub(super) const ACCOUNT: Table<accounts::AccountTarget> = &[&[accounts::LOG_OUT]];
 
 /// Where menu items find their actions.
 const PREFIX: &str = "menu";

@@ -23,7 +23,7 @@ impl App {
     /// at what is used), then run `loaded`. Nothing runs if they already are.
     pub(super) fn load_frecency(self: &Rc<Self>, loaded: impl Fn() + 'static) {
         let rest = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             if state.frecency_sync.is_loaded() {
                 return;
             }
@@ -36,9 +36,14 @@ impl App {
         };
         let Some(rest) = rest else { return };
         let this = self.clone();
+        let epoch = self.account.epoch.get();
         glib::spawn_future_local(async move {
             let proto = rest.settings_proto(2).await;
-            let mut state = this.state.borrow_mut();
+            // Of an account that was left meanwhile: its state, which waited, is gone.
+            if this.account.epoch.get() != epoch {
+                return;
+            }
+            let mut state = this.account.state.borrow_mut();
             state.frecency_loading = false;
             let waiting = std::mem::take(&mut state.frecency_waiting);
             match proto {
@@ -61,7 +66,7 @@ impl App {
 
     /// Another client changed the favourites.
     pub(super) fn frecency_updated(&self, patch: FrecencyPatch, proto: &[u8], partial: bool) {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.account.state.borrow_mut();
         if !state.frecency_sync.is_loaded() {
             return;
         }
@@ -74,14 +79,14 @@ impl App {
 
     /// Whether the emoji is one of the account's favourites.
     pub(super) fn is_favorite_emoji(&self, item: &Item) -> bool {
-        self.state.borrow().frecency.favorite_emojis.contains(&Library::key(item))
+        self.account.state.borrow().frecency.favorite_emojis.contains(&Library::key(item))
     }
 
     /// Favourite the emoji, or not (`V4` and `Sw` in 554375): at most
     /// [`MAX_FAVORITE_EMOJI`], which the client tells the user.
     pub(super) fn favorite_emoji(self: &Rc<Self>, item: &Item, favorite: bool) {
         let key = Library::key(item);
-        let current = self.state.borrow().frecency.favorite_emojis.clone();
+        let current = self.account.state.borrow().frecency.favorite_emojis.clone();
         let list = match toggled(&current, &key, favorite) {
             Ok(Some(list)) => list,
             Ok(None) => return,
@@ -94,13 +99,13 @@ impl App {
 
     /// Whether the sticker is one of the account's favourites.
     pub(super) fn is_favorite_sticker(&self, id: discord::Snowflake) -> bool {
-        self.state.borrow().frecency.favorite_stickers.contains(&id.0)
+        self.account.state.borrow().frecency.favorite_stickers.contains(&id.0)
     }
 
     /// Favourite the sticker, or not (`uK` and `vr` in 631576): at most
     /// [`MAX_FAVORITE_STICKERS`], which the client tells the user.
     pub(super) fn favorite_sticker(self: &Rc<Self>, id: discord::Snowflake, favorite: bool) {
-        let current = self.state.borrow().frecency.favorite_stickers.clone();
+        let current = self.account.state.borrow().frecency.favorite_stickers.clone();
         match toggled_sticker(&current, id.0, favorite) {
             Ok(Some(list)) => self.edit_frecency(Setting::FavoriteStickers(list)),
             Ok(None) => {}
@@ -111,7 +116,7 @@ impl App {
     /// Favourite the GIF, or take it back out (`wg` and `Tr` in 497685).
     pub(super) fn favorite_gif(self: &Rc<Self>, star: &Starred, favorite: bool) {
         let (held, hidden) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             (state.frecency.favorite_gifs.clone(), state.frecency.hide_gif_tooltip)
         };
         let setting = match favorite {
@@ -126,14 +131,14 @@ impl App {
 
     /// Whether the GIF is one of the account's favourites.
     pub(super) fn is_favorite_gif(&self, star: &Starred) -> bool {
-        is_favorite(&self.state.borrow().frecency.favorite_gifs, &star.url)
+        is_favorite(&self.account.state.borrow().frecency.favorite_gifs, &star.url)
     }
 
     /// Change a setting of the proto and save it.
     fn edit_frecency(self: &Rc<Self>, setting: Setting) {
-        let edited = self.state.borrow_mut().frecency_sync.edit(setting);
+        let edited = self.account.state.borrow_mut().frecency_sync.edit(setting);
         let Some(edited) = edited else { return self.toast("Favorites aren't loaded yet") };
-        self.state.borrow_mut().frecency.apply(edited.patch, now_ms() as u64);
+        self.account.state.borrow_mut().frecency.apply(edited.patch, now_ms() as u64);
         if let Some(schedule) = edited.schedule {
             self.save_frecency_after(schedule);
         }
@@ -141,8 +146,9 @@ impl App {
 
     pub(super) fn save_frecency_after(self: &Rc<Self>, schedule: Schedule) {
         let this = Rc::downgrade(self);
+        let epoch = self.account.epoch.get();
         glib::timeout_add_local_once(schedule.after, move || {
-            if let Some(this) = this.upgrade() {
+            if let Some(this) = this.upgrade().filter(|this| this.account.epoch.get() == epoch) {
                 this.save_frecency(schedule.generation);
             }
         });
@@ -150,7 +156,7 @@ impl App {
 
     fn save_frecency(self: &Rc<Self>, generation: u64) {
         let (save, rest, sent) = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             // What is used goes in just before the send (`beforeSendCallbacks`), once loaded.
             let (added, sent) = match state.frecency_sync.is_loaded() {
                 true => state.frecency.stores.before_send(now_ms() as u64),
@@ -160,18 +166,25 @@ impl App {
         };
         let (Some(save), Some(rest)) = (save, rest) else { return };
         let this = self.clone();
+        let epoch = self.account.epoch.get();
         glib::spawn_future_local(async move {
             use discord::settings_sync::SaveError;
-            match rest.save_settings(&save).await {
+            let answer = rest.save_settings(&save).await;
+            // The answer is of an account that was left meanwhile, whose sync
+            // state is gone: what it says is no one's.
+            if this.account.epoch.get() != epoch {
+                return;
+            }
+            match answer {
                 Ok(saved) => {
                     // What the save carried is the account's now: the answer is what it holds.
                     let applied = {
-                        let mut state = this.state.borrow_mut();
+                        let mut state = this.account.state.borrow_mut();
                         state.frecency.stores.saved(sent);
                         state.frecency_sync.saved(&save, &saved)
                     };
                     if let Some(applied) = applied {
-                        this.state.borrow_mut().frecency.load(applied.patch, now_ms() as u64);
+                        this.account.state.borrow_mut().frecency.load(applied.patch, now_ms() as u64);
                         if let Some(schedule) = applied.schedule {
                             this.save_frecency_after(schedule);
                         }
@@ -179,14 +192,18 @@ impl App {
                     this.usage_saved();
                 }
                 Err(SaveError::RateLimited { retry_after }) => {
-                    let retry = this.state.borrow_mut().frecency_sync.rate_limited(retry_after.as_deref());
+                    let retry = this.account.state.borrow_mut().frecency_sync.rate_limited(retry_after.as_deref());
                     this.save_frecency_after(retry);
                 }
                 Err(SaveError::Invalid) => {
                     // The client asks for the settings again and starts over.
-                    match rest.settings_proto(2).await {
+                    let reloaded = rest.settings_proto(2).await;
+                    if this.account.epoch.get() != epoch {
+                        return;
+                    }
+                    match reloaded {
                         Ok(proto) => {
-                            let mut state = this.state.borrow_mut();
+                            let mut state = this.account.state.borrow_mut();
                             let patch = state.frecency_sync.reloaded(proto);
                             state.frecency.load(patch.unwrap_or_default(), now_ms() as u64);
                         }
@@ -195,7 +212,7 @@ impl App {
                 }
                 Err(SaveError::Other(e)) => {
                     eprintln!("favourites: {e}");
-                    this.state.borrow_mut().frecency_sync.failed();
+                    this.account.state.borrow_mut().frecency_sync.failed();
                     this.toast("Could not save your favorites");
                 }
             }
@@ -303,7 +320,7 @@ impl Stars {
                 }
             };
             // Saving needs the favourites, which a click may beat.
-            let loaded = app.state.borrow().frecency_sync.is_loaded();
+            let loaded = app.account.state.borrow().frecency_sync.is_loaded();
             match loaded {
                 true => toggle(),
                 false => app.load_frecency(toggle),

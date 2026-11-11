@@ -112,7 +112,7 @@ impl App {
     /// with it (files, a sticker or a draft recording), not while editing
     /// (87207, and `K` in 158781), and a machine that can record.
     pub(super) fn voice_channel(&self) -> Option<Snowflake> {
-        let channel = self.state.borrow().channel?;
+        let channel = self.account.state.borrow().channel?;
         let waiting = discord::voice::Waiting {
             editing: self.editing().is_some(),
             files: !self.drafts.of(channel).is_empty(),
@@ -121,7 +121,7 @@ impl App {
         };
         let offered = self.composer_box.is_visible()
             && !waiting.blocks()
-            && self.state.borrow().can_record_voice(channel)
+            && self.account.state.borrow().can_record_voice(channel)
             && recorder::available();
         offered.then_some(channel)
     }
@@ -207,7 +207,7 @@ impl App {
     /// recording, as the client does, and what it holds for the phase.
     pub(super) fn refresh_voice(&self) {
         let voice = &self.voice;
-        let channel = self.state.borrow().channel;
+        let channel = self.account.state.borrow().channel;
         let shown = {
             let draft = voice.draft.borrow();
             draft.as_ref().filter(|d| Some(d.channel) == channel).map(|d| (d.phase, d.started, d.millis))
@@ -296,7 +296,7 @@ impl App {
     /// The client's question when a recording waits in another channel.
     fn ask_to_discard_voice(self: &Rc<Self>, other: Snowflake) {
         let what = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             state.find_channel(other).map(|(_, c)| match c.kind {
                 discord::ChannelKind::GroupDm => "your Group DM".to_owned(),
                 discord::ChannelKind::Dm => format!("your conversation with {}", c.title()),
@@ -492,14 +492,14 @@ impl App {
 
     /// Upload and post a recording, keeping the draft if anything stops it.
     fn post_voice(self: &Rc<Self>, channel: Snowflake, recording: Recording) {
-        let rest = self.state.borrow().rest.clone();
+        let rest = self.account.state.borrow().rest.clone();
         let Some(rest) = rest else { return };
         // The box follows our permissions, but they may have changed since.
-        if !self.state.borrow().can_record_voice(channel) {
+        if !self.account.state.borrow().can_record_voice(channel) {
             return self.update_notice_bar();
         }
         let limits = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             state.limits().uploads(state.find_channel(channel).and_then(|(guild, _)| guild))
         };
         if let Err(refusal) = uploads::check_send(&limits, &[recording.file.size]) {
@@ -507,7 +507,7 @@ impl App {
         }
         // Slowmode would refuse it; the notice bar says how long is left.
         let wait = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             state.find_channel(channel).map_or(0, |(_, c)| state.slowmode.remaining_ms(c, now_ms()))
         };
         if wait > 0 {
@@ -530,7 +530,7 @@ impl App {
                     this.record_slowmode(channel, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
                     this.discard_voice();
                     this.set_reply(None);
-                    if this.timelines.borrow().get(channel).is_some_and(|t| t.detached) {
+                    if this.account.timelines.borrow().get(channel).is_some_and(|t| t.detached) {
                         this.load_newest(channel);
                     }
                 }
@@ -557,7 +557,7 @@ impl App {
                         draft.phase = Phase::Recorded;
                     }
                     // The reply stays with the draft for another try.
-                    if this.state.borrow().channel == Some(channel) && this.reply.borrow().is_none() {
+                    if this.account.state.borrow().channel == Some(channel) && this.reply.borrow().is_none() {
                         this.set_reply(replying);
                     }
                     this.refresh_voice();
@@ -569,7 +569,7 @@ impl App {
     /// The reply the open channel's box is making, if it may be one, for the
     /// message (`getSendMessageOptionsForReply`) and to put back.
     fn voice_reply(&self, channel: Snowflake) -> (Option<Reply>, Option<ReplyCtx>) {
-        let can_reply = self.state.borrow().can_reply(channel);
+        let can_reply = self.account.state.borrow().can_reply(channel);
         let replying = self.reply.borrow().clone().filter(|r| r.channel == channel && can_reply);
         let reply = replying.as_ref().map(|r| Reply {
             to: r.to,

@@ -28,7 +28,7 @@ pub(super) struct ThreadTarget(pub(super) Snowflake);
 pub(super) const JOIN_THREAD: Entry<ThreadTarget> = Entry::Item(Item {
     name: "join-thread",
     label: "_Join Thread",
-    shows: |app, target| app.state.borrow().thread_joined(target.0) == Some(false),
+    shows: |app, target| app.account.state.borrow().thread_joined(target.0) == Some(false),
     kind: Kind::Action(|app, target| app.join_thread(target.0)),
 });
 
@@ -36,7 +36,7 @@ pub(super) const JOIN_THREAD: Entry<ThreadTarget> = Entry::Item(Item {
 pub(super) const LEAVE_THREAD: Entry<ThreadTarget> = Entry::Item(Item {
     name: "leave-thread",
     label: "_Leave Thread",
-    shows: |app, target| app.state.borrow().thread_joined(target.0) == Some(true),
+    shows: |app, target| app.account.state.borrow().thread_joined(target.0) == Some(true),
     kind: Kind::Action(|app, target| app.leave_thread(target.0)),
 });
 
@@ -103,7 +103,7 @@ impl View {
     /// What the list shows now: the threads we're in, the other active
     /// ones, and the archived ones asked for so far.
     fn lines(&self, app: &App) -> Vec<Line> {
-        let state = app.state.borrow();
+        let state = app.account.state.borrow();
         let Some((Some(guild), _)) = state.find_channel(self.channel) else { return vec![Line::Empty] };
         let fallback = Archive::default();
         let archive = state.archives.get(&self.channel).unwrap_or(&fallback);
@@ -191,7 +191,7 @@ impl View {
     /// as the client does first (`loadMore` in 424798).
     fn ask(self: &Rc<Self>, app: &Rc<App>, next: fn(&mut Archive) -> Option<u32>) {
         let offset = {
-            let mut state = app.state.borrow_mut();
+            let mut state = app.account.state.borrow_mut();
             if !state.can_read_history(self.channel) {
                 return;
             }
@@ -254,7 +254,7 @@ impl App {
     /// and ask for archived threads if it never has.
     pub(super) fn open_threads(self: &Rc<Self>, channel: Snowflake) {
         let parent = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             match state.find_channel(channel) {
                 Some((_, thread)) if thread.kind.is_thread() => thread.parent_id,
                 Some((_, channel)) => Some(channel.id),
@@ -300,15 +300,19 @@ impl App {
     /// The page of archived threads that starts at `offset`. It lands in the
     /// server's threads, as the client's does in its channel store.
     fn load_archived_threads(self: &Rc<Self>, channel: Snowflake, offset: u32) {
-        let Some(rest) = self.state.borrow().rest.clone() else { return };
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
         let this = self.clone();
         glib::spawn_future_local(async move {
             let page = rest.archived_threads(&discord::forum::Search::plain(channel, offset)).await;
-            let guild = this.state.borrow().find_channel(channel).and_then(|(g, _)| g.map(|g| g.id));
+            let guild = this.account.state.borrow().find_channel(channel).and_then(|(g, _)| g.map(|g| g.id));
             match (page, guild) {
                 (Ok(page), Some(guild)) => {
                     let oldest = page.threads.last().map(|t| t.id);
-                    this.state.borrow_mut().archives.entry(channel).or_default().landed(offset, page.has_more, oldest);
+                    this.account.state.borrow_mut().archives.entry(channel).or_default().landed(
+                        offset,
+                        page.has_more,
+                        oldest,
+                    );
                     this.on_threads(guild, |g| {
                         for thread in page.threads {
                             g.set_thread(thread);
@@ -322,7 +326,7 @@ impl App {
                     if let Err(e) = result {
                         eprintln!("threads: couldn't load archived threads: {e}");
                     }
-                    this.state.borrow_mut().archives.entry(channel).or_default().failed();
+                    this.account.state.borrow_mut().archives.entry(channel).or_default().failed();
                     this.refresh_threads_view();
                 }
             }
@@ -337,7 +341,7 @@ impl App {
             view.dialog.force_close();
         }
         let (known, first, rest) = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             let known = state.find_channel(thread).is_some();
             (known, !known && state.fetched_threads.insert(thread), state.rest.clone())
         };
@@ -363,7 +367,7 @@ impl App {
     /// in 289287).
     pub(super) fn sync_threads_button(&self) {
         let shown = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let channel = state.channel.filter(|_| state.page.is_none()).and_then(|id| state.find_channel(id));
             match channel {
                 Some((Some(guild), c)) if c.kind.is_thread() => {
@@ -394,7 +398,7 @@ impl App {
             return None;
         }
         let (name, detail) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let (_, thread) = state
                 .find_channel(message.id)
                 .filter(|(_, t)| t.kind.is_thread() && t.parent_id == Some(message.channel_id))
@@ -448,7 +452,7 @@ impl App {
     }
 
     fn change_membership(self: &Rc<Self>, thread: Snowflake, join: bool) {
-        let Some(rest) = self.state.borrow().rest.clone() else { return };
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
         let this = self.clone();
         glib::spawn_future_local(async move {
             let result = match join {

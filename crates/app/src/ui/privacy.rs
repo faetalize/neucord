@@ -40,7 +40,7 @@ pub(super) fn show_row(row: &adw::SwitchRow, state: Row, why_not: Option<&str>) 
 impl App {
     pub(super) fn privacy_groups(self: &Rc<Self>, form: &mut Form) -> [adw::PreferencesGroup; 3] {
         let servers: Vec<(Snowflake, String)> = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             state.guilds_in_picker_order(None).into_iter().map(|g| (g.id, g.name.clone())).collect()
         };
         let servers = Rc::new(servers);
@@ -82,7 +82,7 @@ impl App {
             move |settings| {
                 let Some(app) = app.upgrade() else { return };
                 let server = servers.get(selected.get().wrapping_sub(1)).map(|(id, _)| *id);
-                let gates = app.state.borrow().gates;
+                let gates = app.account.state.borrow().gates;
                 let (title, note) = direct_messages_text(
                     settings.privacy.friend_sources.only_server_members(),
                     server.map(|server| app.is_hub(server)),
@@ -110,7 +110,7 @@ impl App {
             move |settings| {
                 let Some(app) = app.upgrade() else { return };
                 let server = servers.get(selected.get().wrapping_sub(1)).map(|(id, _)| *id);
-                let gates = app.state.borrow().gates;
+                let gates = app.account.state.borrow().gates;
                 requests.set_subtitle(message_requests_note(server.is_some_and(|server| app.is_hub(server))));
                 show_row(&requests, settings.privacy.message_requests(&gates, server), Some(GUARDIAN));
             }
@@ -128,7 +128,7 @@ impl App {
                 let (app, updating) = (Rc::downgrade(self), form.updating.clone());
                 move |row| {
                     let Some(app) = app.upgrade().filter(|_| !updating.get()) else { return };
-                    let current = app.state.borrow().settings.privacy.friend_sources;
+                    let current = app.account.state.borrow().settings.privacy.friend_sources;
                     app.change_setting(Setting::FriendSourceFlags(set(current, row.is_active())));
                 }
             });
@@ -136,7 +136,7 @@ impl App {
             let app = Rc::downgrade(self);
             form.shows.push(Box::new(move |settings| {
                 let Some(app) = app.upgrade() else { return };
-                let disabled = app.state.borrow().gates.parent_linked;
+                let disabled = app.account.state.borrow().gates.parent_linked;
                 show_row(&row, Row { on: on(settings.privacy.friend_sources), disabled }, Some(GUARDIAN));
             }));
         };
@@ -160,10 +160,10 @@ impl App {
             move |row| {
                 let choice = ProfileVisibility::ALL.get(row.selected() as usize);
                 if let (false, Some(app), Some(choice)) = (updating.get(), app.upgrade(), choice) {
-                    let before = app.state.borrow().settings.privacy.profile_visibility;
+                    let before = app.account.state.borrow().settings.privacy.profile_visibility;
                     app.change_setting(Setting::ProfileVisibility(*choice));
                     // Not if the change was refused: nothing was saved to follow.
-                    if app.state.borrow().settings.privacy.profile_visibility == *choice {
+                    if app.account.state.borrow().settings.privacy.profile_visibility == *choice {
                         app.ask_activity_to_follow(before, *choice);
                     }
                 }
@@ -183,7 +183,7 @@ impl App {
     pub(super) fn set_direct_messages(self: &Rc<Self>, server: Option<Snowflake>, allowed: bool) {
         match server {
             Some(server) => {
-                let current = self.state.borrow().settings.privacy.restricted_servers.clone();
+                let current = self.account.state.borrow().settings.privacy.restricted_servers.clone();
                 let servers = with_server(&self.live_servers(&current), server, !allowed);
                 self.change_setting(Setting::RestrictedServers(servers));
             }
@@ -199,13 +199,13 @@ impl App {
     pub(super) fn set_message_requests(self: &Rc<Self>, server: Option<Snowflake>, on: bool) {
         // Turning them off may need the age verification the client opens
         // a flow for.
-        if !on && self.state.borrow().gates.message_requests_age_gated {
+        if !on && self.account.state.borrow().gates.message_requests_age_gated {
             self.settings_replaced();
             return self.settings_toast("Verify your age in the official app before turning message requests off");
         }
         match server {
             Some(server) => {
-                let current = self.state.borrow().settings.privacy.message_request_restricted_servers.clone();
+                let current = self.account.state.borrow().settings.privacy.message_request_restricted_servers.clone();
                 let servers = with_server(&self.live_servers(&current), server, !on);
                 self.change_setting(Setting::MessageRequestRestrictedServers(servers));
             }
@@ -219,7 +219,8 @@ impl App {
 
     /// Whether the server is a hub, which words some of the rows differently.
     pub(super) fn is_hub(&self, server: Snowflake) -> bool {
-        self.state
+        self.account
+            .state
             .borrow()
             .guilds
             .iter()
@@ -233,7 +234,7 @@ impl App {
     /// the servers' list, Not Now leaves them as they are.
     fn ask_activity_to_follow(self: &Rc<Self>, old: ProfileVisibility, new: ProfileVisibility) {
         let (change, first, count) = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             let state = &mut *state;
             let privacy = &state.settings.privacy;
             let ours: Vec<Snowflake> = state.guilds.iter().map(|g| g.id).collect();
@@ -280,7 +281,7 @@ impl App {
             move |_, response| {
                 let (Some(this), "confirm") = (this.upgrade(), response) else { return };
                 // The list as it is now, as `gF` reads it.
-                let current = this.state.borrow().settings.privacy.activity_restricted_servers.clone();
+                let current = this.account.state.borrow().settings.privacy.activity_restricted_servers.clone();
                 let restricted_servers = change.restricted_after(&this.live_servers(&current));
                 this.change_setting(Setting::ActivityDefault { default: change.default, restricted_servers });
                 this.settings_toast(change.toast());
@@ -292,7 +293,7 @@ impl App {
     /// The servers `ids` name that we are still in, as the client reads the
     /// lists of restrictions.
     pub(super) fn live_servers(&self, ids: &[Snowflake]) -> Vec<Snowflake> {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let ours: Vec<Snowflake> = state.guilds.iter().map(|g| g.id).collect();
         live_servers(ids, &ours, state.unavailable_guilds)
     }
@@ -317,7 +318,7 @@ impl App {
                     "no" => this.change_setting(setting(restricted, None)),
                     "yes" => {
                         // Every server we are in, or none when allowing.
-                        let all = this.state.borrow().guilds.iter().map(|g| g.id).collect();
+                        let all = this.account.state.borrow().guilds.iter().map(|g| g.id).collect();
                         this.change_setting(setting(restricted, Some(if restricted { all } else { Vec::new() })));
                     }
                     _ => this.settings_replaced(),

@@ -189,7 +189,7 @@ impl App {
     /// Open Home's friends page.
     pub(super) fn show_friends(self: &Rc<Self>) {
         {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             state.guild = None;
             state.channel = None;
             state.page = Some(Page::Friends);
@@ -204,7 +204,7 @@ impl App {
     }
 
     fn select_friends_tab(self: &Rc<Self>, tab: Tab) {
-        let changed = std::mem::replace(&mut self.state.borrow_mut().friends_tab, tab) != tab;
+        let changed = std::mem::replace(&mut self.account.state.borrow_mut().friends_tab, tab) != tab;
         if changed {
             self.friends.error.set_visible(false);
             self.rebuild_friends();
@@ -217,14 +217,14 @@ impl App {
     /// Rebuild the page once the current burst of events (presence updates
     /// come in floods) is handled, if it is showing.
     pub(super) fn queue_friends_refresh(self: &Rc<Self>) {
-        if self.state.borrow().page != Some(Page::Friends) || self.friends.queued.replace(true) {
+        if self.account.state.borrow().page != Some(Page::Friends) || self.friends.queued.replace(true) {
             return;
         }
         let this = Rc::downgrade(self);
         glib::idle_add_local_once(move || {
             if let Some(this) = this.upgrade() {
                 this.friends.queued.set(false);
-                if this.state.borrow().page == Some(Page::Friends) {
+                if this.account.state.borrow().page == Some(Page::Friends) {
                     this.rebuild_friends();
                 }
             }
@@ -234,7 +234,7 @@ impl App {
     fn rebuild_friends(self: &Rc<Self>) {
         let page = &self.friends;
         let (tab, incoming) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             (state.friends_tab, state.relationships.incoming())
         };
         let pending = page.stack.page(&page.stack.child_by_name("pending").expect("pending tab"));
@@ -244,7 +244,7 @@ impl App {
         // change; so state must not be borrowed here.
         page.stack.set_visible_child_name(tab_name(tab));
         let Tab::List(list) = tab else { return };
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let Some((_, heading, rows)) = page.lists.iter().find(|l| l.0 == list) else { return };
         rows.remove_all();
         let people = state.relationships.list(list);
@@ -274,7 +274,7 @@ impl App {
         let user = &relationship.user;
         let detail = match (relationship.kind, relationship.spam) {
             (Kind::Friend, _) => {
-                let presence = self.state.borrow().relationships.presence(user.id);
+                let presence = self.account.state.borrow().relationships.presence(user.id);
                 presence.text.unwrap_or_else(|| status.label().to_owned())
             }
             (Kind::Incoming, false) => "Incoming friend request".to_owned(),
@@ -327,6 +327,7 @@ impl App {
     /// Open the DM with `user`, creating it if there is none yet.
     pub(super) fn message_user(self: &Rc<Self>, user: Snowflake) {
         let existing = self
+            .account
             .state
             .borrow()
             .private_channels
@@ -336,7 +337,7 @@ impl App {
         if let Some(channel) = existing {
             return self.open_channel(channel);
         }
-        let Some(rest) = self.state.borrow().rest.clone() else { return };
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
         let this = self.clone();
         glib::spawn_future_local(async move {
             match rest.open_dm(user).await {
@@ -351,7 +352,9 @@ impl App {
     }
 
     pub(super) fn confirm_remove_friend(self: &Rc<Self>, user: Snowflake) {
-        let Some(name) = self.state.borrow().relationships.get(user).map(|r| r.name().to_owned()) else { return };
+        let Some(name) = self.account.state.borrow().relationships.get(user).map(|r| r.name().to_owned()) else {
+            return;
+        };
         let dialog = confirm(
             &format!("Remove {name}?"),
             "They will no longer be your friend. You can send them a new request later.",
@@ -370,8 +373,8 @@ impl App {
     /// confirmed, as the official client does with a dialog: up front when the
     /// request is known to be one, else once Discord answers that it is.
     fn accept_friend(self: &Rc<Self>, user: Snowflake) {
-        let Some(relationship) = self.state.borrow().relationships.get(user).cloned() else { return };
-        let Some(rest) = self.state.borrow().rest.clone() else { return };
+        let Some(relationship) = self.account.state.borrow().relationships.get(user).cloned() else { return };
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
         self.friends.error.set_visible(false);
         let this = self.clone();
         glib::spawn_future_local(async move {
@@ -416,7 +419,7 @@ impl App {
         F: FnOnce(Rest) -> Fut,
         Fut: Future<Output = Result<(), discord::Error>> + 'static,
     {
-        let Some(rest) = self.state.borrow().rest.clone() else { return };
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
         self.friends.error.set_visible(false);
         let request = action(rest);
         let this = self.clone();
@@ -435,7 +438,7 @@ impl App {
     fn send_friend_request(self: &Rc<Self>) {
         let page = &self.friends;
         let username = page.entry.text().trim().trim_start_matches('@').to_owned();
-        let Some(rest) = self.state.borrow().rest.clone() else { return };
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
         if username.is_empty() {
             return;
         }

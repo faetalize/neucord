@@ -37,7 +37,7 @@ impl App {
             return;
         }
         let (title, body) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let author = &state.name_in(message.channel_id, &message.author);
             let title = match state.find_channel(message.channel_id) {
                 Some((Some(guild), channel)) => {
@@ -65,6 +65,7 @@ impl App {
             message.author.avatar.as_deref().map(|hash| discord::cdn::avatar_url(message.author.id.0, hash, 128));
         let channel = place.channel;
         let this = self.clone();
+        let epoch = self.account.epoch.get();
         glib::spawn_future_local(async move {
             // The sender's picture, as the client shows it; without it if it doesn't come.
             let texture = match icon {
@@ -72,13 +73,16 @@ impl App {
                 None => None,
             };
             // Read, or looked at, while the picture loaded: nothing to say any more.
-            if !this.notifications_allowed() || !this.has_news(channel) {
+            // So is a message of an account that was left meanwhile.
+            if this.account.epoch.get() != epoch || !this.notifications_allowed() || !this.has_news(channel) {
                 return;
             }
             if let Some(desktop) = this.desktop() {
+                let key = notification_id(channel);
+                this.account.notified.borrow_mut().insert(key.clone());
                 // Sounds are on, as in the client by default (#86 brings the switch).
                 let notice = desktop::Notice {
-                    key: &notification_id(channel),
+                    key: &key,
                     title: &title,
                     body: &body,
                     icon: texture.as_ref(),
@@ -92,7 +96,7 @@ impl App {
 
     /// Whether `channel` has something unread or a mention waiting.
     fn has_news(&self, channel: Snowflake) -> bool {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         state.find_channel(channel).is_some_and(|(_, c)| state.is_unread(c)) || state.read.mentions(channel) > 0
     }
 
@@ -102,16 +106,22 @@ impl App {
         }
         let user = request.user.clone();
         let this = self.clone();
+        let epoch = self.account.epoch.get();
         glib::spawn_future_local(async move {
             let icon = user.avatar.as_deref().map(|hash| discord::cdn::avatar_url(user.id.0, hash, 128));
             let texture = match icon {
                 Some(url) => glib::future_with_timeout(ICON_WAIT, this.images.texture(&url)).await.ok().flatten(),
                 None => None,
             };
+            if this.account.epoch.get() != epoch {
+                return;
+            }
             if let Some(desktop) = this.desktop() {
+                let key = friend_request_id(user.id);
+                this.account.notified.borrow_mut().insert(key.clone());
                 // The client plays no sound for a friend request.
                 let notice = desktop::Notice {
-                    key: &friend_request_id(user.id),
+                    key: &key,
                     title: user.display_name(),
                     body: "Sent you a friend request",
                     icon: texture.as_ref(),
@@ -128,19 +138,34 @@ impl App {
     /// keeps their sound. Not while Discord requires a step: the official
     /// client stays quiet then too, and a notification would lead nowhere.
     fn notifications_allowed(&self) -> bool {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         state.required_action.is_none() && !state.settings.do_not_disturb()
     }
 
     pub(super) fn withdraw_friend_request(self: &Rc<Self>, user: Snowflake) {
+        let key = friend_request_id(user);
+        self.account.notified.borrow_mut().remove(&key);
         if let Some(desktop) = self.desktop() {
-            desktop.withdraw(&friend_request_id(user));
+            desktop.withdraw(&key);
         }
     }
 
     pub(super) fn withdraw_notification(self: &Rc<Self>, channel: Snowflake) {
+        let key = notification_id(channel);
+        self.account.notified.borrow_mut().remove(&key);
         if let Some(desktop) = self.desktop() {
-            desktop.withdraw(&notification_id(channel));
+            desktop.withdraw(&key);
+        }
+    }
+
+    /// Take back the notifications shown for an account that is being left
+    /// (`keys` from [`super::state::Account::leave`]): opening a channel from
+    /// one would look for it in another account.
+    pub(super) fn withdraw_notifications(self: &Rc<Self>, keys: Vec<String>) {
+        if let Some(desktop) = self.desktop() {
+            for key in keys {
+                desktop.withdraw(&key);
+            }
         }
     }
 
@@ -157,7 +182,7 @@ impl App {
     /// The friends page, at the requests we have.
     fn open_friend_requests(self: &Rc<Self>) {
         self.window.present();
-        self.state.borrow_mut().friends_tab = friends::Tab::List(discord::relationships::List::Pending);
+        self.account.state.borrow_mut().friends_tab = friends::Tab::List(discord::relationships::List::Pending);
         self.show_friends();
         self.show_content();
     }
@@ -168,12 +193,12 @@ impl App {
     /// notification says so.
     fn reply_from_notification(self: &Rc<Self>, channel: Snowflake, typed: String) {
         let typed = typed.trim().to_owned();
-        let rest = self.state.borrow().rest.clone();
+        let rest = self.account.state.borrow().rest.clone();
         let Some(rest) = rest.filter(|_| !typed.is_empty()) else { return };
         // `:name:`s go out as emoji, and the length is checked on what goes out.
         let text = self.emoji_library(channel).translate(&typed).text;
         let refusal = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             if state.box_blocked(channel) || !state.can_send(channel) {
                 Some("You can't send messages in this channel.".to_owned())
             } else if let Err(too_long) = state.limits().check_length(&text) {
@@ -209,19 +234,14 @@ impl App {
     /// Say a reply didn't go out, in the channel's notification, which still takes one.
     fn reply_failed(self: &Rc<Self>, channel: Snowflake, why: &str) {
         let title = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let name = state.find_channel(channel).map(|(_, c)| c.title());
             format!("Reply not sent{}", name.map(|n| format!(" to {n}")).unwrap_or_default())
         };
         if let Some(desktop) = self.desktop() {
-            let notice = desktop::Notice {
-                key: &notification_id(channel),
-                title: &title,
-                body: why,
-                icon: None,
-                sound: false,
-                reply: true,
-            };
+            let key = notification_id(channel);
+            self.account.notified.borrow_mut().insert(key.clone());
+            let notice = desktop::Notice { key: &key, title: &title, body: why, icon: None, sound: false, reply: true };
             desktop.show(&notice);
         }
     }
@@ -235,7 +255,7 @@ impl App {
     /// [`Self::open_channel`], scrolled to `message` if one is given.
     pub(super) fn open_channel_at(self: &Rc<Self>, id: Snowflake, message: Option<Snowflake>) {
         let found = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             let guild = state.find_channel(id).filter(|_| state.can_view(id)).map(|(guild, _)| guild.map(|g| g.id));
             if let Some(guild) = guild {
                 state.guild = guild;

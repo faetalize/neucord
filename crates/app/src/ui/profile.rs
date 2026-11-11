@@ -51,7 +51,7 @@ fn is_person(target: &UserTarget) -> bool {
 }
 
 fn is_me(app: &App, user: &User) -> bool {
-    app.state.borrow().me() == Some(user.id)
+    app.account.state.borrow().me() == Some(user.id)
 }
 
 /// Opens the popout (`user-profile`, 243949): any account that has one.
@@ -67,7 +67,7 @@ pub(super) const MENTION: Entry<UserTarget> = Entry::Item(Item {
     name: "mention",
     label: "_Mention",
     shows: |app, target| {
-        let state = app.state.borrow();
+        let state = app.account.state.borrow();
         let channel = target.channel.or(state.channel);
         is_person(target) && channel.is_some_and(|c| state.can_send(c))
     },
@@ -88,7 +88,7 @@ pub(super) const MESSAGE: Entry<UserTarget> = Entry::Item(Item {
 pub(super) const NOTE: Entry<UserTarget> = Entry::Choices(Choices {
     name: "note",
     choices: |app, target| {
-        let state = app.state.borrow();
+        let state = app.account.state.borrow();
         if !is_person(target) || state.me() == Some(target.user.id) {
             return Vec::new();
         }
@@ -109,7 +109,7 @@ pub(super) const REMOVE_FRIEND: Entry<UserTarget> = Entry::Item(Item {
     label: "_Remove Friend",
     shows: |app, target| {
         let is_friend =
-            app.state.borrow().relationships.get(target.user.id).is_some_and(|r| r.kind == Relation::Friend);
+            app.account.state.borrow().relationships.get(target.user.id).is_some_and(|r| r.kind == Relation::Friend);
         is_person(target) && !target.user.bot && is_friend
     },
     kind: Kind::Action(|app, target| app.confirm_remove_friend(target.user.id)),
@@ -119,7 +119,7 @@ pub(super) const REMOVE_FRIEND: Entry<UserTarget> = Entry::Item(Item {
 pub(super) const COPY_USER_ID: Entry<UserTarget> = Entry::Item(Item {
     name: "copy-user-id",
     label: "Copy User _ID",
-    shows: |app, _| app.state.borrow().settings.developer_mode,
+    shows: |app, _| app.account.state.borrow().settings.developer_mode,
     kind: Kind::Action(|app, target| app.copy(&target.user.id.to_string())),
 });
 
@@ -170,9 +170,9 @@ impl App {
         if !is_person(target) {
             return;
         }
-        let Some(me) = self.state.borrow().me() else { return };
+        let Some(me) = self.account.state.borrow().me() else { return };
         let request = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let role = target.guild.and_then(|g| state.connections_role(g, target.user.id, target.channel));
             Request::popout(&target.user, me, target.guild, role)
         };
@@ -224,7 +224,7 @@ impl App {
     /// left as it is if it is already theirs.
     pub(super) fn show_profile_panel(self: &Rc<Self>, channel: Snowflake, host: &gtk::Box) {
         let (user, redesign) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let user = state.private_channels.iter().find(|c| c.id == channel).and_then(|c| c.recipients.first());
             let (Some(user), Some(me)) = (user.cloned(), state.me()) else { return };
             let redesign = profile::sidebar_redesign(&state.experiments, me);
@@ -261,8 +261,8 @@ impl App {
 
     /// Draw `view`, and ask for what it needs.
     fn begin_profile(self: &Rc<Self>, view: &Rc<View>) {
-        let Some(rest) = self.state.borrow().rest.clone() else { return };
-        let plan = self.state.borrow().profiles.plan(&view.request, now_ms() as u64);
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
+        let plan = self.account.state.borrow().profiles.plan(&view.request, now_ms() as u64);
         view.fill(self, plan == Fetch::Before);
         self.load_note_then(view.target.user.id, {
             let (this, view) = (Rc::downgrade(self), view.clone());
@@ -275,13 +275,13 @@ impl App {
         if plan == Fetch::No {
             return;
         }
-        self.state.borrow_mut().profiles.asked(&view.request);
+        self.account.state.borrow_mut().profiles.asked(&view.request);
         let (this, view) = (self.clone(), view.clone());
         glib::spawn_future_local(async move {
             let answer = rest.profile(&view.request).await;
             let now = now_ms() as u64;
             {
-                let mut state = this.state.borrow_mut();
+                let mut state = this.account.state.borrow_mut();
                 match answer {
                     Ok(profile) => state.profiles.answered(&view.request, profile, now),
                     Err(e) => {
@@ -312,14 +312,14 @@ impl App {
     /// Ask for `user`'s mutual friends when the panel's section opens
     /// (`ob` in 229187), unless they are here or on their way.
     fn ask_friend_list(self: &Rc<Self>, user: Snowflake) {
-        let rest = self.state.borrow().rest.clone();
-        let Some(rest) = rest.filter(|_| self.state.borrow().profiles.wants_friend_list(user)) else { return };
-        self.state.borrow_mut().profiles.asked_friend_list(user);
+        let rest = self.account.state.borrow().rest.clone();
+        let Some(rest) = rest.filter(|_| self.account.state.borrow().profiles.wants_friend_list(user)) else { return };
+        self.account.state.borrow_mut().profiles.asked_friend_list(user);
         let this = self.clone();
         glib::spawn_future_local(async move {
             let answer = rest.mutual_friends(user).await;
             {
-                let mut state = this.state.borrow_mut();
+                let mut state = this.account.state.borrow_mut();
                 match answer {
                     Ok(friends) => state.profiles.friend_list_arrived(user, friends),
                     Err(_) => state.profiles.friend_list_failed(user),
@@ -337,12 +337,12 @@ impl App {
     }
 
     fn load_note_then(self: &Rc<Self>, user: Snowflake, then: impl FnOnce() + 'static) {
-        let rest = self.state.borrow().rest.clone();
-        let Some(rest) = rest.filter(|_| self.state.borrow_mut().notes.start(user)) else { return };
+        let rest = self.account.state.borrow().rest.clone();
+        let Some(rest) = rest.filter(|_| self.account.state.borrow_mut().notes.start(user)) else { return };
         let this = self.clone();
         glib::spawn_future_local(async move {
             let note = rest.note(user).await.ok().flatten();
-            this.state.borrow_mut().notes.loaded(user, note);
+            this.account.state.borrow_mut().notes.loaded(user, note);
             then();
         });
     }
@@ -350,7 +350,7 @@ impl App {
     /// Our note on `user` changed, from another of our sessions: what is
     /// open shows it, unless it is being written.
     pub(super) fn on_note(self: &Rc<Self>, user: Snowflake, note: Option<String>) {
-        self.state.borrow_mut().notes.loaded(user, note);
+        self.account.state.borrow_mut().notes.loaded(user, note);
         self.refresh_profile_views();
     }
 
@@ -452,7 +452,7 @@ impl View {
     }
 
     fn body(self: &Rc<Self>, app: &Rc<App>) -> gtk::Widget {
-        let state = app.state.borrow();
+        let state = app.account.state.borrow();
         let held = state.profiles.get_in(self.target.user.id, self.target.guild);
         // What Discord says of them replaces what we knew when it was clicked.
         let user = &held.as_ref().map_or_else(|| self.target.user.clone(), |p| p.user.clone());
@@ -860,7 +860,7 @@ impl View {
                     return;
                 }
                 *sent.borrow_mut() = text.clone();
-                let Some(rest) = app.state.borrow().rest.clone() else { return };
+                let Some(rest) = app.account.state.borrow().rest.clone() else { return };
                 glib::spawn_future_local(async move {
                     let _ = rest.set_note(user, &text).await;
                 });

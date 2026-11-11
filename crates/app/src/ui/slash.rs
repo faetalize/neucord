@@ -149,7 +149,7 @@ const fn apps_item<T: CommandTarget + 'static>() -> Entry<T> {
 /// look for commands.
 fn shows_apps<T: CommandTarget>(app: &App, target: &T) -> bool {
     let Some(subject) = target.subject() else { return false };
-    let state = app.state.borrow();
+    let state = app.account.state.borrow();
     state.find_channel(subject.channel).is_some_and(|(_, c)| commands::offers_apps(c.kind))
         && state.command_place(subject.channel).is_some()
 }
@@ -201,7 +201,7 @@ fn apps_menu<T: CommandTarget + 'static>(app: &Rc<App>, target: &Rc<T>, live: Li
             menu.list();
         }
     });
-    let place = app.state.borrow().command_place(subject.channel);
+    let place = app.account.state.borrow().command_place(subject.channel);
     if let Some(place) = place {
         app.fetch_command_indexes(&place, {
             let menu = Rc::downgrade(&menu);
@@ -230,7 +230,7 @@ impl AppsMenu {
     fn list(&self) {
         let Some(app) = self.app.upgrade() else { return };
         let listing = {
-            let state = app.state.borrow();
+            let state = app.account.state.borrow();
             let Some(place) = state.command_place(self.subject.channel) else { return };
             let query = self.query.borrow();
             let found = state.commands.find(&place, self.subject.kind, &query);
@@ -412,8 +412,8 @@ impl App {
         if self.editing().is_some() || self.slash.is_active() {
             return false;
         }
-        let Some(channel) = self.state.borrow().channel else { return false };
-        let Some(place) = self.state.borrow().command_place(channel) else { return false };
+        let Some(channel) = self.account.state.borrow().channel else { return false };
+        let Some(place) = self.account.state.borrow().command_place(channel) else { return false };
         self.fetch_command_indexes(&place, {
             let this = Rc::downgrade(self);
             Rc::new(move || {
@@ -425,7 +425,7 @@ impl App {
         });
         let (query, terminated) = commands::query_of(typed);
         let suggestions: Vec<Suggestion> = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let found = state.commands.find(&place, command_type::CHAT, &query);
             commands::settled(found, &query, terminated)
                 .into_iter()
@@ -447,17 +447,22 @@ impl App {
     /// `loaded` runs as each arrives.
     fn fetch_command_indexes(self: &Rc<Self>, place: &commands::Place, loaded: Rc<dyn Fn()>) {
         let (rest, me) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             (state.rest.clone(), state.me())
         };
         let (Some(rest), Some(me)) = (rest, me) else { return };
-        let targets = self.state.borrow_mut().commands.to_fetch(place, Instant::now());
+        let targets = self.account.state.borrow_mut().commands.to_fetch(place, Instant::now());
+        let epoch = self.account.epoch.get();
         for target in targets {
             let (this, rest, loaded) = (self.clone(), rest.clone(), loaded.clone());
             glib::spawn_future_local(async move {
                 let index = rest.command_index(target).await;
+                // An index of an account that was left isn't the next one's.
+                if this.account.epoch.get() != epoch {
+                    return;
+                }
                 {
-                    let mut state = this.state.borrow_mut();
+                    let mut state = this.account.state.borrow_mut();
                     match &index {
                         Some(index) => state.commands.loaded(target, index, me),
                         None => state.commands.failed(target, Instant::now()),
@@ -470,9 +475,9 @@ impl App {
 
     /// Fill in `id`, a suggestion, in the form.
     pub(super) fn start_command(self: &Rc<Self>, id: &str) {
-        let Some(channel) = self.state.borrow().channel else { return };
+        let Some(channel) = self.account.state.borrow().channel else { return };
         let found = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let place = state.command_place(channel);
             place.and_then(|p| state.commands.get(&p, command_type::CHAT, id).map(|(c, a)| (c.clone(), a.clone())))
         };
@@ -529,13 +534,13 @@ impl App {
     /// it now (`canUseApplicationCommands`): the message box shows, nothing
     /// is being edited or replied to, and commands have a place to run.
     pub(super) fn apps_channel(&self) -> Option<Snowflake> {
-        let channel = self.state.borrow().channel?;
+        let channel = self.account.state.borrow().channel?;
         let replying = self.reply.borrow().as_ref().is_some_and(|r| r.channel == channel);
         let allowed = self.composer_box.is_visible()
             && self.editing().is_none()
             && !self.has_voice_draft(channel)
             && !replying
-            && self.state.borrow().command_place(channel).is_some();
+            && self.account.state.borrow().command_place(channel).is_some();
         allowed.then_some(channel)
     }
 
@@ -664,7 +669,7 @@ impl App {
             let mut slot = self.slash.active.borrow_mut();
             let Some(active) = slot.as_mut() else { return };
             let values = active.values();
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let names = Resolver { state: &state, channel: active.channel };
             let options =
                 commands::run_options(&active.command, &values, &names, active.autocomplete.answers(), Some(option));
@@ -799,7 +804,7 @@ impl App {
         let prepared = {
             let slot = self.slash.active.borrow();
             let Some(active) = slot.as_ref() else { return };
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let names = Resolver { state: &state, channel: active.channel };
             let values = active.values();
             let mut invalid: Option<gtk::Widget> = None;
@@ -872,7 +877,7 @@ impl App {
             Go { command: Box<Command>, app: CommandApp, body: serde_json::Value, nonce: Snowflake },
         }
         let prepared = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let found = state.command_place(subject.channel).and_then(|place| {
                 let (command, app) = state.commands.get(&place, subject.kind, id)?;
                 Some((command.clone(), app.clone()))
@@ -916,14 +921,23 @@ impl App {
         body: serde_json::Value,
         nonce: Snowflake,
     ) -> bool {
-        let rest = self.state.borrow().rest.clone();
+        let rest = self.account.state.borrow().rest.clone();
         let Some(rest) = rest else { return false };
-        self.state.borrow_mut().running.insert(nonce, Running { channel, app: app.name.clone(), created: false });
+        self.account
+            .state
+            .borrow_mut()
+            .running
+            .insert(nonce, Running { channel, app: app.name.clone(), created: false });
         self.refresh_command_status();
         let this = self.clone();
+        let epoch = self.account.epoch.get();
         glib::spawn_future_local(async move {
-            if let Err(why) = this.reopen(&rest, channel).await {
-                this.state.borrow_mut().running.remove(&nonce);
+            let reopened = this.reopen(&rest, channel).await;
+            if this.account.epoch.get() != epoch {
+                return;
+            }
+            if let Err(why) = reopened {
+                this.account.state.borrow_mut().running.remove(&nonce);
                 this.refresh_command_status();
                 return this.show_composer_error(&format!("Not sent: {why}"));
             }
@@ -936,9 +950,9 @@ impl App {
 
     /// Discord turned the request down.
     fn command_refused(self: &Rc<Self>, nonce: Snowflake, command: &Command, failure: &Failure) {
-        let Some(running) = self.state.borrow_mut().running.remove(&nonce) else { return };
+        let Some(running) = self.account.state.borrow_mut().running.remove(&nonce) else { return };
         if failure.stale_command {
-            self.state.borrow_mut().commands_out_of_date(command.application, running.channel);
+            self.account.state.borrow_mut().commands_out_of_date(command.application, running.channel);
         }
         self.refresh_command_status();
         let text = match (&failure.message, failure.is_announced()) {
@@ -951,7 +965,7 @@ impl App {
 
     /// Say what the commands running in the open channel are doing.
     pub(super) fn refresh_command_status(&self) {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let open = state.channel;
         let latest = state.running.iter().filter(|(_, r)| Some(r.channel) == open).max_by_key(|(nonce, _)| **nonce);
         let text =
@@ -975,7 +989,7 @@ impl App {
             self.show_choices(&option);
             return true;
         }
-        let Some(running) = self.state.borrow_mut().running.remove(&nonce) else { return false };
+        let Some(running) = self.account.state.borrow_mut().running.remove(&nonce) else { return false };
         self.refresh_command_status();
         match outcome {
             Outcome::Success => {}
@@ -991,7 +1005,7 @@ impl App {
 
     /// Discord took the command (`INTERACTION_CREATE`).
     pub(super) fn command_created(self: &Rc<Self>, nonce: Snowflake) {
-        if let Some(running) = self.state.borrow_mut().running.get_mut(&nonce) {
+        if let Some(running) = self.account.state.borrow_mut().running.get_mut(&nonce) {
             running.created = true;
         }
         self.refresh_command_status();
@@ -999,7 +1013,7 @@ impl App {
 
     /// The server's apps or commands changed.
     pub(super) fn command_index_changed(self: &Rc<Self>, guild: Snowflake, version: Option<String>) {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.account.state.borrow_mut();
         let bots = state.commands.guild_changed(guild, version);
         let channels: Vec<Snowflake> = state
             .private_channels

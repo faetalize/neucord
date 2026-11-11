@@ -44,7 +44,7 @@ pub(super) struct Live {
 impl Live {
     pub(super) fn new(app: &Rc<App>, message: &Message) -> Live {
         let blocked = {
-            let state = app.state.borrow();
+            let state = app.account.state.borrow();
             match (state.find_channel(message.channel_id), &state.account) {
                 (Some((guild, channel)), Some(me)) => permissions::components_blocked(guild, channel, me, now_unix()),
                 _ => false,
@@ -423,13 +423,13 @@ impl App {
         component_type: u8,
         values: Option<Vec<String>>,
     ) {
-        let Some(store) = self.timelines.borrow().get(channel).map(|t| t.store.clone()) else { return };
+        let Some(store) = self.account.timelines.borrow().get(channel).map(|t| t.store.clone()) else { return };
         let Some((_, held)) = timelines::find(&store, message) else { return };
         if !held.local.can_queue() {
             return;
         }
         let (rest, session, guild) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let guild = state.find_channel(channel).and_then(|(g, _)| g.map(|g| g.id));
             (state.rest.clone(), state.session_id.clone(), guild)
         };
@@ -450,7 +450,7 @@ impl App {
             });
             let Some(at) = at.filter(|_| free) else { return };
             let application = held.application_id.unwrap_or(held.author.id);
-            this.state.borrow_mut().interactions.insert(nonce, Pending { channel, message, application });
+            this.account.state.borrow_mut().interactions.insert(nonce, Pending { channel, message, application });
             this.rebind(&store, at, 1);
             let sent = Press {
                 guild,
@@ -491,10 +491,11 @@ impl App {
     /// The interaction is over: answered, or `answered` false, refused. Ours
     /// that the request itself failed (`failure`) is told, when the client does.
     fn interaction_ended(self: &Rc<Self>, nonce: Snowflake, answered: bool, failure: Option<Failure>) {
-        let Some(Pending { channel, message, .. }) = self.state.borrow_mut().end_press(nonce, failure.as_ref()) else {
+        let Some(Pending { channel, message, .. }) = self.account.state.borrow_mut().end_press(nonce, failure.as_ref())
+        else {
             return;
         };
-        let Some(store) = self.timelines.borrow().get(channel).map(|t| t.store.clone()) else { return };
+        let Some(store) = self.account.timelines.borrow().get(channel).map(|t| t.store.clone()) else { return };
         let at = timelines::edit(&store, message, |m| {
             _ = if answered { m.local.answered(nonce) } else { m.local.refused(nonce) };
         });

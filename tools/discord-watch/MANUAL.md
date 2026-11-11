@@ -250,6 +250,17 @@ changed for unrelated reasons only needs a note in the issue.
 - **A login that must change its password** (`auth::check_required`). The
   login store is watched (`LoginRequiredActionStore`). The forced modal, and
   logging out when it's closed, are in `handleConnectionOpen` in 165685.
+- **Listing and switching accounts** (`accounts.rs`, `ui/accounts.rs`,
+  `Rest::me`, `Rest::adding_account`). The list's rules (`MultiAccountStore`:
+  five accounts, what a connection does to the list) and the switch
+  (`switchAccountToken`) are watched. Not watched: `MultiAccountActionCreators`
+  in 429707 (anchor `Found per-user token authentication mismatch`), which
+  asks `GET /users/@me` with each stored token when a list opens, and counts
+  only a 401, a 403 or another account's id against the token; the limit's
+  other copy, in the Manage Accounts dialog 623161 (anchor `maxNumAccounts`);
+  and the `authorization: ""` that only the password login sends while adding
+  an account (`isMultiAccount` in 830215), where the two-factor and QR
+  requests carry the signed-in token.
 - **Confirming a friend request from a stranger** (`accept_friend`,
   `confirm_stranger` in `ui/friends.rs`). Client:
   `maybeConfirmFriendRequestAccept` in 393426, and the stranger state in

@@ -794,7 +794,7 @@ impl Viewer {
         if !hide && item.can_link() {
             section.append(Some("Copy Media Link"), Some("viewer.copy-link"));
         }
-        let developer = app.state.borrow().settings.developer_mode;
+        let developer = app.account.state.borrow().settings.developer_mode;
         if developer && matches!(item.source, Source::Attachment(_)) {
             section.append(Some("Copy Attachment ID"), Some("viewer.copy-attachment-id"));
         }
@@ -972,7 +972,7 @@ impl App {
     /// Whether the media options (saving, copying, opening links) are hidden
     /// in `channel`: a post of a forum that says so (`s` in 207133).
     pub(super) fn media_options_hidden(&self, channel: discord::Snowflake) -> bool {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let Some((Some(guild), channel)) = state.find_channel(channel) else { return false };
         channel.kind.is_thread()
             && channel

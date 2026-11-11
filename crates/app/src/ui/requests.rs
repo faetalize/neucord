@@ -45,7 +45,7 @@ impl App {
 
     pub(super) fn show_requests(self: &Rc<Self>) {
         {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             state.guild = None;
             state.channel = None;
             state.page = Some(Page::MessageRequests);
@@ -64,7 +64,7 @@ impl App {
         while let Some(child) = list.first_child() {
             list.remove(&child);
         }
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let (spam, requests): (Vec<_>, Vec<_>) = state.requests().into_iter().partition(|c| c.spam);
         if requests.is_empty() && spam.is_empty() {
             list.append(
@@ -146,7 +146,7 @@ impl App {
     /// Accept or ignore a message request. The result is applied at once;
     /// the gateway confirms it with CHANNEL_UPDATE or CHANNEL_DELETE.
     fn answer_request(self: &Rc<Self>, channel: Snowflake, accept: bool) {
-        let Some(rest) = self.state.borrow().rest.clone() else { return };
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
         let this = self.clone();
         glib::spawn_future_local(async move {
             let result = if accept {
@@ -156,7 +156,7 @@ impl App {
             };
             if let Err(e) = result {
                 let text = format!("Could not {} the request: {e}", if accept { "accept" } else { "ignore" });
-                if this.state.borrow().page == Some(Page::MessageRequests) {
+                if this.account.state.borrow().page == Some(Page::MessageRequests) {
                     this.requests.error.set_label(&text);
                     this.requests.error.set_visible(true);
                     this.rebuild_requests();

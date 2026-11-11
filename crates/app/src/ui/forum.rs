@@ -169,7 +169,7 @@ pub(super) const EDIT_TAGS: Entry<ThreadTarget> = Entry::Item(Item {
 pub(super) const COPY_TAG_ID: Entry<Tagged> = Entry::Item(Item {
     name: "copy-tag-id",
     label: "Copy Tag _ID",
-    shows: |app, _| app.state.borrow().settings.developer_mode,
+    shows: |app, _| app.account.state.borrow().settings.developer_mode,
     kind: Kind::Action(|app, tag| app.copy(&tag.0.to_string())),
 });
 
@@ -302,7 +302,7 @@ impl App {
 
     /// The forum on the page, if it's what the window shows.
     pub(super) fn forum_shown(&self) -> Option<Snowflake> {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let id = state.channel.filter(|_| state.page.is_none())?;
         let (_, channel) = state.find_channel(id)?;
         (channel.kind.is_forum_like() && self.content.visible_child_name().as_deref() == Some("forum")).then_some(id)
@@ -311,7 +311,7 @@ impl App {
     /// A forum was opened.
     pub(super) fn open_forum(self: &Rc<Self>, id: Snowflake) {
         {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let Some((Some(guild), forum)) = state.find_channel(id) else { return };
             let mut data = self.forum.data.borrow_mut();
             let data = &mut *data;
@@ -343,7 +343,7 @@ impl App {
     fn forum_change_view(self: &Rc<Self>, change: impl FnOnce(&mut View, &Channel)) {
         let Some(id) = self.forum_shown() else { return };
         {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let Some((Some(guild), forum)) = state.find_channel(id) else { return };
             let mut data = self.forum.data.borrow_mut();
             let data = &mut *data;
@@ -365,7 +365,7 @@ impl App {
     pub(super) fn forum_resort(self: &Rc<Self>) {
         let Some(id) = self.forum_shown() else { return };
         {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let Some((Some(guild), _)) = state.find_channel(id) else { return };
             let mut data = self.forum.data.borrow_mut();
             let data = &mut *data;
@@ -382,7 +382,7 @@ impl App {
     /// is shown now.
     fn forum_header(self: &Rc<Self>) {
         let page = &self.forum;
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let data = page.data.borrow();
         let Some(id) = state.channel else { return };
         let (Some((_, forum)), Some(view)) = (state.find_channel(id), data.views.get(&id)) else { return };
@@ -471,7 +471,7 @@ impl App {
     pub(super) fn forum_rebuild(self: &Rc<Self>) {
         let Some(id) = self.forum_shown() else { return };
         let (rows, layout, loading) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let data = self.forum.data.borrow();
             let (Some((Some(guild), forum)), Some(view), Some(me)) =
                 (state.find_channel(id), data.views.get(&id), state.account.as_ref())
@@ -573,7 +573,7 @@ impl App {
     /// author's member, which the client asks for together with others.
     fn forum_card_shown(self: &Rc<Self>, post: Snowflake) {
         let (ask, author) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let Some((Some(guild), thread)) = state.find_channel(post) else { return };
             let Some(forum) = thread.parent_id else { return };
             let mut data = self.forum.data.borrow_mut();
@@ -583,7 +583,7 @@ impl App {
             (ask, thread.owner_id.map(|owner| (guild.id, owner)))
         };
         if let Some((guild, owner)) = author {
-            self.state.borrow_mut().members.request(guild, owner);
+            self.account.state.borrow_mut().members.request(guild, owner);
             let due = std::mem::replace(&mut self.forum.data.borrow_mut().members_due, true);
             if !due {
                 let this = Rc::downgrade(self);
@@ -612,7 +612,7 @@ impl App {
             glib::spawn_future_local(async move {
                 loop {
                     let next = this.forum.data.borrow().first.next_request();
-                    let rest = this.state.borrow().rest.clone();
+                    let rest = this.account.state.borrow().rest.clone();
                     let (Some((forum, posts)), Some(rest)) = (next, rest) else { break };
                     let answer = rest.post_data(forum, &posts).await;
                     {
@@ -645,7 +645,7 @@ impl App {
     fn forum_load_archived(self: &Rc<Self>) {
         let Some(id) = self.forum_shown() else { return };
         let search = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let (Some((Some(guild), forum)), Some(me)) = (state.find_channel(id), state.account.as_ref()) else {
                 return;
             };
@@ -657,7 +657,7 @@ impl App {
             let Some(view) = data.views.get(&id) else { return };
             data.archive.begin(id, view)
         };
-        let (Some(search), Some(rest)) = (search, self.state.borrow().rest.clone()) else { return };
+        let (Some(search), Some(rest)) = (search, self.account.state.borrow().rest.clone()) else { return };
         let this = self.clone();
         glib::spawn_future_local(async move {
             let answer = rest.archived_threads(&search).await;
@@ -669,7 +669,7 @@ impl App {
     /// A page of archived posts came, or didn't.
     fn forum_archived(self: &Rc<Self>, search: &Search, answer: Result<ArchivedPage, discord::Error>) {
         {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             let state = &mut *state;
             let Some(guild) = state.guilds.iter_mut().find(|g| g.channel(search.channel).is_some()) else {
                 return;
@@ -724,7 +724,7 @@ impl App {
     fn forum_request_unreads(self: &Rc<Self>) {
         let Some(id) = self.forum_shown() else { return };
         let request = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let Some((Some(guild), _)) = state.find_channel(id) else { return };
             let data = self.forum.data.borrow();
             if !data.synced.contains(&guild.id) {
@@ -745,7 +745,7 @@ impl App {
         };
         let Some(request) = request else { return };
         self.forum.data.borrow_mut().unreads.asked(&request.posts());
-        if let Some(gateway) = &self.state.borrow().gateway {
+        if let Some(gateway) = &self.account.state.borrow().gateway {
             gateway.request_forum_unreads(&request);
         }
     }
@@ -755,7 +755,7 @@ impl App {
     fn forum_ack(self: &Rc<Self>) {
         let Some(id) = self.forum_shown() else { return };
         let ack = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let Some((Some(guild), _)) = state.find_channel(id) else { return };
             let data = self.forum.data.borrow();
             let newer = state.read.acked(id).is_some_and(|acked| {
@@ -772,7 +772,7 @@ impl App {
         }
         // The client reads a forum up to now, whatever its last message is.
         let now = Snowflake::now();
-        self.state.borrow_mut().read.ack(id, now);
+        self.account.state.borrow_mut().read.ack(id, now);
         self.forum.data.borrow_mut().listing.acked(id);
         self.queue_ack(id, now);
         self.refresh_badges();
@@ -780,8 +780,8 @@ impl App {
 
     /// A thread of a server was created: a post may have been.
     pub(super) fn forum_thread_created(self: &Rc<Self>, guild: Snowflake, thread: &Channel, newly_created: bool) {
-        let mine = self.state.borrow().me() == thread.owner_id;
-        let subscribed = self.state.borrow().subscriptions.threads(guild);
+        let mine = self.account.state.borrow().me() == thread.owner_id;
+        let subscribed = self.account.state.borrow().subscriptions.threads(guild);
         {
             let mut data = self.forum.data.borrow_mut();
             if newly_created && data.synced.contains(&guild) {
@@ -796,7 +796,7 @@ impl App {
     /// A thread of a server changed.
     pub(super) fn forum_thread_updated(self: &Rc<Self>, thread: &Channel) {
         let changed = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let Some((Some(guild), now)) = state.find_channel(thread.id) else { return };
             let mut data = self.forum.data.borrow_mut();
             let data = &mut *data;
@@ -820,7 +820,7 @@ impl App {
     /// A thread was deleted; `post` is what it was.
     pub(super) fn forum_thread_deleted(self: &Rc<Self>, post: &Channel) {
         {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let mut data = self.forum.data.borrow_mut();
             let data = &mut *data;
             data.archive.deleted(post.id);
@@ -842,7 +842,7 @@ impl App {
         // As `THREAD_LIST_SYNC` does the list of the forum that's open.
         if let Some(id) = self.forum_shown() {
             let refresh = {
-                let state = self.state.borrow();
+                let state = self.account.state.borrow();
                 let mut data = self.forum.data.borrow_mut();
                 let data = &mut *data;
                 match (state.find_channel(id), data.views.get(&id).cloned()) {
@@ -864,7 +864,7 @@ impl App {
     /// A message arrived in a post, or began one.
     pub(super) fn forum_message(self: &Rc<Self>, message: &Message) {
         let parent = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let Some((Some(_), thread)) = state.find_channel(message.channel_id) else { return };
             let mut data = self.forum.data.borrow_mut();
             data.first.created(message);
@@ -917,7 +917,7 @@ impl App {
     /// We read a post, here or elsewhere.
     pub(super) fn forum_read(&self, post: Snowflake) {
         let forum_post = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             state
                 .find_channel(post)
                 .and_then(|(g, t)| g.zip(t.parent_id))
@@ -947,7 +947,7 @@ impl App {
 
     /// What a card says, from what we hold.
     fn card_facts(&self, post: Snowflake) -> Option<Card> {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let data = self.forum.data.borrow();
         let (Some(guild), thread) = state.find_channel(post)? else { return None };
         let forum = guild.channel(thread.parent_id?)?;
@@ -1149,7 +1149,7 @@ impl App {
 
     /// Whether Pin Post and Unpin Post show.
     pub(super) fn forum_may_pin(&self, post: Snowflake) -> bool {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         match (state.find_channel(post), &state.account) {
             (Some((Some(guild), thread)), Some(me)) => permissions::can_pin_post(guild, thread, me, now_unix()),
             _ => false,
@@ -1157,14 +1157,14 @@ impl App {
     }
 
     pub(super) fn forum_is_pinned(&self, post: Snowflake) -> bool {
-        self.state.borrow().find_channel(post).is_some_and(|(_, t)| t.is_pinned())
+        self.account.state.borrow().find_channel(post).is_some_and(|(_, t)| t.is_pinned())
     }
 
     /// Pin `post`, or unpin it (`pin` and `unpin` in 7909). Pinning one
     /// replaces the post that's pinned, after asking.
     pub(super) fn forum_pin(self: &Rc<Self>, post: Snowflake, pin: bool) {
         let other = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let Some((Some(guild), thread)) = state.find_channel(post) else { return };
             guild
                 .threads
@@ -1200,7 +1200,7 @@ impl App {
     fn forum_set_pinned(self: &Rc<Self>, post: Snowflake, pin: bool) {
         const PINNED: u64 = 1 << 1;
         let (before, rest) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let Some((_, thread)) = state.find_channel(post) else { return };
             (thread.clone(), state.rest.clone())
         };
@@ -1208,7 +1208,7 @@ impl App {
         let flags = if pin { before.flags | PINNED } else { before.flags & !PINNED };
         let mut after = before.clone();
         after.flags = flags;
-        let guild = self.state.borrow().find_channel(post).and_then(|(g, _)| g.map(|g| g.id));
+        let guild = self.account.state.borrow().find_channel(post).and_then(|(g, _)| g.map(|g| g.id));
         let Some(guild) = guild else { return };
         self.on_threads(guild, |g| g.set_thread(after.clone()));
         self.forum_thread_updated(&after);
@@ -1224,7 +1224,7 @@ impl App {
 
     /// Whether Edit Tags shows.
     pub(super) fn forum_may_edit_tags(&self, post: Snowflake) -> bool {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         match (state.find_channel(post), &state.account) {
             (Some((Some(guild), thread)), Some(me)) => permissions::can_edit_post_tags(guild, thread, me, now_unix()),
             _ => false,
@@ -1233,7 +1233,7 @@ impl App {
 
     /// The forum's tags, ticked where the post has them.
     pub(super) fn forum_tag_choices(&self, post: Snowflake) -> Vec<Choice> {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let Some((Some(guild), thread)) = state.find_channel(post) else { return Vec::new() };
         let Some(forum) = thread.parent_id.and_then(|id| guild.channel(id)) else { return Vec::new() };
         forum
@@ -1252,7 +1252,7 @@ impl App {
     /// gateway says the post changed.
     pub(super) fn forum_set_tag(self: &Rc<Self>, post: Snowflake, tag: Snowflake, on: bool) {
         let (mut tags, rest) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let Some((_, thread)) = state.find_channel(post) else { return };
             (thread.applied_tags.clone(), state.rest.clone())
         };

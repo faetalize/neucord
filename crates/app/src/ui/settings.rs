@@ -19,7 +19,6 @@ use discord::settings_sync::{Save, SaveError, Schedule};
 use gtk::glib;
 
 use super::App;
-use super::state::State;
 use crate::config::{self, Key};
 
 /// Sets a row to the settings.
@@ -214,7 +213,7 @@ impl App {
         );
         // Only for the accounts Discord is trying it on.
         let upcoming = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             state.me.as_ref().is_some_and(|me| settings::upcoming_event_toggle(&state.experiments, me.id))
         };
         if upcoming {
@@ -267,7 +266,7 @@ impl App {
             "Let others see when I'm typing",
             "You still see who else is typing.",
             &config::SEND_TYPING,
-            |app, sending| app.state.borrow_mut().typing.set_sending(sending),
+            |app, sending| app.account.state.borrow_mut().typing.set_sending(sending),
         );
         let appearance = group(
             "Appearance",
@@ -335,7 +334,7 @@ impl App {
             shows.iter().for_each(|show| show(settings));
             updating.set(false);
         };
-        show(&self.state.borrow().settings);
+        show(&self.account.state.borrow().settings);
         Window { dialog, show: Box::new(show) }
     }
 
@@ -346,14 +345,6 @@ impl App {
             Some(window) => window.dialog.clone().upcast(),
             None => self.window.clone().upcast(),
         }
-    }
-
-    /// The state of a session that hasn't begun, with the options and
-    /// remembered choices from disk.
-    pub(super) fn fresh_state(&self) -> State {
-        let mut state = State { members_closed: self.remembered.get(&config::MEMBERS_CLOSED), ..State::default() };
-        state.typing.set_sending(self.config.get(&config::SEND_TYPING));
-        state
     }
 
     /// Say how a save went where it's seen: the window covers the app's own
@@ -371,17 +362,17 @@ impl App {
     /// Show the settings in the window, if it's open.
     pub(super) fn settings_replaced(&self) {
         if let Some(window) = self.settings_window.borrow().as_ref() {
-            (window.show)(&self.state.borrow().settings);
+            (window.show)(&self.account.state.borrow().settings);
         }
         if let Some(dialog) = self.server_privacy.borrow().as_ref() {
-            dialog.show(&self.state.borrow().settings);
+            dialog.show(&self.account.state.borrow().settings);
         }
     }
 
     /// Settings that changed, here or elsewhere, take effect where they show.
     pub(super) fn apply_settings(self: &Rc<Self>, patch: SettingsPatch, replace: bool) {
         let (media, folders, status) = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             let before = (state.settings.media, state.settings.guild_folders.clone(), state.settings.status.clone());
             if replace {
                 state.settings.replace(patch);
@@ -398,7 +389,7 @@ impl App {
             self.rebuild_rail();
         }
         if media {
-            self.images.motion().set_media(self.state.borrow().settings.media);
+            self.images.motion().set_media(self.account.state.borrow().settings.media);
             self.refresh_rows();
         }
         if status {
@@ -411,7 +402,7 @@ impl App {
 
     /// The user changed a setting in the window.
     pub(super) fn change_setting(self: &Rc<Self>, setting: Setting) {
-        let edited = self.state.borrow_mut().sync.edit(setting);
+        let edited = self.account.state.borrow_mut().sync.edit(setting);
         let Some(edited) = edited else {
             // Before READY there's nothing to change.
             self.settings_replaced();
@@ -424,11 +415,12 @@ impl App {
     }
 
     /// Save when `schedule` says. A timer replaced since finds the save
-    /// gone and does nothing.
+    /// gone and does nothing, and so does one of an account that was left.
     pub(super) fn save_settings_after(self: &Rc<Self>, schedule: Schedule) {
         let this = Rc::downgrade(self);
+        let epoch = self.account.epoch.get();
         glib::timeout_add_local_once(schedule.after, move || {
-            if let Some(this) = this.upgrade() {
+            if let Some(this) = this.upgrade().filter(|this| this.account.epoch.get() == epoch) {
                 this.save_settings(schedule.generation);
             }
         });
@@ -436,14 +428,19 @@ impl App {
 
     fn save_settings(self: &Rc<Self>, generation: u64) {
         let (save, rest) = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             (state.sync.save(generation), state.rest.clone())
         };
         let (Some(save), Some(rest)) = (save, rest) else { return };
         let this = self.clone();
+        let epoch = self.account.epoch.get();
         glib::spawn_future_local(async move {
             let answer = rest.save_settings(&save).await;
-            this.settings_answered(&rest, &save, answer).await;
+            // The answer is of an account that was left meanwhile, whose
+            // sync state is gone: what it says is no one's.
+            if this.account.epoch.get() == epoch {
+                this.settings_answered(&rest, &save, answer, epoch).await;
+            }
         });
     }
 
@@ -452,10 +449,11 @@ impl App {
         rest: &Rest,
         save: &Save,
         answer: Result<discord::settings_sync::Saved, SaveError>,
+        epoch: u64,
     ) {
         match answer {
             Ok(saved) => {
-                let applied = self.state.borrow_mut().sync.saved(save, &saved);
+                let applied = self.account.state.borrow_mut().sync.saved(save, &saved);
                 if let Some(applied) = applied {
                     self.apply_settings(applied.patch, true);
                     if let Some(schedule) = applied.schedule {
@@ -464,15 +462,19 @@ impl App {
                 }
             }
             Err(SaveError::RateLimited { retry_after }) => {
-                let retry = self.state.borrow_mut().sync.rate_limited(retry_after.as_deref());
+                let retry = self.account.state.borrow_mut().sync.rate_limited(retry_after.as_deref());
                 self.save_settings_after(retry);
             }
             Err(SaveError::Invalid) => {
                 // The client asks for the settings again and starts over.
                 self.settings_toast("Discord refused those settings. Loading them again");
-                match rest.settings_proto(1).await {
+                let reloaded = rest.settings_proto(1).await;
+                if self.account.epoch.get() != epoch {
+                    return;
+                }
+                match reloaded {
                     Ok(proto) => {
-                        let patch = self.state.borrow_mut().sync.reloaded(proto);
+                        let patch = self.account.state.borrow_mut().sync.reloaded(proto);
                         if let Some(patch) = patch {
                             self.apply_settings(patch, true);
                         }
@@ -482,7 +484,7 @@ impl App {
             }
             Err(SaveError::Other(e)) => {
                 eprintln!("settings: {e}");
-                self.state.borrow_mut().sync.failed();
+                self.account.state.borrow_mut().sync.failed();
                 self.settings_toast("Could not save your settings");
             }
         }

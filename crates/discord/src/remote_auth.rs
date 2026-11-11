@@ -80,9 +80,14 @@ impl State {
 }
 
 impl RemoteAuth {
-    /// `solver` answers a captcha Discord asks for when the ticket is
-    /// exchanged, as the client's `interceptResponse` does for any request.
-    pub async fn connect(solver: CaptchaSolver) -> Result<(RemoteAuth, async_channel::Receiver<Event>), Error> {
+    /// `rest` exchanges the ticket for the token: [`Rest::anonymous`], or
+    /// [`Rest::adding_account`] while another account stays signed in, with
+    /// `solver` to answer a captcha Discord asks for, as the client's
+    /// `interceptResponse` does for any request.
+    pub async fn connect(
+        rest: Rest,
+        solver: CaptchaSolver,
+    ) -> Result<(RemoteAuth, async_channel::Receiver<Event>), Error> {
         let keys = gio::spawn_blocking(Keys::generate).await.expect("key generation does not panic")?;
         let session = soup::Session::new();
         session.set_user_agent(&identity::user_agent());
@@ -93,7 +98,7 @@ impl RemoteAuth {
             .map_err(Error::Transport)?;
 
         let (tx, rx) = async_channel::unbounded();
-        let rest = Rest::anonymous().solving_captchas(solver);
+        let rest = rest.solving_captchas(solver);
         let state = Rc::new(State { keys, rest, settled: Cell::new(false), acked: Cell::new(true), events: tx });
         conn.connect_message({
             let state = state.clone();

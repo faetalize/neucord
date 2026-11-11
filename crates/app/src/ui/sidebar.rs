@@ -25,7 +25,7 @@ pub(super) const COPY_CHANNEL_LINK: Entry<ChannelTarget> = Entry::Item(Item {
     label: "Copy _Link",
     shows: |_, _| true,
     kind: Kind::Action(|app, target| {
-        let link = app.state.borrow().find_channel(target.0).map(|(guild, c)| c.link(guild.map(|g| g.id)));
+        let link = app.account.state.borrow().find_channel(target.0).map(|(guild, c)| c.link(guild.map(|g| g.id)));
         if let Some(link) = link {
             app.copy(&link);
         }
@@ -39,7 +39,7 @@ pub(super) const OPEN_CHAT: Entry<ChannelTarget> = Entry::Item(Item {
     name: "open-chat",
     label: "Open _Chat",
     shows: |app, target| {
-        let state = app.state.borrow();
+        let state = app.account.state.borrow();
         state.find_channel(target.0).is_some_and(|(_, c)| c.kind.is_vocal()) && state.can_view(target.0)
     },
     kind: Kind::Action(|app, target| {
@@ -52,7 +52,7 @@ pub(super) const OPEN_CHAT: Entry<ChannelTarget> = Entry::Item(Item {
 pub(super) const COPY_CHANNEL_ID: Entry<ChannelTarget> = Entry::Item(Item {
     name: "copy-channel-id",
     label: "Copy Channel _ID",
-    shows: |app, _| app.state.borrow().settings.developer_mode,
+    shows: |app, _| app.account.state.borrow().settings.developer_mode,
     kind: Kind::Action(|app, target| app.copy(&target.0.to_string())),
 });
 
@@ -70,7 +70,7 @@ impl App {
     pub(super) fn rebuild_sidebar(self: &Rc<Self>) {
         self.channels.remove_all();
         self.targets.borrow_mut().clear();
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         self.drawn.borrow_mut().1 = state.sidebar_signature();
         let Some(id) = state.guild else {
             self.guild_name.set("Direct Messages", None);
@@ -279,7 +279,7 @@ impl App {
         let target = usize::try_from(index).ok().and_then(|i| self.targets.borrow().get(i).copied().flatten());
         match target {
             Some(Target::Category(id)) => {
-                let folded = self.state.borrow().collapsed.contains(id);
+                let folded = self.account.state.borrow().collapsed.contains(id);
                 return self.fold_category(id, !folded);
             }
             Some(Target::Channel(id)) => self.select_channel(id),

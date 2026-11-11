@@ -34,18 +34,29 @@ fn look_interval() -> Duration {
     Duration::from_secs(2 * 3600) + Duration::from_secs(glib::random_int_range(0, 600) as u64)
 }
 
+/// Where the pending uses of an account are kept: a file for each, so no
+/// account's uses are saved as another's.
+fn usage_file_of(id: Snowflake) -> PathBuf {
+    glib::user_data_dir().join("neucord").join(format!("usage-{}.json", id.0))
+}
+
+/// Forget what is pending for an account for good, as logging it out does.
+pub(super) fn forget_usage(id: Snowflake) {
+    let _ = std::fs::remove_file(usage_file_of(id));
+}
+
 impl App {
-    /// Where the pending uses of the logged in account are kept.
+    /// Where the pending uses of the shown account are kept.
     fn usage_file(&self) -> Option<PathBuf> {
-        let me = self.state.borrow().me.as_ref()?.id;
-        Some(glib::user_data_dir().join("neucord").join(format!("usage-{}.json", me.0)))
+        let me = self.account.state.borrow().me.as_ref()?.id;
+        Some(usage_file_of(me))
     }
 
     /// Take back what a closed app left pending.
     pub(super) fn restore_usage(&self) {
         let Some(file) = self.usage_file() else { return };
         let Ok(json) = std::fs::read_to_string(file) else { return };
-        let mut state = self.state.borrow_mut();
+        let mut state = self.account.state.borrow_mut();
         if !state.frecency.stores.has_pending() {
             state.frecency.stores.restore_pending(&json);
         }
@@ -56,7 +67,7 @@ impl App {
     fn persist_usage(&self) {
         let Some(file) = self.usage_file() else { return };
         let (pending, json) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             (state.frecency.stores.has_pending(), state.frecency.stores.pending_json())
         };
         if !pending {
@@ -74,13 +85,6 @@ impl App {
         }
     }
 
-    /// Forget what is pending for good, as logging out does.
-    pub(super) fn forget_usage(&self) {
-        if let Some(file) = self.usage_file() {
-            let _ = std::fs::remove_file(file);
-        }
-    }
-
     /// A message went out with these emoji (see [`discord::emoji::Translated::used`])
     /// and sticker: the client counts them once Discord took it
     /// (`EMOJI_TRACK_USAGE` and `STICKER_TRACK_USAGE`, 138399).
@@ -90,7 +94,7 @@ impl App {
         }
         let now = now_ms() as u64;
         {
-            let stores = &mut self.state.borrow_mut().frecency.stores;
+            let stores = &mut self.account.state.borrow_mut().frecency.stores;
             for key in emoji {
                 stores.emoji.track(key, now);
             }
@@ -107,7 +111,7 @@ impl App {
     pub(super) fn track_reaction_use(&self, key: &str) {
         let now = now_ms() as u64;
         {
-            let stores = &mut self.state.borrow_mut().frecency.stores;
+            let stores = &mut self.account.state.borrow_mut().frecency.stores;
             stores.reactions.track(key, now);
             stores.emoji.track(key, now);
         }
@@ -120,7 +124,7 @@ impl App {
     pub(super) fn track_channel_use(&self, channel: Snowflake) {
         let now = now_ms() as u64;
         {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             let guild = state.find_channel(channel).map(|(guild, _)| guild.map(|g| g.id));
             // A channel we can't place has no server to compare, and the client would count the channel.
             let guild = guild.unwrap_or(None);
@@ -140,30 +144,32 @@ impl App {
 
     /// The connection is open, or resumed (`POST_CONNECTION_OPEN`).
     pub(super) fn usage_connected(self: &Rc<Self>) {
-        self.state.borrow_mut().usage_active = true;
+        self.account.state.borrow_mut().usage_active = true;
         self.usage_look_after(first_wait(), true);
     }
 
     /// The connection closed: look now (`CONNECTION_CLOSED`), before the
     /// settings sync sets a save aside as an offline edit.
     pub(super) fn usage_closed(self: &Rc<Self>) {
-        if !self.state.borrow().usage_active {
+        if !self.account.state.borrow().usage_active {
             return;
         }
-        self.state.borrow_mut().usage_timer += 1;
+        self.account.state.borrow_mut().usage_timer += 1;
         self.usage_look(false);
     }
 
     fn usage_look_after(self: &Rc<Self>, after: Duration, first: bool) {
         let generation = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             state.usage_timer += 1;
             state.usage_timer
         };
         let this = Rc::downgrade(self);
+        let epoch = self.account.epoch.get();
         glib::timeout_add_local_once(after, move || {
             if let Some(this) = this.upgrade()
-                && this.state.borrow().usage_timer == generation
+                && this.account.epoch.get() == epoch
+                && this.account.state.borrow().usage_timer == generation
             {
                 this.usage_look(first);
             }
@@ -175,13 +181,13 @@ impl App {
     /// which servers and channels alone don't make load the proto.
     fn usage_look(self: &Rc<Self>, first: bool) {
         let (wait, loaded) = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             let wait = *state.usage_interval.get_or_insert_with(look_interval);
             (wait, state.frecency_sync.is_loaded())
         };
         self.usage_look_after(wait, false);
         let waiting = {
-            let stores = &self.state.borrow().frecency.stores;
+            let stores = &self.account.state.borrow().frecency.stores;
             stores.has_pending_beyond_channels() || (stores.has_pending() && !first)
         };
         if loaded {
@@ -197,7 +203,7 @@ impl App {
     /// and the proto is loaded.
     fn usage_ask_for_save(self: &Rc<Self>) {
         let schedule = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             if state.frecency.stores.has_pending() { state.frecency_sync.touch() } else { None }
         };
         if let Some(schedule) = schedule {

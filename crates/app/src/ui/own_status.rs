@@ -164,7 +164,7 @@ impl App {
 
     /// Show the status in the account panel and its menu.
     pub(super) fn refresh_status(&self) {
-        let status = self.state.borrow().settings.status.clone();
+        let status = self.account.state.borrow().settings.status.clone();
         let class = match status.status {
             UserStatus::Online => "online",
             UserStatus::Idle => "idle",
@@ -234,7 +234,7 @@ impl App {
     /// Online is told so.
     pub(super) fn report_presence(self: &Rc<Self>) {
         let send = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             let status = state.settings.status.status;
             state.presence.changed(status, now_ms() as u64)
         };
@@ -245,29 +245,30 @@ impl App {
 
     /// After RESUMED the client says again what it last said.
     pub(super) fn resend_presence(self: &Rc<Self>) {
-        let send = self.state.borrow_mut().presence.resumed(now_ms() as u64);
+        let send = self.account.state.borrow_mut().presence.resumed(now_ms() as u64);
         self.send_presence(send);
     }
 
     fn send_presence(self: &Rc<Self>, send: Send) {
         // A newer decision replaces one waiting for its turn.
         let generation = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             state.presence_timer += 1;
             state.presence_timer
         };
         match send {
             Send::Now(status) => {
-                if let Some(gateway) = &self.state.borrow().gateway {
+                if let Some(gateway) = &self.account.state.borrow().gateway {
                     gateway.update_presence(status);
                 }
             }
             Send::After(wait, status) => {
                 let this = Rc::downgrade(self);
+                let epoch = self.account.epoch.get();
                 glib::timeout_add_local_once(wait, move || {
-                    let Some(this) = this.upgrade() else { return };
+                    let Some(this) = this.upgrade().filter(|this| this.account.epoch.get() == epoch) else { return };
                     let send = {
-                        let mut state = this.state.borrow_mut();
+                        let mut state = this.account.state.borrow_mut();
                         (state.presence_timer == generation).then(|| state.presence.admit(status, now_ms() as u64))
                     };
                     if let Some(send) = send {
@@ -282,14 +283,18 @@ impl App {
     /// and `manageExpiringCustomStatus`, 340137).
     pub(super) fn manage_expiries(self: &Rc<Self>) {
         let (expiries, generation) = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             state.expiry_timer += 1;
             (state.settings.status.expiries(now_ms() as u64), state.expiry_timer)
         };
         let later = |wait: Duration, end: fn(&Rc<App>)| {
             let this = Rc::downgrade(self);
+            let epoch = self.account.epoch.get();
             glib::timeout_add_local_once(wait, move || {
-                if let Some(this) = this.upgrade().filter(|t| t.state.borrow().expiry_timer == generation) {
+                if let Some(this) = this
+                    .upgrade()
+                    .filter(|t| t.account.epoch.get() == epoch && t.account.state.borrow().expiry_timer == generation)
+                {
                     end(&this);
                 }
             });
@@ -310,8 +315,9 @@ impl App {
         self.refresh_status();
         self.report_presence();
         let this = Rc::downgrade(self);
+        let epoch = self.account.epoch.get();
         glib::timeout_add_local_once(AFTER_READY, move || {
-            if let Some(this) = this.upgrade() {
+            if let Some(this) = this.upgrade().filter(|this| this.account.epoch.get() == epoch) {
                 this.manage_expiries();
             }
         });
@@ -319,7 +325,7 @@ impl App {
 
     /// The custom status dialog (431273).
     fn show_custom_status(self: &Rc<Self>) {
-        let current = self.state.borrow().settings.status.custom.clone();
+        let current = self.account.state.borrow().settings.status.custom.clone();
         let dialog =
             adw::Dialog::builder().title("Set Your Status").content_width(420).follows_content_size(true).build();
 

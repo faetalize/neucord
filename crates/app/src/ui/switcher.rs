@@ -282,7 +282,8 @@ impl App {
             open.dialog.force_close();
             return;
         }
-        let ready = self.state.borrow().me().is_some() && self.stack.visible_child_name().as_deref() == Some("main");
+        let ready =
+            self.account.state.borrow().me().is_some() && self.stack.visible_child_name().as_deref() == Some("main");
         if !ready {
             return;
         }
@@ -304,7 +305,7 @@ impl App {
 
     /// What the box lists for `query`, from the session as it is now.
     fn switcher_rows(&self, query: &switcher::Query) -> Vec<Row> {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let Some(me) = state.me() else { return Vec::new() };
         let now = now_unix();
         let account = state.account.as_ref();
@@ -330,7 +331,7 @@ impl App {
 
     /// A result's row: what it is, its name, and where it is.
     fn switcher_row(&self, hit: &Hit) -> gtk::ListBoxRow {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let line =
             gtk::Box::builder().spacing(10).margin_top(6).margin_bottom(6).margin_start(12).margin_end(12).build();
         let mut context = String::new();

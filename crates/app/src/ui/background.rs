@@ -58,8 +58,11 @@ impl App {
 
     /// The icon says what the rail does, unless the option is off.
     pub(super) fn refresh_tray(&self) {
-        let alert =
-            if self.config.get(&config::UNREAD_BADGE) { self.state.borrow().tray_alert() } else { Alert::Quiet };
+        let alert = if self.config.get(&config::UNREAD_BADGE) {
+            self.account.state.borrow().tray_alert()
+        } else {
+            Alert::Quiet
+        };
         self.tray.set_alert(alert);
     }
 

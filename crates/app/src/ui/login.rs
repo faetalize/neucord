@@ -13,10 +13,16 @@ use discord::{Error, Rest, User};
 use gtk::glib;
 use qrcodegen::{QrCode, QrCodeEcc};
 
+use super::accounts::Origin;
 use super::{App, bare_page, widgets};
 use crate::images::Row;
 
 pub(super) struct Page {
+    title: gtk::Label,
+    /// Under the title, while adding an account.
+    subtitle: gtk::Label,
+    /// Back to where the page was opened from, unless that was nowhere.
+    back: gtk::Button,
     /// "password" or "mfa".
     form: gtk::Stack,
     email: adw::EntryRow,
@@ -44,6 +50,9 @@ pub(super) struct Page {
 impl Page {
     pub(super) fn new() -> Self {
         Page {
+            title: gtk::Label::builder().label("Neucord").xalign(0.0).css_classes(["title-1"]).build(),
+            subtitle: gtk::Label::builder().wrap(true).max_width_chars(40).xalign(0.0).visible(false).build(),
+            back: link_button("Back"),
             form: gtk::Stack::builder()
                 .transition_type(gtk::StackTransitionType::Crossfade)
                 .vhomogeneous(false)
@@ -94,7 +103,7 @@ impl Page {
         self.error.set_visible(error.is_some());
     }
 
-    fn clear(&self) {
+    pub(super) fn clear(&self) {
         for entry in [self.password.upcast_ref::<gtk::Editable>(), self.mfa_code.upcast_ref(), self.token.upcast_ref()]
         {
             entry.set_text("");
@@ -111,7 +120,8 @@ impl App {
         let columns = gtk::Box::builder().spacing(36).valign(gtk::Align::Center).halign(gtk::Align::Center).build();
 
         let left = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(18).width_request(300).build();
-        left.append(&gtk::Label::builder().label("Neucord").xalign(0.0).css_classes(["title-1"]).build());
+        left.append(&page.title);
+        left.append(&page.subtitle);
 
         let password_form = gtk::Box::new(gtk::Orientation::Vertical, 18);
         password_form.append(&boxed_list(&[page.email.upcast_ref(), page.password.upcast_ref()]));
@@ -144,6 +154,16 @@ impl App {
         let token_box = boxed_list(&[page.token.upcast_ref()]);
         token_box.set_margin_top(12);
         left.append(&gtk::Expander::builder().label("Log in with a token").child(&token_box).build());
+        page.back.set_visible(false);
+        page.back.connect_clicked({
+            let this = Rc::downgrade(self);
+            move |_| {
+                if let Some(this) = this.upgrade() {
+                    this.login_back();
+                }
+            }
+        });
+        left.append(&page.back);
         columns.append(&left);
 
         let separator = gtk::Separator::new(gtk::Orientation::Vertical);
@@ -250,32 +270,46 @@ impl App {
     }
 
     pub(super) fn show_login(self: &Rc<Self>, error: Option<&str>) {
+        self.show_login_as(Origin::Start, error);
+    }
+
+    /// The login page. Opened to add an account, it says so, goes back, and
+    /// its requests go out as the client's do with another account logged
+    /// in; the QR code is made afresh since its requests depend on that.
+    pub(super) fn show_login_as(self: &Rc<Self>, origin: Origin, error: Option<&str>) {
         // A login nobody can see, in a window hidden behind the tray, waits forever.
         self.window.present();
         self.refresh_tray();
-        self.set_content_title("Neucord");
+        let adding = origin != Origin::Start;
+        if origin != Origin::Beside {
+            self.set_content_title("Neucord");
+        }
+        self.login_origin.set(origin);
+        self.login.title.set_label(if adding { "Add Account" } else { "Neucord" });
+        self.login.subtitle.set_visible(adding);
+        self.login
+            .subtitle
+            .set_label("Logging in to another account will let you easily switch between accounts on this device.");
+        self.login.back.set_visible(adding);
         self.login.clear();
         self.login.set_error(error);
         self.stack.set_visible_child_name("login");
         self.login.email.grab_focus();
-        if self.login.remote.borrow().is_none() {
-            self.start_qr();
-        }
+        self.start_qr();
     }
 
     /// Requests started on the login page answer late; by then the user may
     /// have logged in another way.
-    fn on_login_page(&self) -> bool {
+    pub(super) fn on_login_page(&self) -> bool {
         self.stack.visible_child_name().as_deref() == Some("login")
     }
 
     fn logged_in(self: &Rc<Self>, token: String) {
         self.login.clear();
-        {
-            let mut state = self.state.borrow_mut();
-            state.ready_seen = false;
-            state.reconnect_attempts = 0;
-        }
+        self.login_origin.set(Origin::Start);
+        // An account added beside another takes the window from it, as a
+        // switch does: no request goes out for the one left.
+        drop(self.leave_account());
         self.connect(token, false);
     }
 
@@ -292,7 +326,9 @@ impl App {
 
     /// For the login endpoints, before there is a token.
     fn anonymous_rest(&self) -> Rest {
-        Rest::anonymous().solving_captchas(super::captcha::solver(&self.window))
+        let beside = self.account.state.borrow().token.clone().filter(|_| self.login_origin.get() == Origin::Beside);
+        let rest = beside.map_or_else(Rest::anonymous, Rest::adding_account);
+        rest.solving_captchas(super::captcha::solver(&self.window))
     }
 
     fn token_login(self: &Rc<Self>) {
@@ -482,10 +518,10 @@ impl App {
         self.login.stop_qr();
         let session = self.login.session.get();
         self.login.qr.set_visible_child_name("waiting");
-        let solver = super::captcha::solver(&self.window);
+        let (rest, solver) = (self.anonymous_rest(), super::captcha::solver(&self.window));
         let this = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let result = RemoteAuth::connect(solver).await;
+            let result = RemoteAuth::connect(rest, solver).await;
             let current = || this.upgrade().filter(|this| this.login.session.get() == session);
             let Some(app) = current() else { return };
             let events = match result {

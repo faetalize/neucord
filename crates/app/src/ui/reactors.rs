@@ -207,7 +207,7 @@ impl View {
         let (emoji, after, round) = {
             let mut shown = self.shown.borrow_mut();
             let Some(emoji) = shown.emoji.clone() else { return };
-            let listed = app.state.borrow_mut().reactors.users(self.message, &emoji, Kind::Normal).len();
+            let listed = app.account.state.borrow_mut().reactors.users(self.message, &emoji, Kind::Normal).len();
             // The first page is asked for whatever is known: events may have
             // listed a few, and the message's count says there are more.
             if shown.loading || (shown.last.is_some() && shown.count as usize <= listed) {
@@ -216,7 +216,7 @@ impl View {
             shown.loading = true;
             (emoji, shown.last, shown.round)
         };
-        let Some(rest) = app.state.borrow().rest.clone() else { return };
+        let Some(rest) = app.account.state.borrow().rest.clone() else { return };
         let (view, app) = (self.clone(), app.clone());
         glib::spawn_future_local(async move {
             let page = rest.reactors(view.channel, view.message, &emoji, PAGE, after).await;
@@ -234,7 +234,7 @@ impl View {
                 }
             }
             drop(shown);
-            app.state.borrow_mut().reactors.arrived(view.message, &emoji, Kind::Normal, users);
+            app.account.state.borrow_mut().reactors.arrived(view.message, &emoji, Kind::Normal, users);
             if current {
                 view.fill(&app);
             }
@@ -247,16 +247,17 @@ impl View {
             self.people.remove(&row);
         }
         let Some(emoji) = self.shown.borrow().emoji.clone() else { return };
-        let users: Vec<User> = app.state.borrow_mut().reactors.users(self.message, &emoji, Kind::Normal).to_vec();
+        let users: Vec<User> =
+            app.account.state.borrow_mut().reactors.users(self.message, &emoji, Kind::Normal).to_vec();
         let (me, manager) = {
-            let state = app.state.borrow();
+            let state = app.account.state.borrow();
             (state.me(), state.can_remove_reactions(self.channel))
         };
         for user in users {
             let line =
                 gtk::Box::builder().spacing(10).margin_top(6).margin_bottom(6).margin_start(8).margin_end(8).build();
             let name = {
-                let state = app.state.borrow();
+                let state = app.account.state.borrow();
                 let server = state.avatar_in(self.channel, user.id);
                 line.append(&avatar_widget_in(&user, 32, Some(&app.images), server, Row::None));
                 state.name_in(self.channel, &user)
@@ -333,7 +334,7 @@ impl App {
 
     /// What we hold of `message`, in a channel's messages.
     pub(super) fn message_in(&self, channel: Snowflake, message: Snowflake) -> Option<Message> {
-        let store = self.timelines.borrow().get(channel)?.store.clone();
+        let store = self.account.timelines.borrow().get(channel)?.store.clone();
         timelines::find(&store, message).map(|(_, message)| message)
     }
 
@@ -386,12 +387,12 @@ impl App {
         emoji: Emoji,
         button: glib::WeakRef<gtk::ToggleButton>,
     ) {
-        let first = self.state.borrow_mut().reactors.first_ask(message, &emoji, Kind::Normal);
-        let Some(rest) = self.state.borrow().rest.clone().filter(|_| first) else { return };
+        let first = self.account.state.borrow_mut().reactors.first_ask(message, &emoji, Kind::Normal);
+        let Some(rest) = self.account.state.borrow().rest.clone().filter(|_| first) else { return };
         let this = self.clone();
         glib::spawn_future_local(async move {
             if let Ok(users) = rest.reactors(channel, message, &emoji, TOOLTIP, None).await {
-                this.state.borrow_mut().reactors.arrived(message, &emoji, Kind::Normal, users);
+                this.account.state.borrow_mut().reactors.arrived(message, &emoji, Kind::Normal, users);
                 if let Some(button) = button.upgrade() {
                     button.trigger_tooltip_query();
                 }
@@ -402,7 +403,7 @@ impl App {
     /// "🔥 reacted by A, B, and 2 others": up to three of those we know made
     /// it, leaving out people we blocked (`e_` in 30492).
     fn reactors_tooltip(&self, channel: Snowflake, message: Snowflake, emoji: &Emoji, count: u32) -> Option<String> {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.account.state.borrow_mut();
         let state = &mut *state;
         let users: Vec<User> = state
             .reactors

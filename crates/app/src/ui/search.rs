@@ -107,7 +107,7 @@ impl Known {
 impl App {
     /// Where the open channel is searched: its server, or the DM.
     pub(super) fn search_context(&self) -> Option<Context> {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let id = state.channel.filter(|_| state.page.is_none())?;
         match state.find_channel(id)? {
             (Some(guild), _) => Some(Context::Guild(guild.id)),
@@ -139,7 +139,7 @@ impl App {
     }
 
     fn search_known(&self, context: Context) -> Known {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let mut channels = Vec::new();
         if let Context::Guild(id) = context
             && let Some(guild) = state.guilds.iter().find(|g| g.id == id)
@@ -197,7 +197,7 @@ impl App {
             }
         });
         let text = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             let saved = state.searches.entry(context).or_default();
             // A search session starts when the box gets focus (`initialize`).
             saved.session.get_or_insert_with(|| glib::uuid_string_random().to_string());
@@ -220,12 +220,12 @@ impl App {
         let text = search::cleaned(&text, &tokens);
         let tokens = known.tokens(context, &text);
         let fields = search::fields(&tokens);
-        let Some(rest) = self.state.borrow().rest.clone() else { return };
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
         if !search::askable(&tokens) {
             return;
         }
         let (request, generation) = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             let discoverable = match context {
                 Context::Guild(id) => state
                     .guilds
@@ -248,11 +248,12 @@ impl App {
         };
         view.refresh(self);
         let (this, view) = (self.clone(), view.clone());
+        let epoch = self.account.epoch.get();
         glib::spawn_future_local(async move {
             let mut attempts = 0;
             loop {
                 let answer = rest.search_messages(&request, attempts).await;
-                if this.state.borrow().searches.get(&context).is_none_or(|s| s.generation != generation) {
+                if this.stale_search(epoch, context, generation) {
                     return;
                 }
                 let status = match answer {
@@ -264,7 +265,7 @@ impl App {
                         attempts = next;
                         this.set_search_status(context, Status::Indexing, &view);
                         glib::timeout_future(delay).await;
-                        if this.state.borrow().searches.get(&context).is_none_or(|s| s.generation != generation) {
+                        if this.stale_search(epoch, context, generation) {
                             return;
                         }
                         continue;
@@ -280,8 +281,16 @@ impl App {
         });
     }
 
+    /// Whether an answer for the search `generation` of `context` is one no
+    /// one waits for: a newer search replaced it, or the account it was for
+    /// was left (`epoch` is the one it was made in).
+    fn stale_search(&self, epoch: u64, context: Context, generation: u64) -> bool {
+        self.account.epoch.get() != epoch
+            || self.account.state.borrow().searches.get(&context).is_none_or(|s| s.generation != generation)
+    }
+
     fn set_search_status(self: &Rc<Self>, context: Context, status: Status, view: &Rc<View>) {
-        if let Some(saved) = self.state.borrow_mut().searches.get_mut(&context) {
+        if let Some(saved) = self.account.state.borrow_mut().searches.get_mut(&context) {
             saved.status = status;
         }
         view.refresh(self);
@@ -296,7 +305,7 @@ impl App {
 impl View {
     fn new(app: &Rc<App>, context: Context) -> Rc<View> {
         let placeholder = {
-            let state = app.state.borrow();
+            let state = app.account.state.borrow();
             match context {
                 Context::Guild(id) => state.guilds.iter().find(|g| g.id == id).map(|g| format!("Search {}", g.name)),
                 Context::Channel(id) => state.find_channel(id).map(|(_, c)| format!("Search {}", c.title())),
@@ -412,13 +421,13 @@ impl View {
                 }
                 let sort = Sort::ALL[dropdown.selected() as usize];
                 let (changed, busy) = {
-                    let mut state = app.state.borrow_mut();
+                    let mut state = app.account.state.borrow_mut();
                     let saved = state.searches.entry(view.context).or_default();
                     (saved.sort != sort, saved.status == Status::Searching)
                 };
                 // Not while a search is under way (`E` in 252715).
                 if changed && !busy {
-                    if let Some(saved) = app.state.borrow_mut().searches.get_mut(&view.context) {
+                    if let Some(saved) = app.account.state.borrow_mut().searches.get_mut(&view.context) {
                         saved.sort = sort;
                     }
                     app.run_search(&view, 0, false);
@@ -433,6 +442,7 @@ impl View {
                 move |_| {
                     let (Some(app), Some(view)) = (app.upgrade(), view.upgrade()) else { return };
                     let page = app
+                        .account
                         .state
                         .borrow()
                         .searches
@@ -504,7 +514,8 @@ impl View {
             if view.submissions.get() != n {
                 return;
             }
-            let busy = app.state.borrow().searches.get(&view.context).is_some_and(|s| s.status == Status::Searching);
+            let busy =
+                app.account.state.borrow().searches.get(&view.context).is_some_and(|s| s.status == Status::Searching);
             if !busy {
                 app.run_search(&view, 0, true);
             }
@@ -569,7 +580,7 @@ impl View {
     /// Draw what the search holds now.
     fn refresh(self: &Rc<Self>, app: &Rc<App>) {
         let (status, sort, offset, show_blocked) = {
-            let state = app.state.borrow();
+            let state = app.account.state.borrow();
             let saved = state.searches.get(&self.context);
             saved.map_or((Status::Idle, Sort::Newest, 0, false), |s| {
                 (s.status.clone(), s.sort, s.offset, s.show_blocked)
@@ -596,7 +607,7 @@ impl View {
                     n => format!("{n} Results"),
                 };
                 let (shown, blocked) = {
-                    let state = app.state.borrow();
+                    let state = app.account.state.borrow();
                     let mut blocked = 0;
                     let shown: Vec<&Message> = page
                         .messages
@@ -623,7 +634,7 @@ impl View {
                         let (app, view) = (Rc::downgrade(app), Rc::downgrade(self));
                         move |_| {
                             let (Some(app), Some(view)) = (app.upgrade(), view.upgrade()) else { return };
-                            if let Some(saved) = app.state.borrow_mut().searches.get_mut(&view.context) {
+                            if let Some(saved) = app.account.state.borrow_mut().searches.get_mut(&view.context) {
                                 saved.show_blocked = true;
                             }
                             view.refresh(&app);
@@ -697,7 +708,7 @@ impl App {
             .margin_end(12)
             .build();
         let place = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             match (context, state.find_channel(message.channel_id)) {
                 (Context::Guild(_), Some((_, channel))) => {
                     let name = channel.name.clone().unwrap_or_default();
@@ -712,6 +723,7 @@ impl App {
         let line = gtk::Box::builder().spacing(8).build();
         line.append(&avatar_widget(&message.author, 24, Some(&self.images), Row::Parent));
         let name = self
+            .account
             .state
             .borrow()
             .relationships

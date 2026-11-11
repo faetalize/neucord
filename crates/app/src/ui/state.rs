@@ -1,6 +1,7 @@
 //! Everything the UI knows about the session, and the derived views of it
 //! the rail and sidebar draw from: unread markers, mention counts, order.
 
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
@@ -28,12 +29,15 @@ use discord::thread_creation;
 use discord::threads;
 use discord::typing::Typing;
 use discord::verification;
-use discord::verification::Account;
+use discord::verification::Account as Verification;
 use discord::voice_states::{VoiceState, VoiceStates};
 use discord::{Channel, ChannelKind, Gateway, Guild, Message, Rest, Resume, Snowflake, User};
 use gtk::glib;
 
 use super::friends::Tab;
+use crate::config::{self, Store};
+use crate::kept::Kept;
+use crate::timelines::Timelines;
 use crate::tray::Alert;
 
 /// A press of ours on a message's component, until it is answered.
@@ -89,11 +93,65 @@ pub(super) struct Section<'a> {
     pub(super) channels: Vec<&'a Channel>,
 }
 
+/// Everything that belongs to one account: its session and gateway
+/// connection, what Discord has told us, the messages we hold and what was
+/// made from them. Nothing of it outlives the account, so what the window
+/// shows is always one account's, and leaving one is [`Account::leave`].
+pub(super) struct Account {
+    pub(super) state: RefCell<State>,
+    /// Makes the state of a session that hasn't begun (see [`State::fresh`]),
+    /// which is what leaving puts in place of the account's.
+    fresh: Box<dyn Fn() -> State>,
+    /// The messages of the channels we hold.
+    pub(super) timelines: RefCell<Timelines>,
+    /// The content of messages whose rows have moved on to others, for when
+    /// they come back (see [`super::chat::KeptContent`]).
+    pub(super) kept_content: RefCell<Kept<Snowflake, super::chat::KeptContent>>,
+    /// The desktop notifications we've shown for the account, by id, so they
+    /// can be taken back when it's left: opening a channel from one would
+    /// look for it in another account.
+    pub(super) notified: RefCell<HashSet<String>>,
+    /// Counts the sessions the window has had with accounts. The event loop
+    /// and reconnect timers of a session that was left see it changed, and
+    /// stop.
+    pub(super) epoch: Cell<u64>,
+}
+
+impl Account {
+    pub(super) fn new(fresh: impl Fn() -> State + 'static) -> Self {
+        Account {
+            state: RefCell::new(fresh()),
+            fresh: Box::new(fresh),
+            timelines: RefCell::default(),
+            kept_content: RefCell::new(Kept::new(super::chat::KEPT_CONTENT)),
+            notified: RefCell::default(),
+            epoch: Cell::new(0),
+        }
+    }
+
+    /// Let go of the account: its connection closes with the gateway
+    /// dropped, and everything held for it goes. Gives what answered its
+    /// requests, for one that has to be sent still, and the notifications
+    /// to take back.
+    pub(super) fn leave(&self) -> (Option<Rest>, Vec<String>) {
+        self.epoch.set(self.epoch.get() + 1);
+        let rest = self.state.replace((self.fresh)()).rest;
+        self.timelines.borrow_mut().clear();
+        self.kept_content.borrow_mut().clear();
+        (rest, self.notified.take().into_iter().collect())
+    }
+}
+
 #[derive(Default)]
 pub(super) struct State {
     pub(super) token: Option<String>,
     /// The token is already in the keyring.
     pub(super) persisted: bool,
+    /// The token came from the keyring entry of earlier versions, which
+    /// READY moves to the account's own.
+    pub(super) migrating: bool,
+    /// Whose stored token the session connects with, which READY has yet to say.
+    pub(super) target: Option<Snowflake>,
     /// READY arrived at least once for this token.
     pub(super) ready_seen: bool,
     pub(super) reconnect_attempts: u32,
@@ -104,7 +162,7 @@ pub(super) struct State {
     pub(super) gateway: Option<Gateway>,
     pub(super) me: Option<User>,
     /// What servers' verification asks of us.
-    pub(super) account: Option<Account>,
+    pub(super) account: Option<Verification>,
     pub(super) nitro: Nitro,
     /// What Discord rolls out to the account and its servers.
     pub(super) experiments: Experiments,
@@ -222,6 +280,14 @@ pub(super) struct State {
 }
 
 impl State {
+    /// The state of a session that hasn't begun, with the options and
+    /// remembered choices from disk, which outlast any account.
+    pub(super) fn fresh(config: &Store, remembered: &Store) -> State {
+        let mut state = State { members_closed: remembered.get(&config::MEMBERS_CLOSED), ..State::default() };
+        state.typing.set_sending(config.get(&config::SEND_TYPING));
+        state
+    }
+
     /// What a voice channel's participants are called: their nickname in the
     /// server, else their display name, which the update or an earlier
     /// message told us.
@@ -281,6 +347,11 @@ impl State {
 
     pub(super) fn me(&self) -> Option<Snowflake> {
         self.me.as_ref().map(|u| u.id)
+    }
+
+    /// [`Self::me`], or before READY the account whose token is being used.
+    pub(super) fn known_id(&self) -> Option<Snowflake> {
+        self.me().or(self.target)
     }
 
     /// Where commands would run if `channel` is open, for what they may be.
@@ -1017,7 +1088,7 @@ mod tests {
         .unwrap();
         guild.my_roles = vec![Snowflake(40)];
         State {
-            account: Some(Account { id: Snowflake(5), ..Account::default() }),
+            account: Some(Verification { id: Snowflake(5), ..Verification::default() }),
             guild: Some(guild.id),
             guilds: vec![guild],
             ..State::default()
@@ -1451,5 +1522,35 @@ mod tests {
         ]});
         assert_ne!(plain, open_server(None, hidden).sidebar_signature(), "it was hidden from @everyone");
         assert_eq!(plain, open_server(None, json!({})).sidebar_signature(), "nothing changed");
+    }
+
+    /// A directory of this test's own for the options files, removed on drop.
+    struct Dir(std::path::PathBuf);
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn leaving_an_account_keeps_the_options_that_outlast_it() {
+        let dir = Dir(std::env::temp_dir().join(format!("neucord-state-test-{}", std::process::id())));
+        let (config, remembered) =
+            (Rc::new(Store::open(dir.0.join("config.ini"))), Rc::new(Store::open(dir.0.join("state.ini"))));
+        config.set(&config::SEND_TYPING, false).unwrap();
+        remembered.set(&config::MEMBERS_CLOSED, true).unwrap();
+        let account = Account::new({
+            let (config, remembered) = (config.clone(), remembered.clone());
+            move || State::fresh(&config, &remembered)
+        });
+        account.state.borrow_mut().token = Some("token".into());
+
+        account.leave();
+
+        let mut state = account.state.borrow_mut();
+        assert_eq!(state.token, None, "what the account held is gone");
+        assert!(state.members_closed, "the pane stays closed for the next account");
+        assert!(state.typing.typed(Snowflake(1), Snowflake(2), 0).is_none(), "typing stays off");
     }
 }

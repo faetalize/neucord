@@ -2,6 +2,7 @@
 //! `discord` crate. All of this runs on the GTK main thread.
 
 mod account;
+mod accounts;
 mod attachments;
 mod background;
 mod captcha;
@@ -60,14 +61,14 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
-use discord::{Snowflake, session};
+use discord::Snowflake;
+use discord::accounts::Roster;
 use gtk::{gdk, gio, glib, pango};
 
 use crate::config::{self, Store};
 use crate::images::Images;
 use crate::render;
 use crate::theme::Theme;
-use crate::timelines::Timelines;
 use crate::tray::Tray;
 
 /// The server rail's width.
@@ -112,7 +113,20 @@ pub struct App {
     selection: gtk::NoSelection,
     /// Shown when no channel is open.
     blank: gio::ListStore,
-    timelines: RefCell<Timelines>,
+    /// The account the window shows.
+    account: state::Account,
+    /// The accounts on this device: who they are, and which was shown last.
+    roster: RefCell<Roster>,
+    /// Where the login page was opened from, which says what Back does.
+    login_origin: Cell<accounts::Origin>,
+    /// Why the list of accounts is shown instead of a login, if it is.
+    accounts_error: gtk::Label,
+    /// The lists of accounts that exist, to redraw as they change.
+    account_lists: RefCell<Vec<(glib::WeakRef<gtk::ListBox>, accounts::Role)>>,
+    /// The accounts in the account menu.
+    switch_items: gio::Menu,
+    /// The Manage Accounts dialog and its note, while it is open.
+    manage: RefCell<Option<(adw::Dialog, gtk::Label)>>,
     list: gtk::ListView,
     scroller: gtk::ScrolledWindow,
     composer: gtk::TextView,
@@ -209,21 +223,17 @@ pub struct App {
     search_view: RefCell<Option<Rc<search::View>>>,
     /// The quick switcher, while it's open.
     switcher: RefCell<Option<Rc<switcher::View>>>,
-    /// The content of messages whose rows have moved on to others, for when
-    /// they come back (see [`chat::KeptContent`]).
-    kept_content: RefCell<crate::kept::Kept<Snowflake, chat::KeptContent>>,
     /// Every row the message list has made, to fill in again when what
     /// they show changes.
     rows: RefCell<Vec<glib::WeakRef<message_row::MessageRow>>>,
     /// When scrolling loads another page.
     scroll_loader: RefCell<discord::history::ScrollLoader>,
-    state: RefCell<state::State>,
     /// Neucord's own options, which the settings window sets.
-    config: Store,
+    config: Rc<Store>,
     /// The stylesheets, one of whose options the settings window sets.
     theme: Theme,
     /// What Neucord remembers between runs.
-    remembered: Store,
+    remembered: Rc<Store>,
     /// The settings window, while it's open.
     settings_window: RefCell<Option<settings::Window>>,
     /// A server's Privacy Settings, while open.
@@ -281,7 +291,8 @@ impl App {
 
         let blank = gio::ListStore::new::<glib::BoxedAnyObject>();
         let selection = gtk::NoSelection::new(Some(blank.clone()));
-        let config = Store::open(config::config_path());
+        let config = Rc::new(Store::open(config::config_path()));
+        let remembered = Rc::new(Store::open(config::state_path()));
         let this = Rc::new(App {
             window,
             medium,
@@ -313,7 +324,16 @@ impl App {
             list: gtk::ListView::new(Some(selection.clone()), None::<gtk::ListItemFactory>),
             selection,
             blank,
-            timelines: RefCell::default(),
+            account: state::Account::new({
+                let (config, remembered) = (config.clone(), remembered.clone());
+                move || state::State::fresh(&config, &remembered)
+            }),
+            roster: RefCell::default(),
+            login_origin: Cell::default(),
+            accounts_error: gtk::Label::builder().wrap(true).xalign(0.0).visible(false).css_classes(["error"]).build(),
+            account_lists: RefCell::default(),
+            switch_items: gio::Menu::new(),
+            manage: RefCell::default(),
             scroller: gtk::ScrolledWindow::builder().vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build(),
             composer: gtk::TextView::builder()
                 .wrap_mode(gtk::WrapMode::WordChar)
@@ -420,13 +440,11 @@ impl App {
                 .build(),
             search_view: RefCell::default(),
             switcher: RefCell::default(),
-            kept_content: RefCell::new(crate::kept::Kept::new(chat::KEPT_CONTENT)),
             rows: RefCell::default(),
             scroll_loader: RefCell::default(),
-            state: RefCell::default(),
             theme: Theme::install(&config),
             config,
-            remembered: Store::open(config::state_path()),
+            remembered,
             settings_window: RefCell::default(),
             server_privacy: RefCell::default(),
             tray: Tray::new(),
@@ -445,7 +463,6 @@ impl App {
             &this.folder_css,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
-        *this.state.borrow_mut() = this.fresh_state();
         this.build();
 
         // Images from the media proxy are requested at the pixels shown.
@@ -481,13 +498,7 @@ impl App {
         }
         self.show_loading("Checking keyring…");
         let this = self.clone();
-        glib::spawn_future_local(async move {
-            match session::load_token().await {
-                Ok(Some(token)) => this.connect(token, true),
-                Ok(None) => this.show_login(None),
-                Err(e) => this.show_login(Some(&e.to_string())),
-            }
-        });
+        glib::spawn_future_local(async move { this.resume_session().await });
     }
 
     /// Tell the animations when the window loses focus, is hidden or is
@@ -533,6 +544,7 @@ impl App {
     fn build(self: &Rc<Self>) {
         self.stack.add_named(&self.build_loading(), Some("loading"));
         self.stack.add_named(&self.build_login(), Some("login"));
+        self.stack.add_named(&self.build_choose_account(), Some("accounts"));
         self.stack.add_named(&self.build_main(), Some("main"));
         self.stack.add_named(&self.build_blocked(), Some("blocked"));
         // The viewer covers everything but the toasts, which say how it went.
@@ -603,6 +615,9 @@ impl App {
             .build();
         self.window.add_action_entries([logout, standing, scheduled, find, switch, settings]);
         self.window.add_action_entries(self.status_actions());
+        for action in self.account_actions() {
+            self.window.add_action(&action);
+        }
         if let Some(app) = self.window.application() {
             app.set_accels_for_action("win.logout", &["<Control><Shift>l"]);
             app.set_accels_for_action("win.search", &["<Control>f"]);
@@ -617,7 +632,7 @@ impl App {
             let this = Rc::downgrade(self);
             move || {
                 let Some(this) = this.upgrade() else { return };
-                let channel = this.state.borrow().channel;
+                let channel = this.account.state.borrow().channel;
                 if let (true, Some(channel)) = (this.chat_visible(), channel) {
                     this.mark_read(channel);
                 }
@@ -737,19 +752,28 @@ impl App {
         // The app's menu too, as Discord's settings live here.
         let menu = gio::Menu::new();
         menu.append(Some("_User Settings"), Some("win.settings"));
+        menu.append_section(None, &self.switch_menu());
         menu.append(Some("_Scheduled Messages"), Some("win.scheduled-messages"));
         menu.append(Some("Account _Standing"), Some("win.account-standing"));
         menu.append(Some("_About Neucord"), Some("app.about"));
         menu.append(Some("_Log Out"), Some("win.logout"));
-        row.append(
-            &gtk::MenuButton::builder()
-                .icon_name("view-more-symbolic")
-                .tooltip_text("Account")
-                .primary(true)
-                .menu_model(&menu)
-                .css_classes(["flat"])
-                .build(),
-        );
+        let button = gtk::MenuButton::builder()
+            .icon_name("view-more-symbolic")
+            .tooltip_text("Account")
+            .primary(true)
+            .menu_model(&menu)
+            .css_classes(["flat"])
+            .build();
+        // The client asks who each account is when its list opens.
+        button.connect_active_notify({
+            let this = Rc::downgrade(self);
+            move |button| {
+                if let (true, Some(this)) = (button.is_active(), this.upgrade()) {
+                    this.validate_accounts();
+                }
+            }
+        });
+        row.append(&button);
         let panel = gtk::Box::builder().valign(gtk::Align::End).css_classes(["account-panel", "floating-card"]).build();
         panel.append(&row);
 
