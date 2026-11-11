@@ -1,8 +1,8 @@
 // Distil a build into what a third-party client depends on: REST endpoint
 // paths, the fields each REST call sends, the headers added to every
 // request, the gateway events the client handles and the payload fields it
-// reads, the enums, methods, stores and constants named in watch.json, and
-// every experiment the client defines.
+// reads, the enums, methods, stores, constants and protobuf messages named in
+// watch.json, and every experiment the client defines.
 // Minified names are dropped, so snapshots of two builds differ only where
 // Discord changed something.
 
@@ -363,6 +363,43 @@ function experimentOf(node) {
   return null;
 }
 
+/** A protobuf message as the client compiles it:
+ * `class X extends … { constructor() { super("pkg.Type", [{ no: 1, name: "a",
+ * kind: "scalar", T: 8 }, …]) } }`. Null for any other class. */
+function messageOf(node) {
+  let found = null;
+  walk(node.body, (n) => {
+    const [name, fields] = n.type === "CallExpression" && n.callee.type === "Super" ? n.arguments : [];
+    if (name?.type === "Literal" && typeof name.value === "string" && fields?.type === "ArrayExpression") {
+      found = { name: name.value, fields: fields.elements.filter((f) => f?.type === "ObjectExpression") };
+    }
+  });
+  return found;
+}
+
+/** One field of a message: `{ no, name, kind, T }` as a number, a name and
+ * what it holds. A message field names its type through an arrow function,
+ * `T: () => X` for a message of the module and `T: () => P.hU` for another
+ * module's, whose name is only known once every module has been read. */
+function protoFieldOf(object, bindings) {
+  const get = (key) => object.properties.find((p) => keyName(p) === key)?.value;
+  const [no, name, kind, T] = [get("no"), get("name"), get("kind"), get("T")];
+  if (no?.type !== "Literal" || name?.type !== "Literal" || kind?.type !== "Literal") return null;
+  const field = { no: no.value, name: name.value, kind: kind.value, repeated: get("repeat") !== undefined };
+  if (kind.value === "scalar") field.type = T?.type === "Literal" ? String(T.value) : "?";
+  else if (kind.value === "enum") {
+    const named = isFunction(T) && T.body.type === "ArrayExpression" ? T.body.elements[0] : null;
+    field.type = named?.type === "Literal" ? named.value : "?";
+  } else {
+    const target = isFunction(T) ? T.body : null;
+    if (target?.type === "Identifier") field.local = bindings.declared.get(target);
+    else if (target?.type === "MemberExpression" && target.object.type === "Identifier" && !target.computed) {
+      field.from = [bindings.imports.get(bindings.declared.get(target.object)), target.property.name];
+    }
+  }
+  return field;
+}
+
 /** What a module's code refers to: its imports (`r = n(17928)`), the
  * experiments it defines, its exports (`n.d(t, { ew: () => o })`) and its
  * other declarations, each keyed by the identifier declaring it, as
@@ -476,6 +513,12 @@ export async function snapshot(dir) {
   const stores = new Map(WATCH.stores.map((name) => [name, new Set()]));
   const constants = new Map(WATCH.constants.map((name) => [name, new Set()]));
   const experiments = new Map();
+  // The protobuf messages in watch.json, and what resolves the types of their
+  // fields: every message class by its declaring identifier, and the classes
+  // each module exports.
+  const protos = new Map(WATCH.protos.map((name) => [name, []]));
+  const messageClasses = new Map();
+  const messageExports = new Map();
   // What each module's exports touch, and what the code holding a rule
   // Neucord copies touches: the watched methods and stores, and the modules
   // MANUAL.md names. Resolved across modules once every module is read.
@@ -516,6 +559,7 @@ export async function snapshot(dir) {
       };
       if (MANUAL.has(id)) copy(body, `module ${id}`);
       const text = source.slice(body.start, body.end);
+      const hasMessages = /"(?:discord_protos|google\.protobuf)\./.test(text);
       const isGatewayModule = text.includes('"READY_SUPPLEMENTAL"') && text.includes('"INITIAL_GUILD"');
       // Constants are named where they are used or exported, and often
       // defined apart: `MAX: () => c` in the export map, `c = 30` below it.
@@ -525,6 +569,7 @@ export async function snapshot(dir) {
       // `getEmojiUnavailableReason: N` in the export map, `function N(e)` above.
       const functions = new Map();
       const aliased = [];
+      const messages = [];
       walk(body, (node) => {
         if (node.type === "VariableDeclarator" && node.id.type === "Identifier" && node.init) {
           declared.set(node.id.name, node.init);
@@ -594,12 +639,20 @@ export async function snapshot(dir) {
             }
           }
         }
+        if (node.type === "ClassDeclaration" && node.id && hasMessages) {
+          const message = messageOf(node);
+          if (message) {
+            messageClasses.set(node.id, message.name);
+            if (protos.has(message.name)) messages.push([message.name, message.fields]);
+          }
+        }
         if (node.type === "FunctionDeclaration" && node.id) functions.set(node.id.name, node);
         if (node.type === "Property" && node.value.type === "Identifier" && methods.has(keyName(node))) {
           aliased.push([keyName(node), node.value.name]);
         }
-        // Class methods and object methods alike: `isSystemDM() { … }`.
-        if ((node.type === "MethodDefinition" || node.type === "Property") && isFunction(node.value)) {
+        // Class methods, class fields holding a function and object methods
+        // alike: `isSystemDM() { … }`, `persistChanges = async () => { … }`.
+        if (["MethodDefinition", "PropertyDefinition", "Property"].includes(node.type) && isFunction(node.value)) {
           const name = !node.computed && node.key.type === "Identifier" ? node.key.name : null;
           if (methods.has(name)) {
             methods.get(name).add(normalized(source, node.value));
@@ -636,6 +689,27 @@ export async function snapshot(dir) {
           }
         }
       });
+      if (hasMessages) {
+        // The client holds each message as an instance, `let el = new es();`,
+        // and imports and exports that.
+        const instanceOf = (id) => {
+          const init = bindings.locals.get(id);
+          return init?.type === "NewExpression" && init.callee.type === "Identifier"
+            ? messageClasses.get(bindings.declared.get(init.callee))
+            : undefined;
+        };
+        const instances = new Map();
+        for (const [name, value] of bindings.exported) {
+          const type = value.type === "Identifier" ? instanceOf(bindings.declared.get(value)) : null;
+          if (type) instances.set(name, type);
+        }
+        messageExports.set(id, instances);
+        for (const [name, fields] of messages) {
+          const found = fields.map((f) => protoFieldOf(f, bindings)).filter(Boolean);
+          for (const field of found) if (field.local) field.type = instanceOf(field.local);
+          protos.get(name).push(found);
+        }
+      }
       for (const [name, id] of aliased) {
         const target = functions.get(id);
         if (target) {
@@ -680,6 +754,14 @@ export async function snapshot(dir) {
     if (names.size > 0) reached[key] = [...names].sort();
   }
 
+  // A message field's type by name, wherever the client defines it.
+  const typeOf = (field) => {
+    if (field.type) return field.type;
+    return messageExports.get(field.from?.[0])?.get(field.from?.[1]) ?? "?";
+  };
+  const described = (fields) =>
+    Object.fromEntries(fields.map((f) => [f.no, `${f.name} ${f.kind}${f.repeated ? " repeated" : ""} ${typeOf(f)}`]));
+
   return sorted({
     channel: meta.channel,
     build: meta.build,
@@ -693,6 +775,12 @@ export async function snapshot(dir) {
     methods: Object.fromEntries([...methods].map(([k, v]) => [k, [...v].sort()])),
     stores: Object.fromEntries([...stores].map(([k, v]) => [k, [...v].sort()])),
     constants: Object.fromEntries([...constants].map(([k, v]) => [k, [...v].sort().map((s) => JSON.parse(s))])),
+    protos: Object.fromEntries(
+      [...protos].map(([k, v]) => [
+        k,
+        [...new Set(v.map((fields) => JSON.stringify(described(fields))))].sort().map((s) => JSON.parse(s)),
+      ]),
+    ),
     experiments: Object.fromEntries([...experiments].map(([k, v]) => [k, JSON.parse(v)])),
     reached,
     emoji,

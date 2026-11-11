@@ -90,6 +90,68 @@ pub struct UnicodeEmoji {
     /// Its group in the picker. Skin tone variants and the tone swatches
     /// have none: they only have names to convert.
     pub category: Option<Category>,
+    /// Where the variant for each [`Tone`] is in the catalog, for the emoji
+    /// that have one (a hand, a person).
+    tones: [Option<usize>; 5],
+    /// The emoji a skin tone variant is of.
+    base: Option<usize>,
+}
+
+/// A skin tone, the account's default one being a setting
+/// (`text_and_images.diversity_surrogate`, which holds the modifier).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Light,
+    MediumLight,
+    Medium,
+    MediumDark,
+    Dark,
+}
+
+impl Tone {
+    pub const ALL: [Tone; 5] = [Tone::Light, Tone::MediumLight, Tone::Medium, Tone::MediumDark, Tone::Dark];
+
+    /// The Fitzpatrick modifier, U+1F3FB to U+1F3FF.
+    pub fn modifier(self) -> &'static str {
+        ["\u{1F3FB}", "\u{1F3FC}", "\u{1F3FD}", "\u{1F3FE}", "\u{1F3FF}"][self as usize]
+    }
+
+    /// The tone a setting's modifier is; none for the default (an empty
+    /// string) and for anything that is not one.
+    pub fn from_modifier(modifier: &str) -> Option<Tone> {
+        Tone::ALL.into_iter().find(|t| t.modifier() == modifier)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Tone::Light => "Light Skin Tone",
+            Tone::MediumLight => "Medium-Light Skin Tone",
+            Tone::Medium => "Medium Skin Tone",
+            Tone::MediumDark => "Medium-Dark Skin Tone",
+            Tone::Dark => "Dark Skin Tone",
+        }
+    }
+}
+
+impl UnicodeEmoji {
+    /// What the client keeps a favourite or a count of use under: the name of
+    /// the emoji without its skin tone (`convertSurrogateToBase`, 7584).
+    pub fn base_name(&self) -> &'static str {
+        match self.base {
+            Some(index) => catalog().emoji[index].names[0],
+            None => self.names[0],
+        }
+    }
+
+    /// This emoji in `tone`, or itself if it has no skin tones: what the
+    /// client shows and sends for it once a default tone is set
+    /// (`defaultDiversityChild`, 7584).
+    pub fn toned(&'static self, tone: Option<Tone>) -> &'static UnicodeEmoji {
+        match tone.and_then(|t| self.tones[t as usize]) {
+            Some(index) => &catalog().emoji[index],
+            None => self,
+        }
+    }
 }
 
 /// The picker's groups of Unicode emoji.
@@ -149,6 +211,10 @@ struct Catalog {
     emoji: Vec<UnicodeEmoji>,
     /// Every name, aliases and skin tones too, to its emoji.
     by_name: HashMap<String, usize>,
+    /// Each emoji written out, skin tones too, to its emoji.
+    by_glyph: HashMap<&'static str, usize>,
+    /// The most characters an emoji takes.
+    longest: usize,
 }
 
 /// The client's names, read from `emoji_names.txt`: a group per `@line`, an
@@ -158,6 +224,7 @@ fn catalog() -> &'static Catalog {
     CATALOG.get_or_init(|| {
         let mut emoji: Vec<UnicodeEmoji> = Vec::new();
         let mut by_name = HashMap::new();
+        let mut by_glyph = HashMap::new();
         let (mut category, mut parent) = (None, None);
         for line in include_str!("emoji_names.txt").lines() {
             if let Some(group) = line.strip_prefix('@') {
@@ -170,6 +237,7 @@ fn catalog() -> &'static Catalog {
             let glyph = words.next().expect("an emoji");
             let tones = variant.and_then(|_| words.next());
             let index = emoji.len();
+            by_glyph.entry(glyph).or_insert(index);
             let names: Vec<&'static str> = words.collect();
             for name in &names {
                 by_name.entry((*name).to_owned()).or_insert(index);
@@ -181,13 +249,17 @@ fn catalog() -> &'static Catalog {
                     for name in &emoji[parent].names {
                         by_name.entry(format!("{name}::skin-tone-{}", tones.unwrap_or_default())).or_insert(index);
                     }
+                    if let Some(tone) = tones.and_then(|t| t.parse::<usize>().ok()).filter(|t| (1..=5).contains(t)) {
+                        emoji[parent].tones[tone - 1] = Some(index);
+                    }
                 }
                 _ => {}
             }
             let category = if variant.is_some() { None } else { category };
-            emoji.push(UnicodeEmoji { glyph, names, category });
+            emoji.push(UnicodeEmoji { glyph, names, category, tones: [None; 5], base: variant.and(parent) });
         }
-        Catalog { emoji, by_name }
+        let longest = by_glyph.keys().map(|g| g.chars().count()).max().unwrap_or(1);
+        Catalog { emoji, by_name, by_glyph, longest }
     })
 }
 
@@ -203,11 +275,34 @@ pub fn unicode_label(glyph: &str) -> String {
     catalog().emoji.iter().find(|e| e.glyph == glyph).map_or_else(String::new, |e| format!(":{}:", e.names[0]))
 }
 
+/// The Unicode emoji written out as `glyph`, if it has a name.
+pub fn unicode_glyph(glyph: &str) -> Option<&'static UnicodeEmoji> {
+    let catalog = catalog();
+    let stripped = glyph.strip_suffix('\u{FE0F}').unwrap_or(glyph);
+    catalog.by_glyph.get(glyph).or_else(|| catalog.by_glyph.get(stripped)).map(|&n| &catalog.emoji[n])
+}
+
+/// The emoji that starts `chars`, the longest one, and how many characters
+/// it takes.
+fn glyph_at(chars: &[char]) -> Option<(&'static UnicodeEmoji, usize)> {
+    let catalog = catalog();
+    (1..=catalog.longest.min(chars.len())).rev().find_map(|len| {
+        let text: String = chars[..len].iter().collect();
+        unicode_glyph(&text).map(|emoji| (emoji, len))
+    })
+}
+
 /// The Unicode emoji of a picker group, in the client's order, without skin
 /// tone variants (the client's default tone is a setting only the protobuf
 /// settings carry).
 pub fn unicode_in(category: Category) -> impl Iterator<Item = &'static UnicodeEmoji> {
     catalog().emoji.iter().filter(move |e| e.category == Some(category))
+}
+
+/// Whether any Unicode emoji has skin tones: where the picker offers to
+/// choose one.
+pub fn has_tones(emoji: &UnicodeEmoji) -> bool {
+    emoji.tones.iter().any(Option::is_some)
 }
 
 /// The emoji of the picker and searches: every one with a group.
@@ -274,6 +369,28 @@ pub struct Found {
     pub locked: Vec<Item>,
 }
 
+/// How much each emoji was used, by [`Library::usage_key`].
+pub type Scores = HashMap<String, f64>;
+
+/// What an emoji is picked or searched for: reactions rank by the use of
+/// reactions, the rest by the use of emoji.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Intention {
+    Chat,
+    Reaction,
+}
+
+/// The key a reaction's emoji is counted under (see [`Library::usage_key`]),
+/// as the client works it out (`MESSAGE_REACTION_ADD`, 121681): an id, or
+/// the name of the emoji written out, which a skin tone is part of.
+pub fn reaction_key(emoji: &crate::model::Emoji) -> Option<String> {
+    match (emoji.id, emoji.name.as_deref()) {
+        (Some(id), _) if id.0 != 0 => Some(id.0.to_string()),
+        (_, Some(glyph)) => unicode_glyph(glyph).map(|e| e.names[0].to_owned()),
+        _ => None,
+    }
+}
+
 /// A message after its `:name:`s are written out.
 #[derive(Debug, PartialEq)]
 pub struct Translated {
@@ -281,6 +398,11 @@ pub struct Translated {
     /// The custom emoji in it that Nitro would be needed for. The client
     /// sends the message all the same, and tells the sender.
     pub locked: Vec<GuildEmoji>,
+    /// The keys (see [`Library::usage_key`]) of the emoji the message
+    /// sends, one for each time one is written, as the client counts them
+    /// when the message is sent: custom ones Nitro doesn't lock, and every
+    /// Unicode one, written out or by its `:name:`.
+    pub used: Vec<String>,
 }
 
 /// The emoji the open channel's account has: every server's custom ones we
@@ -317,6 +439,37 @@ impl Library {
         Library { servers, place: *place }
     }
 
+    /// The key the client files an emoji under in the favourites and the
+    /// counts of use: a custom emoji's id, a Unicode one's base name (`C` in
+    /// 554375).
+    pub fn key(item: &Item) -> String {
+        match item {
+            Item::Unicode(e) => e.base_name().to_owned(),
+            Item::Custom(n) => n.emoji.id.0.to_string(),
+        }
+    }
+
+    /// The key the client counts a use of an emoji under (`id ?? uniqueName`):
+    /// an id, or the emoji's own first name, a skin tone's included, which is
+    /// not the base name a favourite is filed under.
+    pub fn usage_key(item: &Item) -> String {
+        match item {
+            Item::Unicode(e) => e.names[0].to_owned(),
+            Item::Custom(n) => n.emoji.id.0.to_string(),
+        }
+    }
+
+    /// The emoji a key names, if we know it: a Unicode emoji's name first,
+    /// as the client looks (`getByName` before the custom ones, 121681), and
+    /// then a custom emoji's id.
+    pub fn item(&self, key: &str) -> Option<Item> {
+        if let Some(emoji) = unicode(key) {
+            return Some(Item::Unicode(emoji));
+        }
+        let id = key.parse::<u64>().ok()?;
+        self.custom().find(|n| n.emoji.id.0 == id).cloned().map(Item::Custom)
+    }
+
     fn custom(&self) -> impl Iterator<Item = &Named> {
         self.servers.iter().flat_map(|s| &s.emoji)
     }
@@ -341,24 +494,30 @@ impl Library {
 
     /// Emoji matching `query`, best first: what we may send (at most `max`),
     /// and what Nitro would unlock. Matching ignores case, `_` and spaces,
-    /// and finds the query anywhere in a name. The client also ranks by how
-    /// often an emoji was used, which a setting only the protobuf settings
-    /// carry.
-    pub fn search(&self, query: &str, max: usize) -> Found {
+    /// and finds the query anywhere in a name. A name that fits counts for
+    /// more the more an emoji was used: `scores` has the score of each key
+    /// (see [`Self::usage_key`]) that was, as [`crate::usage::History::scores`] says.
+    pub fn search(&self, query: &str, max: usize, scores: &Scores) -> Found {
         let needle: String = query.to_lowercase().chars().filter(|c| !matches!(c, ' ' | '_')).collect();
         let plain = query.to_lowercase();
-        let mut found: Vec<(u32, Item)> = Vec::new();
+        let mut found: Vec<(f64, Item)> = Vec::new();
+        let used = |item: &Item, fit: u32| match scores.get(&Self::usage_key(item)) {
+            Some(score) => f64::from(fit) * (score / 100.0).max(1.0),
+            None => f64::from(fit),
+        };
         for e in listed() {
             if e.names.iter().any(|n| n.replace('_', "").contains(&needle)) {
-                found.push((score(e.names[0], &plain), Item::Unicode(e)));
+                let item = Item::Unicode(e);
+                found.push((used(&item, score(e.names[0], &plain)), item));
             }
         }
         for n in self.custom() {
             if n.name.to_lowercase().replace('_', "").contains(&needle) {
-                found.push((score(&n.name, &plain), Item::Custom(n.clone())));
+                let item = Item::Custom(n.clone());
+                found.push((used(&item, score(&n.name, &plain)), item));
             }
         }
-        found.sort_by(|(a, x), (b, y)| b.cmp(a).then_with(|| x.name().cmp(y.name())));
+        found.sort_by(|(a, x), (b, y)| b.total_cmp(a).then_with(|| x.name().cmp(y.name())));
         let mut results = Found::default();
         for (_, item) in found {
             match item.unavailable() {
@@ -387,11 +546,15 @@ impl Library {
         let by_name: HashMap<&str, &Named> = self.custom().map(|n| (n.name.as_str(), n)).collect();
         let by_id: HashMap<Snowflake, &Named> = self.custom().map(|n| (n.emoji.id, n)).collect();
         let mut locked: Vec<GuildEmoji> = Vec::new();
-        let mut lock = |n: &Named| {
+        let mut used: Vec<String> = Vec::new();
+        // What Nitro locks is told to the sender; the rest counts as used.
+        fn note(n: &Named, locked: &mut Vec<GuildEmoji>, used: &mut Vec<String>) {
             if n.status == Err(Unavailable::Nitro) {
                 locked.push(n.emoji.clone());
+            } else {
+                used.push(n.emoji.id.0.to_string());
             }
-        };
+        }
         let chars: Vec<char> = text.chars().collect();
         let mut out = String::with_capacity(text.len());
         let mut i = 0;
@@ -408,7 +571,7 @@ impl Library {
                 if let Some(id) = raw_emoji_id(span)
                     && let Some(n) = by_id.get(&id)
                 {
-                    lock(n);
+                    note(n, &mut locked, &mut used);
                 }
                 out.extend(span);
                 i += skip;
@@ -420,21 +583,45 @@ impl Library {
                 let name: String = rest[1..len - 1].iter().collect();
                 match by_name.get(name.as_str()) {
                     Some(n) => {
-                        lock(n);
+                        note(n, &mut locked, &mut used);
                         out.push_str(&n.emoji.markup());
                     }
                     None => match unicode(&name) {
-                        Some(e) => out.push_str(e.glyph),
+                        Some(e) => {
+                            out.push_str(e.glyph);
+                            // A skin tone written after the name is not counted.
+                            let base = name.split_once("::skin-tone-").map_or(name.as_str(), |(base, _)| base);
+                            used.push(unicode(base).unwrap_or(e).names[0].to_owned());
+                        }
                         None => out.extend(&rest[..len]),
                     },
                 }
                 i += len;
                 continue;
             }
+            if starts_emoji(rest)
+                && let Some((emoji, len)) = glyph_at(rest)
+            {
+                used.push(emoji.names[0].to_owned());
+                out.extend(&rest[..len]);
+                i += len;
+                continue;
+            }
             out.push(rest[0]);
             i += 1;
         }
-        Translated { text: out, locked }
+        Translated { text: out, locked, used }
+    }
+}
+
+/// Whether an emoji could start `rest`, which saves looking for one at
+/// every letter: letters and spaces never do, and digits, `#` and `*` only
+/// as a keycap.
+fn starts_emoji(rest: &[char]) -> bool {
+    match rest[0] {
+        c if c.is_ascii_alphabetic() || c.is_whitespace() => false,
+        '0'..='9' | '#' | '*' => matches!(rest.get(1), Some('\u{FE0F}' | '\u{20E3}')),
+        c => !c.is_ascii(),
     }
 }
 
@@ -683,23 +870,63 @@ mod tests {
         let away = guild("2", &[], vec![custom("10", "zonk_far", json!({}))]);
         let free = library(&[home, away], json!({}), here(true));
 
-        let found = free.search("zonk", 2);
+        let found = free.search("zonk", 2, &Scores::new());
         assert_eq!(
             names(&found.unlocked),
             ["zonk", "zonk_blob_party"],
             "the whole name, then a word of it, up to the cap"
         );
         assert_eq!(names(&found.locked), ["zonk_far"], "the other server's, for Nitro");
-        let all = free.search("zonk", 10);
+        let all = free.search("zonk", 10, &Scores::new());
         assert_eq!(names(&all.unlocked), ["zonk", "zonk_blob_party", "zonkblob"]);
 
-        assert_eq!(free.search("ZONK", 10).unlocked[0].name(), "zonk", "whatever the case");
+        assert_eq!(free.search("ZONK", 10, &Scores::new()).unlocked[0].name(), "zonk", "whatever the case");
         // Spaces and underscores don't count; the Unicode name finds too.
-        assert_eq!(names(&free.search("zonk blob", 10).unlocked), ["zonk_blob_party", "zonkblob"]);
-        let joy = free.search("joy", 50).unlocked;
+        assert_eq!(names(&free.search("zonk blob", 10, &Scores::new()).unlocked), ["zonk_blob_party", "zonkblob"]);
+        let joy = free.search("joy", 50, &Scores::new()).unlocked;
         assert!(joy.iter().any(|i| matches!(i, Item::Unicode(e) if e.glyph == "😂")));
         assert!(joy.iter().all(|i| !matches!(i, Item::Unicode(e) if e.category.is_none())), "no variants");
-        assert!(free.search("zzzzqq", 10).unlocked.is_empty());
+        assert!(free.search("zzzzqq", 10, &Scores::new()).unlocked.is_empty());
+    }
+
+    #[test]
+    fn a_default_tone_picks_the_variant_where_there_is_one() {
+        let thumbs = unicode("thumbsup").unwrap();
+        assert!(has_tones(thumbs));
+        assert_eq!(thumbs.toned(None).glyph, "👍");
+        assert_eq!(thumbs.toned(Some(Tone::Medium)).glyph, "👍🏽");
+        assert_eq!(thumbs.toned(Some(Tone::Dark)).glyph, "👍🏿");
+        let grinning = unicode("grinning").unwrap();
+        assert!(!has_tones(grinning));
+        assert_eq!(grinning.toned(Some(Tone::Light)).glyph, "😀", "nothing to tone");
+        // A pair of hands has tones of its own for each, which no single tone picks.
+        let handshake = unicode("handshake").unwrap();
+        assert_eq!(handshake.toned(Some(Tone::Light)).glyph, "🤝🏻");
+    }
+
+    #[test]
+    fn a_favourite_is_filed_under_the_emoji_without_its_tone() {
+        let thumbs = unicode("thumbsup").unwrap();
+        let toned = thumbs.toned(Some(Tone::Dark));
+        assert_eq!(Library::key(&Item::Unicode(toned)), "thumbsup");
+        assert_eq!(Library::key(&Item::Unicode(thumbs)), "thumbsup");
+        let library = Library { servers: vec![], place: Place { guild: None, external: true } };
+        assert!(matches!(library.item("thumbsup"), Some(Item::Unicode(e)) if e.glyph == "👍"));
+        assert!(library.item("no_such_emoji_at_all").is_none());
+        assert!(library.item("12345").is_none(), "an id nobody has");
+        // A name that is all digits is still a name.
+        assert!(matches!(library.item("100"), Some(Item::Unicode(e)) if e.glyph == "💯"));
+    }
+
+    #[test]
+    fn tones_are_their_modifiers() {
+        assert_eq!(Tone::from_modifier("🏽"), Some(Tone::Medium));
+        assert_eq!(Tone::from_modifier(""), None);
+        assert_eq!(Tone::from_modifier("x"), None);
+        for tone in Tone::ALL {
+            assert_eq!(Tone::from_modifier(tone.modifier()), Some(tone));
+        }
+        assert_eq!(unicode("skin-tone-3").map(|e| e.glyph), Some(Tone::Medium.modifier()));
     }
 
     #[test]
@@ -788,6 +1015,59 @@ mod tests {
 
         // A role we lack: not an emoji for us, so the text stays.
         assert!(free.text.contains(":zclub:") && no_permission.text.contains(":zclub:"));
+    }
+
+    #[test]
+    fn a_sent_message_counts_each_emoji_it_writes_but_those_nitro_locks() {
+        let home =
+            guild("1", &[], vec![custom("9", "blob", json!({})), custom("8", "spin", json!({"animated": true}))]);
+        let free = library(&[home], json!({}), here(true));
+        // Custom ones by id, a name for each Unicode one however written, in order, repeats counted.
+        let sent = free.translate(":blob: 👍 :smile: <:blob:9> 😄 :slight_smile:");
+        assert_eq!(sent.used, ["9", "thumbsup", "smile", "9", "smile", "slight_smile"]);
+        assert_eq!(free.translate(":spin: :blob:").used, ["9"], "Nitro locks the animated one");
+        // A skin tone is the emoji's own name when written out, and left off a typed name.
+        assert_eq!(free.translate("👍🏽").used, ["thumbsup_tone3"]);
+        assert_eq!(free.translate(":thumbsup::skin-tone-3: :thumbsup_tone3:").used, ["thumbsup", "thumbsup_tone3"]);
+        // Code, links, other markup and what is no emoji count for nothing.
+        assert!(free.translate("`😄` :nope: https://x.test/😄 <@5> abc 123 #1 *x*").used.is_empty());
+        assert_eq!(free.translate("1️⃣ #️⃣").used, ["one", "hash"]);
+    }
+
+    #[test]
+    fn a_search_ranks_what_was_used_ahead_by_its_score_over_a_hundred() {
+        let home = guild(
+            "1",
+            &[],
+            vec![
+                custom("9", "zonk_blob_party", json!({})),
+                custom("8", "zonkblob", json!({})),
+                custom("7", "zonk", json!({})),
+            ],
+        );
+        let free = library(&[home], json!({}), here(true));
+        // `zonk` fits best (whole name: 1 + 4 + 2 + 1 = 8), a word of the others less (4).
+        let plain = free.search("zonk", 10, &Scores::new());
+        assert_eq!(names(&plain.unlocked), ["zonk", "zonk_blob_party", "zonkblob"]);
+        // A score under a hundred changes nothing; 900 makes 4 into 36, over 8.
+        let few: Scores = [("8".to_owned(), 90.0)].into();
+        assert_eq!(names(&free.search("zonk", 10, &few).unlocked), ["zonk", "zonk_blob_party", "zonkblob"]);
+        let many: Scores = [("8".to_owned(), 900.0)].into();
+        assert_eq!(names(&free.search("zonk", 10, &many).unlocked)[0], "zonkblob");
+        // A Unicode emoji is found by its own first name.
+        let smile: Scores = [("smirk".to_owned(), 5000.0)].into();
+        assert_eq!(free.search("smi", 3, &smile).unlocked[0].name(), "smirk");
+    }
+
+    #[test]
+    fn a_reaction_is_counted_under_an_id_or_the_name_of_the_emoji_written_out() {
+        use crate::model::Emoji;
+        let custom = Emoji { id: Some(Snowflake(9)), name: Some("blob".into()), animated: false };
+        assert_eq!(reaction_key(&custom).as_deref(), Some("9"));
+        let unicode = |glyph: &str| Emoji { id: None, name: Some(glyph.into()), animated: false };
+        assert_eq!(reaction_key(&unicode("👍")).as_deref(), Some("thumbsup"));
+        assert_eq!(reaction_key(&unicode("👍🏽")).as_deref(), Some("thumbsup_tone3"), "a tone is part of it");
+        assert_eq!(reaction_key(&unicode("not an emoji")), None);
     }
 
     #[test]

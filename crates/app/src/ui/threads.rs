@@ -378,6 +378,7 @@ impl App {
             }
         };
         self.threads_button.set_visible(shown);
+        self.sync_search_button();
     }
 
     /// Open `thread`'s menu where `widget` is right-clicked.

@@ -10,6 +10,8 @@
 use std::fmt::Display;
 
 pub(crate) const MESSAGES: Endpoint = Endpoint::get("/channels/{channel}/messages");
+pub(crate) const SEARCH_GUILD_MESSAGES: Endpoint = Endpoint::get("/guilds/{guild}/messages/search");
+pub(crate) const SEARCH_CHANNEL_MESSAGES: Endpoint = Endpoint::get("/channels/{channel}/messages/search");
 pub(crate) const SEND_MESSAGE: Endpoint = Endpoint::post("/channels/{channel}/messages");
 pub(crate) const EDIT_MESSAGE: Endpoint = Endpoint::patch("/channels/{channel}/messages/{message}");
 pub(crate) const DELETE_MESSAGE: Endpoint = Endpoint::delete("/channels/{channel}/messages/{message}");
@@ -32,8 +34,15 @@ pub(crate) const DELETE_UPLOAD: Endpoint = Endpoint::delete("/attachments/{+uplo
 pub(crate) const VOTE: Endpoint = Endpoint::put("/channels/{channel}/polls/{message}/answers/@me");
 pub(crate) const END_POLL: Endpoint = Endpoint::post("/channels/{channel}/polls/{message}/expire");
 pub(crate) const INTERACT: Endpoint = Endpoint::post("/interactions");
+pub(crate) const COMMAND_INDEX_GUILD: Endpoint = Endpoint::get("/guilds/{guild}/application-command-index");
+pub(crate) const COMMAND_INDEX_CHANNEL: Endpoint = Endpoint::get("/channels/{channel}/application-command-index");
+pub(crate) const COMMAND_INDEX_USER: Endpoint = Endpoint::get("/users/@me/application-command-index");
 pub(crate) const TYPING: Endpoint = Endpoint::post("/channels/{channel}/typing");
 pub(crate) const ACK: Endpoint = Endpoint::post("/channels/{channel}/messages/{message}/ack");
+pub(crate) const ACK_BULK: Endpoint = Endpoint::post("/read-states/ack-bulk");
+pub(crate) const SAVE_GUILD_SETTINGS_BULK: Endpoint = Endpoint::patch("/users/@me/guilds/settings");
+pub(crate) const SAVE_GUILD_SETTINGS: Endpoint = Endpoint::patch("/users/@me/guilds/{+guild}/settings");
+pub(crate) const THREAD_MEMBER_SETTINGS: Endpoint = Endpoint::patch("/channels/{channel}/thread-members/@me/settings");
 pub(crate) const CREATE_THREAD: Endpoint = Endpoint::post("/channels/{channel}/threads");
 #[rustfmt::skip]
 pub(crate) const CREATE_THREAD_FROM_MESSAGE: Endpoint = Endpoint::post("/channels/{channel}/messages/{message}/threads");
@@ -46,6 +55,7 @@ pub(crate) const POST_DATA: Endpoint = Endpoint::post("/channels/{channel}/post-
 pub(crate) const ME: Endpoint = Endpoint::get("/users/@me");
 pub(crate) const USER: Endpoint = Endpoint::get("/users/{user}");
 pub(crate) const USER_PROFILE: Endpoint = Endpoint::get("/users/{user}/profile");
+pub(crate) const MUTUAL_FRIENDS: Endpoint = Endpoint::get("/users/{user}/relationships");
 pub(crate) const NOTE: Endpoint = Endpoint::get("/users/@me/notes/{user}");
 pub(crate) const SET_NOTE: Endpoint = Endpoint::put("/users/@me/notes/{user}");
 pub(crate) const OPEN_DM: Endpoint = Endpoint::post("/users/@me/channels");
@@ -58,6 +68,7 @@ pub(crate) const LOGIN: Endpoint = Endpoint::post("/auth/login");
 pub(crate) const LOGOUT: Endpoint = Endpoint::post("/auth/logout");
 pub(crate) const SEND_MFA_SMS: Endpoint = Endpoint::post("/auth/mfa/sms/send");
 pub(crate) const VERIFY_MFA: Endpoint = Endpoint::post("/auth/mfa/{method}");
+pub(crate) const FORGOT_PASSWORD: Endpoint = Endpoint::post("/auth/forgot");
 pub(crate) const REMOTE_AUTH_LOGIN: Endpoint = Endpoint::post("/users/@me/remote-auth/login");
 pub(crate) const STICKER_PACKS: Endpoint = Endpoint::get("/sticker-packs");
 pub(crate) const GIFS_SEARCH: Endpoint = Endpoint::get("/gifs/search");
@@ -65,6 +76,9 @@ pub(crate) const GIFS_TRENDING: Endpoint = Endpoint::get("/gifs/trending");
 pub(crate) const GIFS_TRENDING_GIFS: Endpoint = Endpoint::get("/gifs/trending-gifs");
 pub(crate) const GIFS_SUGGEST: Endpoint = Endpoint::get("/gifs/suggest");
 pub(crate) const SAFETY_HUB: Endpoint = Endpoint::get("/safety-hub/@me");
+pub(crate) const SAFETY_HUB_SUSPENDED: Endpoint = Endpoint::post("/safety-hub/suspended/@me");
+pub(crate) const SETTINGS_PROTO: Endpoint = Endpoint::get("/users/@me/settings-proto/{kind}");
+pub(crate) const SAVE_SETTINGS_PROTO: Endpoint = Endpoint::patch("/users/@me/settings-proto/{kind}");
 
 /// An HTTP method and a path template.
 #[derive(Clone, Copy, Debug)]
@@ -213,6 +227,13 @@ mod tests {
     }
 
     #[test]
+    fn the_dms_settings_are_at_at_me() {
+        // The client's path (931260) has `@me` in it as it is, not as `%40me`.
+        let call = call!(SAVE_GUILD_SETTINGS, guild = "@me");
+        assert_eq!((call.method(), call.path()), ("PATCH", "/users/@me/guilds/@me/settings"));
+    }
+
+    #[test]
     fn plus_keeps_slashes() {
         let call = call!(DELETE_UPLOAD, uploaded_filename = "a-1/my file.png");
         assert_eq!((call.method(), call.path()), ("DELETE", "/attachments/a-1/my%20file.png"));
@@ -264,6 +285,8 @@ mod tests {
     #[should_panic(expected = "doesn't have")]
     fn extra_parameter() {
         OPEN_DM.check(&["user"]);
+        SEARCH_GUILD_MESSAGES.check(&["guild"]);
+        SEARCH_CHANNEL_MESSAGES.check(&["channel"]);
     }
 
     /// discord-watch reads the table as text, so a row written any other way

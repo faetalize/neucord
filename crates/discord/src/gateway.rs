@@ -16,22 +16,26 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use soup::prelude::*;
 
+use crate::channel_list::Collapsed;
 use crate::component::Component;
 use crate::embed::Embed;
 use crate::emoji::GuildEmoji;
 use crate::experiments::Experiments;
+use crate::gates::Gates;
 use crate::inflate::Inflater;
 use crate::limits::Nitro;
 use crate::member_list::Update as MemberListUpdate;
-use crate::members::Members;
+use crate::members::{Known, Members};
 use crate::model::Emoji;
 use crate::notifications::{GuildSettings, NotificationSettings};
 use crate::reactions::{self, Kind};
 use crate::read_state::ReadStates;
 use crate::relationships::{Presence, Relationship, Relationships};
-use crate::settings::{self, GuildFolder, MediaPatch, MediaSettings};
+use crate::settings::{Settings, SettingsPatch, UserStatus};
+use crate::settings_proto;
 use crate::stickers::Listed;
 use crate::verification::Account;
+use crate::voice_states::{self, VoiceState, VoiceStates};
 use crate::{Channel, Error, Guild, Member, Message, MessageEdit, Role, Snowflake, ThreadMember, User, identity};
 
 /// Gateway capability bits. 0 asks for the classic payload shapes, which the
@@ -68,13 +72,14 @@ pub struct Ready {
     pub relationships: Relationships,
     pub read_states: ReadStates,
     pub notification_settings: NotificationSettings,
-    /// Server folders and order; empty if the user never arranged servers.
-    pub guild_folders: Vec<GuildFolder>,
-    pub media_settings: MediaSettings,
-    pub developer_mode: bool,
+    /// Which categories are folded.
+    pub collapsed: Collapsed,
+    pub settings: Settings,
+    /// The `PreloadedUserSettings` they were read from, whole: what changing
+    /// a setting starts from (see [`crate::settings_sync`]).
+    pub settings_proto: Option<Vec<u8>>,
     /// See [`crate::regional::media_takedown_regulated`].
     pub media_takedown_regulated: bool,
-    pub message_display_compact: bool,
     /// A step Discord requires before the account can be used, if any
     /// (see [`crate::account`]).
     pub required_action: Option<String>,
@@ -82,6 +87,13 @@ pub struct Ready {
     pub experiments: Experiments,
     /// This session's id, which interactions name.
     pub session_id: String,
+    /// What holds privacy settings back, see [`crate::gates`].
+    pub gates: Gates,
+    /// How many of our servers READY could not give (an outage): the
+    /// restrictions of servers we are no longer in are kept while any is.
+    pub unavailable_guilds: usize,
+    /// Who is in the voice channels of every server READY carries.
+    pub voice_states: VoiceStates,
 }
 
 /// How an interaction of ours ended, as the events `INTERACTION_SUCCESS`,
@@ -98,6 +110,13 @@ pub enum Outcome {
 pub enum Event {
     Ready(Box<Ready>),
     GuildCreate(Guild),
+    /// A server's whole voice list, which follows its `GUILD_CREATE`.
+    GuildVoiceStates {
+        guild_id: Snowflake,
+        states: Vec<VoiceState>,
+    },
+    /// People joining, moving in and leaving voice channels.
+    VoiceStates(Vec<voice_states::Update>),
     /// A DM or group DM was opened (or reopened), or a message request
     /// arrived. Guild channels are not reported yet.
     PrivateChannelCreate(Channel),
@@ -168,7 +187,7 @@ pub enum Event {
     /// we asked for who aren't members.
     Members {
         guild_id: Snowflake,
-        members: Vec<(Snowflake, Vec<Snowflake>)>,
+        members: Vec<(Snowflake, Known)>,
         not_found: Vec<Snowflake>,
     },
     /// A server's settings changed, its roles among them. It has no channels
@@ -198,11 +217,31 @@ pub enum Event {
         ids: Vec<Snowflake>,
         channel_id: Snowflake,
     },
-    /// Discord answered the interaction we sent as `nonce`.
+    /// Discord answered the interaction we sent as `nonce`. A failure may
+    /// carry the reason Discord gives (`reason_code`; 2 is a timeout).
     Interaction {
         nonce: Snowflake,
         outcome: Outcome,
+        reason: Option<u64>,
     },
+    /// Discord took the interaction we sent as `nonce` (`INTERACTION_CREATE`);
+    /// the app has yet to answer.
+    InteractionCreated {
+        nonce: Snowflake,
+    },
+    /// An app's choices for an option being autocompleted, for the request
+    /// we sent as `nonce`.
+    Autocomplete {
+        nonce: Snowflake,
+        choices: Value,
+    },
+    /// A server's apps or commands changed; `version` is what the index is at now.
+    CommandIndexChanged {
+        guild: Snowflake,
+        version: Option<String>,
+    },
+    /// An app was installed to or removed from the account.
+    UserApplicationChanged,
     /// Votes on a poll's answers, as `(answer_id, user_id)`: added, or taken back.
     /// `many` is a `MESSAGE_POLL_VOTE_ADD_MANY`, which the client counts
     /// without its DM rule.
@@ -240,9 +279,12 @@ pub enum Event {
         user: Option<User>,
     },
     /// One of our clients (maybe this one) marked `channel_id` read up to `message_id`.
+    /// `manual` carries the mentions left to read when it was "Mark Unread",
+    /// which moves the read point back.
     MessageAck {
         channel_id: Snowflake,
         message_id: Snowflake,
+        manual: Option<u32>,
     },
     /// Newest message ids for some of a server's channels, sent after READY
     /// because READY's can be stale.
@@ -280,12 +322,21 @@ pub enum Event {
     MemberList(Box<MemberListUpdate>),
     /// Our notification settings for one server (or DMs) changed.
     NotificationSettingsUpdate(GuildSettings),
-    /// The user rearranged servers or folders (on any client).
-    GuildFoldersUpdate(Vec<GuildFolder>),
-    /// The user changed how embeds and media show.
-    MediaSettingsUpdate(MediaPatch),
-    DeveloperModeUpdate(bool),
-    MessageDisplayCompactUpdate(bool),
+    /// The user changed settings (on any client). With `replace`, the patch
+    /// is all of them and what it leaves out is back to its default. From
+    /// the protobuf form, `proto` is what arrived.
+    SettingsUpdate {
+        patch: SettingsPatch,
+        replace: bool,
+        proto: Option<Vec<u8>>,
+    },
+    /// The favourites and counts of use changed (the settings proto of type
+    /// 2, see [`crate::frecency`]): all of them, or with `partial` the
+    /// messages that changed in them.
+    FrecencyUpdate {
+        proto: Vec<u8>,
+        partial: bool,
+    },
     /// Discord started or stopped requiring a step (see [`crate::account`]).
     RequiredActionUpdate(Option<String>),
     /// A resume succeeded; everything missed has been replayed before this.
@@ -447,6 +498,15 @@ impl Gateway {
         }
     }
 
+    /// Tell Discord what we show as, as the client does (`presenceUpdate`,
+    /// 868): op 3, see [`crate::presence`]. Like the client, nothing is sent
+    /// before the session is established.
+    pub fn update_presence(&self, status: UserStatus) {
+        if self.state.established.get() {
+            send_text(&self.conn, &request_text(3, &PresenceUpdate::new(status)));
+        }
+    }
+
     /// Ask for how many messages of a forum's posts we haven't read, as the
     /// client does when it lists them (`requestForumUnreads`, 868): op 28,
     /// answered with [`Event::ForumUnreads`]. `request` is
@@ -481,6 +541,22 @@ struct MemberRequest<'a> {
 impl<'a> MemberRequest<'a> {
     fn new(guild: Snowflake, users: &'a [Snowflake]) -> Self {
         MemberRequest { guild_id: [guild], user_ids: users, presences: false }
+    }
+}
+
+/// Op 3's payload, in the client's field order. Neucord reports no
+/// activities, never goes idle on its own and is never away.
+#[derive(serde::Serialize)]
+struct PresenceUpdate {
+    status: &'static str,
+    since: u64,
+    activities: [(); 0],
+    afk: bool,
+}
+
+impl PresenceUpdate {
+    fn new(status: UserStatus) -> Self {
+        PresenceUpdate { status: status.wire(), since: 0, activities: [], afk: false }
     }
 }
 
@@ -636,15 +712,16 @@ fn guild_with_member(value: &Value, merged: &Value, me: Snowflake) -> Option<Gui
 
 /// Everyone's members a guild object carries, as in [`guild_with_member`],
 /// with their roles.
-fn members_of(value: &Value, merged: &Value) -> Vec<(Snowflake, Vec<Snowflake>)> {
+fn members_of(value: &Value, merged: &Value) -> Vec<(Snowflake, Known)> {
     let members = value["members"].as_array().into_iter().chain(merged.as_array()).flatten();
-    members.filter_map(member_roles).collect()
+    members.filter_map(member_known).collect()
 }
 
-/// A member's user and roles; it names its user either inline or by id.
-fn member_roles(member: &Value) -> Option<(Snowflake, Vec<Snowflake>)> {
+/// A member's user, roles, nickname and picture; it names its user either
+/// inline or by id.
+fn member_known(member: &Value) -> Option<(Snowflake, Known)> {
     let user = parse_id(&member["user"]["id"]).or_else(|| parse_id(&member["user_id"]))?;
-    Some((user, Member::from_value(member).roles))
+    Some((user, Known::from_value(member)))
 }
 
 /// READY's DMs, message requests included. Recipients come either inline as `recipients` (the classic
@@ -695,6 +772,12 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 .enumerate()
                 .filter_map(|(i, g)| guild_with_member(g, &data["merged_members"][i], user.id))
                 .collect();
+            let mut voice_states = VoiceStates::default();
+            for g in raw_guilds {
+                if let Some(id) = parse_id(&g["id"]) {
+                    voice_states.replace_guild(id, VoiceState::parse_list(&g["voice_states"]));
+                }
+            }
             let experiments = Experiments::from_ready(&data);
             crate::experiments::debug_dump(&data, &experiments, user.id, &guilds);
             let mut members = Members::default();
@@ -708,18 +791,25 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 relationships: Relationships::from_ready(&data),
                 read_states: ReadStates::from_ready(&data["read_state"]),
                 notification_settings: NotificationSettings::from_ready(&data["user_guild_settings"]),
-                guild_folders: settings::guild_folders(&data["user_settings"]).unwrap_or_default(),
-                media_settings: {
-                    let mut media = MediaSettings::default();
-                    media.apply(MediaPatch::from_settings(&data["user_settings"]));
-                    media
+                collapsed: Collapsed::from_ready(&data["user_guild_settings"]),
+                settings: {
+                    // The protobuf is what the official client reads, so it
+                    // wins where both say something.
+                    let mut settings = Settings::default();
+                    settings.apply(SettingsPatch::from_json(&data["user_settings"]));
+                    if let Some(proto) = data["user_settings_proto"].as_str().and_then(SettingsPatch::from_proto) {
+                        settings.apply(proto);
+                    }
+                    settings
                 },
-                developer_mode: settings::developer_mode(&data["user_settings"]).unwrap_or(false),
+                settings_proto: data["user_settings_proto"].as_str().map(settings_proto::decode),
                 media_takedown_regulated: crate::regional::media_takedown_regulated(&data["regional_feature_config"]),
-                message_display_compact: settings::message_display_compact(&data["user_settings"]).unwrap_or(false),
                 required_action: data["required_action"].as_str().map(str::to_owned),
                 experiments,
                 session_id: data["session_id"].as_str().unwrap_or_default().to_owned(),
+                gates: Gates::from_ready(&data),
+                unavailable_guilds: raw_guilds.iter().filter(|g| g["unavailable"] == true).count(),
+                voice_states,
                 account,
                 nitro: Nitro::from_user(&data["user"]),
                 user,
@@ -739,7 +829,8 @@ fn dispatch(state: &State, name: &str, data: Value) {
             else {
                 return;
             };
-            Event::MessageAck { channel_id, message_id }
+            let manual = (data["manual"] == true).then(|| data["mention_count"].as_u64().unwrap_or(0) as u32);
+            Event::MessageAck { channel_id, message_id, manual }
         }
         "CHANNEL_UNREAD_UPDATE" => {
             let Some(guild_id) = parse_id(&data["guild_id"]) else { return };
@@ -753,20 +844,32 @@ fn dispatch(state: &State, name: &str, data: Value) {
         }
         // Partial: only the settings that changed.
         "USER_SETTINGS_UPDATE" => {
-            let media = MediaPatch::from_settings(&data);
-            if !media.is_empty() {
-                let _ = state.events.try_send(Event::MediaSettingsUpdate(media));
+            let patch = SettingsPatch::from_json(&data);
+            if patch.is_empty() {
+                return;
             }
-            if let Some(on) = settings::developer_mode(&data) {
-                let _ = state.events.try_send(Event::DeveloperModeUpdate(on));
+            Event::SettingsUpdate { patch, replace: false, proto: None }
+        }
+        // `type` 1 is the account's settings, 2 its favourites and what it
+        // uses most.
+        "USER_SETTINGS_PROTO_UPDATE" => {
+            let kind = data["settings"]["type"].as_u64();
+            let Some(proto) = data["settings"]["proto"].as_str().map(settings_proto::decode) else {
+                return eprintln!("gateway: bad USER_SETTINGS_PROTO_UPDATE");
+            };
+            if kind == Some(2) {
+                return send_event(
+                    state,
+                    Event::FrecencyUpdate { proto, partial: data["partial"].as_bool() == Some(true) },
+                );
             }
-            if let Some(on) = settings::message_display_compact(&data) {
-                let _ = state.events.try_send(Event::MessageDisplayCompactUpdate(on));
+            if kind != Some(1) {
+                return;
             }
-            match settings::guild_folders(&data) {
-                Some(folders) => Event::GuildFoldersUpdate(folders),
-                None => return,
-            }
+            let Some(patch) = SettingsPatch::from_proto_bytes(&proto) else {
+                return eprintln!("gateway: bad USER_SETTINGS_PROTO_UPDATE");
+            };
+            Event::SettingsUpdate { patch, replace: data["partial"].as_bool() != Some(true), proto: Some(proto) }
         }
         "USER_GUILD_SETTINGS_UPDATE" => match GuildSettings::deserialize(&data) {
             Ok(settings) => Event::NotificationSettingsUpdate(settings),
@@ -787,14 +890,18 @@ fn dispatch(state: &State, name: &str, data: Value) {
         "GUILD_MEMBER_UPDATE" => {
             let Some(guild_id) = parse_id(&data["guild_id"]) else { return };
             if !state.me.get().is_some_and(|me| is_me(&data, me)) {
-                let Some(member) = member_roles(&data) else { return };
+                let Some(member) = member_known(&data) else { return };
                 return send_event(state, Event::Members { guild_id, members: vec![member], not_found: Vec::new() });
+            }
+            // Our own nickname and picture show in the chat like anyone's.
+            if let Some(known) = member_known(&data) {
+                send_event(state, Event::Members { guild_id, members: vec![known], not_found: Vec::new() });
             }
             Event::MemberUpdate { guild_id, member: Member::from_value(&data) }
         }
         "GUILD_MEMBERS_CHUNK" => {
             let Some(guild_id) = parse_id(&data["guild_id"]) else { return };
-            let members = data["members"].as_array().into_iter().flatten().filter_map(member_roles).collect();
+            let members = data["members"].as_array().into_iter().flatten().filter_map(member_known).collect();
             let not_found = data["not_found"].as_array().into_iter().flatten().filter_map(parse_id).collect();
             Event::Members { guild_id, members, not_found }
         }
@@ -866,7 +973,9 @@ fn dispatch(state: &State, name: &str, data: Value) {
             let Some(update) = MemberListUpdate::from_value(&data) else {
                 return eprintln!("gateway: bad GUILD_MEMBER_LIST_UPDATE");
             };
-            let members = update.members().iter().map(|m| (m.user.id, m.roles.clone())).collect();
+            let members = (update.members().iter())
+                .map(|m| (m.user.id, Known { roles: m.roles.clone(), nick: m.nick.clone(), avatar: m.avatar.clone() }))
+                .collect();
             send_event(state, Event::Members { guild_id: update.guild, members, not_found: Vec::new() });
             Event::MemberList(Box::new(update))
         }
@@ -959,8 +1068,23 @@ fn dispatch(state: &State, name: &str, data: Value) {
             let Some(guild) = guild_with_member(&data, &Value::Null, me) else { return };
             let members =
                 Event::Members { guild_id: guild.id, members: members_of(&data, &Value::Null), not_found: Vec::new() };
+            let voice =
+                Event::GuildVoiceStates { guild_id: guild.id, states: VoiceState::parse_list(&data["voice_states"]) };
             send_event(state, Event::GuildCreate(guild));
+            send_event(state, voice);
             members
+        }
+        "VOICE_STATE_UPDATE" => match voice_states::Update::parse(&data) {
+            Some(update) => Event::VoiceStates(vec![update]),
+            None => return,
+        },
+        "VOICE_STATE_UPDATE_BATCH" => {
+            let updates: Vec<_> =
+                data["voice_states"].as_array().into_iter().flatten().filter_map(voice_states::Update::parse).collect();
+            if updates.is_empty() {
+                return;
+            }
+            Event::VoiceStates(updates)
         }
         "MESSAGE_CREATE" => match serde_json::from_value(data) {
             Ok(message) => Event::MessageCreate(Box::new(message)),
@@ -993,8 +1117,22 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 "INTERACTION_FAILURE" => Outcome::Failure,
                 _ => Outcome::Form,
             };
-            Event::Interaction { nonce, outcome }
+            let reason = data["reason_code"].as_u64().filter(|_| outcome == Outcome::Failure);
+            Event::Interaction { nonce, outcome, reason }
         }
+        "INTERACTION_CREATE" => {
+            let Some(nonce) = parse_id(&data["nonce"]) else { return };
+            Event::InteractionCreated { nonce }
+        }
+        "APPLICATION_COMMAND_AUTOCOMPLETE_RESPONSE" => {
+            let Some(nonce) = parse_id(&data["nonce"]) else { return };
+            Event::Autocomplete { nonce, choices: data["choices"].clone() }
+        }
+        "GUILD_APPLICATION_COMMAND_INDEX_UPDATE" => {
+            let Some(guild) = parse_id(&data["guild_id"]) else { return };
+            Event::CommandIndexChanged { guild, version: data["version"].as_str().map(str::to_owned) }
+        }
+        "USER_APPLICATION_UPDATE" | "USER_APPLICATION_REMOVE" => Event::UserApplicationChanged,
         "MESSAGE_DELETE" => {
             let (Some(id), Some(channel_id)) = (parse_id(&data["id"]), parse_id(&data["channel_id"])) else {
                 return;
@@ -1184,7 +1322,12 @@ mod tests {
                 "GUILD_MEMBER_UPDATE",
                 json!({"guild_id": "1", "user": {"id": user}, "roles": ["40"], "communication_disabled_until": until}),
             );
-            rx.try_recv().ok()
+            // Our own nickname and picture come first, as theirs do.
+            let first = rx.try_recv().ok();
+            match first {
+                Some(Event::Members { .. }) if user == "5" => rx.try_recv().ok(),
+                first => first,
+            }
         };
         assert!(
             matches!(update("8", json!("2026-10-28T12:00:00+00:00")), Some(Event::Members { .. })),
@@ -1288,12 +1431,22 @@ mod tests {
             json!({"id": "2", "name": "B", "members": [{"user": {"id": "7"}, "roles": ["41"]}]}),
         );
         assert!(matches!(rx.try_recv(), Ok(Event::GuildCreate(_))));
+        assert!(matches!(rx.try_recv(), Ok(Event::GuildVoiceStates { .. })));
         let Ok(Event::Members { guild_id, members, .. }) = rx.try_recv() else { panic!("no members") };
-        assert_eq!((guild_id, members), (Snowflake(2), vec![(Snowflake(7), vec![Snowflake(41)])]));
+        let roles = |ids: &[u64]| Known { roles: ids.iter().map(|&id| Snowflake(id)).collect(), ..Known::default() };
+        assert_eq!((guild_id, members), (Snowflake(2), vec![(Snowflake(7), roles(&[41]))]));
 
         dispatch(&state, "GUILD_MEMBER_UPDATE", json!({"guild_id": "1", "user": {"id": "6"}, "roles": []}));
         let Ok(Event::Members { members, .. }) = rx.try_recv() else { panic!("someone else's update") };
-        assert_eq!(members, vec![(Snowflake(6), vec![])]);
+        assert_eq!(members, vec![(Snowflake(6), Known::default())]);
+        dispatch(
+            &state,
+            "GUILD_MEMBER_UPDATE",
+            json!({"guild_id": "1", "user": {"id": "6"}, "roles": [], "nick": "Six", "avatar": "av"}),
+        );
+        let Ok(Event::Members { members, .. }) = rx.try_recv() else { panic!("someone else's update") };
+        assert_eq!(members[0].1.nick.as_deref(), Some("Six"));
+        assert_eq!(members[0].1.avatar.as_deref(), Some("av"));
 
         dispatch(
             &state,
@@ -1302,7 +1455,49 @@ mod tests {
                    "chunk_index": 0, "chunk_count": 1}),
         );
         let Ok(Event::Members { members, not_found, .. }) = rx.try_recv() else { panic!("no chunk") };
-        assert_eq!((members, not_found), (vec![(Snowflake(8), vec![Snowflake(40)])], vec![Snowflake(9)]));
+        assert_eq!((members, not_found), (vec![(Snowflake(8), roles(&[40]))], vec![Snowflake(9)]));
+    }
+
+    #[test]
+    fn voice_states() {
+        let (tx, rx) = async_channel::unbounded();
+        let state = State {
+            token: String::new(),
+            me: Cell::new(None),
+            session: RefCell::new(None),
+            resuming: Cell::new(false),
+            resumable: Cell::new(true),
+            established: Cell::new(false),
+            seq: Cell::new(None),
+            acked: Cell::new(true),
+            events: tx,
+        };
+        let in_voice = |guild: &str, user: &str, channel: Value| json!({"guild_id": guild, "user_id": user, "channel_id": channel, "session_id": "s", "self_mute": true});
+        let ready = json!({
+            "user": {"id": "5", "username": "me"},
+            "guilds": [{"id": "1", "properties": {"name": "A"}, "voice_states": [in_voice("1", "6", json!("9"))]}],
+        });
+        dispatch(&state, "READY", ready);
+        let Ok(Event::Ready(ready)) = rx.try_recv() else { panic!("no READY") };
+        let names =
+            |states: &VoiceStates| states.in_channel(Snowflake(1), Snowflake(9), |s| s.user_id.0.to_string()).len();
+        assert_eq!(names(&ready.voice_states), 1);
+
+        dispatch(&state, "VOICE_STATE_UPDATE", in_voice("1", "7", json!("9")));
+        let Ok(Event::VoiceStates(updates)) = rx.try_recv() else { panic!("no update") };
+        assert_eq!((updates[0].guild, updates[0].user), (Snowflake(1), Snowflake(7)));
+        assert!(updates[0].state.as_ref().is_some_and(|s| s.self_mute && s.channel_id == Snowflake(9)));
+
+        dispatch(
+            &state,
+            "VOICE_STATE_UPDATE_BATCH",
+            json!({"voice_states": [in_voice("1", "7", Value::Null), in_voice("2", "8", json!("3"))]}),
+        );
+        let Ok(Event::VoiceStates(updates)) = rx.try_recv() else { panic!("no batch") };
+        assert_eq!(updates.iter().map(|u| (u.guild.0, u.state.is_some())).collect::<Vec<_>>(), [(1, false), (2, true)]);
+
+        dispatch(&state, "VOICE_STATE_UPDATE", json!({"guild_id": null, "user_id": "7", "channel_id": "3"}));
+        assert!(rx.try_recv().is_err(), "a DM call isn't a server's voice list");
     }
 
     #[test]
@@ -1404,7 +1599,10 @@ mod tests {
         );
         // Their roles colour names in the chat, as the client's member store takes them.
         let Ok(Event::Members { guild_id, members, .. }) = rx.try_recv() else { panic!("no members") };
-        assert_eq!((guild_id, members), (Snowflake(1), vec![(Snowflake(6), vec![Snowflake(40)])]));
+        assert_eq!(
+            (guild_id, members),
+            (Snowflake(1), vec![(Snowflake(6), Known { roles: vec![Snowflake(40)], ..Known::default() })])
+        );
         let Ok(Event::MemberList(update)) = rx.try_recv() else { panic!("no list") };
         assert_eq!((update.guild, update.list.as_str(), update.ops.len()), (Snowflake(1), "everyone", 1));
 
@@ -1435,6 +1633,27 @@ mod tests {
     fn member_request_as_the_client_sends_it() {
         let d = MemberRequest::new(Snowflake(1), &[Snowflake(6), Snowflake(7)]);
         assert_eq!(request_text(8, &d), r#"{"op":8,"d":{"guild_id":["1"],"user_ids":["6","7"],"presences":false}}"#);
+    }
+
+    #[test]
+    fn an_update_of_the_favourites_is_told_apart_from_the_settings() {
+        let (state, rx) = fresh_state();
+        let update = |kind: u64, partial: bool| json!({"settings": {"type": kind, "proto": settings_proto::encode(&[0x2a, 0x00])}, "partial": partial});
+        dispatch(&state, "USER_SETTINGS_PROTO_UPDATE", update(2, true));
+        let Ok(Event::FrecencyUpdate { proto, partial }) = rx.try_recv() else { panic!("no update") };
+        assert_eq!((proto, partial), (vec![0x2a, 0x00], true));
+        dispatch(&state, "USER_SETTINGS_PROTO_UPDATE", update(2, false));
+        assert!(matches!(rx.try_recv(), Ok(Event::FrecencyUpdate { partial: false, .. })));
+        dispatch(&state, "USER_SETTINGS_PROTO_UPDATE", update(3, false));
+        assert!(rx.try_recv().is_err(), "a type nobody reads");
+    }
+
+    #[test]
+    fn presence_update_as_the_client_sends_it() {
+        assert_eq!(
+            request_text(3, &PresenceUpdate::new(UserStatus::DoNotDisturb)),
+            r#"{"op":3,"d":{"status":"dnd","since":0,"activities":[],"afk":false}}"#
+        );
     }
 
     #[test]

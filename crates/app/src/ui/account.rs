@@ -44,14 +44,16 @@ impl App {
     pub(super) fn show_standing(self: &Rc<Self>) {
         let Some(rest) = self.account.state.borrow().rest.clone() else { return };
         let this = self.clone();
-        glib::spawn_future_local(async move {
-            let dialog = match rest.account_standing().await {
-                Ok(standing) => standing_dialog(&standing),
-                Err(e) => adw::AlertDialog::new(Some("Could Not Load Account Standing"), Some(&e.to_string())),
-            };
-            dialog.add_response("close", "_Close");
-            dialog.present(Some(&this.window));
-        });
+        glib::spawn_future_local(async move { this.present_standing(rest.account_standing().await) });
+    }
+
+    pub(super) fn present_standing(&self, standing: Result<account::Standing, discord::Error>) {
+        let dialog = match standing {
+            Ok(standing) => standing_dialog(&standing),
+            Err(e) => adw::AlertDialog::new(Some("Could Not Load Account Standing"), Some(&e.to_string())),
+        };
+        dialog.add_response("close", "_Close");
+        dialog.present(Some(&self.window));
     }
 }
 

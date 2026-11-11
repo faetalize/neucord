@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 use discord::channel_icon::{self, Glyph, Mark};
 use discord::notifications::Place;
+use discord::voice_states::VoiceState;
 use discord::{Channel, Snowflake};
 use gtk::prelude::*;
 use gtk::{glib, pango};
@@ -12,8 +13,8 @@ use super::App;
 use super::menus::{self, At, Entry, Item, Kind};
 use super::state::{Page, now_ms, now_unix};
 use super::thread_line::ThreadLine;
-use super::widgets::{avatar_widget, badge, round_picture};
-use crate::images::Images;
+use super::widgets::{avatar_still, avatar_widget, badge, round_picture};
+use crate::images::{Images, Row};
 
 /// What a channel row's menu acts on.
 pub(super) struct ChannelTarget(pub(super) Snowflake);
@@ -51,7 +52,7 @@ pub(super) const OPEN_CHAT: Entry<ChannelTarget> = Entry::Item(Item {
 pub(super) const COPY_CHANNEL_ID: Entry<ChannelTarget> = Entry::Item(Item {
     name: "copy-channel-id",
     label: "Copy Channel _ID",
-    shows: |app, _| app.account.state.borrow().developer_mode,
+    shows: |app, _| app.account.state.borrow().settings.developer_mode,
     kind: Kind::Action(|app, target| app.copy(&target.0.to_string())),
 });
 
@@ -59,6 +60,8 @@ pub(super) const COPY_CHANNEL_ID: Entry<ChannelTarget> = Entry::Item(Item {
 #[derive(Clone, Copy)]
 pub(super) enum Target {
     Channel(Snowflake),
+    /// A category's heading.
+    Category(Snowflake),
     Friends,
     Requests,
 }
@@ -90,6 +93,7 @@ impl App {
                     row.append(&badge);
                 }
                 let row = self.append_row(&row, Some(Target::Channel(dm.id)), state.channel == Some(dm.id));
+                self.menu_on(&row, menus::DIRECT_MESSAGE, dm.id);
                 let place = Place { guild: None, guild_default: 0, channel: dm.id, parent: None };
                 if state.notifications.channel_muted(&place, now_unix()) {
                     row.add_css_class("muted");
@@ -103,15 +107,28 @@ impl App {
             return;
         };
         self.guild_name.set(&guild.name, None);
-        for (category, channels) in state.sidebar(guild) {
-            if let Some(category) = category {
-                let label = gtk::Label::builder()
-                    .label(category)
-                    .xalign(0.0)
-                    .ellipsize(pango::EllipsizeMode::End)
-                    .css_classes(["category", "dimmed"])
-                    .build();
-                self.append_row(&label, None, false);
+        for section in state.sidebar(guild) {
+            let channels = section.channels;
+            if let Some(category) = section.category {
+                let heading = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                heading.append(
+                    &gtk::Label::builder()
+                        .label(category.name.as_deref().unwrap_or("unnamed"))
+                        .xalign(0.0)
+                        .hexpand(true)
+                        .ellipsize(pango::EllipsizeMode::End)
+                        .css_classes(["category", "dimmed"])
+                        .build(),
+                );
+                heading.append(&gtk::Image::from_icon_name(if section.folded {
+                    "pan-end-symbolic"
+                } else {
+                    "pan-down-symbolic"
+                }));
+                // Activating it folds or unfolds the category; it is no place to be.
+                let row = self.append_row(&heading, Some(Target::Category(category.id)), false);
+                row.set_selectable(false);
+                self.menu_on(&row, menus::CATEGORY, category.id);
             }
             for channel in channels {
                 let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -134,7 +151,7 @@ impl App {
                     row.append(&badge);
                 }
                 let row = self.append_row(&row, Some(Target::Channel(channel.id)), state.channel == Some(channel.id));
-                self.channel_menu_on(&row, channel.id);
+                self.menu_on(&row, menus::CHANNEL, channel.id);
                 let place = Place {
                     guild: Some(guild.id),
                     guild_default: guild.default_message_notifications,
@@ -146,6 +163,11 @@ impl App {
                 } else if state.is_unread(channel) {
                     row.add_css_class("unread");
                 }
+                if channel.kind == discord::ChannelKind::Voice {
+                    for voice in state.voice.in_channel(guild.id, channel.id, |v| state.voice_name(v)) {
+                        self.append_voice_state(&state, voice);
+                    }
+                }
                 let threads = state.sidebar_threads(guild, channel);
                 for (i, thread) in threads.iter().enumerate() {
                     self.append_thread(&state, thread, i + 1 == threads.len());
@@ -155,13 +177,36 @@ impl App {
         self.watch_thread_expiry(guild);
     }
 
-    /// Open `channel`'s menu where its row is right-clicked.
-    fn channel_menu_on(self: &Rc<Self>, row: &gtk::ListBoxRow, channel: Snowflake) {
+    /// Open `table`'s menu for `channel` where its row is right-clicked.
+    fn menu_on(self: &Rc<Self>, row: &gtk::ListBoxRow, table: menus::Table<ChannelTarget>, channel: Snowflake) {
         let (app, row_weak) = (Rc::downgrade(self), row.downgrade());
         menus::on_secondary(row, move |x, y| {
             let (Some(app), Some(row)) = (app.upgrade(), row_weak.upgrade()) else { return };
-            menus::popup(&app, menus::CHANNEL, ChannelTarget(channel), &row, At::Point(x, y));
+            menus::popup(&app, table, ChannelTarget(channel), &row, At::Point(x, y));
         });
+    }
+
+    /// Someone connected to the voice channel above, in line with its name.
+    fn append_voice_state(&self, state: &super::state::State, voice: &VoiceState) {
+        let name = state.voice_name(voice);
+        let row = gtk::Box::builder().spacing(6).margin_start(GLYPH_WIDTH + 6).build();
+        row.append(&match &voice.user {
+            Some(user) => avatar_still(user, VOICE_AVATAR, Some(&self.images)),
+            None => adw::Avatar::new(VOICE_AVATAR, Some(&name), true).upcast(),
+        });
+        row.append(
+            &gtk::Label::builder().label(&name).xalign(0.0).hexpand(true).ellipsize(pango::EllipsizeMode::End).build(),
+        );
+        let marks = [
+            (voice.self_stream, "video-display-symbolic", "Live"),
+            (voice.self_video, "camera-video-symbolic", "Camera on"),
+            (voice.muted(), "microphone-disabled-symbolic", "Muted"),
+            (voice.deafened(), "audio-volume-muted-symbolic", "Deafened"),
+        ];
+        for (_, icon, tooltip) in marks.into_iter().filter(|(on, ..)| *on) {
+            row.append(&gtk::Image::builder().icon_name(icon).tooltip_text(tooltip).build());
+        }
+        self.append_row(&row, None, false);
     }
 
     /// A thread's row, under its parent's, joined to it by a line; `last`
@@ -233,6 +278,10 @@ impl App {
     pub(super) fn activate_sidebar_row(self: &Rc<Self>, index: i32) {
         let target = usize::try_from(index).ok().and_then(|i| self.targets.borrow().get(i).copied().flatten());
         match target {
+            Some(Target::Category(id)) => {
+                let folded = self.account.state.borrow().collapsed.contains(id);
+                return self.fold_category(id, !folded);
+            }
             Some(Target::Channel(id)) => self.select_channel(id),
             Some(Target::Friends) => self.show_friends(),
             Some(Target::Requests) => self.show_requests(),
@@ -245,10 +294,13 @@ impl App {
 /// The width of a symbolic icon at the default size.
 const GLYPH_WIDTH: i32 = 16;
 
+/// A voice channel participant's avatar.
+const VOICE_AVATAR: i32 = 20;
+
 /// The kind of channel, in front of its name. Text channels show a `#`, which
 /// the theme has no icon for. Every glyph is as wide as an icon, so the names
 /// line up; a size group would measure every row on each rebuild.
-fn glyph_widget(glyph: Glyph) -> gtk::Widget {
+pub(super) fn glyph_widget(glyph: Glyph) -> gtk::Widget {
     let (icon, tooltip) = match glyph {
         Glyph::Text => {
             return gtk::Label::builder()
@@ -304,10 +356,10 @@ pub(super) fn dm_icon(channel: &Channel, images: &Images) -> gtk::Widget {
     let icon: gtk::Widget = match (channel.kind, channel.recipients.first(), channel.icon.as_deref()) {
         (discord::ChannelKind::GroupDm, _, Some(hash)) => {
             let picture = round_picture(SIZE);
-            images.set(&picture, &discord::cdn::group_dm_icon_url(channel.id.0, hash, 64), false);
+            images.set(&picture, &discord::cdn::group_dm_icon_url(channel.id.0, hash, 64));
             picture.upcast()
         }
-        (discord::ChannelKind::Dm, Some(user), _) => avatar_widget(user, SIZE, Some(images)),
+        (discord::ChannelKind::Dm, Some(user), _) => avatar_widget(user, SIZE, Some(images), Row::Parent),
         _ => adw::Avatar::new(SIZE, Some(&channel.title()), true).upcast(),
     };
     icon.set_valign(gtk::Align::Center);

@@ -17,7 +17,8 @@ use super::chat::MessageTarget;
 use super::menus::{Entry, Item, Kind as MenuKind};
 use super::polls;
 use super::reactions::emoji_label;
-use super::widgets::avatar_widget;
+use super::widgets::avatar_widget_in;
+use crate::images::Row;
 use crate::timelines;
 
 /// How long a pointer rests on a reaction before we ask who reacted (`eM` in
@@ -255,15 +256,12 @@ impl View {
         for user in users {
             let line =
                 gtk::Box::builder().spacing(10).margin_top(6).margin_bottom(6).margin_start(8).margin_end(8).build();
-            line.append(&avatar_widget(&user, 32, Some(&app.images)));
-            let name = app
-                .account
-                .state
-                .borrow()
-                .users
-                .get(&user.id.0)
-                .cloned()
-                .unwrap_or_else(|| user.display_name().to_owned());
+            let name = {
+                let state = app.account.state.borrow();
+                let server = state.avatar_in(self.channel, user.id);
+                line.append(&avatar_widget_in(&user, 32, Some(&app.images), server, Row::None));
+                state.name_in(self.channel, &user)
+            };
             let text = gtk::Box::builder()
                 .orientation(gtk::Orientation::Vertical)
                 .hexpand(true)
@@ -354,7 +352,8 @@ impl App {
         button.connect_query_tooltip({
             let (app, emoji) = (Rc::downgrade(self), emoji.clone());
             move |_, _, _, _, tooltip| {
-                let Some(text) = app.upgrade().and_then(|app| app.reactors_tooltip(message, &emoji, count)) else {
+                let Some(text) = app.upgrade().and_then(|app| app.reactors_tooltip(channel, message, &emoji, count))
+                else {
                     return false;
                 };
                 tooltip.set_text(Some(&text));
@@ -403,17 +402,18 @@ impl App {
 
     /// "🔥 reacted by A, B, and 2 others": up to three of those we know made
     /// it, leaving out people we blocked (`e_` in 30492).
-    fn reactors_tooltip(&self, message: Snowflake, emoji: &Emoji, count: u32) -> Option<String> {
+    fn reactors_tooltip(&self, channel: Snowflake, message: Snowflake, emoji: &Emoji, count: u32) -> Option<String> {
         let mut state = self.account.state.borrow_mut();
         let state = &mut *state;
-        let names: Vec<String> = state
+        let users: Vec<User> = state
             .reactors
             .users(message, emoji, Kind::Normal)
             .iter()
             .filter(|u| !state.relationships.is_blocked(u.id))
             .take(3)
-            .map(|u| state.users.get(&u.id.0).cloned().unwrap_or_else(|| u.display_name().to_owned()))
+            .cloned()
             .collect();
+        let names: Vec<String> = users.iter().map(|u| state.name_in(channel, u)).collect();
         who_reacted(&emoji_label(emoji), &names, count)
     }
 }

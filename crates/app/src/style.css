@@ -1,16 +1,42 @@
 /* Neucord. libadwaita draws nearly everything; this sheet only shapes what
    it has no widget for, in its colours, so dark mode, the accent colour and
-   the user's gtk.css apply here too. */
+   the user's gtk.css apply here too.
+
+   Every colour this sheet adds is a --neucord-* variable below, defaulting to
+   a libadwaita colour or a shade of the text colour (currentColor resolves
+   where a variable is used, not here). A user stylesheet overrides them on
+   :root; README.md documents them, and a test keeps the two in step. */
+:root {
+  --neucord-rail-bg: var(--sidebar-shade-color);
+  --neucord-guild-bg: alpha(currentColor, 0.1);
+  --neucord-guild-hover-bg: alpha(currentColor, 0.15);
+  --neucord-guild-active-bg: var(--accent-bg-color);
+  --neucord-guild-active-fg: var(--accent-fg-color);
+  --neucord-badge-bg: var(--accent-bg-color);
+  --neucord-badge-fg: var(--accent-fg-color);
+  --neucord-folder-bg: alpha(var(--accent-bg-color), 0.35);
+  --neucord-message-hover-bg: alpha(currentColor, 0.04);
+  --neucord-reply-color: var(--accent-bg-color);
+  --neucord-highlight-color: var(--warning-bg-color);
+  --neucord-embed-bg: alpha(currentColor, 0.06);
+  --neucord-line: alpha(currentColor, 0.25);
+  --neucord-bar-opacity: 0.75;
+  --neucord-blur: 18px;
+  --neucord-online: var(--success-color);
+  --neucord-idle: var(--warning-color);
+  --neucord-dnd: var(--error-color);
+  --neucord-offline: alpha(currentColor, 0.5);
+}
 
 /* Server rail */
-.rail { background-color: var(--sidebar-shade-color); }
+.rail { background-color: var(--neucord-rail-bg); }
 .guild {
   min-width: 48px; min-height: 48px; margin: 3px 12px; padding: 0;
-  border-radius: 24px; background-color: alpha(currentColor, 0.1); font-weight: bold;
+  border-radius: 24px; background-color: var(--neucord-guild-bg); font-weight: bold;
   transition: border-radius 150ms, background-color 150ms;
 }
-.guild:hover  { border-radius: 16px; background-color: alpha(currentColor, 0.15); }
-.guild.active { border-radius: 16px; background-color: var(--accent-bg-color); color: var(--accent-fg-color); }
+.guild:hover  { border-radius: 16px; background-color: var(--neucord-guild-hover-bg); }
+.guild.active { border-radius: 16px; background-color: var(--neucord-guild-active-bg); color: var(--neucord-guild-active-fg); }
 /* The pill grows from unread to hovered to open, and takes the accent
    colour once hovered or open. */
 .rail-pill {
@@ -18,12 +44,12 @@
   transition: min-height 200ms ease-out, opacity 200ms, background-color 200ms;
 }
 .rail-pill.unread { min-height: 8px; opacity: 1; }
-.rail-item:hover > .rail-pill { min-height: 20px; opacity: 1; background-color: var(--accent-bg-color); }
-.rail-item > .rail-pill.active { min-height: 40px; opacity: 1; background-color: var(--accent-bg-color); }
+.rail-item:hover > .rail-pill { min-height: 20px; opacity: 1; background-color: var(--neucord-guild-active-bg); }
+.rail-item > .rail-pill.active { min-height: 40px; opacity: 1; background-color: var(--neucord-guild-active-bg); }
 .rail-separator { margin: 3px 24px; }
 /* Folders: collapsed shows a 2×2 preview on the folder's colour (per-folder
    colours come from a provider the rail regenerates). */
-.folder:not(.expanded) { background-color: alpha(var(--accent-bg-color), 0.35); }
+.folder:not(.expanded) { background-color: var(--neucord-folder-bg); }
 .folder image { -gtk-icon-size: 22px; }
 .folder-open { margin: 0 8px; padding-bottom: 3px; border-radius: 16px; background-color: alpha(currentColor, 0.06); }
 .folder-open .guild { margin-left: 4px; margin-right: 4px; }
@@ -31,7 +57,7 @@
 
 .badge {
   min-width: 16px; min-height: 16px; padding: 0 4px; border-radius: 8px;
-  background-color: var(--accent-bg-color); color: var(--accent-fg-color); font-size: 11px; font-weight: bold;
+  background-color: var(--neucord-badge-bg); color: var(--neucord-badge-fg); font-size: 11px; font-weight: bold;
 }
 
 /* Channel list */
@@ -49,37 +75,37 @@ listview.messages, listview.messages > row { background: none; padding: 0; }
 .message-main  { margin-right: 72px; }
 .message.editable .message-main { margin-right: 100px; }
 .message.first { padding-top: 14px; }
-.message:hover { background-color: alpha(currentColor, 0.04); }
-.message.replying, .message.editing { background-color: alpha(var(--accent-bg-color), 0.12); box-shadow: inset 2px 0 var(--accent-bg-color); }
-.message.highlight { background-color: alpha(var(--warning-bg-color), 0.15); box-shadow: inset 2px 0 var(--warning-bg-color); transition: background-color 300ms; }
+.message:hover { background-color: var(--neucord-message-hover-bg); }
+.message.replying, .message.editing { background-color: alpha(var(--neucord-reply-color), 0.12); box-shadow: inset 2px 0 var(--neucord-reply-color); }
+.message.highlight { background-color: alpha(var(--neucord-highlight-color), 0.15); box-shadow: inset 2px 0 var(--neucord-highlight-color); transition: background-color 300ms; }
 .blocked-bar { margin: 3px 50px 3px 74px; opacity: var(--dim-opacity); font-size: 0.9em; border-spacing: 8px; }
 /* Hover actions take their space always, so rows don't reflow on hover. */
 .message .message-action { opacity: 0; min-width: 28px; min-height: 28px; padding: 0; }
 .message:hover .message-action { opacity: 1; }
 picture.avatar { border-radius: 9999px; }
-.attachment-image, .embed-media { border-radius: 8px; margin-top: 4px; background-color: alpha(currentColor, 0.06); }
+.attachment-image, .embed-media { border-radius: 8px; margin-top: 4px; background-color: var(--neucord-embed-bg); }
 
 /* Replies: a spine from the avatar up to the original, as in Discord. */
 .reply-preview { font-size: 0.9em; }
 .reply-spine {
   min-width: 34px; min-height: 8px; margin: 0 0 0 18px; border-top-left-radius: 6px;
-  border-left: 2px solid alpha(currentColor, 0.25); border-top: 2px solid alpha(currentColor, 0.25);
+  border-left: 2px solid var(--neucord-line); border-top: 2px solid var(--neucord-line);
 }
 .reply-snippet { opacity: 0.8; }
 .reply-snippet.missing { font-style: italic; opacity: var(--dim-opacity); }
 
 /* Floating controls: translucent over the content scrolling beneath them,
    which they blur. */
-.floating { background-color: alpha(var(--window-bg-color), 0.75); backdrop-filter: blur(18px); }
+.floating { background-color: alpha(var(--window-bg-color), var(--neucord-bar-opacity)); backdrop-filter: blur(var(--neucord-blur)); }
 /* A toolbar view's bars over content that runs under them. The blur goes on
    the bars' container: on the header bar itself, GTK draws none. */
 toolbarview.floating-bars > .top-bar {
-  background-color: alpha(var(--headerbar-bg-color), 0.75); backdrop-filter: blur(18px);
+  background-color: alpha(var(--headerbar-bg-color), var(--neucord-bar-opacity)); backdrop-filter: blur(var(--neucord-blur));
   box-shadow: 0 1px var(--headerbar-shade-color);
 }
 /* A sidebar sliding over the content, which libadwaita marks as an overlay pane. */
 overlay-split-view > .overlay-pane {
-  background-color: alpha(var(--sidebar-bg-color), 0.75); backdrop-filter: blur(18px);
+  background-color: alpha(var(--sidebar-bg-color), var(--neucord-bar-opacity)); backdrop-filter: blur(var(--neucord-blur));
 }
 
 /* Cards floating over the bottom of a pane: the composer, and the account
@@ -107,22 +133,22 @@ textview.composer-input, textview.composer-input text { background: none; }
   min-width: 10px; min-height: 10px; border-radius: 5px;
   box-shadow: 0 0 0 2px var(--card-bg-color), 0 0 0 2px var(--window-bg-color);
 }
-.presence.online  { background-color: var(--success-color); }
-.presence.idle    { background-color: var(--warning-color); }
-.presence.dnd     { background-color: var(--error-color); }
-.presence.offline { background-color: alpha(currentColor, 0.5); }
+.presence.online  { background-color: var(--neucord-online); }
+.presence.idle    { background-color: var(--neucord-idle); }
+.presence.dnd     { background-color: var(--neucord-dnd); }
+.presence.offline { background-color: var(--neucord-offline); }
 
 /* The phone reads the code best dark on white, whatever the theme. */
 .qr { background-color: white; border-radius: 12px; padding: 12px; }
 
 /* Message markup */
-.code-block { background-color: alpha(currentColor, 0.06); border-radius: 6px; padding: 6px 10px; margin: 2px 0; }
+.code-block { background-color: var(--neucord-embed-bg); border-radius: 6px; padding: 6px 10px; margin: 2px 0; }
 .code-lang  { font-size: 0.8em; opacity: var(--dim-opacity); margin-bottom: 2px; }
 .code-body  { font-family: var(--monospace-font-family); font-size: var(--monospace-font-size); }
-.quote      { border-left: 4px solid alpha(currentColor, 0.25); padding-left: 10px; margin: 2px 0; }
+.quote      { border-left: 4px solid var(--neucord-line); padding-left: 10px; margin: 2px 0; }
 
 /* Embeds. The colour bar is drawn, since each embed picks its own. */
-.embed { margin-top: 4px; border-radius: 6px; background-color: alpha(currentColor, 0.06); }
+.embed { margin-top: 4px; border-radius: 6px; background-color: var(--neucord-embed-bg); }
 .embed-body { padding: 8px 16px 12px 12px; }
 .embed-provider, .embed-footer { font-size: 0.8em; opacity: var(--dim-opacity); }
 .embed-author, .embed-title, .embed-field-name { font-weight: bold; }
@@ -130,4 +156,6 @@ textview.composer-input, textview.composer-input text { background: none; }
 .embed-author-icon { border-radius: 12px; }
 .embed-footer-icon { border-radius: 10px; }
 .embed-play { min-width: 48px; min-height: 48px; }
+/* The media viewer dims the window and reads light on it, in either theme. */
+.media-viewer { background-color: alpha(black, 0.85); color: white; }
 .spoiler-cover { margin-top: 4px; padding: 24px 40px; border-radius: 8px; font-weight: bold; }

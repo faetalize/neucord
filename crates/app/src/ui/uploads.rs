@@ -10,7 +10,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use discord::images;
 use discord::uploads::{self, Data, File, Refusal, Sent};
-use discord::{Rest, Snowflake};
+use discord::{Channel, Rest, Snowflake};
 use gtk::{gdk, gio, glib};
 
 use super::App;
@@ -164,6 +164,9 @@ pub(super) struct Drafts {
     sending: RefCell<HashMap<Snowflake, Rc<Sending>>>,
     tray: gtk::Box,
     attach: gtk::Button,
+    /// The same button on the notice that takes the message box's place,
+    /// where only Create Thread is left in its menu.
+    pub(super) notice_attach: gtk::Button,
     /// The tray's top row while sending.
     sending_bar: gtk::Box,
     cancel: gtk::Button,
@@ -175,16 +178,20 @@ impl Drafts {
         sending_bar.append(&gtk::Label::builder().label("Sending…").xalign(0.0).hexpand(true).build());
         let cancel = gtk::Button::builder().label("Cancel").css_classes(["flat"]).build();
         sending_bar.append(&cancel);
-        Drafts {
-            files: RefCell::default(),
-            sending: RefCell::default(),
-            tray: gtk::Box::builder().orientation(gtk::Orientation::Vertical).visible(false).build(),
-            attach: gtk::Button::builder()
+        let attach_button = || {
+            gtk::Button::builder()
                 .icon_name("list-add-symbolic")
                 .tooltip_text("Attach")
                 .valign(gtk::Align::Center)
                 .css_classes(["flat", "circular"])
-                .build(),
+                .build()
+        };
+        Drafts {
+            files: RefCell::default(),
+            sending: RefCell::default(),
+            tray: gtk::Box::builder().orientation(gtk::Orientation::Vertical).visible(false).build(),
+            attach: attach_button(),
+            notice_attach: attach_button(),
             sending_bar,
             cancel,
         }
@@ -231,6 +238,39 @@ async fn post(rest: &Rest, channel: Snowflake, message: &Outgoing<'_>, sent: &[S
     .map_err(Stopped::Send)
 }
 
+/// What a message calls its files, which the edit dialog may have changed:
+/// [`Sent`] borrows it.
+struct Details {
+    names: Vec<String>,
+    descriptions: Vec<Option<String>>,
+    types: Vec<String>,
+}
+
+impl Details {
+    fn of(files: &[Rc<Upload>]) -> Self {
+        let (names, descriptions) =
+            files.iter().map(|u| (u.name.borrow().clone(), u.description.borrow().clone())).unzip();
+        let types = files.iter().map(|u| u.file.borrow().content_type.clone()).collect();
+        Details { names, descriptions, types }
+    }
+
+    /// `files` as the message names them, by what Discord keeps each as.
+    fn sent<'a>(&'a self, files: &[Rc<Upload>], uploaded: &'a [String]) -> Vec<Sent<'a>> {
+        files
+            .iter()
+            .enumerate()
+            .map(|(i, u)| Sent {
+                filename: &self.names[i],
+                uploaded_filename: &uploaded[i],
+                description: self.descriptions[i].as_deref(),
+                spoiler: u.spoiler.get(),
+                content_type: &self.types[i],
+                voice: None,
+            })
+            .collect()
+    }
+}
+
 impl App {
     /// The open channel, if files may be attached to it now: the message box
     /// shows, no edit has it, and the client would offer attaching there.
@@ -241,6 +281,12 @@ impl App {
             && !self.has_voice_draft(channel)
             && self.account.state.borrow().can_attach(channel);
         allowed.then_some(channel)
+    }
+
+    /// Whether `channel`'s draft takes files now: from the message box, or
+    /// from the form that starts a post there.
+    fn takes_files(&self, channel: Snowflake) -> bool {
+        self.attach_channel() == Some(channel) || self.post_form_channel() == Some(channel)
     }
 
     /// Show the attach button and the tray as they are now for the open
@@ -254,7 +300,8 @@ impl App {
                 || self.voice_channel().is_some()
                 || self.poll_channel().is_some()
                 || self.schedule_channel().is_some()
-                || self.thread_channel().is_some(),
+                || self.thread_channel().is_some()
+                || self.apps_channel().is_some(),
         );
         self.refresh_schedule_bar();
         while let Some(child) = drafts.tray.first_child() {
@@ -273,26 +320,54 @@ impl App {
         drafts.tray.set_visible(!files.is_empty());
         self.refresh_stickers();
         self.refresh_voice();
+        self.refresh_post_files();
+    }
+
+    /// Put `channel`'s files in `tray`, as the message box's tray shows them,
+    /// and say whether a message waiting on them may still be called off.
+    pub(super) fn fill_tray(&self, tray: &gtk::Box, channel: Snowflake) -> bool {
+        while let Some(child) = tray.first_child() {
+            tray.remove(&child);
+        }
+        let sending = self.drafts.sending.borrow().get(&channel).cloned();
+        for upload in self.drafts.of(channel) {
+            upload.lock(sending.as_ref().is_some_and(|s| s.has(&upload)));
+            tray.append(&upload.row.root);
+        }
+        sending.is_some_and(|s| !s.posting.get())
+    }
+
+    /// Take `channel`'s files out of the draft, unless a post is on its way
+    /// that names them.
+    pub(super) fn drop_post_files(self: &Rc<Self>, channel: Snowflake) {
+        if self.drafts.sending.borrow().contains_key(&channel) {
+            return;
+        }
+        for upload in self.drafts.of(channel) {
+            self.remove_upload(channel, &upload);
+        }
     }
 
     pub(super) fn build_attach(self: &Rc<Self>, area: &gtk::Box) {
         let drafts = &self.drafts;
         area.append(&drafts.tray);
         self.composer_box.append(&drafts.attach);
-        drafts.attach.connect_clicked({
-            let this = Rc::downgrade(self);
-            move |button| {
-                let Some(this) = this.upgrade() else { return };
-                let Some(bounds) = button.compute_bounds(&this.composer_box) else { return };
-                let rect = gdk::Rectangle::new(
-                    bounds.x() as i32,
-                    bounds.y() as i32,
-                    bounds.width() as i32,
-                    bounds.height() as i32,
-                );
-                super::menus::popup(&this, super::menus::ATTACH, (), &this.composer_box, super::menus::At::Below(rect));
-            }
-        });
+        for (button, parent) in [(&drafts.attach, &self.composer_box), (&drafts.notice_attach, &self.notice_bar)] {
+            button.connect_clicked({
+                let (this, parent) = (Rc::downgrade(self), parent.downgrade());
+                move |button| {
+                    let (Some(this), Some(parent)) = (this.upgrade(), parent.upgrade()) else { return };
+                    let Some(bounds) = button.compute_bounds(&parent) else { return };
+                    let rect = gdk::Rectangle::new(
+                        bounds.x() as i32,
+                        bounds.y() as i32,
+                        bounds.width() as i32,
+                        bounds.height() as i32,
+                    );
+                    super::menus::popup(&this, super::menus::ATTACH, (), &parent, super::menus::At::Below(rect));
+                }
+            });
+        }
         drafts.cancel.connect_clicked({
             let this = Rc::downgrade(self);
             move |_| {
@@ -393,7 +468,7 @@ impl App {
     }
 
     /// Add what `paths` hold.
-    async fn add_paths(self: &Rc<Self>, channel: Snowflake, paths: Vec<gio::File>) {
+    pub(super) async fn add_paths(self: &Rc<Self>, channel: Snowflake, paths: Vec<gio::File>) {
         let mut files = Vec::new();
         for path in paths {
             let attributes = "standard::name,standard::size,standard::type";
@@ -418,7 +493,7 @@ impl App {
     /// JPEGs (all at once, unseen), and only then are the limits checked, on
     /// what will be uploaded.
     async fn add_files(self: &Rc<Self>, channel: Snowflake, files: Vec<File>) {
-        if files.is_empty() || self.attach_channel() != Some(channel) {
+        if files.is_empty() || !self.takes_files(channel) {
             return;
         }
         if files.iter().any(|f| f.size == 0) {
@@ -435,7 +510,7 @@ impl App {
     /// Put files in `channel`'s draft and start uploading them, unless
     /// they're over what a message may carry, in which case none are added.
     fn add_prepared(self: &Rc<Self>, channel: Snowflake, files: Vec<File>) {
-        if files.is_empty() || self.attach_channel() != Some(channel) {
+        if files.is_empty() || !self.takes_files(channel) {
             return;
         }
         let limits = {
@@ -679,6 +754,15 @@ impl App {
         message: &Outgoing<'_>,
         sending: &Sending,
     ) -> Result<(), Stopped> {
+        let uploaded = self.finish_uploads(sending).await?;
+        let details = Details::of(&sending.files);
+        post(rest, channel, message, &details.sent(&sending.files, &uploaded)).await
+    }
+
+    /// Wait for `sending`'s uploads, starting again those that failed in a
+    /// way that restarts, and say what Discord keeps each by. Once they are
+    /// all up, what follows is the post itself, which can't be taken back.
+    async fn finish_uploads(self: &Rc<Self>, sending: &Sending) -> Result<Vec<String>, Stopped> {
         let files = &sending.files;
         for upload in files {
             let failed = match &*upload.status.borrow() {
@@ -701,27 +785,45 @@ impl App {
         }
         sending.posting.set(true);
         self.refresh_attach();
-        let (names, descriptions): (Vec<String>, Vec<Option<String>>) =
-            files.iter().map(|u| (u.name.borrow().clone(), u.description.borrow().clone())).unzip();
-        let types: Vec<String> = files.iter().map(|u| u.file.borrow().content_type.clone()).collect();
-        let sent: Vec<Sent> = files
-            .iter()
-            .enumerate()
-            .map(|(i, u)| Sent {
-                filename: &names[i],
-                uploaded_filename: &uploaded[i],
-                description: descriptions[i].as_deref(),
-                spoiler: u.spoiler.get(),
-                content_type: &types[i],
-                voice: None,
-            })
-            .collect();
-        post(rest, channel, message, &sent).await
+        Ok(uploaded)
+    }
+
+    /// Start the post `make` builds in the forum or media channel `forum`,
+    /// with `files` as its first message's attachments once they are all
+    /// uploaded.
+    pub(super) async fn post_with_uploads(
+        self: &Rc<Self>,
+        rest: &Rest,
+        forum: Snowflake,
+        files: Vec<Rc<Upload>>,
+        make: impl FnOnce(Vec<serde_json::Value>) -> serde_json::Value,
+    ) -> Result<Channel, Stopped> {
+        if files.is_empty() {
+            return rest.create_post(forum, make(Vec::new())).await.map_err(Stopped::Send);
+        }
+        let sending = Rc::new(Sending { files, posting: Cell::new(false) });
+        self.drafts.sending.borrow_mut().insert(forum, sending.clone());
+        self.refresh_attach();
+        let result = match self.finish_uploads(&sending).await {
+            Ok(uploaded) => {
+                let details = Details::of(&sending.files);
+                let sent = details.sent(&sending.files, &uploaded);
+                let attachments = sent.iter().enumerate().map(|(at, s)| s.body(at)).collect();
+                rest.create_post(forum, make(attachments)).await.map_err(Stopped::Send)
+            }
+            Err(stopped) => Err(stopped),
+        };
+        self.drafts.sending.borrow_mut().remove(&forum);
+        if result.is_ok() {
+            self.forget(forum, &sending);
+        }
+        self.refresh_attach();
+        result
     }
 
     /// Cancel a send that is still uploading: the files are taken back, and
     /// the uploads that finished are deleted.
-    fn cancel_sending(self: &Rc<Self>) {
+    pub(super) fn cancel_sending(self: &Rc<Self>) {
         let Some(channel) = self.account.state.borrow().channel else { return };
         let sending = self.drafts.sending.borrow().get(&channel).cloned();
         let Some(sending) = sending.filter(|s| !s.posting.get()) else { return };

@@ -11,6 +11,7 @@
 
 use std::rc::Rc;
 
+use crate::images::Row;
 use adw::prelude::*;
 use discord::accounts::{Answer, Entry as Listed, MAX_ACCOUNTS, Status};
 use discord::{Rest, Snowflake, User, session};
@@ -201,7 +202,7 @@ impl App {
         let id = entry.id;
         let invalid = entry.status == Status::Invalid;
         let row = adw::ActionRow::builder().title(entry.tag()).use_markup(false).build();
-        row.add_prefix(&widgets::avatar_widget(&entry.user(), 40, Some(&self.images)));
+        row.add_prefix(&widgets::avatar_widget(&entry.user(), 40, Some(&self.images), Row::None));
         let active = current == Some(id);
         if active {
             row.set_subtitle("Active account");

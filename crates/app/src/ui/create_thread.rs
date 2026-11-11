@@ -22,8 +22,8 @@ use super::uploads::Stopped;
 use crate::render;
 
 /// Create Thread in the attach menu, where the client offers it
-/// (`canStartThreads` in 316576), as it does everything in the menu: in a
-/// channel with a message box.
+/// (`canStartThreads` in 316576): in a channel with a message box, or whose
+/// notice keeps the button, as the client keeps it for Create Thread alone.
 pub(super) const ATTACH_MENU: Entry<()> = Entry::Item(Item {
     name: "create-thread",
     label: "Create T_hread",
@@ -83,12 +83,14 @@ impl Form {
 }
 
 impl App {
-    /// The open channel, if the attach menu offers Create Thread there now.
+    /// The open channel, if the attach menu offers Create Thread there now:
+    /// with the message box, or on the notice that replaces it where only
+    /// Send Messages is missing (see [`discord::notice::Notice`]).
     pub(super) fn thread_channel(&self) -> Option<Snowflake> {
         let channel = self.account.state.borrow().channel?;
-        let offered = self.composer_box.is_visible()
-            && self.editing().is_none()
-            && self.account.state.borrow().offers_thread_in_attach_menu(channel);
+        let button = self.composer_box.is_visible() || self.drafts.notice_attach.parent().is_some();
+        let offered =
+            button && self.editing().is_none() && self.account.state.borrow().offers_thread_in_attach_menu(channel);
         offered.then_some(channel)
     }
 
@@ -422,9 +424,9 @@ impl App {
             Refused::Slowmode(seconds) => {
                 alert(CANNOT, &format!("Slowmode is on in this channel. Try again in {seconds} seconds."))
             }
-            Refused::AutoMod(Some(reason)) => form.show_errors(Some(reason), None),
+            Refused::AutoMod { reason: Some(reason), .. } => form.show_errors(Some(reason), None),
             Refused::Name => form.show_errors(Some("Thread Name is required"), None),
-            Refused::AutoMod(None) | Refused::Other => match error {
+            Refused::AutoMod { reason: None, .. } | Refused::Other => match error {
                 discord::Error::Http { .. } => alert("Error", "An error occurred, please try again."),
                 other => alert("Error", &other.to_string()),
             },
@@ -434,7 +436,7 @@ impl App {
     /// Wait for the gateway to bring thread `id`, where we can see it: a
     /// private one only once our membership has arrived. Gives up after a
     /// while, which the client never does.
-    async fn thread_arrived(self: &Rc<Self>, id: Snowflake) -> bool {
+    pub(super) async fn thread_arrived(self: &Rc<Self>, id: Snowflake) -> bool {
         let (sender, receiver) = async_channel::bounded(1);
         self.thread_waiters.borrow_mut().push((id, sender));
         self.thread_arrivals();

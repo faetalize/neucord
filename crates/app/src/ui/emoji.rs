@@ -4,17 +4,18 @@
 //! anything that wants an emoji (the message box, adding a reaction) opens
 //! it the same way.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use discord::Snowflake;
-use discord::emoji::{Category, Item, Library, Place};
+use discord::emoji::{Category, Intention, Item, Library, Place, Scores, Tone};
 use discord::permissions::{self, Permissions};
+use discord::{Setting, Snowflake};
 
 use super::App;
 use super::menus::{self, Entry, Item as MenuItem, Kind};
 use super::picker::{self, Row, Spec, Target};
-use super::state::now_unix;
+use super::state::{now_ms, now_unix};
 use crate::images::Images;
 
 /// Emoji to a row of the picker.
@@ -29,7 +30,7 @@ pub(super) const AUTOCOMPLETE: usize = 50;
 
 /// Only in Developer Mode, like the rest of the picker's menu (233503).
 fn developer(app: &App) -> bool {
-    app.account.state.borrow().developer_mode
+    app.account.state.borrow().settings.developer_mode
 }
 
 /// The emoji a menu was opened on.
@@ -39,6 +40,30 @@ fn item(target: &Target) -> Option<&Item> {
         Target::Sticker(_) | Target::Gif(_) => None,
     }
 }
+
+/// Favorite and Unfavorite lead the emoji's menu, whether or not Developer
+/// Mode is on (253925).
+pub(super) const FAVORITE: Entry<Target> = Entry::Item(MenuItem {
+    name: "favorite-emoji",
+    label: "_Favorite Emoji",
+    shows: |app, target| item(target).is_some_and(|item| !app.is_favorite_emoji(item)),
+    kind: Kind::Action(|app, target| {
+        if let Some(item) = item(target) {
+            app.favorite_emoji(item, true);
+        }
+    }),
+});
+
+pub(super) const UNFAVORITE: Entry<Target> = Entry::Item(MenuItem {
+    name: "unfavorite-emoji",
+    label: "_Unfavorite Emoji",
+    shows: |app, target| item(target).is_some_and(|item| app.is_favorite_emoji(item)),
+    kind: Kind::Action(|app, target| {
+        if let Some(item) = item(target) {
+            app.favorite_emoji(item, false);
+        }
+    }),
+});
 
 pub(super) const COPY_EMOJI: Entry<Target> = Entry::Item(MenuItem {
     name: "copy-emoji",
@@ -103,42 +128,179 @@ impl App {
         self: &Rc<Self>,
         channel: Snowflake,
         parent: &impl IsA<gtk::Widget>,
+        intention: Intention,
         picked: impl Fn(&Rc<App>, &Item) + 'static,
     ) {
-        let library = Rc::new(self.emoji_library(channel));
+        let library = self.emoji_library(channel);
+        self.open_library_picker(library, parent, intention, picked);
+    }
+
+    /// The picker over `library`, wherever its emoji are for.
+    pub(super) fn open_library_picker(
+        self: &Rc<Self>,
+        library: Library,
+        parent: &impl IsA<gtk::Widget>,
+        intention: Intention,
+        picked: impl Fn(&Rc<App>, &Item) + 'static,
+    ) {
+        let library = Rc::new(library);
+        let tone = {
+            let app = Rc::downgrade(self);
+            move || app.upgrade().and_then(|app| app.account.state.borrow().settings.skin_tone)
+        };
         let spec = Spec {
             placeholder: "Search emoji",
             columns: COLUMNS,
             cell_width: 40,
             rows: Rc::new({
-                let library = library.clone();
-                move |query| rows(&library, query)
+                let (library, tone, app) = (library.clone(), tone.clone(), Rc::downgrade(self));
+                move |query| {
+                    let app = app.upgrade();
+                    let shortcuts =
+                        app.as_ref().map(|app| app.emoji_shortcuts(&library, intention)).unwrap_or_default();
+                    let scores = app.as_ref().map(|app| app.emoji_scores(intention)).unwrap_or_default();
+                    rows(&library, query, tone(), shortcuts, &scores)
+                }
             }),
             cell: Rc::new(cell_button),
-            best: Rc::new(move |query| library.search(query, 1).unlocked.first().cloned()),
+            best: Rc::new({
+                let app = Rc::downgrade(self);
+                move |query| {
+                    let scores = app.upgrade().map(|app| app.emoji_scores(intention)).unwrap_or_default();
+                    library.search(query, 1, &scores).unlocked.first().cloned().map(|item| toned(item, tone()))
+                }
+            }),
         };
-        picker::open(self, parent, spec, picked);
+        // The skin tone button lists the emoji again once a tone is chosen.
+        let handle: Rc<RefCell<Option<picker::Handle>>> = Rc::default();
+        let hooks = picker::Hooks {
+            trailing: Some(self.tone_button({
+                let handle = handle.clone();
+                move || {
+                    if let Some(handle) = handle.borrow().as_ref() {
+                        handle.reload();
+                    }
+                }
+            })),
+            ..Default::default()
+        };
+        *handle.borrow_mut() = Some(picker::open_with(self, parent, spec, hooks, picked));
+        // The favourites come from Discord the first time, and fill in then.
+        self.load_frecency({
+            let handle = handle.clone();
+            move || {
+                if let Some(handle) = handle.borrow().as_ref() {
+                    handle.reload();
+                }
+            }
+        });
+    }
+
+    /// The emoji the picker lists first: the favourites, then those used
+    /// most (reactions for a reaction picker), as far as `library` has them.
+    pub(super) fn emoji_shortcuts(&self, library: &Library, intention: Intention) -> Shortcuts {
+        let mut state = self.account.state.borrow_mut();
+        let favorites = state.frecency.favorite_emojis.iter().filter_map(|key| library.item(key)).collect();
+        let stores = &mut state.frecency.stores;
+        let history = match intention {
+            Intention::Chat => &mut stores.emoji.history,
+            Intention::Reaction => &mut stores.reactions.history,
+        };
+        let frequent = history.frequently(now_ms() as u64, |key| library.item(key).is_some());
+        Shortcuts { favorites, frequent: frequent.iter().filter_map(|key| library.item(key)).collect() }
+    }
+
+    /// How much each emoji was used, for a search to rank by.
+    pub(super) fn emoji_scores(&self, intention: Intention) -> Scores {
+        let mut state = self.account.state.borrow_mut();
+        let stores = &mut state.frecency.stores;
+        match intention {
+            Intention::Chat => stores.emoji.history.scores(now_ms() as u64),
+            Intention::Reaction => stores.reactions.history.scores(now_ms() as u64),
+        }
+    }
+
+    /// The skin tone button of the picker: the tone emoji take by default,
+    /// chosen from a list, saved as the client saves it. `chosen` runs once
+    /// the choice is made.
+    fn tone_button(self: &Rc<Self>, chosen: impl Fn() + Clone + 'static) -> gtk::Widget {
+        let current = self.account.state.borrow().settings.skin_tone;
+        let sample = |tone: Option<Tone>| discord::emoji::unicode("wave").map_or("👋", |e| e.toned(tone).glyph);
+        let button =
+            gtk::MenuButton::builder().label(sample(current)).tooltip_text("Skin tone").css_classes(["flat"]).build();
+        let popover = gtk::Popover::new();
+        let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let choices = std::iter::once(None).chain(Tone::ALL.into_iter().map(Some));
+        for tone in choices {
+            let row = gtk::Button::builder()
+                .css_classes(["flat"])
+                .tooltip_text(tone.map_or("Default Skin Tone", Tone::label))
+                .label(sample(tone))
+                .build();
+            row.connect_clicked({
+                let (this, button, popover, chosen) =
+                    (Rc::downgrade(self), button.clone(), popover.clone(), chosen.clone());
+                move |_| {
+                    popover.popdown();
+                    let Some(this) = this.upgrade() else { return };
+                    button.set_label(sample(tone));
+                    this.change_setting(Setting::SkinTone(tone));
+                    chosen();
+                }
+            });
+            list.append(&row);
+        }
+        popover.set_child(Some(&list));
+        button.set_popover(Some(&popover));
+        button.upcast()
+    }
+
+    /// The emoji a status may carry: every server's, as in a DM, where the
+    /// client applies the same Nitro rules (`getEmojiUnavailableReason`,
+    /// 690521, with the status intention and no channel).
+    pub(super) fn status_emoji_library(&self) -> Library {
+        let state = self.account.state.borrow();
+        Library::new(state.guilds_in_picker_order(None), &state.limits(), &Place { guild: None, external: true })
     }
 }
 
 /// What the picker lists for `query`: each server's emoji and the Unicode
 /// groups, or what a search finds.
-fn rows(library: &Library, query: &str) -> Vec<Row<Item>> {
+/// The emoji the picker lists before the servers and groups.
+#[derive(Default)]
+pub(super) struct Shortcuts {
+    pub(super) favorites: Vec<Item>,
+    pub(super) frequent: Vec<Item>,
+}
+
+fn rows(library: &Library, query: &str, tone: Option<Tone>, shortcuts: Shortcuts, scores: &Scores) -> Vec<Row<Item>> {
     let mut rows = Vec::new();
     if query.is_empty() {
+        let toned = |items: Vec<Item>| items.into_iter().map(|item| toned(item, tone)).collect();
+        Row::section(&mut rows, COLUMNS, "Favorites".to_owned(), toned(shortcuts.favorites));
+        Row::section(&mut rows, COLUMNS, "Frequently Used".to_owned(), toned(shortcuts.frequent));
         for server in library.picker() {
             Row::section(&mut rows, COLUMNS, server.name, server.emoji.into_iter().map(Item::Custom).collect());
         }
         for category in Category::ALL {
-            let unicode = discord::emoji::unicode_in(category).map(Item::Unicode).collect();
+            let unicode = discord::emoji::unicode_in(category).map(|e| Item::Unicode(e.toned(tone))).collect();
             Row::section(&mut rows, COLUMNS, category.label().to_owned(), unicode);
         }
     } else {
-        let found = library.search(query, SEARCH);
-        Row::section(&mut rows, COLUMNS, "Search Results".to_owned(), found.unlocked);
-        Row::section(&mut rows, COLUMNS, "Needs Nitro".to_owned(), found.locked);
+        let found = library.search(query, SEARCH, scores);
+        let toned = |items: Vec<Item>| items.into_iter().map(|item| toned(item, tone)).collect();
+        Row::section(&mut rows, COLUMNS, "Search Results".to_owned(), toned(found.unlocked));
+        Row::section(&mut rows, COLUMNS, "Needs Nitro".to_owned(), toned(found.locked));
     }
     rows
+}
+
+/// A Unicode emoji in the account's skin tone, if it has one.
+pub(super) fn toned(item: Item, tone: Option<Tone>) -> Item {
+    match item {
+        Item::Unicode(e) => Item::Unicode(e.toned(tone)),
+        custom => custom,
+    }
 }
 
 /// An emoji of the picker: a button that picks it, if we may send it, and
@@ -180,7 +342,7 @@ pub(super) fn glyph(item: &Item, images: &Images) -> gtk::Widget {
             let size = ((SIZE * images.scale()) as u32).next_power_of_two().clamp(16, 4096) as u16;
             // A still, even for an animated emoji: a screenful of them
             // moving would be a lot of drawing.
-            images.set(&picture, &discord::cdn::emoji_url(named.emoji.id.0, false, size), false);
+            images.set(&picture, &discord::cdn::emoji_url(named.emoji.id.0, false, size));
             picture.upcast()
         }
     }

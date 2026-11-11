@@ -19,6 +19,36 @@ pub const BUTTON: u8 = 2;
 /// ApiErrorCode values the client tells apart in a refusal (652215).
 const INVALID_FORM_BODY: u64 = 50035;
 const UNKNOWN_INTEGRATION: u64 = 10005;
+/// The form errors that say a command is out of date.
+const COMMAND_OUT_OF_DATE: [&str; 2] =
+    ["INTERACTION_APPLICATION_COMMAND_INVALID_VERSION", "INTERACTION_APPLICATION_COMMAND_INVALID"];
+
+/// Why an answer is only ours to see, as the footer under it says it
+/// (`ephemerality_reason` in 376767). A reason it doesn't know, and `NONE`,
+/// read as an unknown error.
+pub fn ephemerality_text(reason: u64) -> &'static str {
+    match reason {
+        1 => "This feature is temporarily limited",
+        2 => "This feature is temporarily limited for this server",
+        3 => "This feature is temporarily limited for you",
+        4 => "You are sending messages too quickly",
+        5 => "You are being rate limited",
+        6 => "You cannot message this user",
+        7 => "You do not meet this server's verification level",
+        8 => "You cannot unarchive this thread",
+        9 => "You cannot join this thread",
+        10 => "You cannot send messages in this channel",
+        11 => "You cannot send attachments in this channel",
+        12 => "You cannot send embeds in this channel",
+        13 => "You cannot send stickers in this channel",
+        14 => "This message was blocked by AutoMod. The message may also be viewed by the community owners.",
+        15 => "This message contains a link blocked by Discord.",
+        16 => "You cannot use this command in this channel",
+        17 => "Only you can see this message during beta",
+        18 => "You cannot use external apps in this channel",
+        _ => "An unknown error occurred",
+    }
+}
 
 /// The interaction a message is waiting on.
 #[derive(Clone, Debug, PartialEq)]
@@ -167,6 +197,9 @@ impl Press<'_> {
 pub struct Failure {
     pub code: Option<u64>,
     pub message: Option<String>,
+    /// Discord says the command (or the app) isn't what we have: the index
+    /// it came from is out of date (`APPLICATION_COMMAND_EXECUTE_BAD_VERSION`).
+    pub stale_command: bool,
 }
 
 impl Failure {
@@ -182,23 +215,26 @@ impl Failure {
         let code = body.as_ref().and_then(|b| b["code"].as_u64());
         let message = body.as_ref().and_then(|b| b["message"].as_str().map(String::from));
         let Some(body) = body.filter(|_| (400..500).contains(&status)) else {
-            return Failure { code, message: None };
+            return Failure { code, ..Failure::default() };
         };
         if code == Some(INVALID_FORM_BODY) && body.get("errors").is_some_and(|e| !e.is_null()) {
-            return Failure { code: None, message: first_error(&body["errors"]) };
+            let first = first_error(&body["errors"]);
+            let stale = first.and_then(|e| e["code"].as_str()).is_some_and(|c| COMMAND_OUT_OF_DATE.contains(&c));
+            let message = first.and_then(|e| e["message"].as_str()).map(String::from);
+            return Failure { code: None, message, stale_command: stale };
         }
         match code {
-            Some(UNKNOWN_INTEGRATION) => Failure { code: None, message },
-            _ => Failure { code, message },
+            Some(UNKNOWN_INTEGRATION) => Failure { code: None, message, stale_command: true },
+            _ => Failure { code, message, stale_command: false },
         }
     }
 }
 
-/// The first error's message: one in this level's `_errors`, else the first
-/// nested level that has one (the client's `e` in `T`).
-fn first_error(errors: &Value) -> Option<String> {
+/// The first error: one in this level's `_errors`, else the first nested
+/// level that has one (the client's `e` in `T`).
+fn first_error(errors: &Value) -> Option<&Value> {
     if let Some(first) = errors["_errors"].as_array().and_then(|list| list.first()) {
-        return first["message"].as_str().map(String::from);
+        return Some(first);
     }
     errors
         .as_object()?
@@ -311,25 +347,52 @@ mod tests {
     fn a_refusal_reads_as_the_client_reads_it() {
         // Server trouble, or no body: only a code makes the client say anything.
         assert_eq!(failure(500, ""), Failure::default());
-        assert_eq!(failure(502, r#"{"code": 0}"#), Failure { code: Some(0), message: None });
+        assert_eq!(failure(502, r#"{"code": 0}"#), Failure { code: Some(0), ..Failure::default() });
         assert!(failure(500, r#"{"code": 7}"#).is_announced() && !failure(500, "").is_announced());
         // A form error: the first message in the errors.
         let nested = r#"{"code": 50035, "message": "Invalid Form Body", "errors": {"data": {"custom_id":
             {"_errors": [{"code": "X", "message": "Unknown component"}]}}}}"#;
-        assert_eq!(failure(400, nested), Failure { code: None, message: Some("Unknown component".into()) });
+        assert_eq!(failure(400, nested), Failure { message: Some("Unknown component".into()), ..Failure::default() });
         let top =
             r#"{"code": 50035, "errors": {"_errors": [{"message": "bad"}], "data": {"_errors": [{"message": "no"}]}}}"#;
         assert_eq!(failure(400, top).message.as_deref(), Some("bad"), "this level before the ones inside");
         // Any other 4xx keeps the code and says why.
         assert_eq!(
             failure(403, r#"{"code": 50013, "message": "Missing Permissions"}"#),
-            Failure { code: Some(50013), message: Some("Missing Permissions".into()) }
+            Failure { code: Some(50013), message: Some("Missing Permissions".into()), ..Failure::default() }
         );
         assert!(!failure(403, r#"{"code": 50013, "message": "Missing Permissions"}"#).is_announced());
         // An app that is no longer installed has no code of its own to show.
         assert_eq!(
             failure(404, r#"{"code": 10005, "message": "Unknown Integration"}"#),
-            Failure { code: None, message: Some("Unknown Integration".into()) }
+            Failure { message: Some("Unknown Integration".into()), stale_command: true, ..Failure::default() }
         );
+    }
+
+    #[test]
+    fn an_answer_only_we_see_says_why_as_the_client_does() {
+        assert_eq!(ephemerality_text(4), "You are sending messages too quickly");
+        assert_eq!(ephemerality_text(18), "You cannot use external apps in this channel");
+        // `NONE` is a reason too, with no words of its own.
+        assert_eq!(ephemerality_text(0), "An unknown error occurred");
+        assert_eq!(ephemerality_text(99), "An unknown error occurred");
+        let metadata: crate::model::InteractionMetadata =
+            serde_json::from_str(r#"{"user": {"id": "7", "username": "u"}, "ephemerality_reason": 10}"#).unwrap();
+        assert_eq!(metadata.ephemerality_reason, Some(10));
+    }
+
+    #[test]
+    fn a_command_discord_calls_out_of_date_says_to_fetch_the_index_again() {
+        let invalid = |code| {
+            format!(
+                r#"{{"code": 50035, "errors": {{"data": {{"_errors": [{{"code": "{code}", "message": "Command changed"}}]}}}}}}"#
+            )
+        };
+        let stale = failure(400, &invalid("INTERACTION_APPLICATION_COMMAND_INVALID_VERSION"));
+        assert!(stale.stale_command && stale.message.as_deref() == Some("Command changed"));
+        assert!(failure(400, &invalid("INTERACTION_APPLICATION_COMMAND_INVALID")).stale_command);
+        assert!(!failure(400, &invalid("SOMETHING_ELSE")).stale_command);
+        assert!(failure(404, r#"{"code": 10005, "message": "Unknown Integration"}"#).stale_command);
+        assert!(!failure(403, r#"{"code": 50013, "message": "Missing Permissions"}"#).stale_command);
     }
 }

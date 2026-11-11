@@ -22,7 +22,7 @@ use super::App;
 use super::chat::{self, MessageTarget};
 use super::menus::{self, Entry as MenuEntry, Item as MenuItem, Kind};
 use super::picker::{self, Row, Spec, Target};
-use super::state::now_unix;
+use super::state::{now_ms, now_unix};
 
 /// Stickers to a row of the picker.
 const COLUMNS: usize = 4;
@@ -33,7 +33,7 @@ const WAITING: i32 = 48;
 
 /// Only in Developer Mode, like the rest of the picker's menu (233503).
 fn developer(app: &App) -> bool {
-    app.account.state.borrow().developer_mode
+    app.account.state.borrow().settings.developer_mode
 }
 
 fn sticker(target: &Target) -> Option<&discord::Sticker> {
@@ -42,6 +42,30 @@ fn sticker(target: &Target) -> Option<&discord::Sticker> {
         Target::Emoji(_) | Target::Gif(_) => None,
     }
 }
+
+/// Favorite Sticker and Unfavorite Sticker lead a sticker's menu (253925),
+/// as they lead an emoji's.
+pub(super) const FAVORITE: MenuEntry<Target> = MenuEntry::Item(MenuItem {
+    name: "favorite-sticker",
+    label: "_Favorite Sticker",
+    shows: |app, target| sticker(target).is_some_and(|s| !app.is_favorite_sticker(s.id)),
+    kind: Kind::Action(|app, target| {
+        if let Some(sticker) = sticker(target) {
+            app.favorite_sticker(sticker.id, true);
+        }
+    }),
+});
+
+pub(super) const UNFAVORITE: MenuEntry<Target> = MenuEntry::Item(MenuItem {
+    name: "unfavorite-sticker",
+    label: "_Unfavorite Sticker",
+    shows: |app, target| sticker(target).is_some_and(|s| app.is_favorite_sticker(s.id)),
+    kind: Kind::Action(|app, target| {
+        if let Some(sticker) = sticker(target) {
+            app.favorite_sticker(sticker.id, false);
+        }
+    }),
+});
 
 pub(super) const COPY_STICKER_ID: MenuEntry<Target> = MenuEntry::Item(MenuItem {
     name: "copy-sticker-id",
@@ -240,7 +264,7 @@ impl App {
         if let Some(listed) = waiting {
             self.waiting.name.set_label(&listed.sticker.name);
             match listed.sticker.still(request(self)) {
-                Some(url) => self.images.set(&self.waiting.image, &url, false),
+                Some(url) => self.images.set(&self.waiting.image, &url),
                 None => self.waiting.image.set_paintable(None::<&gtk::gdk::Paintable>),
             }
         }
@@ -263,16 +287,29 @@ impl App {
             columns: COLUMNS,
             cell_width: SIZE + 8,
             rows: Rc::new({
-                let library = library.clone();
-                move |query| rows(&library.borrow(), query)
+                let (library, app) = (library.clone(), Rc::downgrade(self));
+                move |query| {
+                    let app = app.upgrade();
+                    let lists = app.as_ref().map(|app| app.sticker_lists(&library.borrow())).unwrap_or_default();
+                    let scores = app.as_ref().map(|app| app.sticker_scores()).unwrap_or_default();
+                    rows(&library.borrow(), query, lists, &scores)
+                }
             }),
             cell: Rc::new(cell_button),
             best: Rc::new({
-                let library = library.clone();
-                move |query| library.borrow().search(query).unlocked.first().cloned()
+                let (library, app) = (library.clone(), Rc::downgrade(self));
+                move |query| {
+                    let scores = app.upgrade().map(|app| app.sticker_scores()).unwrap_or_default();
+                    library.borrow().search(query, &scores).unlocked.first().cloned()
+                }
             }),
         };
         let reload = picker::open(self, parent, spec, move |app, entry: &Entry| app.pick_sticker(channel, entry));
+        // The favourites and the counts come from Discord the first time, and fill in then.
+        self.load_frecency({
+            let reload = reload.clone();
+            move || reload()
+        });
         let rest = {
             let mut state = self.account.state.borrow_mut();
             let now = (glib::monotonic_time() / 1000) as u64;
@@ -325,16 +362,48 @@ fn request(app: &App) -> u32 {
     crate::images::request_size((WAITING, WAITING), app.images.scale(), None).0
 }
 
-/// What the picker lists for `query`: each server's stickers and the
-/// standard packs, or what a search finds.
-fn rows(library: &Library, query: &str) -> Vec<Row<Entry>> {
+/// The stickers the picker lists before the servers and packs.
+#[derive(Default)]
+struct Lists {
+    favorites: Vec<Entry>,
+    frequent: Vec<Entry>,
+}
+
+impl App {
+    /// The favourite stickers, then those used most, as far as `library` has them
+    /// (`Gc` and `frequently`, 256449).
+    fn sticker_lists(&self, library: &Library) -> Lists {
+        let mut state = self.account.state.borrow_mut();
+        let favorites =
+            state.frecency.favorite_stickers.iter().filter_map(|&id| library.find(Snowflake(id))).cloned().collect();
+        let used = state.frecency.stores.stickers.history.frequently(now_ms() as u64, |_| true);
+        let frequent = used
+            .iter()
+            .filter_map(|id| id.parse().ok())
+            .filter_map(|id| library.find(Snowflake(id)))
+            .cloned()
+            .collect();
+        Lists { favorites, frequent }
+    }
+
+    /// How much each sticker was used, for a search to rank by.
+    fn sticker_scores(&self) -> HashMap<String, f64> {
+        self.account.state.borrow_mut().frecency.stores.stickers.history.scores(now_ms() as u64)
+    }
+}
+
+/// What the picker lists for `query`: the favourites, the stickers used most,
+/// each server's stickers and the standard packs, or what a search finds.
+fn rows(library: &Library, query: &str, lists: Lists, scores: &HashMap<String, f64>) -> Vec<Row<Entry>> {
     let mut rows = Vec::new();
     if query.is_empty() {
+        Row::section(&mut rows, COLUMNS, "Favorites".to_owned(), lists.favorites);
+        Row::section(&mut rows, COLUMNS, "Frequently Used".to_owned(), lists.frequent);
         for section in library.servers.iter().chain(&library.packs) {
             Row::section(&mut rows, COLUMNS, section.name.clone(), section.stickers.clone());
         }
     } else {
-        let found = library.search(query);
+        let found = library.search(query, scores);
         Row::section(&mut rows, COLUMNS, "Search Results".to_owned(), found.unlocked);
         Row::section(&mut rows, COLUMNS, "Needs Nitro".to_owned(), found.locked);
     }
@@ -356,7 +425,7 @@ fn cell_button(app: &Rc<App>, entry: &Entry, picked: &Rc<dyn Fn(&Entry)>) -> gtk
                 .build();
             // A still, even for an animated sticker: a screenful of them
             // moving would be a lot of drawing.
-            app.images.set(&picture, &url, false);
+            app.images.set(&picture, &url);
             picture.upcast()
         }
         None => gtk::Label::builder()

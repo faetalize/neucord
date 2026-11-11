@@ -9,6 +9,10 @@ use serde_json::{Value, json};
 use crate::endpoints::{Call, call};
 use crate::{Error, Rest};
 
+/// ApiErrorCode values the client's login tells apart (652215).
+const ACCOUNT_SCHEDULED_FOR_DELETION: u64 = 20011;
+const PHONE_VERIFICATION_REQUIRED: u64 = 70007;
+
 pub enum Login {
     Token(String),
     /// The password was right; now a second factor.
@@ -36,12 +40,21 @@ impl Mfa {
         self.methods().first().copied()
     }
 
+    /// In the order the client's login store lists them (`ea` in 46653),
+    /// after the security keys it puts first.
     pub fn methods(&self) -> Vec<MfaMethod> {
-        [(self.totp, MfaMethod::Totp), (self.sms, MfaMethod::Sms), (self.backup, MfaMethod::Backup)]
+        [(self.totp, MfaMethod::Totp), (self.backup, MfaMethod::Backup), (self.sms, MfaMethod::Sms)]
             .into_iter()
             .filter_map(|(on, method)| on.then_some(method))
             .collect()
     }
+}
+
+/// What the email from [`Rest::forgot_password`] holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Recovery {
+    PasswordReset,
+    OneTimeLogin,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,10 +78,11 @@ impl MfaMethod {
 }
 
 impl Rest {
-    /// `login` is an email address or an E.164 phone number.
-    pub async fn login(&self, login: &str, password: &str) -> Result<Login, Error> {
-        let body = json!({ "login": login, "password": password, "undelete": false });
-        let response = self.auth_with(call!(LOGIN), body, true).await?;
+    /// `login` is an email address or an E.164 phone number. `undelete`
+    /// cancels the account's scheduled deletion, which the client only
+    /// sends after asking ([`Error::ScheduledForDeletion`]).
+    pub async fn login(&self, login: &str, password: &str, undelete: bool) -> Result<Login, Error> {
+        let response = self.auth_with(call!(LOGIN), login_body(login, password, undelete), true).await?;
         // Sent here even when a second factor follows; that answer has none.
         let required: Vec<String> = serde_json::from_value(response["required_actions"].clone()).unwrap_or_default();
         check_required(&required)?;
@@ -81,6 +95,16 @@ impl Rest {
         Err(Error::Protocol("login answered with neither a token nor two-factor".into()))
     }
 
+    /// Have Discord email a link for a new password, or for a one-time
+    /// login when the account has no password (`forgotPassword` in 830215).
+    pub async fn forgot_password(&self, login: &str) -> Result<Recovery, Error> {
+        let response = self.auth(call!(FORGOT_PASSWORD), json!({ "login": login })).await?;
+        Ok(match response["method"].as_str() {
+            Some("one_time_login") => Recovery::OneTimeLogin,
+            _ => Recovery::PasswordReset,
+        })
+    }
+
     /// Text a code to the account's phone. Returns the number, redacted.
     pub async fn send_mfa_sms(&self, mfa: &Mfa) -> Result<String, Error> {
         let response = self.auth(call!(SEND_MFA_SMS), json!({ "ticket": mfa.ticket })).await?;
@@ -88,11 +112,7 @@ impl Rest {
     }
 
     pub async fn verify_mfa(&self, mfa: &Mfa, method: MfaMethod, code: &str) -> Result<String, Error> {
-        let mut body = json!({ "ticket": mfa.ticket, "code": code });
-        if let Some(id) = &mfa.login_instance_id {
-            body["login_instance_id"] = id.as_str().into();
-        }
-        let response = self.auth(call!(VERIFY_MFA, method = method.path()), body).await?;
+        let response = self.auth(call!(VERIFY_MFA, method = method.path()), mfa_body(mfa, code)).await?;
         token(&response)
     }
 
@@ -121,6 +141,28 @@ impl Rest {
     }
 }
 
+/// The client's login form sends `login_source` and `gift_code_sku_id` too
+/// (`login` and `loginMFAv2` in 830215). They name the invite, gift or page
+/// the login started from, and are `null` for a login that started on the
+/// plain login page, which is the only one Neucord has.
+fn login_body(login: &str, password: &str, undelete: bool) -> Value {
+    json!({
+        "login": login,
+        "password": password,
+        "undelete": undelete,
+        "login_source": null,
+        "gift_code_sku_id": null,
+    })
+}
+
+fn mfa_body(mfa: &Mfa, code: &str) -> Value {
+    let mut body = json!({ "ticket": mfa.ticket, "code": code, "login_source": null, "gift_code_sku_id": null });
+    if let Some(id) = &mfa.login_instance_id {
+        body["login_instance_id"] = id.as_str().into();
+    }
+    body
+}
+
 /// Turn down a login that came with steps Neucord can't take. Discord sends
 /// the token all the same, but the official client won't let the account in
 /// until they're done: closing its forced password change logs out.
@@ -146,10 +188,19 @@ fn refusal(body: &Value) -> Option<Error> {
     if crate::rest::is_captcha(body) {
         return Some(Error::Captcha);
     }
-    if body.get("suspended_user_token").is_some() {
-        return Some(Error::Rejected(
-            "Discord has suspended this account. Log in at discord.com to see why and to appeal.".into(),
-        ));
+    if let Some(token) = body["suspended_user_token"].as_str() {
+        return Some(Error::Suspended(token.to_owned()));
+    }
+    match body["code"].as_u64() {
+        Some(ACCOUNT_SCHEDULED_FOR_DELETION) => return Some(Error::ScheduledForDeletion),
+        Some(PHONE_VERIFICATION_REQUIRED) => {
+            return Some(Error::Rejected(
+                "Discord wants to verify a phone number first, which Neucord can't do. \
+                 Do it at discord.com, then try again."
+                    .into(),
+            ));
+        }
+        _ => {}
     }
     fn first_form_error(errors: &Value) -> Option<&str> {
         if let Some(message) = errors["_errors"][0]["message"].as_str() {
@@ -177,6 +228,19 @@ mod tests {
     }
 
     #[test]
+    fn accounts_the_client_stops_at() {
+        let suspended = serde_json::json!({"code": 40002, "message": "x", "suspended_user_token": "tok"});
+        assert!(matches!(refusal(&suspended), Some(Error::Suspended(t)) if t == "tok"));
+        let deleting = serde_json::json!({"code": 20011, "message": "This account is scheduled for deletion."});
+        assert!(matches!(refusal(&deleting), Some(Error::ScheduledForDeletion)));
+        let phone = serde_json::json!({"code": 70007, "message": "x"});
+        assert!(matches!(refusal(&phone), Some(Error::Rejected(why)) if why.contains("phone")));
+        // Disabled accounts get Discord's own words.
+        let disabled = serde_json::json!({"code": 20013, "message": "This account is disabled."});
+        assert_eq!(refusal(&disabled).unwrap().to_string(), "This account is disabled.");
+    }
+
+    #[test]
     fn plain_messages_and_captchas() {
         assert_eq!(refused(r#"{"code":60008,"message":"Invalid two-factor code"}"#), "Invalid two-factor code");
         assert!(matches!(
@@ -184,6 +248,22 @@ mod tests {
             Some(Error::Captcha)
         ));
         assert!(refusal(&Value::Null).is_none());
+    }
+
+    #[test]
+    fn logins_carry_the_fields_the_client_sends() {
+        let mfa: Mfa =
+            serde_json::from_str(r#"{"ticket":"t","mfa":true,"totp":true,"login_instance_id":"i"}"#).unwrap();
+        assert_eq!(
+            login_body("a@b.c", "pw", false),
+            json!({"login": "a@b.c", "password": "pw", "undelete": false, "login_source": null, "gift_code_sku_id": null})
+        );
+        assert_eq!(
+            mfa_body(&mfa, "123456"),
+            json!({"ticket": "t", "code": "123456", "login_source": null, "gift_code_sku_id": null, "login_instance_id": "i"})
+        );
+        let without_instance: Mfa = serde_json::from_str(r#"{"ticket":"t","mfa":true,"totp":true}"#).unwrap();
+        assert!(mfa_body(&without_instance, "1").get("login_instance_id").is_none());
     }
 
     #[test]
@@ -195,7 +275,11 @@ mod tests {
     #[test]
     fn mfa_methods_in_preference_order() {
         let mfa: Mfa = serde_json::from_str(r#"{"ticket":"t","mfa":true,"sms":true,"backup":true}"#).unwrap();
-        assert_eq!(mfa.methods(), [MfaMethod::Sms, MfaMethod::Backup]);
+        assert_eq!(mfa.methods(), [MfaMethod::Backup, MfaMethod::Sms]);
+        // Texting a code is never the first thing offered when a code the user already holds will do.
+        let all: Mfa =
+            serde_json::from_str(r#"{"ticket":"t","mfa":true,"totp":true,"sms":true,"backup":true}"#).unwrap();
+        assert_eq!(all.methods(), [MfaMethod::Totp, MfaMethod::Backup, MfaMethod::Sms]);
         let keys_only: Mfa = serde_json::from_str(r#"{"ticket":"t","mfa":true,"webauthn":"{}"}"#).unwrap();
         assert_eq!(keys_only.preferred(), None);
     }

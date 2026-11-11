@@ -5,6 +5,7 @@
 use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
+use discord::animation::Subject;
 use discord::model::Emoji;
 use discord::permissions;
 use discord::poll::{Ballot, Outcome, Poll, Primary};
@@ -14,7 +15,7 @@ use gtk::{glib, pango};
 use super::menus::{Entry, Item, Kind};
 use super::state::now_unix;
 use super::{App, friends::confirm};
-use crate::images::Images;
+use crate::images::{Images, Row};
 use crate::timelines;
 
 /// Custom emoji beside an answer (the official client's size).
@@ -351,7 +352,13 @@ pub(super) fn emoji_widget(emoji: &Emoji, images: &Images) -> gtk::Widget {
                 picture.set_tooltip_text(Some(&format!(":{name}:")));
             }
             let size = ((EMOJI * images.scale()) as u32).next_power_of_two().clamp(16, 4096) as u16;
-            images.set(&picture, &discord::cdn::emoji_url(id.0, emoji.animated, size), emoji.animated);
+            if emoji.animated {
+                let (still, moving) =
+                    (discord::cdn::emoji_url(id.0, false, size), discord::cdn::emoji_url(id.0, true, size));
+                images.set_moving(&picture, &still, &moving, Subject::Emoji, Row::Parent);
+            } else {
+                images.set(&picture, &discord::cdn::emoji_url(id.0, false, size));
+            }
             picture.upcast()
         }
         None => gtk::Label::new(emoji.name.as_deref()).upcast(),

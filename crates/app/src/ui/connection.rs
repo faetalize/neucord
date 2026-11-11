@@ -16,18 +16,22 @@ use super::state::{Page, now_ms};
 impl App {
     /// Let go of the shown account without telling Discord: its gateway
     /// closes, what the window holds of it goes, and so do its desktop
-    /// notifications. Gives what answered its requests.
+    /// notifications, its unread count and its tray icon's alert. Gives what
+    /// answered its requests.
     pub(super) fn leave_account(self: &Rc<Self>) -> Option<Rest> {
         let (rest, notified) = self.account.leave();
-        if let Some(app) = self.window.application() {
-            for id in notified {
-                app.withdraw_notification(&id);
-            }
+        self.withdraw_notifications(notified);
+        // Folds it hadn't saved are not the next account's to send.
+        if let Some(timer) = self.fold_save.take() {
+            timer.remove();
         }
         self.show_blank();
+        self.refresh_badges();
         self.refresh_typing();
         self.set_reply(None);
         self.end_edit();
+        self.cancel_command();
+        self.refresh_command_status();
         self.discard_drafts();
         rest
     }
@@ -59,12 +63,14 @@ impl App {
         self.show_signed_out(None);
     }
 
-    /// Take an account off the list and its token out of the keyring.
-    /// `migrating` is a token that is still in the entry of earlier versions.
+    /// Take an account off the list and its token out of the keyring, and
+    /// what was kept pending for it off the disk. `migrating` is a token that
+    /// is still in the entry of earlier versions.
     pub(super) async fn forget_account(self: &Rc<Self>, id: Option<Snowflake>, migrating: bool) {
         if let Some(id) = id {
             self.roster.borrow_mut().remove(id);
             self.refresh_account_views();
+            super::usage::forget_usage(id);
             if let Err(e) = session::clear_token(id).await {
                 eprintln!("logout: {e}");
             }
@@ -156,6 +162,22 @@ impl App {
             match event {
                 Event::Ready(ready) => self.on_ready(*ready),
                 Event::GuildCreate(guild) => self.on_guild(guild),
+                Event::GuildVoiceStates { guild_id, states } => {
+                    self.account.state.borrow_mut().voice.replace_guild(guild_id, states);
+                    self.refresh_badges();
+                }
+                Event::VoiceStates(updates) => {
+                    let mut changed = false;
+                    {
+                        let mut state = self.account.state.borrow_mut();
+                        for update in updates {
+                            changed |= state.voice.apply(update);
+                        }
+                    }
+                    if changed {
+                        self.refresh_badges();
+                    }
+                }
                 Event::PrivateChannelCreate(channel) | Event::PrivateChannelUpdate(channel) => {
                     self.on_private_channel(channel)
                 }
@@ -243,7 +265,11 @@ impl App {
                 Event::TypingStart { channel_id, user_id, user } => self.on_typing(channel_id, user_id, user.as_ref()),
                 Event::MessageCreate(message) => self.on_message(*message),
                 Event::MessageUpdate(edit) => self.on_message_update(edit),
-                Event::Interaction { nonce, outcome } => self.on_interaction(nonce, outcome),
+                Event::Interaction { nonce, outcome, reason } => self.on_interaction(nonce, outcome, reason),
+                Event::InteractionCreated { nonce } => self.command_created(nonce),
+                Event::Autocomplete { nonce, choices } => self.on_autocomplete(nonce, &choices),
+                Event::CommandIndexChanged { guild, version } => self.command_index_changed(guild, version),
+                Event::UserApplicationChanged => self.account.state.borrow_mut().commands.user_changed(),
                 Event::MessageDelete { id, channel_id } => self.on_message_delete(id, channel_id),
                 Event::MessageDeleteBulk { ids, channel_id } => self.on_message_delete_bulk(ids, channel_id),
                 Event::PollVote { channel_id, message_id, votes, added, many } => {
@@ -259,8 +285,13 @@ impl App {
                 Event::EmojiReactionsCleared { channel_id, message_id, emoji } => {
                     self.on_reactions_cleared(channel_id, message_id, Some(&emoji))
                 }
-                Event::MessageAck { channel_id, message_id } => {
-                    self.account.state.borrow_mut().read.ack(channel_id, message_id);
+                Event::MessageAck { channel_id, message_id, manual } => {
+                    match manual {
+                        Some(mentions) => {
+                            self.account.state.borrow_mut().read.mark_unread(channel_id, message_id, mentions)
+                        }
+                        None => self.account.state.borrow_mut().read.ack(channel_id, message_id),
+                    }
                     self.forum_read(channel_id);
                     self.withdraw_notification(channel_id);
                     self.refresh_badges();
@@ -278,12 +309,13 @@ impl App {
                     self.account.state.borrow_mut().required_action = action;
                     self.apply_required_action();
                 }
-                Event::MediaSettingsUpdate(patch) => {
-                    self.account.state.borrow_mut().media.apply(patch);
-                    self.refresh_rows();
+                Event::SettingsUpdate { patch, replace, proto } => {
+                    if let Some(update) = proto {
+                        self.account.state.borrow_mut().sync.received(&update, !replace);
+                    }
+                    self.apply_settings(patch, replace);
                 }
-                Event::DeveloperModeUpdate(on) => self.account.state.borrow_mut().developer_mode = on,
-                Event::MessageDisplayCompactUpdate(on) => self.account.state.borrow_mut().message_display_compact = on,
+                Event::FrecencyUpdate { proto, partial } => self.frecency_updated(&proto, partial),
                 Event::RelationshipAdd { relationship, notify } => {
                     self.learn_users(std::iter::once(&relationship.user));
                     let blocked = relationship.kind == discord::relationships::Kind::Blocked;
@@ -304,6 +336,8 @@ impl App {
                     self.account.state.borrow_mut().profiles.doubt(user_id);
                     self.account.state.borrow_mut().relationships.update(user_id, nickname);
                     self.relationships_changed(false);
+                    // What we call them shows in DMs.
+                    self.refresh_rows();
                 }
                 Event::RelationshipRemove(user_id) => {
                     self.withdraw_friend_request(user_id);
@@ -319,21 +353,25 @@ impl App {
                         self.queue_friends_refresh();
                         // A group DM's friends.
                         self.refresh_member_rows();
+                        self.refresh_profile_views();
                     }
-                }
-                Event::GuildFoldersUpdate(folders) => {
-                    self.account.state.borrow_mut().guild_folders = folders;
-                    self.rebuild_rail();
                 }
                 Event::NotificationSettingsUpdate(settings) => {
                     self.account.state.borrow_mut().notifications.update(settings);
                     self.refresh_badges();
                 }
                 Event::Resumed => {
+                    {
+                        let mut state = self.account.state.borrow_mut();
+                        state.sync.disconnected();
+                        state.frecency_sync.disconnected();
+                    }
+                    self.usage_connected();
                     self.account.timelines.borrow_mut().held.resumed();
                     self.account.state.borrow_mut().members.resumed();
                     self.send_member_requests();
                     self.subscribe_session(false);
+                    self.resend_presence();
                     let name = {
                         let mut state = self.account.state.borrow_mut();
                         state.reconnect_attempts = 0;
@@ -343,6 +381,15 @@ impl App {
                     // Replayed messages have already updated the open channel.
                 }
                 Event::Closed { code, reason, resume } => {
+                    // A rejected token has nothing to save to.
+                    if !Event::is_fatal_close(code) {
+                        self.usage_closed();
+                    }
+                    {
+                        let mut state = self.account.state.borrow_mut();
+                        state.sync.disconnected();
+                        state.frecency_sync.disconnected();
+                    }
                     self.account.timelines.borrow_mut().held.closed();
                     {
                         let mut state = self.account.state.borrow_mut();
@@ -396,14 +443,16 @@ impl App {
             relationships,
             read_states,
             notification_settings,
-            guild_folders,
-            media_settings,
-            developer_mode,
+            collapsed,
+            settings,
+            settings_proto,
             media_takedown_regulated,
-            message_display_compact,
             required_action,
             experiments,
             session_id,
+            gates,
+            unavailable_guilds,
+            voice_states,
         } = ready;
         self.learn_users(private_channels.iter().flat_map(|c| &c.recipients));
         self.learn_users(
@@ -416,7 +465,7 @@ impl App {
             .flat_map(|list| relationships.list(list))
             .map(|r| &r.user),
         );
-        let (store, was_ready) = {
+        let (store, was_ready, offline_save) = {
             let mut state = self.account.state.borrow_mut();
             let was_ready = state.ready_seen;
             state.ready_seen = true;
@@ -432,26 +481,44 @@ impl App {
             state.notes.clear();
             state.typing.clear();
             state.read = read_states;
-            state.guild_folders = guild_folders;
             state.notifications = notification_settings;
-            state.media = media_settings;
-            state.developer_mode = developer_mode;
+            state.collapsed = collapsed;
+            self.images.motion().set_media(settings.media);
+            state.settings = settings;
+            let offline_save = settings_proto.and_then(|proto| state.sync.connected(proto));
             state.media_takedown_regulated = media_takedown_regulated;
-            state.message_display_compact = message_display_compact;
             state.required_action = required_action;
             state.account = Some(account);
             state.nitro = nitro;
             state.experiments = experiments;
             state.session_id = session_id;
+            state.gates = gates;
+            state.unavailable_guilds = unavailable_guilds;
+            state.voice = voice_states;
+            // A new session: every index is out of date, and no command is waiting on this one.
+            state.commands.session_started();
+            state.running.clear();
             let store = (!state.persisted || state.migrating).then(|| state.token.clone());
             let migrated = std::mem::take(&mut state.migrating);
             state.persisted = true;
             state.users.insert(user.id.0, user.display_name().to_string());
             state.me = Some(user.clone());
-            ((store.flatten(), migrated), was_ready)
+            ((store.flatten(), migrated), was_ready, offline_save)
         };
         self.remember_account(&user, store.0, store.1);
 
+        self.settings_replaced();
+        self.status_ready();
+        if let Some(schedule) = offline_save {
+            self.save_settings_after(schedule);
+        }
+        // What was used and not saved: a closed app's, and a lost connection's edit.
+        self.restore_usage();
+        let offline_frecency = self.account.state.borrow_mut().frecency_sync.reconnected();
+        if let Some(schedule) = offline_frecency {
+            self.save_frecency_after(schedule);
+        }
+        self.usage_connected();
         let me = self.account.state.borrow().me.as_ref().map(|u| u.display_name().to_owned()).unwrap_or_default();
         self.me_label.set_label(&me);
         // READY may bring other Nitro, which changes the length limit.
@@ -561,6 +628,7 @@ impl App {
     fn relationships_changed(self: &Rc<Self>, blocks_changed: bool) {
         self.refresh_badges();
         self.queue_friends_refresh();
+        self.refresh_profile_views();
         if blocks_changed {
             self.refresh_typing();
             self.refresh_rows();
