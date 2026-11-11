@@ -402,7 +402,15 @@ changed for unrelated reasons only needs a note in the issue.
   (anchor `guild_connections`) with 920268 (anchor `GUILD_APP`) picks
   `connections_role_id`. A note is asked for once a session by 612630 (anchor
   `USER_NOTE_LOAD_START`) wherever one renders, the popout (243166) and the
-  user menu (497600) included.
+  user menu (497600) included. The panel beside a DM (`ok` in 289287, anchor
+  `UserProfileSidebarRenderer`) asks for `type=sidebar` with mutual servers,
+  and for anyone but a bot either the friends or just their count, by the
+  experiment `rD` there (`2026-06-user-profile-sidebar-redesign`, variant 1,
+  read through `experiments.rs`). The list of mutual friends is asked for
+  once its section opens and the held one isn't as long as the count (229187,
+  anchor `isFetchingFriends`). A decoration's image is the shop's by `sku_id`
+  or else the preset's by `asset`, none once it lapses (`D` in 486020, with
+  `getCollectiblesItemAssetUrl` in 746002).
 
 ## Notifications and unread state
 
@@ -500,6 +508,10 @@ changed for unrelated reasons only needs a note in the issue.
   that has an attachment, and takes the first.
   Neucord leaves out the analytics these send (`MESSAGE_LINK_COPIED`,
   `CONTEXT_MENU_LINK_COPIED`).
+- **What people are called in a server** (`State::name_in`, `Members`).
+  Client: 562153 (anchor `getNickname`): a server's nickname, in a DM what we
+  call a friend, else the name they go by. Their picture there replaces
+  their own.
 - **The user menu and who has a profile** (`USER` in `ui/menus.rs`,
   `User::non_user_bot`). Client: 841549 picks the menu by channel, the server
   variant is 107632 (`user-context`), which keeps its order. A system account

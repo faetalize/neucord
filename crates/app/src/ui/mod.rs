@@ -175,6 +175,8 @@ pub struct App {
     reactors_view: RefCell<Option<Rc<reactors::View>>>,
     /// The thread browser, while it's open.
     threads_view: RefCell<Option<Rc<threads::View>>>,
+    /// The profiles on screen: the popout and the panel beside a DM.
+    profile_views: RefCell<profile::Views>,
     /// Opens the thread browser, from the chat's header.
     threads_button: gtk::Button,
     /// The quick switcher, while it's open.
@@ -351,6 +353,7 @@ impl App {
             row_epoch: Cell::default(),
             reactors_view: RefCell::default(),
             threads_view: RefCell::default(),
+            profile_views: RefCell::default(),
             threads_button: gtk::Button::builder()
                 .icon_name("chat-message-new-symbolic")
                 .tooltip_text("Threads")
