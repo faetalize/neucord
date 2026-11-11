@@ -437,6 +437,12 @@ changed for unrelated reasons only needs a note in the issue.
   newest loaded message before it, with the mentions after it. The items and
   where they show: 507238 and 871638 (anchor `mark-guild-read`) for servers,
   995102, 288104 and 511904 for channels, 20883 for messages.
+- **The unread count** (`badge.rs`, `State::rail_signature`), on the icon and
+  in the title. The sum and the dot are in the app component of 852799
+  (anchor `getDisableUnreadBadge`): every server's and DM's mentions plus
+  friend requests, or a dot when that is 0 and a server is unread. The title
+  prefix is `notificationCount` in 726249, and Linux's icon takes only the
+  count (`setBadgeCount` in 253400).
 - **What adds a mention** (`counts_mention`, `is_dropped`).
   `MESSAGE_CREATE` in 218461 (anchor `mentionCount++`): nothing from a
   blocked author or command user (`isBlockedOrIgnoredForMessage`, watched

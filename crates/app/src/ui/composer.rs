@@ -11,7 +11,7 @@ use discord::limits::{LengthCount, TooLong, message_length};
 use discord::notice::Notice;
 use discord::rest::{Reply, ReplyPing};
 use discord::scheduled;
-use discord::verification::{self, Gate};
+use discord::verification::Gate;
 use discord::{Channel, Message, Snowflake};
 use gtk::glib;
 
@@ -341,23 +341,17 @@ impl App {
         let (notice, request, denied_here, slowmode) = {
             let state = self.state.borrow();
             let open = state.channel.and_then(|id| state.find_channel(id));
-            let system = open.is_some_and(|(_, c)| c.is_system_dm());
             let denied_here = match open.map(|(_, c)| c) {
                 Some(c) if c.kind == discord::ChannelKind::MediaThread => "This thread can only be read.",
                 Some(c) if c.is_locked() => "This thread is locked. Only moderators can send messages in it.",
                 _ => "You do not have permission to send messages in this channel.",
             };
-            let guild = open.and_then(|(guild, _)| guild).zip(state.account.as_ref());
-            let timeout = guild.and_then(|(g, a)| g.timeout_left(a, now_unix()));
-            let gate = guild.and_then(|(g, a)| verification::gate(g, a, now_unix()));
-            let denied = guild.is_some() && !state.channel.is_some_and(|id| state.can_send(id));
             let slowmode = open.map_or(0, |(_, c)| state.slowmode.remaining_ms(c, now_ms()));
-            let request = state.open_request().map(|c| (c.id, c.spam, c.title()));
-            let notice = Notice::of(system, request.as_ref().map(|r| r.1), timeout, gate, denied);
-            (notice, request, denied_here, slowmode)
+            let request = state.open_request().map(|c| (c.id, c.title()));
+            (state.channel.and_then(|id| state.notice(id)), request, denied_here, slowmode)
         };
         let label = |text: String| gtk::Label::builder().label(text).xalign(0.0).wrap(true).hexpand(true).build();
-        let request = request.as_ref().map(|(id, _, title)| (*id, title.as_str()));
+        let request = request.as_ref().map(|(id, title)| (*id, title.as_str()));
         let text = match &notice {
             Some(Notice::System) => "This chat is reserved for official Discord notifications. \
                 Discord will never ask for your password or token."
@@ -828,21 +822,32 @@ impl App {
     /// What follows a message that didn't: slowmode as Discord says it is,
     /// and the reason.
     pub(super) fn message_stopped(self: &Rc<Self>, channel: Snowflake, stopped: &Stopped) {
+        if let Some(why) = self.record_stopped(channel, stopped) {
+            self.show_composer_error(&why);
+        }
+    }
+
+    /// Slowmode as a message that didn't go out leaves it, and what to tell
+    /// of it, unless the user took it back.
+    pub(super) fn record_stopped(self: &Rc<Self>, channel: Snowflake, stopped: &Stopped) -> Option<String> {
         match stopped {
             Stopped::Send(e) if e.slowmode_wait().is_some() => {
                 let wait = e.slowmode_wait().unwrap_or_default();
                 self.record_slowmode(channel, |slowmode, c, _| slowmode.refused(c, wait, now_ms()));
-                self.show_composer_error("Not sent: slowmode is enabled in this channel.");
+                Some("Not sent: slowmode is enabled in this channel.".to_owned())
             }
             Stopped::Send(e) => {
                 self.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c));
-                self.show_composer_error(&format!("Not sent: {e}"));
+                Some(format!("Not sent: {e}"))
             }
             Stopped::Upload(why) => {
                 self.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c));
-                self.show_composer_error(&format!("Not sent: {why}"));
+                Some(format!("Not sent: {why}"))
             }
-            Stopped::Canceled => self.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c)),
+            Stopped::Canceled => {
+                self.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c));
+                None
+            }
         }
     }
 }
