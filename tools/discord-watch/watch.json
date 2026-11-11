@@ -231,6 +231,7 @@
     "LocalInteractionComponentStateStore",
     "LoginRequiredActionStore",
     "MessageStore",
+    "NoteStore",
     "PendingReplyStore",
     "PermissionStore",
     "RawGuildEmojiStore",
@@ -242,7 +243,8 @@
     "StickersPackStore",
     "ThreadMessageStore",
     "TypingStore",
-    "UploadAttachmentStore"
+    "UploadAttachmentStore",
+    "UserProfileStore"
   ],
   "constants": ["ACCOUNT_AGE", "FONT_SIZES", "MEMBER_AGE", "POLLS", "REPLYABLE", "UNDELETABLE", "USER_MESSAGE"]
 }

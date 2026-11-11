@@ -28,13 +28,24 @@ pub(super) fn initials(name: &str) -> String {
 /// A round avatar of `size` px: the user's picture over their initials, which
 /// show while it loads, or the initials alone when they have no picture.
 pub(super) fn avatar_widget(user: &User, size: i32, images: Option<&Images>) -> gtk::Widget {
-    let initials = adw::Avatar::new(size, Some(user.display_name()), true);
-    let (Some(hash), Some(images)) = (user.avatar.as_deref(), images) else {
+    let picture = user.avatar.as_deref().map(|hash| (discord::cdn::avatar_url(user.id.0, hash, 64), hash));
+    avatar_from(user.display_name(), size, images, picture)
+}
+
+/// [`avatar_widget`] for a picture at `url`, animated if its hash says so.
+pub(super) fn avatar_from(
+    name: &str,
+    size: i32,
+    images: Option<&Images>,
+    picture: Option<(String, &str)>,
+) -> gtk::Widget {
+    let initials = adw::Avatar::new(size, Some(name), true);
+    let (Some((url, hash)), Some(images)) = (picture, images) else {
         return initials.upcast();
     };
     let overlay = gtk::Overlay::builder().child(&initials).build();
     let picture = round_picture(size);
-    images.set(&picture, &discord::cdn::avatar_url(user.id.0, hash, 64), discord::cdn::is_animated(hash));
+    images.set(&picture, &url, discord::cdn::is_animated(hash));
     overlay.add_overlay(&picture);
     overlay.upcast()
 }

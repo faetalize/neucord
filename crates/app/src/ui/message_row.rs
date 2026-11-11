@@ -53,7 +53,7 @@ pub(super) struct Parts {
     pub(super) row: gtk::Box,
     /// The line above a reply.
     pub(super) reply: RefCell<Option<gtk::Widget>>,
-    gutter: gtk::Box,
+    pub(super) gutter: gtk::Box,
     /// The avatar, and whose (id and picture) it is.
     avatar: RefCell<Option<(Snowflake, Option<String>, gtk::Widget)>>,
     /// A system message's icon, in the avatar's place.
@@ -211,6 +211,11 @@ impl Parts {
         if let Some(icon) = self.icon.get() {
             icon.set_visible(false);
         }
+    }
+
+    /// Whether the gutter shows an avatar: of the first message of a run.
+    pub(super) fn shows_avatar(&self) -> bool {
+        self.avatar.borrow().as_ref().is_some_and(|(_, _, widget)| widget.is_visible())
     }
 
     /// Show a system message's icon in the gutter.

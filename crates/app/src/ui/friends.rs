@@ -349,7 +349,7 @@ impl App {
         });
     }
 
-    fn confirm_remove_friend(self: &Rc<Self>, user: Snowflake) {
+    pub(super) fn confirm_remove_friend(self: &Rc<Self>, user: Snowflake) {
         let Some(name) = self.state.borrow().relationships.get(user).map(|r| r.name().to_owned()) else { return };
         let dialog = confirm(
             &format!("Remove {name}?"),

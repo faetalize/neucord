@@ -76,12 +76,22 @@ pub struct User {
     /// Discord's own account, which sends official notifications.
     #[serde(default, deserialize_with = "null_is_false")]
     pub system: bool,
+    /// `0000` for a webhook, which shows as a bot; people and bots have none
+    /// or one that counts.
+    #[serde(default)]
+    pub discriminator: Option<String>,
 }
 
 impl User {
     /// What Discord shows: the display name if set, else the username.
     pub fn display_name(&self) -> &str {
         self.global_name.as_deref().unwrap_or(&self.username)
+    }
+
+    /// An account that is no one's: Discord's own, or a webhook's name. The
+    /// client (`isNonUserBot`, 619019) offers them no profile.
+    pub fn non_user_bot(&self) -> bool {
+        self.system || (self.bot && self.discriminator.as_deref() == Some("0000"))
     }
 }
 
@@ -319,6 +329,15 @@ pub struct Role {
     /// A gradient, in servers that have them (see [`crate::members`]).
     #[serde(default)]
     pub colors: Option<RoleColors>,
+    /// Given for linking an account of another service, which marks the role
+    /// by its tags holding `guild_connections`, with no value.
+    #[serde(default, rename = "tags", deserialize_with = "has_guild_connections")]
+    pub linked: bool,
+}
+
+fn has_guild_connections<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let tags = Option::<serde_json::Map<String, Value>>::deserialize(d)?;
+    Ok(tags.is_some_and(|tags| tags.contains_key("guild_connections")))
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -1297,6 +1316,33 @@ mod tests {
                                              "author": {"id": "5", "username": "me"}, "timestamp": ""});
         message.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
         serde_json::from_value(message).unwrap()
+    }
+
+    #[test]
+    fn accounts_that_are_no_ones() {
+        let user = |json: Value| serde_json::from_value::<User>(json).unwrap();
+        let base = serde_json::json!({"id": "1", "username": "u"});
+        let with = |extra: Value| {
+            let mut json = base.clone();
+            json.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            user(json)
+        };
+        assert!(!user(base.clone()).non_user_bot());
+        // A webhook's author is a bot with the discriminator 0000; a bot of
+        // today has 0, which a profile belongs to.
+        assert!(with(serde_json::json!({"bot": true, "discriminator": "0000"})).non_user_bot());
+        assert!(!with(serde_json::json!({"bot": true, "discriminator": "0"})).non_user_bot());
+        assert!(!with(serde_json::json!({"discriminator": "0000"})).non_user_bot());
+        assert!(with(serde_json::json!({"system": true})).non_user_bot());
+    }
+
+    #[test]
+    fn a_linked_role_is_told_by_its_tags() {
+        let role = |tags: Value| serde_json::from_value::<Role>(serde_json::json!({"id": "3", "tags": tags})).unwrap();
+        assert!(role(serde_json::json!({"guild_connections": null})).linked);
+        assert!(!role(serde_json::json!({"bot_id": "9"})).linked);
+        assert!(!role(Value::Null).linked);
+        assert!(!serde_json::from_value::<Role>(serde_json::json!({"id": "3"})).unwrap().linked);
     }
 
     #[test]

@@ -719,7 +719,15 @@ mod tests {
     }
 
     fn user(id: u64, name: &str) -> User {
-        User { id: Snowflake(id), username: name.into(), global_name: None, avatar: None, bot: false, system: false }
+        User {
+            id: Snowflake(id),
+            username: name.into(),
+            global_name: None,
+            avatar: None,
+            bot: false,
+            system: false,
+            discriminator: None,
+        }
     }
 
     #[test]

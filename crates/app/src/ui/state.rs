@@ -114,6 +114,9 @@ pub(super) struct State {
     pub(super) fetched_users: std::collections::HashSet<u64>,
     /// Who reacted with what, as far as we know.
     pub(super) reactors: discord::reactions::Reactors,
+    /// The profiles popouts asked for, and our notes on people.
+    pub(super) profiles: discord::profile::Profiles,
+    pub(super) notes: discord::notes::Notes,
     pub(super) read: ReadStates,
     pub(super) notifications: NotificationSettings,
     /// How embeds and media show.
@@ -354,6 +357,22 @@ impl State {
         let roles =
             if self.me() == Some(user) { Some(&guild.my_roles[..]) } else { self.members.roles(guild.id, user) };
         guild.member_colour(roles?)
+    }
+
+    /// The role a profile request names for `user` in `guild` (see
+    /// [`discord::profile::connections_role`]); none for someone whose roles
+    /// we don't know.
+    pub(super) fn connections_role(
+        &self,
+        guild: Snowflake,
+        user: Snowflake,
+        channel: Option<Snowflake>,
+    ) -> Option<Snowflake> {
+        let guild = self.guilds.iter().find(|g| g.id == guild)?;
+        let roles =
+            if self.me() == Some(user) { Some(&guild.my_roles[..]) } else { self.members.roles(guild.id, user) };
+        let channel = channel.and_then(|c| guild.find(c));
+        discord::profile::connections_role(&guild.roles, guild.id, roles?, channel)
     }
 
     /// Whose member list the open channel has, as the client chooses

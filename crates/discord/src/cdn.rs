@@ -20,6 +20,25 @@ pub fn avatar_url(user_id: u64, hash: &str, size: u16) -> String {
     format!("{CDN}/avatars/{user_id}/{hash}.{}?size={size}", ext(hash))
 }
 
+/// A picture someone set for one server.
+pub fn member_avatar_url(guild_id: u64, user_id: u64, hash: &str, size: u16) -> String {
+    format!("{CDN}/guilds/{guild_id}/users/{user_id}/avatars/{hash}.{}?size={size}", ext(hash))
+}
+
+/// A profile banner, still even where animated: the client animates one
+/// only for a pointer on it.
+pub fn banner_url(user_id: u64, hash: &str, size: u16) -> String {
+    format!("{CDN}/banners/{user_id}/{hash}.png?size={size}")
+}
+
+pub fn member_banner_url(guild_id: u64, user_id: u64, hash: &str, size: u16) -> String {
+    format!("{CDN}/guilds/{guild_id}/users/{user_id}/banners/{hash}.png?size={size}")
+}
+
+pub fn badge_icon_url(icon: &str) -> String {
+    format!("{CDN}/badge-icons/{icon}.png")
+}
+
 pub fn guild_icon_url(guild_id: u64, hash: &str, size: u16) -> String {
     format!("{CDN}/icons/{guild_id}/{hash}.{}?size={size}", ext(hash))
 }
@@ -203,6 +222,20 @@ mod tests {
         assert!(avatar_url(5, "a_1234", 64).ends_with("a_1234.gif?size=64"));
         assert!(is_animated("a_1234"));
         assert!(!is_animated("plain"));
+    }
+
+    #[test]
+    fn profile_pictures() {
+        assert_eq!(
+            member_avatar_url(9, 5, "a_x", 64),
+            "https://cdn.discordapp.com/guilds/9/users/5/avatars/a_x.gif?size=64"
+        );
+        assert_eq!(banner_url(5, "a_b", 600), "https://cdn.discordapp.com/banners/5/a_b.png?size=600");
+        assert_eq!(
+            member_banner_url(9, 5, "b", 600),
+            "https://cdn.discordapp.com/guilds/9/users/5/banners/b.png?size=600"
+        );
+        assert_eq!(badge_icon_url("i"), "https://cdn.discordapp.com/badge-icons/i.png");
     }
 
     #[test]

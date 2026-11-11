@@ -343,6 +343,22 @@ changed for unrelated reasons only needs a note in the issue.
   waiting sticker alone, or with Shift puts it in the box (`nd` in 989161,
   anchor `source_object: "GIF Picker"`; `handleSendMessage` in 699344, anchor
   `isGif`).
+- **When a popout asks for a profile, and what** (`profile.rs`,
+  `ui/profile.rs`). The endpoints, the query's field names, `UserProfileStore`
+  and `NoteStore` are watched; their values and when to ask aren't. A mouse
+  press on the target, or Enter or Space, asks (`handlePreload` in 453903;
+  Neucord asks on the click). 342296
+  (anchor `shouldPreload`) asks for mutual servers of anyone but us and mutual
+  friends of neither us nor a bot, and 365958 asks for no count. 917445
+  (anchor `waitForRefetch`) decides: not while asking, not for 60 s after a
+  404 or 429, nothing held asks first, and a profile older than 60 s or short
+  of the mutual servers or friends asked for asks again behind the shown one;
+  a server's profile exists only where the answer had one. `eO` in 803306
+  builds the query: `false` goes out, `undefined` doesn't. `_g` in 370480
+  (anchor `guild_connections`) with 920268 (anchor `GUILD_APP`) picks
+  `connections_role_id`. A note is asked for once a session by 612630 (anchor
+  `USER_NOTE_LOAD_START`) wherever one renders, the popout (243166) and the
+  user menu (497600) included.
 
 ## Notifications and unread state
 
@@ -429,6 +445,13 @@ changed for unrelated reasons only needs a note in the issue.
   (373963) and Copy Link and Open Link (777933) are desktop-only there.
   Neucord leaves out the analytics these send (`MESSAGE_LINK_COPIED`,
   `CONTEXT_MENU_LINK_COPIED`).
+- **The user menu and who has a profile** (`USER` in `ui/menus.rs`,
+  `User::non_user_bot`). Client: 841549 picks the menu by channel, the server
+  variant is 107632 (`user-context`), which keeps its order. A system account
+  or a webhook's author (`isNonUserBot` in 619019) gets only Copy User ID
+  (50268, Developer Mode). Mention (448290) needs Send Messages or a group
+  DM; Message (301541) and Note (497600) aren't for ourselves, and none of
+  the three show on a popout.
 - **The emoji and sticker picker's menu** (`EXPRESSION_PICKER` in
   `ui/menus.rs`). Client: 233503; every item needs Developer Mode, and the
   id is 50268. The sticker link is `zg` in 378058.

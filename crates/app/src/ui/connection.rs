@@ -237,19 +237,23 @@ impl App {
                         self.withdraw_friend_request(relationship.user.id);
                     }
                     let was_blocked = self.state.borrow().relationships.is_blocked(relationship.user.id);
+                    self.state.borrow_mut().profiles.doubt(relationship.user.id);
                     self.state.borrow_mut().relationships.add(relationship);
                     self.relationships_changed(blocked != was_blocked);
                 }
                 Event::RelationshipUpdate { user_id, nickname } => {
+                    self.state.borrow_mut().profiles.doubt(user_id);
                     self.state.borrow_mut().relationships.update(user_id, nickname);
                     self.relationships_changed(false);
                 }
                 Event::RelationshipRemove(user_id) => {
                     self.withdraw_friend_request(user_id);
                     let was_blocked = self.state.borrow().relationships.is_blocked(user_id);
+                    self.state.borrow_mut().profiles.doubt(user_id);
                     self.state.borrow_mut().relationships.remove(user_id);
                     self.relationships_changed(was_blocked);
                 }
+                Event::UserNoteUpdate { user_id, note } => self.on_note(user_id, note),
                 Event::PresenceUpdate { user_id, guild_id, presence } => {
                     self.on_list_presence(guild_id, user_id, &presence);
                     if self.state.borrow_mut().relationships.set_presence(user_id, presence) {
@@ -352,6 +356,7 @@ impl App {
             state.members = members;
             state.private_channels = private_channels;
             state.relationships = relationships;
+            state.notes.clear();
             state.typing.clear();
             state.read = read_states;
             state.guild_folders = guild_folders;

@@ -16,12 +16,13 @@ use crate::gifs::{Gif, Picker, Request, Tile, Tiles};
 use crate::interaction::{Failure, Press};
 use crate::invalid::{Change, InvalidRequests};
 use crate::model::Emoji;
+use crate::profile::{self, Profile};
 use crate::reactions::{Location, Refusal};
 use crate::scheduled::{self, Scheduled};
 use crate::stickers::Pack;
 use crate::threads::{self, ArchivedPage};
 use crate::uploads::Sent;
-use crate::{Channel, Error, Message, Snowflake, identity};
+use crate::{Channel, Error, Message, Snowflake, identity, notes};
 
 /// Error code for accepting a stranger's friend request without confirming.
 pub const STRANGER_NOT_CONFIRMED: u64 = 80013;
@@ -211,6 +212,23 @@ impl Rest {
     /// Look up any user by id, to name a mention whose user we have not seen.
     pub async fn user(&self, id: Snowflake) -> Result<crate::User, Error> {
         self.request(call!(USER, user = id), None).await
+    }
+
+    /// A profile, with the query a popout sends (`eO` in 803306).
+    pub async fn profile(&self, request: &profile::Request) -> Result<Profile, Error> {
+        let call = call!(USER_PROFILE, user = request.user).query(&request.query());
+        let answer: Value = self.request(call, None).await?;
+        Profile::from_value(&answer).ok_or_else(|| Error::Protocol("a profile without a user".into()))
+    }
+
+    /// Our note on `user`, which doesn't exist (a 404) until we write one.
+    pub async fn note(&self, user: Snowflake) -> Result<Option<String>, Error> {
+        let answer: Value = self.request(call!(NOTE, user), None).await?;
+        Ok(notes::from_answer(&answer, user))
+    }
+
+    pub async fn set_note(&self, user: Snowflake, note: &str) -> Result<(), Error> {
+        self.request(call!(SET_NOTE, user), Some(json!({ "note": note }))).await
     }
 
     /// Discord's standard sticker packs, as the client fetches them when the

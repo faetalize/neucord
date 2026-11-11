@@ -16,8 +16,8 @@ use gtk::{gdk, gio, glib};
 use super::App;
 use super::chat::{self, MessageTarget};
 use super::{
-    composer, create_thread, edits, emoji, gifs, picker, poll_composer, polls, reactions, reactors, scheduling,
-    sidebar, stickers, threads, uploads, voice,
+    composer, create_thread, edits, emoji, gifs, picker, poll_composer, polls, profile, reactions, reactors,
+    scheduling, sidebar, stickers, threads, uploads, voice,
 };
 
 /// One entry of a menu, for what it was opened on: a `T`. `C` is what
@@ -126,6 +126,17 @@ pub(super) const THREAD: Table<threads::ThreadTarget> = &[&[threads::JOIN_THREAD
 /// joining and what happens in a call is #12's.
 pub(super) const CHANNEL: Table<sidebar::ChannelTarget> =
     &[&[sidebar::COPY_CHANNEL_LINK], &[sidebar::OPEN_CHAT], &[sidebar::COPY_CHANNEL_ID]];
+
+/// A person's menu, opened from a message's author, a mention and a member
+/// list row: what Neucord has of the official client's (`user-context`,
+/// 841549, the server variant's groups). The client's also has call, voice,
+/// role and moderation items, which Neucord has no surface for, and Add
+/// Friend, Block and Ignore, whose requests Neucord has never sent.
+pub(super) const USER: Table<profile::UserTarget> = &[
+    &[profile::PROFILE, profile::MENTION, profile::MESSAGE, profile::NOTE],
+    &[profile::REMOVE_FRIEND],
+    &[profile::COPY_USER_ID],
+];
 
 /// The attach button's menu, opened from the button: the official client's
 /// (`channel-attach`, 316576) with what Neucord has of it. Upload a File and
