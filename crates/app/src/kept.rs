@@ -2,6 +2,27 @@
 
 use std::collections::VecDeque;
 
+use discord::Message;
+
+/// Something made for a message, and what it was made from: it stands in
+/// for making it again only while all of that is as it was.
+pub struct Made<T> {
+    pub message: Message,
+    /// The `row_epoch` it was made at, which counts changes to everything
+    /// else a message is drawn from: names, settings, colours.
+    pub epoch: u64,
+    pub made: T,
+}
+
+impl<T> Made<T> {
+    /// Whether it is what `message` would be drawn as at `epoch`. A message
+    /// is compared whole, so an edit, a link preview arriving, a vote or
+    /// anything else it carries ends the use of what was made.
+    pub fn fits(&self, message: &Message, epoch: u64) -> bool {
+        self.epoch == epoch && self.message == *message
+    }
+}
+
 /// Holds up to `capacity` values; making room drops the one used longest ago.
 pub struct Kept<K, V> {
     /// Newest first.
@@ -38,6 +59,65 @@ impl<K: PartialEq, V> Kept<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use discord::MessageEdit;
+    use serde_json::{Value, json};
+
+    fn message(extra: Value) -> Message {
+        let mut message = json!({"id": "3", "channel_id": "9", "type": 0, "content": "hi",
+                                 "author": {"id": "5", "username": "a"}, "timestamp": "2026-10-26T00:00:00+00:00"});
+        message.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(message).unwrap()
+    }
+
+    fn poll() -> Value {
+        json!({"poll": {"question": {"text": "q"}, "answers": [{"answer_id": 1, "poll_media": {"text": "a"}}]}})
+    }
+
+    fn made(message: &Message) -> Made<()> {
+        Made { message: message.clone(), epoch: 4, made: () }
+    }
+
+    #[test]
+    fn the_same_message_fits() {
+        let shown = message(poll());
+        assert!(made(&shown).fits(&shown.clone(), 4));
+    }
+
+    #[test]
+    fn a_new_epoch_doesnt_fit() {
+        let shown = message(json!({}));
+        assert!(!made(&shown).fits(&shown, 5));
+    }
+
+    #[test]
+    fn an_edit_doesnt_fit() {
+        let shown = message(json!({}));
+        let kept = made(&shown);
+        let mut edited = shown.clone();
+        MessageEdit { content: Some("hi there".into()), edited: true, ..Default::default() }.apply(&mut edited);
+        assert!(!kept.fits(&edited, 4));
+    }
+
+    #[test]
+    fn a_link_preview_arriving_later_doesnt_fit() {
+        // It comes as an update with only `embeds`.
+        let shown = message(json!({"content": "https://example.com"}));
+        let kept = made(&shown);
+        let embed =
+            serde_json::from_value(json!({"type": "link", "url": "https://example.com", "title": "t"})).unwrap();
+        let mut updated = shown.clone();
+        MessageEdit { embeds: Some(vec![embed]), ..Default::default() }.apply(&mut updated);
+        assert!(!kept.fits(&updated, 4));
+    }
+
+    #[test]
+    fn a_vote_doesnt_fit() {
+        let shown = message(poll());
+        let kept = made(&shown);
+        let mut voted = shown.clone();
+        voted.poll.as_mut().unwrap().vote(1, false, false);
+        assert!(!kept.fits(&voted, 4));
+    }
 
     #[test]
     fn dropping_the_one_used_longest_ago() {

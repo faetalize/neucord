@@ -22,6 +22,7 @@ use super::message_row::{MessageRow, Parts};
 use super::state::{Unread, now_ms, now_unix};
 use super::widgets::avatar_widget;
 use super::{attachments, components, polls};
+use crate::kept::Made;
 use crate::render::{Context, Names, Spoilers};
 use crate::rich_text::RichText;
 use crate::{render, timelines};
@@ -119,12 +120,7 @@ pub(super) const COPY_MESSAGE_ID: Entry<MessageTarget> = Entry::Item(Item {
 pub(super) const KEPT_CONTENT: usize = 128;
 
 /// What a message's row showed, taken out of the row to be put back in one.
-pub(super) struct KeptContent {
-    message: Message,
-    /// The [`App`]'s `row_epoch` it was made at.
-    epoch: u64,
-    widgets: Vec<gtk::Widget>,
-}
+pub(super) type KeptContent = Made<Vec<gtk::Widget>>;
 
 /// Selected text doesn't come back selected.
 fn clear_selections(widgets: &[gtk::Widget]) {
@@ -690,6 +686,11 @@ impl App {
         // The channel we left keeps only its newest messages, which live
         // events keep current. The client keeps the rest to page back in from
         // memory; we ask for it.
+        // Names come from the open server, and a change in another one isn't
+        // counted, so what was kept there can't be trusted on return.
+        if left.is_some() {
+            self.kept_content.borrow_mut().clear();
+        }
         if let Some(left) = left
             && let Some(timeline) = self.timelines.borrow_mut().get_mut(left)
         {
@@ -1296,10 +1297,27 @@ impl App {
 
     /// Record display names for later mention resolution.
     pub(super) fn learn_users<'a>(&self, users: impl Iterator<Item = &'a User>) {
-        let mut state = self.state.borrow_mut();
-        for user in users {
-            state.users.insert(user.id.0, user.display_name().to_string());
+        let mut renamed = false;
+        {
+            let mut state = self.state.borrow_mut();
+            for user in users {
+                let name = user.display_name().to_string();
+                renamed |= state.users.insert(user.id.0, name.clone()).is_some_and(|old| old != name);
+            }
         }
+        // Rows on screen keep the old name until they're filled in again, as
+        // they always have, but content made with it mustn't come back.
+        if renamed {
+            self.drawn_from_changed();
+        }
+    }
+
+    /// What message content is drawn from changed, so none made before is
+    /// good for another message: rows make theirs again when next filled in,
+    /// and what rows kept goes.
+    pub(super) fn drawn_from_changed(&self) {
+        self.row_epoch.set(self.row_epoch.get() + 1);
+        self.kept_content.borrow_mut().clear();
     }
 
     /// For each `<@id>` in `content` we cannot yet name, fetch the user once and
@@ -1335,8 +1353,7 @@ impl App {
     /// Fill every row in again so newly resolved names appear, making their
     /// content again too, which [`Self::rebind`] alone leaves as it was.
     pub(super) fn refresh_rows(self: &Rc<Self>) {
-        self.row_epoch.set(self.row_epoch.get() + 1);
-        self.kept_content.borrow_mut().clear();
+        self.drawn_from_changed();
         let messages = self.messages();
         self.rebind(&messages, 0, messages.n_items());
     }
@@ -1648,12 +1665,11 @@ impl App {
         // message would be drawn as.
         if let Some((old, at)) = old.filter(|(_, at)| *at == epoch) {
             clear_selections(&widgets);
-            self.kept_content.borrow_mut().put(old.id, KeptContent { message: old, epoch: at, widgets });
+            self.kept_content.borrow_mut().put(old.id, Made { message: old, epoch: at, made: widgets });
         }
-        let kept =
-            self.kept_content.borrow_mut().take(&message.id, |kept| kept.epoch == epoch && kept.message == *message);
+        let kept = self.kept_content.borrow_mut().take(&message.id, |kept| kept.fits(message, epoch));
         if let Some(kept) = kept {
-            for widget in &kept.widgets {
+            for widget in &kept.made {
                 content.append(widget);
             }
         } else if let Some(system) = system {
