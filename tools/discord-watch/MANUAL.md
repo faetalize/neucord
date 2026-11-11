@@ -272,6 +272,18 @@ changed for unrelated reasons only needs a note in the issue.
   500 ms on a reaction (`eM` in 30492) and 100 a page in the list (112753,
   anchor `loadMore`). `+:name:` is `reaction` in 751258 (anchor
   `hasPresent`), which sends no message.
+- **When the GIF picker asks Discord, and what a pick sends** (`gifs.rs`,
+  `ui/gifs.rs`). The endpoints, their query fields and the format asked for
+  (`GIFPickerViewStore`) are watched. The rest is in 497685 (anchor
+  `GIF_PICKER_QUERY_SUCCESS`) and 649529 (anchor `backToFrontPage`): the front
+  page is fetched when it has no tiles (`k8`); a search waits 250 ms after
+  typing (`$P`), a category or suggestion doesn't; the trending tile is `Z4`;
+  suggestions are asked once for each query the results show, when they scroll
+  to within 1180 px of their end (`handleScroll` in 884037). A pick sends the
+  link as the message at once, with a reply, leaving the box, its files and a
+  waiting sticker alone, or with Shift puts it in the box (`nd` in 989161,
+  anchor `source_object: "GIF Picker"`; `handleSendMessage` in 699344, anchor
+  `isGif`).
 
 ## Notifications and unread state
 
@@ -350,6 +362,9 @@ changed for unrelated reasons only needs a note in the issue.
 - **The emoji and sticker picker's menu** (`EXPRESSION_PICKER` in
   `ui/menus.rs`). Client: 233503; every item needs Developer Mode, and the
   id is 50268. The sticker link is `zg` in 378058.
+- **The GIF picker's menu** (`GIF_PICKER` in `ui/menus.rs`). Client: 400017
+  (anchor `gif-picker-copy-link`), Copy Link, opened by `handleContextMenu`
+  in 884037 from a result and not from a category tile.
 - **Poll vote counts and shares** (`poll.rs`). Client: 432005 and 969632
   count the votes, and 951727 works out shares, the leader and when counts
   show.

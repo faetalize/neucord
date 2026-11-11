@@ -51,6 +51,29 @@ pub fn proxy_sized(url: &str, width: u32, height: u32) -> String {
     with_params(url, &[("width", &width.to_string()), ("height", &height.to_string())])
 }
 
+/// An image of Discord's media proxy asked to stay animated, as the GIF
+/// picker's previews are (`F` in 884037): a WebP or AVIF of the proxy's
+/// `/external/` or of an attachment says `animated=true`, and a GIF there
+/// is asked for as an animated WebP. Any other URL comes back unchanged.
+pub fn animated(url: &str) -> String {
+    let Some(parsed) = parse(url) else { return url.to_owned() };
+    let proxy = parsed.host.starts_with("images-ext-") && parsed.host.ends_with(".discordapp.net");
+    let external = proxy && parsed.path.starts_with("/external/");
+    let attachment = is_cdn_host(&parsed.host)
+        && ["/attachments/", "/ephemeral-attachments/"].iter().any(|prefix| parsed.path.starts_with(prefix));
+    let path = parsed.path.to_ascii_lowercase();
+    if !(external || attachment) {
+        return url.to_owned();
+    }
+    if path.ends_with(".webp") || path.ends_with(".avif") {
+        with_params(url, &[("animated", "true")])
+    } else if path.ends_with(".gif") {
+        with_params(url, &[("format", "webp"), ("animated", "true")])
+    } else {
+        url.to_owned()
+    }
+}
+
 /// Set query parameters on a URL, replacing any it already has by those names.
 pub fn with_params(url: &str, set: &[(&str, &str)]) -> String {
     let (base, query) = url.split_once('?').unwrap_or((url, ""));
@@ -150,6 +173,25 @@ pub fn links_expired(message: &crate::Message, now_ms: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn previews_of_the_media_proxy_are_asked_to_animate() {
+        let external = "https://images-ext-1.discordapp.net/external/x/https/example.test/a";
+        assert_eq!(animated(&format!("{external}.webp")), format!("{external}.webp?animated=true"));
+        assert_eq!(animated(&format!("{external}.gif?a=b")), format!("{external}.gif?a=b&format=webp&animated=true"));
+        let attachment = "https://cdn.discordapp.com/attachments/1/2/a.avif?ex=1";
+        assert_eq!(animated(attachment), format!("{attachment}&animated=true"));
+        // Neither a still, nor another host, nor another path of the proxy.
+        assert_eq!(
+            animated("https://images-ext-1.discordapp.net/external/x/a.png"),
+            "https://images-ext-1.discordapp.net/external/x/a.png"
+        );
+        assert_eq!(animated("https://static.example.test/a.webp"), "https://static.example.test/a.webp");
+        assert_eq!(
+            animated("https://cdn.discordapp.com/avatars/1/a.webp"),
+            "https://cdn.discordapp.com/avatars/1/a.webp"
+        );
+    }
 
     #[test]
     fn static_avatar() {

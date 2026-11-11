@@ -144,7 +144,9 @@ impl App {
         self.build_edit_bar(area);
         self.build_attach(area);
         self.build_stickers(area);
+        self.build_gifs();
         self.composer_box.append(&self.composer);
+        self.composer_box.append(&self.gif_button);
         self.composer_box.append(&self.sticker_button);
         self.composer_box.append(&self.emoji_button);
         self.composer_box.append(&self.length.root);
@@ -594,7 +596,7 @@ impl App {
     }
 
     /// Milliseconds before we may post in `channel` again.
-    fn slowmode_left(&self, channel: Snowflake) -> i64 {
+    pub(super) fn slowmode_left(&self, channel: Snowflake) -> i64 {
         let state = self.state.borrow();
         state.find_channel(channel).map_or(0, |(_, c)| state.slowmode.remaining_ms(c, now_ms()))
     }
@@ -713,32 +715,9 @@ impl App {
                 .send_with_uploads(&rest, channel, &text, reply, files, waiting.as_ref().map(|w| w.sticker.id))
                 .await
             {
-                Ok(_) => {
-                    this.record_slowmode(channel, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
-                    // The client shows every message again on success, which ends what we typed meanwhile.
-                    this.typing_message_sent(channel);
-                    // Sending from an old stretch of history returns to the present.
-                    if this.timelines.borrow().get(channel).is_some_and(|t| t.detached) {
-                        this.load_newest(channel);
-                    }
-                }
+                Ok(_) => this.message_sent(channel),
                 Err(stopped) => {
-                    match &stopped {
-                        Stopped::Send(e) if e.slowmode_wait().is_some() => {
-                            let wait = e.slowmode_wait().unwrap_or_default();
-                            this.record_slowmode(channel, |slowmode, c, _| slowmode.refused(c, wait, now_ms()));
-                            this.show_composer_error("Not sent: slowmode is enabled in this channel.");
-                        }
-                        Stopped::Send(e) => {
-                            this.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c));
-                            this.show_composer_error(&format!("Not sent: {e}"));
-                        }
-                        Stopped::Upload(why) => {
-                            this.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c));
-                            this.show_composer_error(&format!("Not sent: {why}"));
-                        }
-                        Stopped::Canceled => this.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c)),
-                    }
+                    this.message_stopped(channel, &stopped);
                     let buffer = this.composer.buffer();
                     if buffer.char_count() == 0 && this.reply.borrow().is_none() {
                         if this.waiting.of(channel).is_none() {
@@ -753,6 +732,40 @@ impl App {
                 }
             }
         });
+    }
+}
+
+impl App {
+    /// What follows a message that went out.
+    pub(super) fn message_sent(self: &Rc<Self>, channel: Snowflake) {
+        self.record_slowmode(channel, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
+        // The client shows every message again on success, which ends what we typed meanwhile.
+        self.typing_message_sent(channel);
+        // Sending from an old stretch of history returns to the present.
+        if self.timelines.borrow().get(channel).is_some_and(|t| t.detached) {
+            self.load_newest(channel);
+        }
+    }
+
+    /// What follows a message that didn't: slowmode as Discord says it is,
+    /// and the reason.
+    pub(super) fn message_stopped(self: &Rc<Self>, channel: Snowflake, stopped: &Stopped) {
+        match stopped {
+            Stopped::Send(e) if e.slowmode_wait().is_some() => {
+                let wait = e.slowmode_wait().unwrap_or_default();
+                self.record_slowmode(channel, |slowmode, c, _| slowmode.refused(c, wait, now_ms()));
+                self.show_composer_error("Not sent: slowmode is enabled in this channel.");
+            }
+            Stopped::Send(e) => {
+                self.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c));
+                self.show_composer_error(&format!("Not sent: {e}"));
+            }
+            Stopped::Upload(why) => {
+                self.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c));
+                self.show_composer_error(&format!("Not sent: {why}"));
+            }
+            Stopped::Canceled => self.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c)),
+        }
     }
 }
 

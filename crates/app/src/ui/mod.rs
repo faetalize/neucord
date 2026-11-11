@@ -12,6 +12,7 @@ mod edits;
 mod embeds;
 mod emoji;
 mod friends;
+mod gifs;
 mod login;
 mod media_frame;
 mod members;
@@ -89,6 +90,8 @@ pub struct App {
     composer_box: gtk::Box,
     /// Opens the emoji picker.
     emoji_button: gtk::Button,
+    /// Opens the GIF picker.
+    gif_button: gtk::Button,
     /// Opens the sticker picker, and the sticker waiting for the message.
     sticker_button: gtk::Button,
     waiting: stickers::Waiting,
@@ -243,6 +246,12 @@ impl App {
                 .tooltip_text("Emoji")
                 .valign(gtk::Align::Center)
                 .css_classes(["flat", "circular"])
+                .build(),
+            gif_button: gtk::Button::builder()
+                .label("GIF")
+                .tooltip_text("Find a GIF")
+                .valign(gtk::Align::Center)
+                .css_classes(["flat"])
                 .build(),
             sticker_button: gtk::Button::builder()
                 .icon_name("image-x-generic-symbolic")

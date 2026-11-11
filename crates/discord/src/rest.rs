@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use soup::prelude::*;
 
 use crate::endpoints::{Call, call};
+use crate::gifs::{Gif, Picker, Request, Tile, Tiles};
 use crate::invalid::{Change, InvalidRequests};
 use crate::model::Emoji;
 use crate::reactions::{Location, Refusal};
@@ -212,6 +213,31 @@ impl Rest {
         let call = call!(STICKER_PACKS).query(&format!("locale={}", identity::LOCALE));
         let answer: Value = self.request(call, None).await?;
         Ok(Pack::list(&answer))
+    }
+
+    /// What the GIF picker asks Discord for (never the provider), as the
+    /// client does when [`crate::gifs::Picker`] says. The queries are
+    /// [`Request::query`]'s.
+    pub async fn gif_tiles(&self) -> Result<Vec<Tile>, Error> {
+        let answer: Value = self.request(call!(GIFS_TRENDING).query(&Request::Trending.query()), None).await?;
+        Ok(Tiles::parse(&answer))
+    }
+
+    pub async fn gifs_trending(&self) -> Result<Vec<Gif>, Error> {
+        let answer: Value = self.request(call!(GIFS_TRENDING_GIFS).query(&Request::TrendingGifs.query()), None).await?;
+        Ok(Gif::list(&answer))
+    }
+
+    pub async fn gifs_search(&self, query: &str) -> Result<Vec<Gif>, Error> {
+        let answer: Value =
+            self.request(call!(GIFS_SEARCH).query(&Request::Search(query.to_owned()).query()), None).await?;
+        Ok(Gif::list(&answer))
+    }
+
+    pub async fn gifs_suggest(&self, query: &str) -> Result<Vec<String>, Error> {
+        let answer: Value =
+            self.request(call!(GIFS_SUGGEST).query(&Request::Suggest(query.to_owned()).query()), None).await?;
+        Ok(Picker::parse_suggestions(&answer))
     }
 
     /// Post `content`, the uploaded `attachments` and a `sticker`, which
