@@ -56,6 +56,7 @@ use adw::prelude::*;
 use discord::{Snowflake, session};
 use gtk::{gio, glib, pango};
 
+use crate::config::{self, Store};
 use crate::images::Images;
 use crate::render;
 use crate::timelines::Timelines;
@@ -200,6 +201,10 @@ pub struct App {
     /// When scrolling loads another page.
     scroll_loader: RefCell<discord::history::ScrollLoader>,
     state: RefCell<state::State>,
+    /// Neucord's own options, which the settings window sets.
+    config: Store,
+    /// What Neucord remembers between runs.
+    remembered: Store,
     /// The settings window, while it's open.
     settings_window: RefCell<Option<settings::Window>>,
     /// The member list pane, in the right pane of the chat.
@@ -389,6 +394,8 @@ impl App {
             rows: RefCell::default(),
             scroll_loader: RefCell::default(),
             state: RefCell::default(),
+            config: Store::open(config::config_path()),
+            remembered: Store::open(config::state_path()),
             settings_window: RefCell::default(),
             members: members::Pane::new(),
             drawn: RefCell::default(),
@@ -404,6 +411,7 @@ impl App {
             &this.folder_css,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+        *this.state.borrow_mut() = this.fresh_state();
         this.build();
 
         // Images from the media proxy are requested at the pixels shown.
