@@ -162,10 +162,9 @@ fn durations() -> Vec<Choice> {
         .collect()
 }
 
-fn mute_for(now: i64, value: &str) -> Option<Value> {
+fn mute_for(value: &str) -> Option<Value> {
     let seconds = value.parse().ok()?;
-    let at = glib::DateTime::from_unix_utc(now).ok()?;
-    Some(notification_edit::mute(seconds, &at))
+    Some(notification_edit::mute(seconds, &glib::DateTime::now_utc().ok()?))
 }
 
 /// Mark As Read on a channel, a category, a DM: shown with something to read
@@ -205,7 +204,7 @@ macro_rules! mute_items {
                 choices: |_, _| durations(),
                 style: Style::Plain,
                 choose: |app, target, value, _| {
-                    if let Some(settings) = mute_for(now_unix(), value) {
+                    if let Some(settings) = mute_for(value) {
                         app.save_channel_settings(target.0, settings);
                     }
                 },
@@ -297,7 +296,7 @@ pub(super) const MUTE_GUILD: Entry<GuildTarget> = Entry::Item(Item {
         choices: |_, _| durations(),
         style: Style::Plain,
         choose: |app, target, value, _| {
-            if let Some(settings) = mute_for(now_unix(), value) {
+            if let Some(settings) = mute_for(value) {
                 app.save_notification_settings(Some(target.0), settings);
             }
         },

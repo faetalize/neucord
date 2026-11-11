@@ -36,7 +36,7 @@ pub(crate) const TYPING: Endpoint = Endpoint::post("/channels/{channel}/typing")
 pub(crate) const ACK: Endpoint = Endpoint::post("/channels/{channel}/messages/{message}/ack");
 pub(crate) const ACK_BULK: Endpoint = Endpoint::post("/read-states/ack-bulk");
 pub(crate) const SAVE_GUILD_SETTINGS_BULK: Endpoint = Endpoint::patch("/users/@me/guilds/settings");
-pub(crate) const SAVE_GUILD_SETTINGS: Endpoint = Endpoint::patch("/users/@me/guilds/{guild}/settings");
+pub(crate) const SAVE_GUILD_SETTINGS: Endpoint = Endpoint::patch("/users/@me/guilds/{+guild}/settings");
 pub(crate) const CREATE_THREAD: Endpoint = Endpoint::post("/channels/{channel}/threads");
 #[rustfmt::skip]
 pub(crate) const CREATE_THREAD_FROM_MESSAGE: Endpoint = Endpoint::post("/channels/{channel}/messages/{message}/threads");
@@ -212,6 +212,13 @@ mod tests {
         let (vote, end) = (call!(VOTE, channel, message = 4), call!(END_POLL, channel, message = 4));
         assert_eq!((vote.method(), vote.path()), ("PUT", "/channels/1/polls/4/answers/@me"));
         assert_eq!((end.method(), end.path()), ("POST", "/channels/1/polls/4/expire"));
+    }
+
+    #[test]
+    fn the_dms_settings_are_at_at_me() {
+        // The client's path (931260) has `@me` in it as it is, not as `%40me`.
+        let call = call!(SAVE_GUILD_SETTINGS, guild = "@me");
+        assert_eq!((call.method(), call.path()), ("PATCH", "/users/@me/guilds/@me/settings"));
     }
 
     #[test]
