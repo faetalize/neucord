@@ -402,9 +402,10 @@ impl App {
         self.login.stop_qr();
         let session = self.login.session.get();
         self.login.qr.set_visible_child_name("waiting");
+        let solver = super::captcha::solver(&self.window);
         let this = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let result = RemoteAuth::connect().await;
+            let result = RemoteAuth::connect(solver).await;
             let current = || this.upgrade().filter(|this| this.login.session.get() == session);
             let Some(app) = current() else { return };
             let events = match result {

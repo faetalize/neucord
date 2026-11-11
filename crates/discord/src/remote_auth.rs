@@ -23,6 +23,7 @@ use openssl::rsa::{Padding, Rsa};
 use serde_json::{Value, json};
 use soup::prelude::*;
 
+use crate::rest::CaptchaSolver;
 use crate::{Error, Rest, User, identity};
 
 const URL: &str = "wss://remote-auth-gateway.discord.gg/?v=2";
@@ -61,6 +62,8 @@ impl Drop for RemoteAuth {
 
 struct State {
     keys: Keys,
+    /// Exchanges the ticket for the token.
+    rest: Rest,
     /// A ticket arrived or the phone declined; how the connection then
     /// closes no longer matters.
     settled: Cell<bool>,
@@ -77,7 +80,9 @@ impl State {
 }
 
 impl RemoteAuth {
-    pub async fn connect() -> Result<(RemoteAuth, async_channel::Receiver<Event>), Error> {
+    /// `solver` answers a captcha Discord asks for when the ticket is
+    /// exchanged, as the client's `interceptResponse` does for any request.
+    pub async fn connect(solver: CaptchaSolver) -> Result<(RemoteAuth, async_channel::Receiver<Event>), Error> {
         let keys = gio::spawn_blocking(Keys::generate).await.expect("key generation does not panic")?;
         let session = soup::Session::new();
         session.set_user_agent(&identity::user_agent());
@@ -88,7 +93,8 @@ impl RemoteAuth {
             .map_err(Error::Transport)?;
 
         let (tx, rx) = async_channel::unbounded();
-        let state = Rc::new(State { keys, settled: Cell::new(false), acked: Cell::new(true), events: tx });
+        let rest = Rest::anonymous().solving_captchas(solver);
+        let state = Rc::new(State { keys, rest, settled: Cell::new(false), acked: Cell::new(true), events: tx });
         conn.connect_message({
             let state = state.clone();
             move |conn, kind, bytes| {
@@ -137,7 +143,8 @@ fn act(conn: &soup::WebsocketConnection, state: &Rc<State>, step: Step) {
             state.settled.set(true);
             let state = state.clone();
             glib::spawn_future_local(async move {
-                let token = Rest::anonymous()
+                let token = state
+                    .rest
                     .remote_auth_login(&ticket)
                     .await
                     .and_then(|encrypted| state.keys.decrypt(&encrypted))
