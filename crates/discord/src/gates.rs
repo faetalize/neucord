@@ -18,6 +18,10 @@ fn is_adult(status: u64) -> bool {
 /// `MESSAGE_REQUEST_RESTRICTIONS` among the settings a region sets for teens
 /// by default (923457).
 const TEEN_MESSAGE_REQUESTS: u64 = 4;
+/// `GUILD_ACTIVITY_STATUS` among them: activity is shared in large servers
+/// until the account chooses (923457). The client asks only the region, not
+/// the account's age (`isSettingTeenByDefault`, 454409).
+const TEEN_ACTIVITY_STATUS: u64 = 8;
 /// `DM_PRIVACY_SETTINGS` among the features a region age-gates (687123).
 const AGE_GATED_DM_PRIVACY: u64 = 4;
 
@@ -33,6 +37,9 @@ pub struct Gates {
     /// (`953298`): the client then opens its verification flow, which Neucord
     /// has none of.
     pub message_requests_age_gated: bool,
+    /// Where an account that never chose shares its activity: large servers,
+    /// not none.
+    pub activity_status_by_default: bool,
 }
 
 impl Gates {
@@ -48,6 +55,7 @@ impl Gates {
             parent_linked,
             message_requests_forced: is_teen(age) && teen_defaults & TEEN_MESSAGE_REQUESTS != 0,
             message_requests_age_gated: !is_adult(age) && age_gated & AGE_GATED_DM_PRIVACY != 0,
+            activity_status_by_default: teen_defaults & TEEN_ACTIVITY_STATUS != 0,
         }
     }
 }
@@ -62,6 +70,17 @@ mod tests {
     fn a_plain_account_has_no_gates() {
         assert_eq!(Gates::from_ready(&json!({"user": {}})), Gates::default());
         assert_eq!(Gates::from_ready(&Value::Null), Gates::default());
+    }
+
+    #[test]
+    fn activity_is_shared_in_large_servers_by_default_where_the_region_says_whatever_the_age() {
+        let ready = |age, teen| {
+            json!({"user": {"age_verification_status": age},
+                                       "regional_feature_config": {"teen_by_default_settings": teen}})
+        };
+        assert!(Gates::from_ready(&ready(3, 8)).activity_status_by_default, "an adult too");
+        assert!(Gates::from_ready(&ready(2, 12)).activity_status_by_default);
+        assert!(!Gates::from_ready(&ready(2, 4)).activity_status_by_default);
     }
 
     #[test]

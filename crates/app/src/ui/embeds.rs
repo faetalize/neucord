@@ -10,6 +10,7 @@ use discord::settings::MediaSettings;
 use gtk::prelude::*;
 use gtk::{glib, pango};
 
+use super::favorites::Stars;
 use super::media_frame::MediaFrame;
 use super::video::{Options, Player};
 use super::viewer::MediaCx;
@@ -35,39 +36,41 @@ pub(super) fn embed_widget(
     names: &Names,
     images: Option<&Images>,
     settings: &MediaSettings,
+    stars: &Stars,
     view: &MediaCx,
 ) -> gtk::Widget {
     let show_media = settings.inline_embed_media && images.is_some();
     match (embed.display(show_media), images) {
-        (Display::Bare(media), Some(images)) => large(&media, embed, n, images, view),
-        (Display::Card { media, thumbnail }, images) => card(embed, n, names, images, media, thumbnail, view),
+        (Display::Bare(media), Some(images)) => large(&media, embed, n, images, stars, view),
+        (Display::Card { media, thumbnail }, images) => card(embed, n, names, images, media, thumbnail, stars, view),
         // `display` only offers media when told it may show it.
-        (Display::Bare(_), None) => card(embed, n, names, None, None, None, view),
+        (Display::Bare(_), None) => card(embed, n, names, None, None, None, stars, view),
     }
 }
 
-/// Large media, bare or inside a card, of the embed at place `n`.
-fn large(media: &Large, embed: &Embed, n: usize, images: &Images, view: &MediaCx) -> gtk::Widget {
+/// Large media, bare or inside a card, of the embed at place `n`. A GIF that
+/// animates has a star.
+fn large(media: &Large, embed: &Embed, n: usize, images: &Images, stars: &Stars, view: &MediaCx) -> gtk::Widget {
     match media {
         Large::Image(media) => {
             let frame = image(media, images, MAX_W, MAX_H);
             view.link(&frame, view.embedded(n, 0));
-            frame.upcast()
+            stars.over(&frame, media.star.as_ref())
         }
-        Large::Gallery(media) => gallery(media, n, images, view),
-        Large::Gifv { video, still } => gifv(video, still, images),
+        Large::Gallery(media) => gallery(media, n, images, stars, view),
+        Large::Gifv { video, still } => stars.over(&gifv(video, still, images), video.star.as_ref()),
         Large::Video { video: Some(video), still } => self::video(video, still, images, view.embedded(n, 0), view),
         Large::Video { video: None, still } => page_video(still, embed.url.as_deref(), images),
     }
 }
 
 /// Images gathered from embeds sharing a URL, two to a row.
-fn gallery(media: &[Media], n: usize, images: &Images, view: &MediaCx) -> gtk::Widget {
+fn gallery(media: &[Media], n: usize, images: &Images, stars: &Stars, view: &MediaCx) -> gtk::Widget {
     let grid = gtk::Grid::builder().column_spacing(4).row_spacing(4).halign(gtk::Align::Start).build();
     for (i, media) in media.iter().enumerate() {
         let picture = image(media, images, MAX_W / 2.0 - 2.0, MAX_H / 2.0 - 2.0);
         view.link(&picture, view.embedded(n, i));
-        grid.attach(&picture, i as i32 % 2, i as i32 / 2, 1, 1);
+        grid.attach(&stars.over(&picture, media.star.as_ref()), i as i32 % 2, i as i32 / 2, 1, 1);
     }
     grid.upcast()
 }
@@ -257,6 +260,7 @@ pub(super) fn behind_spoiler(reveal: impl Fn() -> gtk::Widget + 'static) -> gtk:
 
 /// A card: colour bar, then provider, author, title, description, fields,
 /// media and footer, with the thumbnail to the right of the text.
+#[expect(clippy::too_many_arguments, reason = "what the media of the embed's place needs, the star's and the viewer's")]
 fn card(
     embed: &Embed,
     n: usize,
@@ -264,6 +268,7 @@ fn card(
     images: Option<&Images>,
     media: Option<Large>,
     thumbnail: Option<Media>,
+    stars: &Stars,
     view: &MediaCx,
 ) -> gtk::Widget {
     let card =
@@ -307,7 +312,7 @@ fn card(
     body.append(&top);
 
     if let (Some(media), Some(images)) = (media, images) {
-        body.append(&large(&media, embed, n, images, view));
+        body.append(&large(&media, embed, n, images, stars, view));
     }
 
     let footer_text = embed.footer.as_ref().map(|f| f.text.as_str()).filter(|t| !t.is_empty());

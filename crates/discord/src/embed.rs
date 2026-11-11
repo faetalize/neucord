@@ -13,6 +13,8 @@
 use serde::{Deserialize, Deserializer};
 
 use crate::Message;
+use crate::frecency::GifFormat;
+use crate::gifs::Starred;
 use crate::markup::{Span, Style};
 use crate::settings::MediaSettings;
 
@@ -171,10 +173,12 @@ pub struct Media {
     pub height: u32,
     /// An animated image (a GIF, not a GIF link's video).
     pub animated: bool,
+    /// What the star on it favourites, where the client puts one.
+    pub star: Option<Starred>,
 }
 
 /// Embed media and attachment flag: an animated image.
-const IS_ANIMATED: u64 = 1 << 5;
+pub(crate) const IS_ANIMATED: u64 = 1 << 5;
 
 /// Whether an image animates, by the official client's rule: a `.gif`
 /// original, or a WebP or AVIF one flagged as animated.
@@ -194,7 +198,25 @@ impl EmbedMedia {
         let url = self.proxy_url.clone().filter(|u| !u.is_empty())?;
         let original = self.url.as_deref().filter(|u| !u.is_empty()).unwrap_or(&url);
         let animated = looks_animated(original, self.flags);
-        Some(Media { original: original.to_owned(), url, width, height, animated })
+        Some(Media { original: original.to_owned(), url, width, height, animated, star: None })
+    }
+
+    /// An image of a gallery. The client gives each its own star (`e_`,
+    /// 265705) when it animates: itself, with no video or provider to go by.
+    fn gallery_item(&self) -> Option<Media> {
+        let mut item = self.proxied()?;
+        if item.animated {
+            let link = [self.url.as_deref(), self.proxy_url.as_deref()].into_iter().flatten().find(|u| !u.is_empty());
+            item.star = Some(Starred {
+                url: link.unwrap_or_default().to_owned(),
+                src: item.url.clone(),
+                gif_src: None,
+                width: item.width,
+                height: item.height,
+                format: GifFormat::Image,
+            });
+        }
+        Some(item)
     }
 }
 
@@ -242,12 +264,13 @@ impl Embed {
         let mut shaped = Shaped::default();
         // Image and article links carry their picture as a thumbnail, but
         // show it large.
-        match self.kind {
-            EmbedKind::Article | EmbedKind::Image => shaped.image = proxied(&self.thumbnail),
-            _ => shaped.thumbnail = proxied(&self.thumbnail),
-        }
-        if let Some(image) = proxied(&self.image) {
-            shaped.image = Some(image);
+        let large = self.image.as_ref().filter(|m| m.proxied().is_some()).or(match self.kind {
+            EmbedKind::Article | EmbedKind::Image => self.thumbnail.as_ref().filter(|m| m.proxied().is_some()),
+            _ => None,
+        });
+        shaped.image = large.and_then(EmbedMedia::proxied);
+        if !matches!(self.kind, EmbedKind::Article | EmbedKind::Image) {
+            shaped.thumbnail = proxied(&self.thumbnail);
         }
         if let Some(video) = &self.video
             && let Some((width, height)) = video.sized()
@@ -259,24 +282,20 @@ impl Embed {
                 && let Some(file) = &file
             {
                 let still = crate::cdn::with_params(file, &[("format", "png")]);
-                shaped.thumbnail = Some(Media { original: still.clone(), url: still, width, height, animated: false });
+                shaped.thumbnail =
+                    Some(Media { original: still.clone(), url: still, width, height, animated: false, star: None });
             }
             let shown = file.is_some() || video.url.as_deref().is_some_and(|u| u.starts_with("https:"));
             if shaped.thumbnail.is_some() && shown {
                 shaped.video = Some(file.map(|url| {
                     let original = video.url.clone().filter(|u| !u.is_empty()).unwrap_or_else(|| url.clone());
-                    Media { original, url, width, height, animated: false }
+                    Media { original, url, width, height, animated: false, star: None }
                 }));
             }
         }
         if !self.gallery.is_empty() {
-            shaped.gallery = shaped
-                .image
-                .iter()
-                .cloned()
-                .chain(self.gallery.iter().filter_map(EmbedMedia::proxied))
-                .take(4)
-                .collect();
+            shaped.gallery =
+                large.into_iter().chain(&self.gallery).filter_map(EmbedMedia::gallery_item).take(4).collect();
         }
         shaped
     }
@@ -311,6 +330,56 @@ impl Embed {
         (image, video)
     }
 
+    /// What the star on the embed's picture or GIF link favourites: the inputs
+    /// `cP` (679636) gives `b` (343552). The picture is the image or else the
+    /// video, through the proxy where there is one. A GIF link is filed
+    /// under its page, another embed under its image's or video's own link.
+    /// Klipy's still-animated file is its thumbnail. A video makes it a
+    /// video.
+    pub fn star(&self) -> Option<Starred> {
+        let (image, video) = self.client_media();
+        let shown = image.or(video)?;
+        let (width, height) = shown.sized()?;
+        let proxy = shown.proxy_url.as_deref().filter(|u| !u.is_empty());
+        let src = proxy.or(shown.url.as_deref())?.to_owned();
+        let page = match self.kind {
+            EmbedKind::Gifv => self.url.as_deref(),
+            _ => image.and_then(|i| i.url.as_deref()).or(video.and_then(|v| v.url.as_deref())),
+        };
+        let url = [page, proxy, shown.url.as_deref()].into_iter().flatten().find(|u| !u.is_empty())?.to_owned();
+        let klipy = self.provider.as_ref().and_then(|p| p.name.as_deref()) == Some("Klipy");
+        Some(Starred {
+            url,
+            src,
+            gif_src: if klipy { self.client_thumbnail() } else { None },
+            width,
+            height,
+            format: if video.is_some() { GifFormat::Video } else { GifFormat::Image },
+        })
+    }
+
+    /// The thumbnail as the client keeps it (`fK`, 659674): the embed's own,
+    /// except for an image or article, which show it large; or, where there is
+    /// none, a still of the video's file as WebP. Its proxied link, else its own.
+    fn client_thumbnail(&self) -> Option<String> {
+        let own = match self.kind {
+            EmbedKind::Article | EmbedKind::Image => None,
+            _ => self.thumbnail.as_ref().filter(|media| media.sized().is_some()),
+        };
+        if let Some(own) = own {
+            return own.proxy_url.clone().or_else(|| own.url.clone());
+        }
+        let file = self.video.as_ref().filter(|video| video.sized().is_some())?.proxy_url.as_deref()?;
+        Some(crate::cdn::with_params(file, &[("format", "webp")]))
+    }
+
+    /// `media` with the star the client puts on an animated picture of the
+    /// embed, from the embed rather than the picture.
+    fn starred(&self, media: Media) -> Media {
+        let star = if media.animated { self.star() } else { None };
+        Media { star, ..media }
+    }
+
     /// How to show this embed. With `show_media` off (the viewer's
     /// `inline_embed_media`), every embed is a card without media.
     pub fn display(&self, show_media: bool) -> Display {
@@ -324,12 +393,14 @@ impl Embed {
         let media = match (self.kind, shaped.video.clone(), shaped.thumbnail.clone()) {
             // A GIF link plays only with both its page URL and a still.
             (EmbedKind::Gifv, Some(Some(video)), Some(still)) if self.url.is_some() => {
-                Some(Large::Gifv { video, still })
+                Some(Large::Gifv { video: Media { star: self.star(), ..video }, still })
             }
-            (EmbedKind::Gifv, _, still) => shaped.image.clone().or(still).map(Large::Image),
+            (EmbedKind::Gifv, _, still) => {
+                shaped.image.clone().map(|image| self.starred(image)).or(still).map(Large::Image)
+            }
             (_, Some(video), Some(still)) => Some(Large::Video { video, still }),
             _ if shaped.gallery.len() > 1 => Some(Large::Gallery(shaped.gallery.clone())),
-            _ => shaped.image.clone().map(Large::Image),
+            _ => shaped.image.clone().map(|image| self.starred(image)).map(Large::Image),
         };
         if bare && let Some(media) = media {
             return Display::Bare(media);
@@ -495,7 +566,7 @@ mod tests {
     }
 
     fn media(url: &str, width: u32, height: u32) -> Media {
-        Media { url: url.into(), original: url.into(), width, height, animated: false }
+        Media { url: url.into(), original: url.into(), width, height, animated: false, star: None }
     }
 
     /// Media proxied from `original`.
@@ -514,17 +585,99 @@ mod tests {
         }))
     }
 
+    fn starred(url: &str, src: &str, gif_src: Option<&str>, format: GifFormat) -> Option<Starred> {
+        Some(Starred {
+            url: url.into(),
+            src: src.into(),
+            gif_src: gif_src.map(Into::into),
+            width: 498,
+            height: 280,
+            format,
+        })
+    }
+
     #[test]
     fn gif_link_plays_the_proxied_video() {
+        let star =
+            starred("https://tenor.com/view/x", "https://images-ext-1.discordapp.net/x.mp4", None, GifFormat::Video);
         assert_eq!(
             tenor().display(true),
             Display::Bare(Large::Gifv {
-                video: proxied("https://images-ext-1.discordapp.net/x.mp4", "https://media.tenor.com/x.mp4", 498, 280),
+                video: Media {
+                    star,
+                    ..proxied("https://images-ext-1.discordapp.net/x.mp4", "https://media.tenor.com/x.mp4", 498, 280)
+                },
                 still: proxied("https://images-ext-1.discordapp.net/x.png", "https://media.tenor.com/x.png", 498, 280),
             })
         );
         // Without media it's a card, and there's nothing to stand in for the link.
         assert_eq!(tenor().display(false), Display::Card { media: None, thumbnail: None });
+    }
+
+    #[test]
+    fn a_gif_link_is_starred_as_its_page_with_its_video_and_klipys_thumbnail_as_the_gif() {
+        let tenor = tenor().star().unwrap();
+        assert_eq!(tenor.url, "https://tenor.com/view/x", "a GIF link is filed under its page");
+        assert_eq!(tenor.src, "https://images-ext-1.discordapp.net/x.mp4", "the proxied video");
+        assert_eq!((tenor.gif_src, tenor.format), (None, GifFormat::Video));
+
+        let mut klipy = tenor_embed("Klipy");
+        klipy.thumbnail.as_mut().unwrap().proxy_url = Some("https://images-ext-1.discordapp.net/x.gif".into());
+        let star = klipy.star().unwrap();
+        assert_eq!(star.gif_src.as_deref(), Some("https://images-ext-1.discordapp.net/x.gif"));
+        assert_eq!(star.format, GifFormat::Video, "what the star hands over; the favourite is an image once stored");
+        // Without a thumbnail of its own, a still of the video's file as WebP stands in.
+        klipy.thumbnail = None;
+        assert_eq!(
+            klipy.star().unwrap().gif_src.as_deref(),
+            Some("https://images-ext-1.discordapp.net/x.mp4?format=webp")
+        );
+        klipy.provider = None;
+        assert_eq!(klipy.star().unwrap().gif_src, None, "no other provider's");
+    }
+
+    fn tenor_embed(provider: &str) -> Embed {
+        Embed { provider: Some(EmbedProvider { name: Some(provider.into()), url: None }), ..tenor() }
+    }
+
+    #[test]
+    fn an_image_is_starred_only_where_it_animates_and_is_filed_under_its_own_link() {
+        let image = |url: &str, flags: u64| {
+            embed(json!({
+                "type": "image", "url": "https://example.test/page",
+                "thumbnail": {"url": url, "proxy_url": "https://images-ext-1.discordapp.net/p", "width": 60, "height": 40, "flags": flags}
+            }))
+        };
+        let shown = |embed: Embed| match embed.display(true) {
+            Display::Bare(Large::Image(media)) => media.star,
+            other => panic!("{other:?}"),
+        };
+        let star = shown(image("https://example.test/a.gif", 0)).unwrap();
+        assert_eq!(star.url, "https://example.test/a.gif", "not the page, which only a GIF link is filed under");
+        assert_eq!((star.src.as_str(), star.format), ("https://images-ext-1.discordapp.net/p", GifFormat::Image));
+        assert_eq!(shown(image("https://example.test/a.png", 0)), None);
+        assert_eq!(shown(image("https://example.test/a.webp", 0)), None, "not flagged");
+        assert!(shown(image("https://example.test/a.webp", IS_ANIMATED)).is_some());
+    }
+
+    #[test]
+    fn the_images_of_a_gallery_are_starred_each_as_itself() {
+        let item = |name: &str| {
+            json!({"url": format!("https://example.test/{name}.gif"), "proxy_url": format!("https://images-ext-1.discordapp.net/{name}"),
+                   "width": 60, "height": 40})
+        };
+        let first = embed(json!({"type": "image", "url": "https://example.test/post", "image": item("a")}));
+        let second = embed(json!({"type": "image", "url": "https://example.test/post", "image": item("b")}));
+        let merged = merge(&[first, second]);
+        let Display::Bare(Large::Gallery(items)) = merged[0].display(true) else { panic!() };
+        let stars: Vec<_> = items.iter().map(|m| m.star.as_ref().map(|s| (s.url.as_str(), s.src.as_str()))).collect();
+        assert_eq!(
+            stars,
+            [
+                Some(("https://example.test/a.gif", "https://images-ext-1.discordapp.net/a")),
+                Some(("https://example.test/b.gif", "https://images-ext-1.discordapp.net/b")),
+            ]
+        );
     }
 
     #[test]

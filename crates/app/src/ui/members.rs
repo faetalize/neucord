@@ -411,6 +411,7 @@ impl App {
         );
         let (known, change) = {
             let mut state = self.account.state.borrow_mut();
+            state.member_counts.insert(update.guild, update.member_count);
             (state.member_lists.get(update.guild, &update.list).is_some(), state.member_lists.apply(&update))
         };
         if !shown {

@@ -94,6 +94,12 @@
       "AUTOMOD_QUARANTINED_SERVER_TAG"
     ],
     "GIFType": ["NONE", "IMAGE", "VIDEO"],
+    "GuildActivityStatusRestrictionDefaultV2": [
+      "ACTIVITY_STATUS_UNSET",
+      "ACTIVITY_STATUS_OFF",
+      "ACTIVITY_STATUS_ON_FOR_LARGE_GUILDS",
+      "ACTIVITY_STATUS_ON"
+    ],
     "InteractionType": ["PING", "APPLICATION_COMMAND", "MESSAGE_COMPONENT", "APPLICATION_COMMAND_AUTOCOMPLETE"],
     "LinkStatus": ["PENDING", "ACTIVE", "INACTIVE", "DECLINED", "EXPIRED"],
     "LinkType": ["PARENT", "CHILD"],
@@ -151,7 +157,7 @@
     "ReactionType": ["NORMAL", "BURST", "VOTE"],
     "ReactionNotifications": ["NOTIFICATIONS_ENABLED", "ONLY_DMS", "NOTIFICATIONS_DISABLED"],
     "RelationshipType": ["FRIEND", "BLOCKED", "PENDING_INCOMING", "PENDING_OUTGOING"],
-    "RegionalSetting": ["MESSAGE_REQUEST_RESTRICTIONS"],
+    "RegionalSetting": ["MESSAGE_REQUEST_RESTRICTIONS", "GUILD_ACTIVITY_STATUS"],
     "RequiredAction": [
       "AGREEMENTS",
       "REQUIRE_CAPTCHA",
@@ -334,6 +340,7 @@
     "ForumPostUnreadCountStore",
     "FrecencyStore",
     "GIFPickerViewStore",
+    "GuildMemberCountStore",
     "GuildMemberRequesterStore",
     "GuildReadStateStore",
     "GuildRoleStore",
