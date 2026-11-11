@@ -255,7 +255,7 @@ impl View {
         for user in users {
             let line =
                 gtk::Box::builder().spacing(10).margin_top(6).margin_bottom(6).margin_start(8).margin_end(8).build();
-            line.append(&avatar_widget(&user, 32, Some(&app.images), Row::Parent));
+            line.append(&avatar_widget(&user, 32, Some(&app.images), Row::None));
             let name =
                 app.state.borrow().users.get(&user.id.0).cloned().unwrap_or_else(|| user.display_name().to_owned());
             let text = gtk::Box::builder()

@@ -292,7 +292,7 @@ impl App {
             .build();
 
         let avatar = gtk::Overlay::builder()
-            .child(&avatar_widget(user, 32, Some(&self.images), Row::Parent))
+            .child(&avatar_widget(user, 32, Some(&self.images), Row::None))
             .valign(gtk::Align::Center)
             .build();
         if relationship.kind == Kind::Friend {
