@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use discord::animation::Subject;
+use discord::gifs::Starred;
 use discord::settings::MediaSettings;
 use discord::{Attachment, Snowflake, Sticker};
 use gtk::prelude::*;
@@ -14,6 +15,7 @@ use gtk::{gio, glib};
 use super::App;
 use super::chat::MessageTarget;
 use super::embeds::{behind_spoiler, fitted_picture};
+use super::favorites::Stars;
 use super::menus::{Entry, Item, Kind};
 use super::video::{Options, Player};
 use super::viewer::MediaCx;
@@ -43,6 +45,7 @@ pub(super) fn attachment(
     voice: bool,
     images: &Images,
     media: &MediaSettings,
+    stars: &Stars,
     view: &MediaCx,
 ) -> gtk::Widget {
     let inline = media.inline_attachment_media;
@@ -58,10 +61,11 @@ pub(super) fn attachment(
     } else {
         return file(attachment);
     };
+    let stars = stars.clone();
     let build = move |attachment: &Attachment, images: &Images, view: &MediaCx| match shown {
         Shown::Voice => voice_message(attachment, images),
         Shown::Audio => audio(attachment, images),
-        Shown::Image => image(attachment, images, view),
+        Shown::Image => image(attachment, images, view, &stars),
         Shown::Video => video(attachment, images, view),
     };
     if attachment.is_spoiler() {
@@ -109,8 +113,8 @@ pub(super) fn sticker_id(widget: &gtk::Widget) -> Option<Snowflake> {
 }
 
 /// An inline image, scaled to fit a reasonable box. Clicking it opens the
-/// viewer.
-fn image(attachment: &Attachment, images: &Images, view: &MediaCx) -> gtk::Widget {
+/// viewer. A GIF has a star.
+fn image(attachment: &Attachment, images: &Images, view: &MediaCx, stars: &Stars) -> gtk::Widget {
     let fitted = fitted_picture(attachment.width, attachment.height, MAX_W, MAX_H);
     fitted.picture.set_css_classes(&["attachment-image"]);
     // Through the media proxy when we can, which sends it at the size shown.
@@ -122,7 +126,7 @@ fn image(attachment: &Attachment, images: &Images, view: &MediaCx) -> gtk::Widge
         images.set_sized(&fitted.picture, url, fitted.size, original);
     }
     view.link(&fitted.frame, view.attachment(attachment.id));
-    fitted.frame.upcast()
+    stars.over(&fitted.frame, Starred::attachment(attachment).as_ref())
 }
 
 /// A video, its box kept for it, fetched and played once clicked. Among

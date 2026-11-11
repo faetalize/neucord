@@ -14,8 +14,8 @@ use crate::Snowflake;
 use crate::emoji::Tone;
 use crate::protobuf::{Message, Value, bool_value, string_value, uint_value, uint64_value};
 use crate::settings::{
-    CustomStatus, FriendSources, GuildFolder, MediaPatch, NotificationsPatch, PrivacyPatch, ProfileVisibility,
-    ReactionNotifications, SettingsPatch, StatusSettings, StickerAnimation, UserStatus,
+    ActivityDefault, CustomStatus, FriendSources, GuildFolder, MediaPatch, NotificationsPatch, PrivacyPatch,
+    ProfileVisibility, ReactionNotifications, SettingsPatch, StatusSettings, StickerAnimation, UserStatus,
 };
 
 // PreloadedUserSettings.
@@ -59,9 +59,12 @@ const ALLOW_ACTIVITY_PARTY_VOICE_CHANNEL: u32 = 2;
 const RESTRICTED_GUILD_IDS: u32 = 3;
 const DEFAULT_GUILDS_RESTRICTED: u32 = 4;
 const FRIEND_SOURCE_FLAGS: u32 = 11;
+const ACTIVITY_RESTRICTED_GUILD_IDS: u32 = 13;
+const ACTIVITY_JOINING_RESTRICTED_GUILD_IDS: u32 = 15;
 const MESSAGE_REQUEST_RESTRICTED_GUILD_IDS: u32 = 16;
 const DEFAULT_MESSAGE_REQUEST_RESTRICTED: u32 = 17;
 const DEFAULT_GUILDS_RESTRICTED_V2: u32 = 27;
+const DEFAULT_GUILDS_ACTIVITY_RESTRICTED_V2: u32 = 29;
 const PROFILE_VISIBILITY: u32 = 32;
 
 // StatusSettings.
@@ -151,6 +154,14 @@ impl SettingsPatch {
                 profile_visibility: privacy
                     .as_ref()
                     .and_then(|p| ProfileVisibility::from_raw(p.varint(PROFILE_VISIBILITY).unwrap_or(0))),
+                // A plain enum too.
+                activity_default: privacy
+                    .as_ref()
+                    .map(|p| ActivityDefault::from_raw(p.varint(DEFAULT_GUILDS_ACTIVITY_RESTRICTED_V2).unwrap_or(0))),
+                activity_restricted_servers: privacy.as_ref().map(|p| servers(p, ACTIVITY_RESTRICTED_GUILD_IDS)),
+                activity_joining_restricted_servers: privacy
+                    .as_ref()
+                    .map(|p| servers(p, ACTIVITY_JOINING_RESTRICTED_GUILD_IDS)),
             },
             // A plain `bool`: `false` is not sent, so appearance without it is off.
             developer_mode: settings.message(APPEARANCE).map(|a| a.bool(DEVELOPER_MODE).unwrap_or(false)),
@@ -294,6 +305,16 @@ pub enum Setting {
     },
     MessageRequestRestrictedServers(Vec<Snowflake>),
     ProfileVisibility(ProfileVisibility),
+    /// "Share my activity" for the servers listed as not shared.
+    ActivityRestrictedServers(Vec<Snowflake>),
+    /// "Activity joining" the same way.
+    ActivityJoiningRestrictedServers(Vec<Snowflake>),
+    /// What the dialog after a Profile Privacy change confirms (`I`,
+    /// 413201): the default, and the servers it brings along.
+    ActivityDefault {
+        default: ActivityDefault,
+        restricted_servers: Vec<Snowflake>,
+    },
 }
 
 /// How long the client waits before saving a setting (`UserSettingsDelay`):
@@ -389,6 +410,19 @@ impl Setting {
             Setting::ProfileVisibility(visibility) => {
                 one(PRIVACY, PROFILE_VISIBILITY, Some(Value::Varint(visibility.raw())))
             }
+            Setting::ActivityRestrictedServers(servers) => {
+                one(PRIVACY, ACTIVITY_RESTRICTED_GUILD_IDS, servers_value(&servers))
+            }
+            Setting::ActivityJoiningRestrictedServers(servers) => {
+                one(PRIVACY, ACTIVITY_JOINING_RESTRICTED_GUILD_IDS, servers_value(&servers))
+            }
+            Setting::ActivityDefault { default, restricted_servers } => (
+                PRIVACY,
+                vec![
+                    (DEFAULT_GUILDS_ACTIVITY_RESTRICTED_V2, Some(Value::Varint(default.raw()))),
+                    (ACTIVITY_RESTRICTED_GUILD_IDS, servers_value(&restricted_servers)),
+                ],
+            ),
         }
     }
 
@@ -892,6 +926,51 @@ mod tests {
         assert_eq!((group, tone), (TEXT_AND_IMAGES, string_wrapper(DIVERSITY_SURROGATE, "🏿")));
         let (_, default) = Setting::SkinTone(None).written(&[]).unwrap();
         assert_eq!(default, string_wrapper(DIVERSITY_SURROGATE, ""), "the default is an empty string, there");
+    }
+
+    #[test]
+    fn reads_and_writes_the_activity_privacy_the_way_the_client_does() {
+        let privacy = [
+            bytes_field(ACTIVITY_RESTRICTED_GUILD_IDS, &fixed64s(&[3, 4])),
+            bytes_field(ACTIVITY_JOINING_RESTRICTED_GUILD_IDS, &fixed64s(&[5])),
+            varint_field(DEFAULT_GUILDS_ACTIVITY_RESTRICTED_V2, 2),
+        ]
+        .concat();
+        let read = patch(&bytes_field(PRIVACY, &privacy)).privacy;
+        assert_eq!(read.activity_restricted_servers, Some(vec![Snowflake(3), Snowflake(4)]));
+        assert_eq!(read.activity_joining_restricted_servers, Some(vec![Snowflake(5)]));
+        assert_eq!(read.activity_default, Some(Some(ActivityDefault::LargeServers)));
+        let unset = patch(&bytes_field(PRIVACY, &[])).privacy;
+        assert_eq!(unset.activity_default, Some(None), "UNSET is none: the region's default stands");
+        assert_eq!(unset.activity_restricted_servers, Some(vec![]));
+        assert_eq!(patch(&[]).privacy.activity_default, None, "no privacy, nothing said");
+
+        let proto = bytes_field(PRIVACY, &varint_field(60, 1));
+        let written = |setting: Setting| setting.written(&proto).unwrap().1;
+        let joining = written(Setting::ActivityJoiningRestrictedServers(vec![Snowflake(8)]));
+        assert_eq!(Message::parse(&joining).unwrap().fixed64s(ACTIVITY_JOINING_RESTRICTED_GUILD_IDS), vec![8]);
+        let status = written(Setting::ActivityRestrictedServers(vec![Snowflake(9)]));
+        assert_eq!(Message::parse(&status).unwrap().fixed64s(ACTIVITY_RESTRICTED_GUILD_IDS), vec![9]);
+        // What the dialog confirms goes in one message, with what else is there kept.
+        let both = written(Setting::ActivityDefault {
+            default: ActivityDefault::On,
+            restricted_servers: vec![Snowflake(1), Snowflake(2)],
+        });
+        assert_eq!(
+            both,
+            [
+                bytes_field(ACTIVITY_RESTRICTED_GUILD_IDS, &fixed64s(&[1, 2])),
+                varint_field(DEFAULT_GUILDS_ACTIVITY_RESTRICTED_V2, 3),
+                varint_field(60, 1)
+            ]
+            .concat()
+        );
+        let emptied = written(Setting::ActivityDefault { default: ActivityDefault::Off, restricted_servers: vec![] });
+        assert_eq!(
+            emptied,
+            [varint_field(DEFAULT_GUILDS_ACTIVITY_RESTRICTED_V2, 1), varint_field(60, 1)].concat(),
+            "an emptied list is left out"
+        );
     }
 
     #[test]

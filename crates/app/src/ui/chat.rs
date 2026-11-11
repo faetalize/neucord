@@ -17,6 +17,7 @@ use gtk::{gdk, gio, glib, graphene};
 
 use super::App;
 use super::embeds::{behind_spoiler, embed_widget};
+use super::favorites::Stars;
 use super::menus::{self, At, Entry, Item};
 use super::message_row::{MessageRow, Parts};
 use super::state::{Unread, now_ms, now_unix};
@@ -2153,6 +2154,7 @@ impl App {
             body.append(&polls::poll(self, message, poll));
         }
         let voice = message.is_voice_message();
+        let stars = Stars::new(self, media.gif_auto_play);
         // What opens in the viewer. A forward's media opens nothing.
         let view = match live {
             true => MediaCx::new(self, message, discord::media::items(message, &media)),
@@ -2164,7 +2166,7 @@ impl App {
         let shown = message.poll.is_none() && !message.is_components_v2();
         let attached = message.attachments.iter().filter(|a| !a.is_hidden() && shown);
         for attachment in attached {
-            body.append(&attachments::attachment(attachment, voice, &self.images, &media, &view));
+            body.append(&attachments::attachment(attachment, voice, &self.images, &media, &stars, &view));
         }
         for sticker in &message.sticker_items {
             body.append(&attachments::sticker(sticker, &self.images));
@@ -2173,10 +2175,12 @@ impl App {
         let spoilered = discord::embed::has_spoilered_link(&message.content);
         for (n, embed) in embeds.into_iter().enumerate() {
             if spoilered {
-                let (names, images, view) = (names.clone(), self.images.clone(), view.clone());
-                body.append(&behind_spoiler(move || embed_widget(&embed, n, &names, Some(&images), &media, &view)));
+                let (names, images, stars, view) = (names.clone(), self.images.clone(), stars.clone(), view.clone());
+                body.append(&behind_spoiler(move || {
+                    embed_widget(&embed, n, &names, Some(&images), &media, &stars, &view)
+                }));
             } else {
-                body.append(&embed_widget(&embed, n, names, Some(&self.images), &media, &view));
+                body.append(&embed_widget(&embed, n, names, Some(&self.images), &media, &stars, &view));
             }
         }
         if !message.components.is_empty() {

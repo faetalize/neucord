@@ -4,27 +4,34 @@
 //! Safety page (960111), saved as it saves them.
 //!
 //! Direct messages and message requests are the account's defaults, and
-//! each server can differ; changing a default asks whether to apply it to
-//! every server too, as the client does.
+//! each server can differ (`server_privacy` is a server's own dialog);
+//! changing a default asks whether to apply it to every server too, as the
+//! client does. Changing the profile visibility asks whether activity
+//! sharing follows it.
 
 use std::cell::Cell;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use discord::settings::{FriendSources, ProfileVisibility, Row, live_servers, with_server};
+use discord::activity_sharing::{Server, after_profile_privacy};
+use discord::settings::{
+    FriendSources, ProfileVisibility, Row, direct_messages_text, live_servers, message_requests_note, with_server,
+};
 use discord::{Setting, Snowflake};
+use gtk::glib;
 
 use super::App;
 use super::settings::{Form, group};
+use super::state::now_ms;
 
 /// Which server the rows are for: 0 is the account's defaults, then the
 /// servers in the rail's order.
 type Selected = Rc<Cell<usize>>;
 
-const GUARDIAN: &str = "Check in with your guardian to change this setting for you.";
+pub(super) const GUARDIAN: &str = "Check in with your guardian to change this setting for you.";
 
 /// Put what a switch should show on it.
-fn show_row(row: &adw::SwitchRow, state: Row, why_not: Option<&str>) {
+pub(super) fn show_row(row: &adw::SwitchRow, state: Row, why_not: Option<&str>) {
     row.set_active(state.on);
     row.set_sensitive(!state.disabled);
     row.set_tooltip_text(why_not.filter(|_| state.disabled));
@@ -58,7 +65,7 @@ impl App {
         });
         messaging.add(&selector);
 
-        let direct = adw::SwitchRow::builder().subtitle("Server members can message you.").build();
+        let direct = adw::SwitchRow::builder().build();
         direct.connect_active_notify({
             let (app, updating, selected, servers) =
                 (Rc::downgrade(self), form.updating.clone(), selected.clone(), servers.clone());
@@ -76,22 +83,17 @@ impl App {
                 let Some(app) = app.upgrade() else { return };
                 let server = servers.get(selected.get().wrapping_sub(1)).map(|(id, _)| *id);
                 let gates = app.account.state.borrow().gates;
-                // Direct messages and friend requests are one switch where only server members may send requests.
-                let both = server.is_none() && settings.privacy.friend_sources.only_server_members();
-                direct.set_title(if both { "Direct Messages and Friend Requests" } else { "Direct Messages" });
-                direct.set_subtitle(match (both, server.is_some()) {
-                    (true, _) => "Allow DMs and friend requests from other server members",
-                    (false, false) => "Allow DMs from other server members",
-                    (false, true) => "Allow DMs from other members in this server",
-                });
+                let (title, note) = direct_messages_text(
+                    settings.privacy.friend_sources.only_server_members(),
+                    server.map(|server| app.is_hub(server)),
+                );
+                direct.set_title(title);
+                direct.set_subtitle(note);
                 show_row(&direct, settings.privacy.direct_messages(&gates, server), Some(GUARDIAN));
             }
         }));
 
-        let requests = adw::SwitchRow::builder()
-            .title("Message requests")
-            .subtitle("Filter messages from server members you may not know.")
-            .build();
+        let requests = adw::SwitchRow::builder().title("Message requests").build();
         requests.connect_active_notify({
             let (app, updating, selected, servers) =
                 (Rc::downgrade(self), form.updating.clone(), selected.clone(), servers.clone());
@@ -109,6 +111,7 @@ impl App {
                 let Some(app) = app.upgrade() else { return };
                 let server = servers.get(selected.get().wrapping_sub(1)).map(|(id, _)| *id);
                 let gates = app.account.state.borrow().gates;
+                requests.set_subtitle(message_requests_note(server.is_some_and(|server| app.is_hub(server))));
                 show_row(&requests, settings.privacy.message_requests(&gates, server), Some(GUARDIAN));
             }
         }));
@@ -157,7 +160,12 @@ impl App {
             move |row| {
                 let choice = ProfileVisibility::ALL.get(row.selected() as usize);
                 if let (false, Some(app), Some(choice)) = (updating.get(), app.upgrade(), choice) {
+                    let before = app.account.state.borrow().settings.privacy.profile_visibility;
                     app.change_setting(Setting::ProfileVisibility(*choice));
+                    // Not if the change was refused: nothing was saved to follow.
+                    if app.account.state.borrow().settings.privacy.profile_visibility == *choice {
+                        app.ask_activity_to_follow(before, *choice);
+                    }
                 }
             }
         });
@@ -172,7 +180,7 @@ impl App {
     }
 
     /// "Direct Messages" was switched, for the defaults or for one server.
-    fn set_direct_messages(self: &Rc<Self>, server: Option<Snowflake>, allowed: bool) {
+    pub(super) fn set_direct_messages(self: &Rc<Self>, server: Option<Snowflake>, allowed: bool) {
         match server {
             Some(server) => {
                 let current = self.account.state.borrow().settings.privacy.restricted_servers.clone();
@@ -188,7 +196,7 @@ impl App {
     }
 
     /// "Message requests" was switched.
-    fn set_message_requests(self: &Rc<Self>, server: Option<Snowflake>, on: bool) {
+    pub(super) fn set_message_requests(self: &Rc<Self>, server: Option<Snowflake>, on: bool) {
         // Turning them off may need the age verification the client opens
         // a flow for.
         if !on && self.account.state.borrow().gates.message_requests_age_gated {
@@ -209,9 +217,82 @@ impl App {
         }
     }
 
+    /// Whether the server is a hub, which words some of the rows differently.
+    pub(super) fn is_hub(&self, server: Snowflake) -> bool {
+        self.account
+            .state
+            .borrow()
+            .guilds
+            .iter()
+            .find(|g| g.id == server)
+            .is_some_and(|g| g.features.iter().any(|f| f == "HUB"))
+    }
+
+    /// The question the client asks after the profile visibility changes
+    /// (`gS`, 365258; the dialog is 413201): whether activity sharing follows
+    /// it, in the servers where it would differ. Yes saves the default and
+    /// the servers' list, Not Now leaves them as they are.
+    fn ask_activity_to_follow(self: &Rc<Self>, old: ProfileVisibility, new: ProfileVisibility) {
+        let (change, first, count) = {
+            let mut state = self.account.state.borrow_mut();
+            let state = &mut *state;
+            let privacy = &state.settings.privacy;
+            let ours: Vec<Snowflake> = state.guilds.iter().map(|g| g.id).collect();
+            let restricted = live_servers(&privacy.activity_restricted_servers, &ours, state.unavailable_guilds);
+            let servers: Vec<Server> = state
+                .guilds_in_picker_order(None)
+                .into_iter()
+                .map(|g| Server {
+                    id: g.id,
+                    joined_at: g.joined_at,
+                    // The member lists' count, which they keep up to date, else the one READY gave.
+                    member_count: state.member_counts.get(&g.id).copied().or(g.member_count),
+                })
+                .collect();
+            let current = privacy.activity_default(&state.gates);
+            let Some(change) = after_profile_privacy(old, new, current, &restricted, &servers) else { return };
+            // The one used most leads the card (`AB`, 365258).
+            let scores = state.frecency.stores.channels.history.scores(now_ms() as u64);
+            let score = |id: &Snowflake| scores.get(&id.0.to_string()).copied().unwrap_or(0.0);
+            let mut ranked = change.servers.clone();
+            ranked.sort_by(|a, b| score(b).total_cmp(&score(a)));
+            let first = ranked.first().and_then(|id| state.guilds.iter().find(|g| g.id == *id)).map(|g| g.name.clone());
+            (change, first.unwrap_or_default(), ranked.len())
+        };
+        let name = glib::markup_escape_text(change.setting_name);
+        let dialog = adw::AlertDialog::builder()
+            .heading(change.title())
+            .body(change.question(&format!("<b>{name}</b>")))
+            .body_use_markup(true)
+            .build();
+        let card = adw::ActionRow::builder()
+            .title(if count == 1 { "1 Server".to_owned() } else { format!("{count} Servers") })
+            .subtitle(format!("{} \u{b7} {first}{}", change.card_state(), if count > 1 { " and others" } else { "" }))
+            .build();
+        let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).build();
+        list.append(&card);
+        dialog.set_extra_child(Some(&list));
+        dialog.add_responses(&[("cancel", "Not Now"), ("confirm", change.confirm())]);
+        dialog.set_response_appearance("confirm", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("confirm"));
+        dialog.set_close_response("cancel");
+        dialog.connect_response(None, {
+            let this = Rc::downgrade(self);
+            move |_, response| {
+                let (Some(this), "confirm") = (this.upgrade(), response) else { return };
+                // The list as it is now, as `gF` reads it.
+                let current = this.account.state.borrow().settings.privacy.activity_restricted_servers.clone();
+                let restricted_servers = change.restricted_after(&this.live_servers(&current));
+                this.change_setting(Setting::ActivityDefault { default: change.default, restricted_servers });
+                this.settings_toast(change.toast());
+            }
+        });
+        dialog.present(Some(&self.settings_parent()));
+    }
+
     /// The servers `ids` name that we are still in, as the client reads the
     /// lists of restrictions.
-    fn live_servers(&self, ids: &[Snowflake]) -> Vec<Snowflake> {
+    pub(super) fn live_servers(&self, ids: &[Snowflake]) -> Vec<Snowflake> {
         let state = self.account.state.borrow();
         let ours: Vec<Snowflake> = state.guilds.iter().map(|g| g.id).collect();
         live_servers(ids, &ours, state.unavailable_guilds)
