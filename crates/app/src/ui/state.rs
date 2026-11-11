@@ -436,13 +436,13 @@ impl State {
     }
 
     /// A message came to `channel`: a thread has one more, but its starter
-    /// message, which isn't counted (`MESSAGE_CREATE` in 456874). Whether it
-    /// counted.
-    pub(super) fn count_thread_message(&mut self, channel: Snowflake, kind: u8) -> bool {
+    /// message, and a forum post's first message (which has the post's id),
+    /// aren't counted (`MESSAGE_CREATE` in 456874). Whether it counted.
+    pub(super) fn count_thread_message(&mut self, channel: Snowflake, message: Snowflake, kind: u8) -> bool {
         const THREAD_STARTER: u8 = 21;
         let thread = self.guilds.iter_mut().find_map(|g| g.threads.iter_mut().find(|t| t.id == channel));
         match thread {
-            Some(thread) if kind != THREAD_STARTER => {
+            Some(thread) if kind != THREAD_STARTER && message.0 != channel.0 => {
                 thread.message_count = Some((thread.message_count.unwrap_or(0) + 1).min(100_000));
                 true
             }
@@ -700,13 +700,14 @@ mod tests {
         assert_eq!(state.thread_joined(Snowflake(20)), Some(true));
         assert_eq!(state.thread_joined(Snowflake(21)), Some(false));
         assert_eq!(state.thread_joined(Snowflake(9)), None, "a channel isn't a thread");
-        assert!(state.count_thread_message(Snowflake(20), 0));
+        assert!(state.count_thread_message(Snowflake(20), Snowflake(90), 0));
         assert_eq!(count(&state, 20), Some(4));
-        assert!(!state.count_thread_message(Snowflake(20), 21), "the starter message isn't counted");
-        assert!(!state.count_thread_message(Snowflake(9), 0), "a channel has no count");
+        assert!(!state.count_thread_message(Snowflake(20), Snowflake(91), 21), "the starter message isn't counted");
+        assert!(!state.count_thread_message(Snowflake(20), Snowflake(20), 0), "a forum post's first message isn't");
+        assert!(!state.count_thread_message(Snowflake(9), Snowflake(92), 0), "a channel has no count");
         assert_eq!(count(&state, 20), Some(4));
         state.guilds[0].threads[1].message_count = Some(100_000);
-        state.count_thread_message(Snowflake(21), 0);
+        state.count_thread_message(Snowflake(21), Snowflake(93), 0);
         assert_eq!(count(&state, 21), Some(100_000), "the count stops at a hundred thousand");
     }
 

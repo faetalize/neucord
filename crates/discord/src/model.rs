@@ -56,6 +56,23 @@ fn null_is_default<'de, D: Deserializer<'de>, T: Deserialize<'de> + Default>(d: 
     Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
+/// A custom emoji's id, which the client reads as none when it is 0 (`et` in
+/// 95701): Discord sends null, and an id as text.
+fn emoji_id<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Snowflake>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Id {
+        Text(String),
+        Number(u64),
+    }
+    let id = match Option::<Id>::deserialize(d)? {
+        Some(Id::Text(text)) => text.parse().ok(),
+        Some(Id::Number(number)) => Some(number),
+        None => None,
+    };
+    Ok(id.filter(|&id| id != 0).map(Snowflake))
+}
+
 /// An ISO 8601 time, in milliseconds since 1970.
 fn iso_ms<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
     let text = Option::<String>::deserialize(d)?;
@@ -260,6 +277,49 @@ pub struct Channel {
     /// How many messages a thread holds, as of when Discord sent it.
     #[serde(default)]
     pub message_count: Option<u32>,
+    /// The tags a forum or media channel's posts may carry.
+    #[serde(default, deserialize_with = "null_is_default")]
+    pub available_tags: Vec<Tag>,
+    /// The tags a post carries.
+    #[serde(default, deserialize_with = "null_is_default")]
+    pub applied_tags: Vec<Snowflake>,
+    /// A forum or media channel's defaults for how its posts are shown, as
+    /// Discord sends them: see [`crate::forum`].
+    #[serde(default)]
+    pub default_sort_order: Option<u8>,
+    #[serde(default)]
+    pub default_forum_layout: Option<u8>,
+    #[serde(default)]
+    pub default_tag_setting: Option<String>,
+    /// The reaction a post's card offers.
+    #[serde(default)]
+    pub default_reaction_emoji: Option<ReactionEmoji>,
+}
+
+/// A label posts in a forum or media channel may carry.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Tag {
+    pub id: Snowflake,
+    #[serde(default)]
+    pub name: String,
+    /// A custom emoji, or none.
+    #[serde(default, deserialize_with = "emoji_id")]
+    pub emoji_id: Option<Snowflake>,
+    /// A Unicode emoji, or a custom one's name.
+    #[serde(default)]
+    pub emoji_name: Option<String>,
+    /// Only members with Manage Threads may apply it.
+    #[serde(default, deserialize_with = "null_is_false")]
+    pub moderated: bool,
+}
+
+/// A forum's default reaction: a custom emoji or a Unicode one.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct ReactionEmoji {
+    #[serde(default, deserialize_with = "emoji_id")]
+    pub emoji_id: Option<Snowflake>,
+    #[serde(default)]
+    pub emoji_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -996,7 +1056,7 @@ impl Message {
 
     const FORWARD: u8 = 1;
     const THREAD_CREATED: u8 = 18;
-    const THREAD_STARTER: u8 = 21;
+    pub const THREAD_STARTER: u8 = 21;
     const AUTO_MODERATION_ACTION: u8 = 24;
     const MEDIA_MENTION: u8 = 68;
     /// Types nobody may delete (`UNDELETABLE` in 448761): calls, changes to

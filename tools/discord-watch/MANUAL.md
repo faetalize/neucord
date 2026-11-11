@@ -147,10 +147,27 @@ changed for unrelated reasons only needs a note in the issue.
   Details in place of Copy Message ID: 761304 (anchor `message-details`).
 - **Forum and media channels take no message** (the forum page in
   `select_channel`, `permissions::can_send`, `update_notice_bar`). Neucord
-  shows no box there, loads nothing and refuses to send, whatever Send
+  shows the post list there, no box, and refuses to send, whatever Send
   Messages says. Client: 289287 renders a forum view instead of the chat
   for `isForumLikeChannel` (anchor `"forum channels must exist within a
   guild"`), so no message box.
+- **When a forum's post list asks for what it shows** (`forum.rs`,
+  `ui/forum.rs`). The stores (`ArchivedThreadsStore`, `ForumActivePostStore`,
+  `ForumPostMessagesStore`, `ForumPostUnreadCountStore`), the search
+  (`loadArchivedThreads`), the defaults (`getDefaultSortOrder`, `getDefaultLayout`,
+  `getDefaultTagSetting`), op 28 and the pin and tag requests are watched;
+  the hooks that call them aren't. `Fr` in 424798 (anchor
+  `loadArchivedThreads`) asks for the first page when a list has none and
+  the channel is no moderator report, with Read Message History; the next
+  comes within 200px of the end (`eO` in 745431, anchor `getScrollerState`).
+  A card asks for its post's first message, and for the four posts after it
+  in the active order, ten to a `post-data` request (473503, anchor
+  `thread_ids`). 435470 asks for unread counts of at most 180 posts, once the
+  server's threads are all here, for those unread, with a read state and an
+  acked message (`yz`, anchor `REQUEST_FORUM_UNREADS`), and reads the forum
+  up to now when it opens or a post has more (anchor
+  `ACK_FORUM_ACTIVE_THREADS`). Who sees Pin Post: `A` in 41402; Edit Tags,
+  at most five tags: 565846 (anchor `edit-tags`), with `H_` and `NI` in 406704.
 - **Asking for members** (`members::Members`, `Gateway::request_members`),
   whose roles colour names. Which members the client asks for, and when
   again, is watched (`GuildMemberRequesterStore`), and so is the payload

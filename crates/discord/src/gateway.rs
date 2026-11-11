@@ -116,6 +116,13 @@ pub enum Event {
         guild_id: Snowflake,
         thread: Channel,
     },
+    /// A thread was created, which Discord says is new just now or one we
+    /// hadn't been told of.
+    ThreadCreate {
+        guild_id: Snowflake,
+        thread: Channel,
+        newly_created: bool,
+    },
     ThreadDelete {
         guild_id: Snowflake,
         id: Snowflake,
@@ -135,6 +142,15 @@ pub enum Event {
         guild_id: Snowflake,
         threads: Vec<Channel>,
         members: Vec<(Snowflake, ThreadMember)>,
+        /// Every active thread of the server, rather than those of some
+        /// channels (`channel_ids`).
+        complete: bool,
+    },
+    /// How many messages of a forum's posts we haven't read, which asking
+    /// for them (op 28, see [`Gateway::request_forum_unreads`]) brings.
+    ForumUnreads {
+        channel_id: Snowflake,
+        threads: Vec<(Snowflake, Option<u32>)>,
     },
     /// We joined a thread (`Some`), changed how it notifies, or left it.
     ThreadMember {
@@ -428,6 +444,17 @@ impl Gateway {
     pub fn request_members(&self, guild: Snowflake, users: &[Snowflake]) {
         if self.state.established.get() {
             send_text(&self.conn, &request_text(8, &MemberRequest::new(guild, users)));
+        }
+    }
+
+    /// Ask for how many messages of a forum's posts we haven't read, as the
+    /// client does when it lists them (`requestForumUnreads`, 868): op 28,
+    /// answered with [`Event::ForumUnreads`]. `request` is
+    /// [`crate::forum::UnreadRequest`]. Like the client, nothing is sent
+    /// before the session is established.
+    pub fn request_forum_unreads(&self, request: &crate::forum::UnreadRequest) {
+        if self.state.established.get() {
+            send_text(&self.conn, &request_text(28, request));
         }
     }
 
@@ -844,6 +871,11 @@ fn dispatch(state: &State, name: &str, data: Value) {
             Event::MemberList(Box::new(update))
         }
         "THREAD_CREATE" | "THREAD_UPDATE" => match (Channel::deserialize(&data), parse_id(&data["guild_id"])) {
+            (Ok(thread), Some(guild_id)) if thread.kind.is_thread() && name == "THREAD_CREATE" => Event::ThreadCreate {
+                guild_id,
+                thread,
+                newly_created: data["newly_created"].as_bool().unwrap_or(false),
+            },
             (Ok(thread), Some(guild_id)) if thread.kind.is_thread() => Event::ThreadUpdate { guild_id, thread },
             (Ok(_), _) => return,
             (Err(e), _) => return eprintln!("gateway: bad {name}: {e}"),
@@ -867,7 +899,21 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 .flatten()
                 .filter_map(|m| Some((parse_id(&m["id"])?, ThreadMember::deserialize(m).ok()?)))
                 .collect();
-            Event::ThreadListSync { guild_id, threads, members }
+            Event::ThreadListSync { guild_id, threads, members, complete: data["channel_ids"].is_null() }
+        }
+        // The client drops an answer Discord says we may not have (225123).
+        "FORUM_UNREADS" => {
+            if data["permission_denied"].as_bool().unwrap_or(false) {
+                return;
+            }
+            let Some(channel_id) = parse_id(&data["channel_id"]) else { return };
+            let threads = data["threads"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|t| Some((parse_id(&t["thread_id"])?, t["count"].as_u64().map(|n| n as u32))))
+                .collect();
+            Event::ForumUnreads { channel_id, threads }
         }
         // Only ours: the client keeps no one else's.
         "THREAD_MEMBER_UPDATE" => {
@@ -1279,13 +1325,15 @@ mod tests {
                                                 "archive_timestamp": "2026-10-27T00:00:00Z"},
                             "member": member, "newly_created": true});
         dispatch(&state, "THREAD_CREATE", thread);
-        let Ok(Event::ThreadUpdate { guild_id, thread }) = rx.try_recv() else { panic!("no thread") };
-        assert_eq!((guild_id, thread.parent_id), (Snowflake(1), Some(Snowflake(9))));
+        let Ok(Event::ThreadCreate { guild_id, thread, newly_created }) = rx.try_recv() else { panic!("no thread") };
+        assert_eq!((guild_id, thread.parent_id, newly_created), (Snowflake(1), Some(Snowflake(9)), true));
         assert!(thread.is_locked() && thread.is_active_thread());
         assert_eq!(thread.member.map(|m| (m.flags, m.join_timestamp)), Some((2, Some(1_793_145_600_000))));
 
         dispatch(&state, "THREAD_UPDATE", json!({"id": "9", "guild_id": "1", "type": 0}));
         assert!(rx.try_recv().is_err(), "not a thread");
+        dispatch(&state, "THREAD_UPDATE", json!({"id": "20", "guild_id": "1", "parent_id": "9", "type": 11}));
+        assert!(matches!(rx.try_recv(), Ok(Event::ThreadUpdate { .. })), "an update isn't a creation");
         dispatch(&state, "THREAD_DELETE", json!({"id": "20", "guild_id": "1", "parent_id": "9", "type": 11}));
         assert!(matches!(rx.try_recv(), Ok(Event::ThreadDelete { id: Snowflake(20), .. })));
 
@@ -1295,8 +1343,26 @@ mod tests {
             json!({"guild_id": "1", "threads": [{"id": "21", "type": 12, "parent_id": "9"}],
                    "members": [{"id": "21", "user_id": "5", "flags": 0, "join_timestamp": "2026-10-28T00:00:00Z"}]}),
         );
-        let Ok(Event::ThreadListSync { threads, members, .. }) = rx.try_recv() else { panic!("no sync") };
-        assert_eq!((threads.len(), members[0].0), (1, Snowflake(21)));
+        let Ok(Event::ThreadListSync { threads, members, complete, .. }) = rx.try_recv() else { panic!("no sync") };
+        assert_eq!((threads.len(), members[0].0, complete), (1, Snowflake(21), true));
+        dispatch(
+            &state,
+            "THREAD_LIST_SYNC",
+            json!({"guild_id": "1", "channel_ids": ["9"], "threads": [], "members": []}),
+        );
+        let Ok(Event::ThreadListSync { complete, .. }) = rx.try_recv() else { panic!("no sync") };
+        assert!(!complete, "some channels' threads");
+
+        dispatch(
+            &state,
+            "FORUM_UNREADS",
+            json!({"guild_id": "1", "channel_id": "15", "threads": [
+                {"thread_id": "20", "count": 3}, {"thread_id": "21", "missing": true}]}),
+        );
+        let Ok(Event::ForumUnreads { channel_id, threads }) = rx.try_recv() else { panic!("no unreads") };
+        assert_eq!((channel_id, threads), (Snowflake(15), vec![(Snowflake(20), Some(3)), (Snowflake(21), None)]));
+        dispatch(&state, "FORUM_UNREADS", json!({"channel_id": "15", "permission_denied": true, "threads": []}));
+        assert!(rx.try_recv().is_err(), "denied");
 
         let ours = json!({"id": "20", "guild_id": "1", "user_id": "5", "flags": 8, "muted": true,
                           "mute_config": {"end_time": null}, "join_timestamp": "2026-10-28T00:00:00Z"});

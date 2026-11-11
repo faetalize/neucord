@@ -16,7 +16,7 @@ use gtk::{gdk, gio, glib};
 use super::App;
 use super::chat::{self, MessageTarget};
 use super::{
-    composer, create_thread, edits, emoji, gifs, picker, poll_composer, polls, profile, reactions, reactors,
+    composer, create_thread, edits, emoji, forum, gifs, picker, poll_composer, polls, profile, reactions, reactors,
     scheduling, sidebar, stickers, threads, uploads, voice,
 };
 
@@ -113,10 +113,17 @@ pub(super) fn message(regulated: bool) -> Table<MessageTarget> {
 
 /// A thread's menu, from its row in the sidebar or the browser and the box
 /// under the message that started it: what Neucord has of the client's
-/// (949488). Join Thread is in the group of the thread's actions, Leave
-/// Thread after the moderators'. Remove From Thread is on a thread's members
-/// (202643), whose list Neucord doesn't show yet.
-pub(super) const THREAD: Table<threads::ThreadTarget> = &[&[threads::JOIN_THREAD], &[threads::LEAVE_THREAD]];
+/// (949488), and from a forum post's card. Join Thread and Edit Tags are in
+/// the group of the thread's actions, Pin Post and Unpin Post in the
+/// moderators', Leave Thread after. Edit Tags and the pins show on forum
+/// posts only. Remove From Thread is on a thread's members (202643), whose
+/// list Neucord doesn't show yet.
+pub(super) const THREAD: Table<threads::ThreadTarget> =
+    &[&[threads::JOIN_THREAD, forum::EDIT_TAGS], &[forum::PIN_POST, forum::UNPIN_POST], &[threads::LEAVE_THREAD]];
+
+/// A forum's tag, on its filter (`forum-tag`, 960015): Copy Tag ID, in
+/// Developer Mode like every copy of an id.
+pub(super) const FORUM_TAG: Table<forum::Tagged> = &[&[forum::COPY_TAG_ID]];
 
 /// A channel's menu, from its row in the sidebar: what Neucord has of the
 /// client's (428631 for voice and stage channels, 823255 for the others), in

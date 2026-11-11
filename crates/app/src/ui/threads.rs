@@ -303,7 +303,7 @@ impl App {
         let Some(rest) = self.state.borrow().rest.clone() else { return };
         let this = self.clone();
         glib::spawn_future_local(async move {
-            let page = rest.archived_threads(channel, offset).await;
+            let page = rest.archived_threads(&discord::forum::Search::plain(channel, offset)).await;
             let guild = this.state.borrow().find_channel(channel).and_then(|(g, _)| g.map(|g| g.id));
             match (page, guild) {
                 (Ok(page), Some(guild)) => {
