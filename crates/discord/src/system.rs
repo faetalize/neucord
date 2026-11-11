@@ -2,7 +2,7 @@
 //! sends as messages of their own type. What they say is worded as the
 //! official client words it.
 
-use crate::model::{Message, Snowflake};
+use crate::model::{Message, Snowflake, User};
 
 /// How a message shows in the list.
 #[derive(Clone, Debug, PartialEq)]
@@ -116,6 +116,8 @@ pub struct Place<'a> {
     pub guild_name: Option<&'a str>,
     /// A group DM, where a name change renames the group.
     pub group: bool,
+    /// What a person is called here, where that isn't their own name.
+    pub name: Option<&'a dyn Fn(&User) -> String>,
 }
 
 /// How `message` shows.
@@ -133,7 +135,8 @@ fn kind_with(message: &Message, place: &Place, show_unknown: bool) -> Kind {
     if message.is_user_message() {
         return Kind::Normal;
     }
-    let author = || Part::Name(message.author.display_name().to_owned());
+    let called = |user: &User| place.name.map_or_else(|| user.display_name().to_owned(), |name| name(user));
+    let author = || Part::Name(called(&message.author));
     let text = |s: &str| Part::Text(s.to_owned());
     let other = message.mentions.first();
     let guild = place.guild_name.unwrap_or("this server").to_owned();
@@ -143,20 +146,14 @@ fn kind_with(message: &Message, place: &Place, show_unknown: bool) -> Kind {
             vec![
                 author(),
                 text(" added "),
-                Part::Name(other.map_or("someone", |u| u.display_name()).to_owned()),
+                Part::Name(other.map_or_else(|| "someone".to_owned(), called)),
                 text(" to the group."),
             ],
         ),
         2 => match other.filter(|u| u.id != message.author.id) {
-            Some(other) => (
-                Icon::Leave,
-                vec![
-                    author(),
-                    text(" removed "),
-                    Part::Name(other.display_name().to_owned()),
-                    text(" from the group."),
-                ],
-            ),
+            Some(other) => {
+                (Icon::Leave, vec![author(), text(" removed "), Part::Name(called(other)), text(" from the group.")])
+            }
             None => (Icon::Leave, vec![author(), text(" left the group.")]),
         },
         3 => {
@@ -351,7 +348,7 @@ mod tests {
         system.text()
     }
 
-    const DM: Place = Place { me: Some(Snowflake(5)), guild_name: None, group: false };
+    const DM: Place = Place { me: Some(Snowflake(5)), guild_name: None, group: false, name: None };
 
     #[test]
     fn ordinary_and_hidden() {
