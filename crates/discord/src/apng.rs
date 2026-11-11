@@ -214,7 +214,7 @@ fn draw(canvas: &mut [u8], width: u32, region: &Control, pixels: &[u8]) {
             line.copy_from_slice(new);
             continue;
         }
-        for (old, new) in line.chunks_exact_mut(4).zip(new.chunks_exact(4)) {
+        for (old, new) in line.as_chunks_mut::<4>().0.iter_mut().zip(new.as_chunks::<4>().0) {
             let (new_alpha, old_alpha) = (u32::from(new[3]), u32::from(old[3]));
             // Straight alpha, new over old: the colours weigh by their share.
             let out_alpha = new_alpha * 255 + old_alpha * (255 - new_alpha);
