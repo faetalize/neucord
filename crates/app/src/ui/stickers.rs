@@ -38,7 +38,7 @@ fn developer(app: &App) -> bool {
 fn sticker(target: &Target) -> Option<&discord::Sticker> {
     match target {
         Target::Sticker(sticker) => Some(sticker),
-        Target::Emoji(_) => None,
+        Target::Emoji(_) | Target::Gif(_) => None,
     }
 }
 
@@ -109,9 +109,10 @@ impl Waiting {
 }
 
 impl App {
-    /// The open channel, if a sticker may be sent to it now: the message box
-    /// shows and no edit has it, as the client's edit box takes none.
-    fn sticker_channel(&self) -> Option<Snowflake> {
+    /// The open channel, if a sticker or a GIF may be sent to it now: the
+    /// message box shows and no edit has it, as the client's edit box takes
+    /// none.
+    pub(super) fn sticker_channel(&self) -> Option<Snowflake> {
         let channel = self.state.borrow().channel?;
         (self.composer_box.is_visible() && self.editing().is_none()).then_some(channel)
     }
@@ -180,6 +181,8 @@ impl App {
     pub(super) fn refresh_stickers(self: &Rc<Self>) {
         let channel = self.sticker_channel();
         self.sticker_button.set_visible(channel.is_some());
+        // The GIF button shows wherever the sticker button does.
+        self.gif_button.set_visible(channel.is_some());
         let waiting = channel.and_then(|c| self.waiting.of(c));
         self.waiting.bar.set_visible(waiting.is_some());
         if let Some(listed) = waiting {

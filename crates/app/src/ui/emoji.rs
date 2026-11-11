@@ -36,7 +36,7 @@ fn developer(app: &App) -> bool {
 fn item(target: &Target) -> Option<&Item> {
     match target {
         Target::Emoji(item) => Some(item),
-        Target::Sticker(_) => None,
+        Target::Sticker(_) | Target::Gif(_) => None,
     }
 }
 

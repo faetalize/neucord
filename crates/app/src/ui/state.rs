@@ -7,6 +7,7 @@ use std::hash::{Hash, Hasher};
 use discord::channel_icon;
 use discord::cooldowns::Slowmode;
 use discord::experiments::Experiments;
+use discord::gifs::Tiles;
 use discord::limits::{Limits, Nitro};
 use discord::member_list::{self, MemberLists};
 use discord::members::{Members, RoleColour};
@@ -77,6 +78,8 @@ pub(super) struct State {
     pub(super) guilds: Vec<Guild>,
     /// Discord's standard sticker packs, once the picker has fetched them.
     pub(super) sticker_packs: Packs,
+    /// The GIF picker's front page, once it has been fetched.
+    pub(super) gif_tiles: Tiles,
     /// DMs and group DMs, message requests included.
     pub(super) private_channels: Vec<Channel>,
     pub(super) relationships: Relationships,

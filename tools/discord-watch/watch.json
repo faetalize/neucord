@@ -176,6 +176,7 @@
     "ActiveThreadsStore",
     "ChannelMemberStore",
     "EmojiStore",
+    "GIFPickerViewStore",
     "GuildMemberRequesterStore",
     "GuildRoleStore",
     "GuildStickersStore",

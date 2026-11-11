@@ -15,7 +15,7 @@ use gtk::{gdk, gio, glib};
 
 use super::App;
 use super::chat::{self, MessageTarget};
-use super::{composer, edits, emoji, picker, reactions, reactors, stickers, uploads, voice};
+use super::{composer, edits, emoji, gifs, picker, reactions, reactors, stickers, uploads, voice};
 
 /// One entry of a menu, for what it was opened on: a `T`. `C` is what
 /// entries read and act through: the app, or a stand-in in tests.
@@ -131,6 +131,10 @@ pub(super) const EXPRESSION_PICKER: Table<picker::Target> = &[&[
     stickers::COPY_STICKER_ID,
     stickers::COPY_STICKER_LINK,
 ]];
+
+/// A GIF of the picker's results (`gif-picker`, 400017): the client's menu
+/// has Copy Link and nothing else.
+pub(super) const GIF_PICKER: Table<picker::Target> = &[&[gifs::COPY_LINK]];
 
 /// Where menu items find their actions.
 const PREFIX: &str = "menu";
