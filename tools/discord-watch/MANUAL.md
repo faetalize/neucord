@@ -388,16 +388,25 @@ changed for unrelated reasons only needs a note in the issue.
   parent's level. In threads, the decision ignores what the server
   suppresses, and our thread mute (`JoinedThreadsStore`) silences all.
 - **Mutes, notification settings and read marks** (`notification_edit.rs`,
-  `notify_menus.rs`). Requests: 931260 (anchor `USER_GUILD_SETTINGS_BULK`)
-  sends a server's settings keyed under `guilds` to the bulk endpoint and the
-  DMs' to `@me`'s; `updateGuildNotificationSettings` and
-  `updateChannelOverrideSettings` (832712) are watched. The durations are
+  `notify_menus.rs`, `channel_list.rs`). Requests: 931260 (anchor
+  `USER_GUILD_SETTINGS_BULK`) sends a server's settings keyed under `guilds`
+  to the bulk endpoint and the DMs' to `@me`'s, adding every unsaved fold
+  (`collapsed`) to a server's, or sending them alone fifteen seconds after
+  the last; 924985 reads folds from READY only. `updateGuildNotificationSettings`
+  and `updateChannelOverrideSettings` (832712) are watched. The durations are
   `Xx` in 355097. `BULK_ACK` in 218461 (anchor `ack-bulk`) sends a hundred
-  read states at a time, a second apart, and stops at the first failure.
-  Mark Unread is 439147 (anchor `Marking unread`): the ack goes to the
-  newest loaded message before it, with the mentions after it. The items and
-  where they show: 507238 and 871638 (anchor `mark-guild-read`) for servers,
-  995102, 288104 and 511904 for channels, 20883 for messages.
+  read states at a time, a second apart, and stops at the first failure, and
+  always takes every forum (567035 gives one the moment as its message).
+  Mark Unread is 439147 (anchor `Marking unread`): the ack goes to the newest
+  loaded message before it, with the mentions after it. A thread's mute and
+  level go to its member settings (`setNotificationSettings` in 7909,
+  watched). The items and where they show: 507238 and 871638 (anchor
+  `mark-guild-read`) for servers, 865815 (`mark-folder-read`) for folders,
+  995102 (which folds a muted category), 288104 and 511904 (one item for Mark
+  As Read and Mark Unread, greyed or swapped by the unread rules; anchor
+  `mark-channel-unread`) for channels, 57907 and 375500 for threads, 20883 for
+  messages. Which channels the sidebar lists, by Hide Muted Channels (153594)
+  and folds: `computeState` in 791513 (anchor `hideMutedChannels`).
 - **What adds a mention** (`counts_mention`, `is_dropped`).
   `MESSAGE_CREATE` in 218461 (anchor `mentionCount++`): nothing from a
   blocked author or command user (`isBlockedOrIgnoredForMessage`, watched
