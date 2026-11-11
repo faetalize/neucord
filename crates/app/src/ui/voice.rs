@@ -214,6 +214,7 @@ impl App {
         };
         voice.bar.set_visible(shown.is_some());
         self.composer.set_visible(shown.is_none());
+        self.emoji_button.set_visible(shown.is_none());
         if shown.is_some() {
             self.length.show(None);
         } else {
