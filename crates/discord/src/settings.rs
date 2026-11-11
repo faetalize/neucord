@@ -172,6 +172,10 @@ pub struct Settings {
     /// Neucord has no compact layout, but the official client sizes its
     /// history pages by this.
     pub message_display_compact: bool,
+    /// Our status is Do Not Disturb, which silences every notification. Read
+    /// from the JSON `status` only: the protobuf's isn't read yet, so a
+    /// replacing protobuf leaves it as it was.
+    pub do_not_disturb: bool,
 }
 
 /// The settings a payload mentions; the rest are `None`.
@@ -181,6 +185,7 @@ pub struct SettingsPatch {
     pub media: MediaPatch,
     pub developer_mode: Option<bool>,
     pub message_display_compact: Option<bool>,
+    pub do_not_disturb: Option<bool>,
 }
 
 impl SettingsPatch {
@@ -190,6 +195,8 @@ impl SettingsPatch {
             media: MediaPatch::from_settings(settings),
             developer_mode: settings.get("developer_mode").and_then(Value::as_bool),
             message_display_compact: settings.get("message_display_compact").and_then(Value::as_bool),
+            // What the client reads as `SelfPresenceStore.getStatus()` (894768).
+            do_not_disturb: settings.get("status").and_then(Value::as_str).map(|status| status == "dnd"),
         }
     }
 
@@ -206,6 +213,14 @@ impl Settings {
         self.media.apply(patch.media);
         self.developer_mode = patch.developer_mode.unwrap_or(self.developer_mode);
         self.message_display_compact = patch.message_display_compact.unwrap_or(self.message_display_compact);
+        self.do_not_disturb = patch.do_not_disturb.unwrap_or(self.do_not_disturb);
+    }
+
+    /// Take `patch` as all of the settings, as a replacing protobuf is: what
+    /// it leaves out is back to its default, except what it can't carry.
+    pub fn replace(&mut self, patch: SettingsPatch) {
+        *self = Settings { do_not_disturb: self.do_not_disturb, ..Settings::default() };
+        self.apply(patch);
     }
 }
 
@@ -326,6 +341,23 @@ mod tests {
         assert_eq!(patch.message_display_compact, Some(false));
         assert_eq!(patch.media.gif_auto_play, Some(false));
         assert!(SettingsPatch::from_json(&json!({"theme": "dark"})).is_empty());
+    }
+
+    #[test]
+    fn do_not_disturb_when_the_status_is_mentioned() {
+        let dnd = |status: &str| SettingsPatch::from_json(&json!({ "status": status })).do_not_disturb;
+        assert_eq!(dnd("dnd"), Some(true));
+        assert_eq!(dnd("idle"), Some(false));
+        assert_eq!(SettingsPatch::from_json(&json!({"developer_mode": true})).do_not_disturb, None);
+    }
+
+    #[test]
+    fn a_replacing_patch_keeps_the_status_it_cannot_carry() {
+        let mut settings = Settings { do_not_disturb: true, developer_mode: true, ..Settings::default() };
+        settings.replace(SettingsPatch { message_display_compact: Some(true), ..SettingsPatch::default() });
+        assert!(settings.message_display_compact, "what it says");
+        assert!(!settings.developer_mode, "what it leaves out is back to its default");
+        assert!(settings.do_not_disturb, "the status isn't in it");
     }
 
     #[test]

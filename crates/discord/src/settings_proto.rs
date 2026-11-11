@@ -65,6 +65,7 @@ impl SettingsPatch {
             },
             developer_mode: settings.message(APPEARANCE).and_then(|a| a.bool(DEVELOPER_MODE)),
             message_display_compact: flag(MESSAGE_DISPLAY_COMPACT),
+            do_not_disturb: None,
         })
     }
 }

@@ -339,6 +339,12 @@ impl Images {
         Some(paintable)
     }
 
+    /// The image at `url`, first frame only: for what takes a still, such as
+    /// a notification's icon.
+    pub async fn texture(&self, url: &str) -> Option<gdk::Texture> {
+        gdk::Texture::from_bytes(&self.load_bytes(url).await?).ok()
+    }
+
     /// Encoded bytes for a URL: memory → disk → network, filling caches.
     async fn load_bytes(&self, url: &str) -> Option<glib::Bytes> {
         if let Some(bytes) = self.0.memory.borrow_mut().get(url) {

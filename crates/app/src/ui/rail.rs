@@ -128,7 +128,7 @@ impl App {
     /// Set every rail button's markers from state: open, unread, mentions.
     fn mark_rail(&self) {
         let state = self.state.borrow();
-        self.drawn.borrow_mut().0 = state.rail_signature();
+        self.drawn.borrow_mut().0 = state.rail_signature().0;
         let badge = |id: &Snowflake| state.guilds.iter().find(|g| g.id == *id).map(|g| state.guild_badge(g));
         for item in self.rail_items.borrow().iter() {
             let (active, unread, mentions) = match &item.mark {

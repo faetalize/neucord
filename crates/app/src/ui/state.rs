@@ -11,6 +11,7 @@ use discord::gifs::Tiles;
 use discord::limits::{Limits, Nitro};
 use discord::member_list::{self, MemberLists};
 use discord::members::{Members, RoleColour};
+use discord::notice::Notice;
 use discord::notifications::{NotificationSettings, Place};
 use discord::permissions;
 use discord::post_creation;
@@ -22,6 +23,7 @@ use discord::subscriptions::Subscriptions;
 use discord::thread_creation;
 use discord::threads;
 use discord::typing::Typing;
+use discord::verification;
 use discord::verification::Account;
 use discord::{Channel, ChannelKind, Gateway, Guild, Message, Rest, Resume, Snowflake, User};
 use gtk::glib;
@@ -249,6 +251,27 @@ impl State {
             (Some((guild, channel)), Some(me)) => permissions::can_send(guild, channel, me, now_unix()),
             _ => false,
         }
+    }
+
+    /// What stands where the message box would in a channel, so nothing we
+    /// may post to has one (#51). Slowmode isn't one: the box stays, and the
+    /// wait shows above it.
+    pub(super) fn notice(&self, id: Snowflake) -> Option<Notice> {
+        let (guild, channel) = self.find_channel(id)?;
+        let guild = guild.zip(self.account.as_ref());
+        Notice::of(
+            channel.is_system_dm(),
+            channel.is_request().then_some(channel.spam),
+            guild.and_then(|(g, a)| g.timeout_left(a, now_unix())),
+            guild.and_then(|(g, a)| verification::gate(g, a, now_unix())),
+            guild.is_some() && !self.can_send(id),
+        )
+    }
+
+    /// Whether the message box is withheld from the channel: its page of
+    /// posts stands in for a forum's, and a notice for the rest.
+    pub(super) fn box_blocked(&self, id: Snowflake) -> bool {
+        self.find_channel(id).is_some_and(|(_, c)| c.kind.is_forum_like()) || self.notice(id).is_some()
     }
 
     /// Whether files may be attached in the channel (see [`permissions::can_attach`]).
@@ -596,13 +619,22 @@ impl State {
         hasher.finish()
     }
 
-    pub(super) fn rail_signature(&self) -> Vec<u64> {
-        let mut sig = vec![self.guild.map_or(0, |g| g.0), self.home_badge() as u64];
+    /// The rail's signature, and the count on the app icon and in the title
+    /// (see [`discord::badge`]), from the one pass over every server. A
+    /// server's dot counts, but not a DM's, as in the client (`hasAnyUnread`
+    /// in 458294 holds servers only).
+    pub(super) fn rail_signature(&self) -> (Vec<u64>, i64) {
+        let home = self.home_badge();
+        let mut sig = vec![self.guild.map_or(0, |g| g.0), home as u64];
+        let (mut mentions, mut any_unread) = (home, false);
         for guild in &self.guilds {
-            let (unread, mentions) = self.guild_badge(guild);
-            sig.extend([guild.id.0, unread as u64, mentions as u64]);
+            let (unread, guild_mentions) = self.guild_badge(guild);
+            sig.extend([guild.id.0, unread as u64, guild_mentions as u64]);
+            mentions += guild_mentions;
+            any_unread |= unread;
         }
-        sig
+        // The client's "disable unread badge" setting is #86's.
+        (sig, discord::badge::count(mentions, any_unread, false))
     }
 
     /// The same for the sidebar: the open place, selection, order and markers.
@@ -828,6 +860,38 @@ mod tests {
         state.guilds[0].set_role(everyone("66560"));
         assert!(state.can_read_history(Snowflake(9)));
         assert!(!state.can_read_history(Snowflake(77)), "not a channel we know");
+    }
+
+    #[test]
+    fn the_message_box_is_blocked_where_the_notice_bar_would_replace_it() {
+        let mut state = open_server(None, json!({}));
+        let id = Snowflake(9);
+        let everyone =
+            |permissions: &str| serde_json::from_value(json!({"id": "1", "permissions": permissions})).unwrap();
+        state.guilds[0].set_role(everyone("1024"));
+        assert_eq!(state.notice(id), Some(Notice::Denied));
+        assert!(state.box_blocked(id));
+        state.guilds[0].set_role(everyone("3072"));
+        assert!(!state.box_blocked(id), "with Send Messages");
+        assert!(!state.box_blocked(Snowflake(77)), "a channel we don't know");
+
+        state.guilds[0].channels[0].kind = ChannelKind::Forum;
+        assert!(state.box_blocked(id), "a forum has its page of posts in its place");
+
+        let dm = |extra: serde_json::Value| -> Channel {
+            let mut dm = json!({"id": "50", "type": 1, "recipients": [{"id": "6", "username": "x"}]});
+            dm.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(dm).unwrap()
+        };
+        state.private_channels = vec![dm(json!({}))];
+        assert!(!state.box_blocked(Snowflake(50)), "an ordinary DM");
+        state.private_channels = vec![dm(json!({"is_message_request": true}))];
+        assert_eq!(state.notice(Snowflake(50)), Some(Notice::Request { spam: false }));
+        state.private_channels = vec![dm(json!({"is_spam": true}))];
+        assert_eq!(state.notice(Snowflake(50)), Some(Notice::Request { spam: true }));
+        state.private_channels =
+            vec![dm(json!({"recipients": [{"id": "643945264868098049", "username": "Discord", "system": true}]}))];
+        assert_eq!(state.notice(Snowflake(50)), Some(Notice::System));
     }
 
     #[test]
