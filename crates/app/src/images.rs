@@ -11,12 +11,14 @@
 //! frame otherwise). Images from Discord's media proxy are requested at the
 //! size they are shown, which keeps both downloads and decodes small.
 //!
+//! Disk reads and writes run on the pool (see CONTRIBUTING.md, "Threads").
+//!
 //! The memory caches and the video files are bounded; the image files on
 //! disk are not yet (#18).
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gtk::gdk;
@@ -384,11 +386,16 @@ impl Images {
 
     async fn fetch_uncached(&self, url: &str) -> Option<glib::Bytes> {
         let path = self.disk_path(url);
-        if let Ok(data) = std::fs::read(&path) {
+        let read = path.clone();
+        if let Ok(Ok(data)) = gio::spawn_blocking(move || std::fs::read(read)).await {
             return Some(glib::Bytes::from_owned(data));
         }
         let bytes = self.download(url).await?;
-        let _ = std::fs::write(&path, &bytes);
+        // Nothing waits for the file: the bytes are in the memory cache by now.
+        let copy = bytes.clone();
+        drop(gio::spawn_blocking(move || {
+            let _ = write_atomic(&path, &copy);
+        }));
         Some(bytes)
     }
 
@@ -402,23 +409,16 @@ impl Images {
             return Some(path);
         }
         let bytes = self.download(url).await?;
-        std::fs::write(&path, &bytes).ok()?;
-        self.prune_videos();
-        Some(path)
-    }
-
-    fn prune_videos(&self) {
-        let Ok(entries) = std::fs::read_dir(&self.0.video_dir) else { return };
-        let files = entries
-            .flatten()
-            .filter_map(|e| {
-                let meta = e.metadata().ok()?;
-                Some((e.path(), meta.len(), meta.modified().ok()?))
-            })
-            .collect();
-        for path in lru::over_budget(files, VIDEO_BUDGET) {
-            let _ = std::fs::remove_file(path);
-        }
+        let dir = self.0.video_dir.clone();
+        // A video can be hundreds of megabytes: writing it, and the directory
+        // walk after it, stay off the main loop.
+        gio::spawn_blocking(move || {
+            write_atomic(&path, &bytes).ok()?;
+            prune_videos(&dir);
+            Some(path)
+        })
+        .await
+        .ok()?
     }
 
     /// A file's bytes, cached nowhere: for saving and copying, which want
@@ -443,6 +443,34 @@ fn cache_key(url: &str) -> String {
     glib::compute_checksum_for_string(glib::ChecksumType::Sha256, url)
         .map(String::from)
         .unwrap_or_else(|| url.bytes().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Videos' files on disk are kept within [`VIDEO_BUDGET`], least recently
+/// played going first.
+fn prune_videos(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let files = entries
+        .flatten()
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            Some((e.path(), meta.len(), meta.modified().ok()?))
+        })
+        .collect();
+    for path in lru::over_budget(files, VIDEO_BUDGET) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Writes `bytes` so that `path` is never seen half written, by a reader
+/// meanwhile or after a crash: a cached file is trusted as it is, for good.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut partial = path.as_os_str().to_owned();
+    partial.push(".part");
+    let partial = PathBuf::from(partial);
+    std::fs::write(&partial, bytes)?;
+    std::fs::rename(&partial, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&partial);
+    })
 }
 
 /// The pixel size to request for an image shown at `shown` (logical pixels):
@@ -492,7 +520,19 @@ fn animated_paintable(bytes: &glib::Bytes) -> Option<gdk::Paintable> {
 
 #[cfg(test)]
 mod tests {
-    use super::request_size;
+    use super::{request_size, write_atomic};
+
+    #[test]
+    fn a_written_file_is_whole_and_leaves_nothing_behind() {
+        let dir = std::env::temp_dir().join(format!("neucord-images-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a");
+        write_atomic(&path, b"first").unwrap();
+        write_atomic(&path, b"second, and longer").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second, and longer");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no .part file stays");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn requested_size_follows_scale_and_original() {
