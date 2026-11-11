@@ -3,6 +3,7 @@
 mod highlight;
 mod images;
 mod kept;
+mod recorder;
 mod render;
 mod rich_text;
 mod timelines;

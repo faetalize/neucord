@@ -205,6 +205,20 @@ changed for unrelated reasons only needs a note in the issue.
   `upload-text-as-file`); the picker takes one file in a channel with
   slowmode (`multiple`); alt text is for images and videos, up to 1024
   characters (507536).
+- **Voice messages** (`voice.rs`, `ui/voice.rs`). The experiment, the flag and
+  the permission bit are watched. Not watched: what offers it, 87207 (anchor
+  `voiceMessages`: a private channel or Send Voice Messages, a chat input with
+  the button, not forum-like, no files or sticker pending) and the attach
+  item in 316576 (anchor `canRecordVoiceMessage`; the button shows whenever
+  any of its items does); Alt+R, in 158781 (anchor `RECORD_VOICE_MESSAGE`);
+  and the recording, 841817 (anchor `IS_VOICE_MESSAGE`): under 0.5 s is
+  dropped, the length limit is `iA` in 518950, the waveform is at most 256
+  bytes (`el`, averaged by 934581) of the decibel levels `handleVoiceActivity`
+  turns into bytes (198620, anchor `VoiceMessageMediaEngineCapture`), and
+  the upload starts at send. The file is the desktop app's native recorder's,
+  which no web build holds: 198620 only maps its extension to a type (webm,
+  wav, m4a, mp4, caf, else ogg), so a new case there means the container
+  changed.
 - **What Nitro, boosts and experiments allow** (`limits.rs`, and its message
   length in `ui/composer.rs`). `R` in 722178, below the perks each premium
   type includes (anchor `ProductCatalog.tsx`), asks the `perks` bitmask when

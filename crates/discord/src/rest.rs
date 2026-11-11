@@ -222,7 +222,20 @@ impl Rest {
         attachments: &[Sent<'_>],
         sticker: Option<Snowflake>,
     ) -> Result<Message, Error> {
-        let body = message_body(channel, content, &Snowflake::now().to_string(), reply, attachments, sticker);
+        let body = message_body(channel, content, &Snowflake::now().to_string(), 0, reply, attachments, sticker);
+        self.request(call!(SEND_MESSAGE, channel), Some(body)).await
+    }
+
+    /// Post a recorded voice message: no text, `IS_VOICE_MESSAGE`, and the one
+    /// uploaded recording (`em` in 841817).
+    pub async fn send_voice_message(
+        &self,
+        channel: Snowflake,
+        reply: Option<Reply>,
+        recording: Sent<'_>,
+    ) -> Result<Message, Error> {
+        let flags = Message::IS_VOICE_MESSAGE;
+        let body = message_body(channel, "", &Snowflake::now().to_string(), flags, reply, &[recording], None);
         self.request(call!(SEND_MESSAGE, channel), Some(body)).await
     }
 
@@ -482,6 +495,7 @@ fn message_body(
     channel: Snowflake,
     content: &str,
     nonce: &str,
+    flags: u64,
     reply: Option<Reply>,
     attachments: &[Sent<'_>],
     sticker: Option<Snowflake>,
@@ -490,7 +504,7 @@ fn message_body(
         "content": content,
         "nonce": nonce,
         "tts": false,
-        "flags": 0,
+        "flags": flags,
     });
     if let Some(reply) = reply {
         // The same body the official client sends.
@@ -565,6 +579,7 @@ mod tests {
 
     use super::{Captcha, Page, Reply, ReplyPing, base_headers, edit_body, is_md5, message_body, rate_limit_wait};
     use crate::uploads::Sent;
+    use crate::uploads::Voice;
     use crate::{Message, Snowflake, identity};
 
     #[test]
@@ -608,18 +623,19 @@ mod tests {
             description: None,
             spoiler: false,
             content_type: "image/png",
+            voice: None,
         };
-        let body = message_body(Snowflake(9), "", "1", None, &[sent("a.png"), sent("b.png")], None);
+        let body = message_body(Snowflake(9), "", "1", 0, None, &[sent("a.png"), sent("b.png")], None);
         assert_eq!(body["content"], "", "files alone are a message");
         assert_eq!(
             (body["attachments"][0]["id"].as_str(), body["attachments"][1]["id"].as_str()),
             (Some("0"), Some("1"))
         );
         assert_eq!(body["attachments"][1]["filename"], "b.png");
-        assert!(message_body(Snowflake(9), "hi", "1", None, &[], None).get("attachments").is_none());
+        assert!(message_body(Snowflake(9), "hi", "1", 0, None, &[], None).get("attachments").is_none());
         // A reply to a message goes with the files.
         let reply = Reply { to: Snowflake(3), guild: None, ping: true };
-        let body = message_body(Snowflake(9), "hi", "1", Some(reply), &[sent("a.png")], None);
+        let body = message_body(Snowflake(9), "hi", "1", 0, Some(reply), &[sent("a.png")], None);
         assert_eq!(body["message_reference"], json!({ "message_id": "3", "channel_id": "9" }));
         assert_eq!(body["attachments"].as_array().map(Vec::len), Some(1));
     }
@@ -627,9 +643,9 @@ mod tests {
     #[test]
     fn a_sticker_goes_by_id_alone_or_with_text_a_reply_and_files() {
         // `_sendMessage` (138399) adds `sticker_ids` to the same body, whatever else is in it.
-        let body = message_body(Snowflake(9), "", "1", None, &[], Some(Snowflake(5)));
+        let body = message_body(Snowflake(9), "", "1", 0, None, &[], Some(Snowflake(5)));
         assert_eq!((body["content"].as_str(), body["sticker_ids"].clone()), (Some(""), json!(["5"])));
-        assert!(message_body(Snowflake(9), "", "1", None, &[], None).get("sticker_ids").is_none());
+        assert!(message_body(Snowflake(9), "", "1", 0, None, &[], None).get("sticker_ids").is_none());
         let reply = Reply { to: Snowflake(3), guild: Some(Snowflake(2)), ping: false };
         let sent = Sent {
             filename: "a.png",
@@ -637,11 +653,30 @@ mod tests {
             description: None,
             spoiler: false,
             content_type: "image/png",
+            voice: None,
         };
-        let body = message_body(Snowflake(9), "hi", "1", Some(reply), &[sent], Some(Snowflake(5)));
+        let body = message_body(Snowflake(9), "hi", "1", 0, Some(reply), &[sent], Some(Snowflake(5)));
         assert_eq!((body["content"].as_str(), body["sticker_ids"].clone()), (Some("hi"), json!(["5"])));
         assert_eq!(body["message_reference"]["message_id"], "3");
         assert_eq!(body["attachments"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn a_voice_message_is_flagged_and_has_no_text() {
+        let recording = Sent {
+            filename: "0recording.ogg",
+            uploaded_filename: "u/0recording.ogg",
+            description: None,
+            spoiler: false,
+            content_type: "audio/ogg",
+            voice: Some(Voice { duration_secs: 3.0, waveform: "AAEC" }),
+        };
+        let body = message_body(Snowflake(9), "", "1", Message::IS_VOICE_MESSAGE, None, &[recording], None);
+        assert_eq!(body["flags"], 8192);
+        assert_eq!(body["content"], "");
+        assert_eq!(body["attachments"][0]["duration_secs"], 3.0);
+        assert_eq!(body["attachments"][0]["waveform"], "AAEC");
+        assert_eq!(message_body(Snowflake(9), "hi", "1", 0, None, &[], None)["flags"], 0);
     }
 
     #[test]

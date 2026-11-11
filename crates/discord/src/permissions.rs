@@ -435,6 +435,15 @@ pub fn can_attach(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i
         && guild.is_none_or(|g| in_channel(g, channel, me, now).contains(Permissions::ATTACH_FILES))
 }
 
+/// Whether the client offers Record Voice Message in `channel` (87207): in
+/// any private channel, else with Send Voice Messages; and where [`can_send`]
+/// also holds, which the message box it belongs to needs.
+pub fn can_record_voice_message(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64) -> bool {
+    can_send(guild, channel, me, now)
+        && !channel.kind.is_forum_like()
+        && guild.is_none_or(|g| in_channel(g, channel, me, now).contains(Permissions::SEND_VOICE_MESSAGES))
+}
+
 /// Whether the client offers Reply in `channel` (517997), with
 /// [`crate::Message::is_replyable`] for the message itself: not in the
 /// system DM, in a server only with Send Messages and Read Message History
@@ -767,6 +776,30 @@ mod tests {
         )
         .unwrap();
         assert!(system.is_system_dm() && !can_attach(None, &system, &me, 0));
+    }
+
+    #[test]
+    fn recording_a_voice_message_takes_send_voice_messages_in_servers() {
+        let me = me();
+        let mut guild = guild();
+        let open = channel(&[]);
+        assert!(can_send(Some(&guild), &open, &me, 0) && !can_record_voice_message(Some(&guild), &open, &me, 0));
+        guild.my_roles.push(Snowflake(MOD));
+        let moderator = guild.roles.iter_mut().find(|r| r.id == Snowflake(MOD)).unwrap();
+        moderator.permissions = moderator.permissions | Permissions::SEND_VOICE_MESSAGES;
+        assert!(can_record_voice_message(Some(&guild), &open, &me, 0));
+        let muted = channel(&[(GUILD, SEND, Permissions::NONE)]);
+        assert!(!can_record_voice_message(Some(&guild), &muted, &me, 0), "Send Voice Messages alone isn't enough");
+        let forum: Channel = serde_json::from_value(json!({"id": "9", "type": 15})).unwrap();
+        assert!(!can_record_voice_message(Some(&guild), &forum, &me, 0), "never in a forum");
+
+        let dm: Channel = serde_json::from_value(json!({"id": "9", "type": 1})).unwrap();
+        assert!(can_record_voice_message(None, &dm, &me, 0), "a private channel needs no permission");
+        let system: Channel = serde_json::from_value(
+            json!({"id": "9", "type": 1, "recipients": [{"id": "2", "username": "d", "system": true}]}),
+        )
+        .unwrap();
+        assert!(!can_record_voice_message(None, &system, &me, 0));
     }
 
     #[test]

@@ -696,6 +696,9 @@ impl App {
         {
             timelines::keep_newest(timeline);
         }
+        if let Some(left) = left {
+            self.voice_left(left);
+        }
         if self.reply.borrow().as_ref().is_some_and(|r| r.channel != id) {
             self.set_reply(None);
         }

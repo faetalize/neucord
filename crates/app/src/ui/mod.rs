@@ -30,6 +30,7 @@ mod thread_line;
 mod typing;
 mod unread;
 mod uploads;
+mod voice;
 mod widgets;
 
 use std::cell::{Cell, RefCell};
@@ -125,6 +126,8 @@ pub struct App {
     reply: RefCell<Option<composer::ReplyCtx>>,
     /// The files attached to messages being written, and their tray.
     drafts: uploads::Drafts,
+    /// The voice message being recorded, or waiting to be sent.
+    voice: voice::Voice,
     /// "Editing message" above the composer.
     edit_bar: gtk::Box,
     /// The message the composer is editing, if any.
@@ -291,6 +294,7 @@ impl App {
                 .build(),
             reply: RefCell::default(),
             drafts: uploads::Drafts::new(),
+            voice: voice::Voice::new(),
             // Styled as the reply bar, which takes its place while editing.
             edit_bar: gtk::Box::builder().spacing(8).visible(false).css_classes(["reply-bar"]).build(),
             editing: RefCell::default(),

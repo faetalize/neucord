@@ -45,6 +45,7 @@ pub mod threads;
 pub mod typing;
 pub mod uploads;
 pub mod verification;
+pub mod voice;
 
 pub use gateway::{Event, Gateway, Ready, Resume};
 pub use model::{

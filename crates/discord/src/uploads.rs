@@ -11,8 +11,7 @@
 //!
 //! Images are converted first as the client does ([`crate::images`]); a
 //! converted HEIC or JPEG XR file also tells Discord the original's MD5.
-//! Not copied: a voice message adds `duration_secs` and `waveform`, from a
-//! recording only the desktop app makes.
+//! A voice message's recording is [`crate::voice`]'s.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -153,6 +152,16 @@ pub struct Sent<'a> {
     pub description: Option<&'a str>,
     pub spoiler: bool,
     pub content_type: &'a str,
+    /// What a voice message adds.
+    pub voice: Option<Voice<'a>>,
+}
+
+/// A voice message's length and waveform.
+#[derive(Clone, Copy)]
+pub struct Voice<'a> {
+    pub duration_secs: f64,
+    /// Base64 of at most 256 bytes.
+    pub waveform: &'a str,
 }
 
 impl Sent<'_> {
@@ -166,6 +175,10 @@ impl Sent<'_> {
         body["uploaded_filename"] = json!(self.uploaded_filename);
         if self.spoiler {
             body["is_spoiler"] = json!(true);
+        }
+        if let Some(voice) = self.voice {
+            body["duration_secs"] = json!(voice.duration_secs);
+            body["waveform"] = json!(voice.waveform);
         }
         body["original_content_type"] = json!(self.content_type);
         body
@@ -528,6 +541,7 @@ mod tests {
             description: None,
             spoiler: false,
             content_type: "image/png",
+            voice: None,
         };
         assert_eq!(
             plain.body(0),
@@ -540,6 +554,24 @@ mod tests {
             set.body(3),
             json!({ "id": "3", "description": "", "filename": "cat.png", "uploaded_filename": "u/cat.png",
                 "is_spoiler": true, "original_content_type": "image/png" })
+        );
+    }
+
+    #[test]
+    fn a_voice_message_names_its_length_and_waveform() {
+        // `OW` (292348) puts both after `is_spoiler`, before the type.
+        let sent = Sent {
+            filename: "0recording.ogg",
+            uploaded_filename: "u/0recording.ogg",
+            description: None,
+            spoiler: false,
+            content_type: "audio/ogg",
+            voice: Some(Voice { duration_secs: 4.68, waveform: "AAEC/w==" }),
+        };
+        assert_eq!(
+            sent.body(0),
+            json!({ "id": "0", "filename": "0recording.ogg", "uploaded_filename": "u/0recording.ogg",
+                "duration_secs": 4.68, "waveform": "AAEC/w==", "original_content_type": "audio/ogg" })
         );
     }
 
