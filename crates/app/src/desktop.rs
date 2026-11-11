@@ -18,6 +18,23 @@ const LAUNCHER_INTERFACE: &str = "com.canonical.Unity.LauncherEntry";
 /// The sound theme's name for a message arriving.
 const SOUND: &str = "message-new-instant";
 
+/// Ask the server to take down notification `id`.
+fn close(bus: &gio::DBusConnection, id: u32) {
+    let call = bus.call_future(
+        Some(SERVER),
+        PATH,
+        SERVER,
+        "CloseNotification",
+        Some(&(id,).to_variant()),
+        None,
+        gio::DBusCallFlags::NONE,
+        -1,
+    );
+    glib::spawn_future_local(async move {
+        let _ = call.await;
+    });
+}
+
 /// A notification to show.
 pub struct Notice<'a> {
     /// Names the notification: showing another with it replaces the first.
@@ -45,6 +62,11 @@ pub struct Desktop {
     app_name: &'static str,
     /// The server's id for each key's notification, while it shows.
     ids: Rc<RefCell<HashMap<String, u32>>>,
+    /// The latest `show` of each key not since withdrawn. The server answers
+    /// a `Notify` later than it was sent: an answer to anything else is for a
+    /// notification nobody wants any more.
+    wanted: Rc<RefCell<HashMap<String, u64>>>,
+    shows: Cell<u64>,
     /// What the server says it can do, once it has.
     capabilities: Rc<RefCell<Option<Vec<String>>>>,
     /// The count last given to the launcher.
@@ -111,8 +133,17 @@ impl Desktop {
                 })
             }),
         ];
-        let desktop =
-            Desktop { bus, app_id, app_name, ids, capabilities, launcher: Cell::new(None), _signals: signals };
+        let desktop = Desktop {
+            bus,
+            app_id,
+            app_name,
+            ids,
+            wanted: Rc::default(),
+            shows: Cell::new(0),
+            capabilities,
+            launcher: Cell::new(None),
+            _signals: signals,
+        };
         desktop.load_capabilities();
         desktop
     }
@@ -128,6 +159,10 @@ impl Desktop {
     pub fn show(&self, notice: &Notice) {
         let replaces = self.ids.borrow().get(notice.key).copied().unwrap_or(0);
         let (bus, ids, capabilities) = (self.bus.clone(), self.ids.clone(), self.capabilities.clone());
+        let show = self.shows.get() + 1;
+        self.shows.set(show);
+        self.wanted.borrow_mut().insert(notice.key.to_owned(), show);
+        let wanted = self.wanted.clone();
         let (app_name, app_id) = (self.app_name, self.app_id);
         let owned = (notice.key.to_owned(), notice.title.to_owned(), notice.body.to_owned());
         let (icon, sound, reply) = (notice.icon.cloned(), notice.sound, notice.reply);
@@ -151,7 +186,13 @@ impl Desktop {
             match call.await {
                 Ok(answer) => {
                     if let Some((id,)) = answer.get::<(u32,)>() {
-                        ids.borrow_mut().insert(key.clone(), id);
+                        if wanted.borrow().get(key) == Some(&show) {
+                            ids.borrow_mut().insert(key.clone(), id);
+                        } else if ids.borrow().get(key) != Some(&id) {
+                            // Withdrawn, or shown again, while the server was making it:
+                            // it would stay on screen with nothing left to take it back.
+                            close(&bus, id);
+                        }
                     }
                 }
                 Err(e) => eprintln!("notification: {e}"),
@@ -161,20 +202,9 @@ impl Desktop {
 
     /// Take back the notification with `key`, if it shows.
     pub fn withdraw(&self, key: &str) {
+        self.wanted.borrow_mut().remove(key);
         let Some(id) = self.ids.borrow_mut().remove(key) else { return };
-        let call = self.bus.call_future(
-            Some(SERVER),
-            PATH,
-            SERVER,
-            "CloseNotification",
-            Some(&(id,).to_variant()),
-            None,
-            gio::DBusCallFlags::NONE,
-            -1,
-        );
-        glib::spawn_future_local(async move {
-            let _ = call.await;
-        });
+        close(&self.bus, id);
     }
 
     /// The count on the app's icon, for launchers that follow Unity's
@@ -312,6 +342,10 @@ mod tests {
     /// A notification server on a private bus that records what it is asked.
     struct Server {
         calls: Rc<RefCell<Vec<(String, glib::Variant)>>>,
+        /// While set, `Notify` isn't answered until [`Server::release`], so a
+        /// test decides when the answer reaches the client.
+        hold: Rc<Cell<bool>>,
+        held: Rc<RefCell<Vec<(gio::DBusMethodInvocation, u32)>>>,
         bus: gio::DBusConnection,
         registration: gio::RegistrationId,
     }
@@ -328,6 +362,9 @@ mod tests {
             let calls: Rc<RefCell<Vec<(String, glib::Variant)>>> = Rc::default();
             let next = Cell::new(1u32);
             let log = calls.clone();
+            let hold: Rc<Cell<bool>> = Rc::default();
+            let held: Rc<RefCell<Vec<(gio::DBusMethodInvocation, u32)>>> = Rc::default();
+            let (holding, held_back) = (hold.clone(), held.clone());
             let registration = bus
                 .register_object(PATH, &info.lookup_interface(SERVER).expect("an interface"))
                 .method_call(move |_, _, _, _, method, parameters, invocation| {
@@ -344,14 +381,31 @@ mod tests {
                                 next.set(next.get() + 1);
                                 next.get() - 1
                             };
-                            invocation.return_value(Some(&(id,).to_variant()))
+                            if holding.get() {
+                                held_back.borrow_mut().push((invocation, id));
+                            } else {
+                                invocation.return_value(Some(&(id,).to_variant()))
+                            }
                         }
                         _ => invocation.return_value(None),
                     }
                 })
                 .build()
                 .expect("registered");
-            Server { calls, bus: bus.clone(), registration }
+            Server { calls, hold, held, bus: bus.clone(), registration }
+        }
+
+        /// Answer every `Notify` held back, with the ids it was given.
+        fn release(&self) -> Vec<u32> {
+            self.hold.set(false);
+            self.held
+                .take()
+                .into_iter()
+                .map(|(invocation, id)| {
+                    invocation.return_value(Some(&(id,).to_variant()));
+                    id
+                })
+                .collect()
         }
 
         /// Let go of the bus: it can't be shut down while this holds it.
@@ -370,7 +424,7 @@ mod tests {
 
     /// Run the main loop until `done`, which must happen within a few seconds.
     fn until(done: impl Fn() -> bool) {
-        let context = glib::MainContext::default();
+        let context = glib::MainContext::ref_thread_default();
         let limit = glib::monotonic_time() + 5_000_000;
         while !done() {
             assert!(glib::monotonic_time() < limit, "timed out");
@@ -378,69 +432,168 @@ mod tests {
         }
     }
 
-    #[test]
-    fn notifications_go_through_the_server_and_its_answers_come_back() {
-        // Needs a bus of its own to run; without a daemon to start there is nothing to test against.
-        let Some(_) = glib::find_program_in_path("dbus-daemon") else { return };
-        let private = gio::TestDBus::new(gio::TestDBusFlags::NONE);
-        private.up();
-        let bus = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE).expect("the private bus");
-        let server = Server::start(&bus);
-        let name = gio::bus_own_name_on_connection(&bus, SERVER, gio::BusNameOwnerFlags::NONE, |_, _| {}, |_, _| {});
-        let heard: Rc<RefCell<Vec<(String, String)>>> = Rc::default();
-        let desktop = Desktop::new(bus.clone(), "dev.example.app", "Neucord", {
-            let heard = heard.clone();
-            move |key, event| {
-                let what = match event {
-                    Event::Opened => "opened".to_owned(),
-                    Event::Replied(text) => format!("replied {text}"),
-                };
-                heard.borrow_mut().push((key.to_owned(), what));
+    /// Run the main loop until everything already on its way to the client
+    /// has been handled: a call to the server is answered after anything the
+    /// server sent before it.
+    fn settle(bus: &gio::DBusConnection) {
+        let answered = Rc::new(Cell::new(false));
+        let call =
+            bus.call_future(Some(SERVER), PATH, SERVER, "GetCapabilities", None, None, gio::DBusCallFlags::NONE, -1);
+        glib::spawn_future_local({
+            let answered = answered.clone();
+            async move {
+                let _ = call.await;
+                answered.set(true);
             }
         });
-        until(|| desktop.capabilities.borrow().is_some());
+        until(|| answered.get());
+        while glib::MainContext::ref_thread_default().iteration(false) {}
+    }
 
-        desktop.show(&notice(true));
-        until(|| !server.calls("Notify").is_empty() && desktop.ids.borrow().contains_key("channel-1"));
-        let first = server.calls("Notify").remove(0);
-        assert_eq!(first.child_value(5).get::<Vec<String>>().unwrap(), ["default", "Open", "inline-reply", "Reply"]);
-        assert_eq!(first.child_value(1).get::<u32>(), Some(0), "nothing to replace yet");
-        let id = desktop.ids.borrow()["channel-1"];
+    /// A private bus with a notification server and a [`Desktop`] on it, run
+    /// by a main context of its own: what one test leaves queued must not be
+    /// dispatched by another's thread.
+    struct Rig {
+        _turn: std::sync::MutexGuard<'static, ()>,
+        private: gio::TestDBus,
+        bus: gio::DBusConnection,
+        server: Server,
+        name: gio::OwnerId,
+        heard: Rc<RefCell<Vec<(String, String)>>>,
+        desktop: Desktop,
+    }
 
-        desktop.show(&notice(true));
-        until(|| server.calls("Notify").len() == 2);
-        assert_eq!(server.calls("Notify")[1].child_value(1).get::<u32>(), Some(id), "the newer replaces the first");
+    impl Rig {
+        /// Runs `test` on a rig. Without a daemon to start there is nothing
+        /// to test against, and it isn't run.
+        fn run(test: impl FnOnce(&Rig)) {
+            static TURNS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            if glib::find_program_in_path("dbus-daemon").is_none() {
+                return;
+            }
+            let turn = TURNS.lock().unwrap_or_else(|e| e.into_inner());
+            glib::MainContext::new()
+                .with_thread_default(|| {
+                    let rig = Rig::start(turn);
+                    test(&rig);
+                    rig.finish();
+                })
+                .expect("a main context of its own");
+        }
 
-        server.signal("ActionInvoked", (id, "default").to_variant());
-        server.signal("ActionInvoked", (id, "something else").to_variant());
-        server.signal("NotificationReplied", (id, "on my way").to_variant());
-        server.signal("ActionInvoked", (id + 100, "default").to_variant());
-        until(|| heard.borrow().len() == 2);
-        assert_eq!(
-            *heard.borrow(),
-            [("channel-1".to_owned(), "opened".to_owned()), ("channel-1".to_owned(), "replied on my way".to_owned())]
-        );
+        fn start(turn: std::sync::MutexGuard<'static, ()>) -> Rig {
+            let private = gio::TestDBus::new(gio::TestDBusFlags::NONE);
+            private.up();
+            // Its own connection: the session bus's is shared by every test.
+            let address = private.bus_address().expect("the private bus's address");
+            let bus = gio::DBusConnection::for_address_sync(
+                &address,
+                gio::DBusConnectionFlags::AUTHENTICATION_CLIENT | gio::DBusConnectionFlags::MESSAGE_BUS_CONNECTION,
+                None,
+                gio::Cancellable::NONE,
+            )
+            .expect("the private bus");
+            let server = Server::start(&bus);
+            let name =
+                gio::bus_own_name_on_connection(&bus, SERVER, gio::BusNameOwnerFlags::NONE, |_, _| {}, |_, _| {});
+            let heard: Rc<RefCell<Vec<(String, String)>>> = Rc::default();
+            let desktop = Desktop::new(bus.clone(), "dev.example.app", "Neucord", {
+                let heard = heard.clone();
+                move |key, event| {
+                    let what = match event {
+                        Event::Opened => "opened".to_owned(),
+                        Event::Replied(text) => format!("replied {text}"),
+                    };
+                    heard.borrow_mut().push((key.to_owned(), what));
+                }
+            });
+            until(|| desktop.capabilities.borrow().is_some());
+            Rig { _turn: turn, private, bus, server, name, heard, desktop }
+        }
 
-        desktop.withdraw("channel-1");
-        until(|| !server.calls("CloseNotification").is_empty());
-        assert_eq!(server.calls("CloseNotification")[0].child_value(0).get::<u32>(), Some(id));
-        assert!(desktop.ids.borrow().is_empty());
-        desktop.show(&notice(true));
-        until(|| server.calls("Notify").len() == 3);
-        assert_eq!(server.calls("Notify")[2].child_value(1).get::<u32>(), Some(0), "a withdrawn one isn't replaced");
+        /// Everything on the bus lets go before it goes: the daemon waits for its connections.
+        fn finish(self) {
+            let Rig { private, bus, server, name, desktop, .. } = self;
+            gio::bus_unown_name(name);
+            drop(desktop);
+            server.stop();
+            bus.close_sync(gio::Cancellable::NONE).expect("closed");
+            drop(bus);
+            private.down();
+        }
+    }
 
-        // A server that closed it by itself is forgotten the same way.
-        until(|| desktop.ids.borrow().contains_key("channel-1"));
-        let id = desktop.ids.borrow()["channel-1"];
-        server.signal("NotificationClosed", (id, 2u32).to_variant());
-        until(|| desktop.ids.borrow().is_empty());
-        // Everything on the bus lets go before it goes: the daemon waits for its connections.
-        gio::bus_unown_name(name);
-        drop(desktop);
-        server.stop();
-        bus.close_sync(gio::Cancellable::NONE).expect("closed");
-        drop(bus);
-        private.down();
+    #[test]
+    fn notifications_go_through_the_server_and_its_answers_come_back() {
+        Rig::run(|rig| {
+            let Rig { server, heard, desktop, .. } = rig;
+
+            desktop.show(&notice(true));
+            until(|| !server.calls("Notify").is_empty() && desktop.ids.borrow().contains_key("channel-1"));
+            let first = server.calls("Notify").remove(0);
+            assert_eq!(
+                first.child_value(5).get::<Vec<String>>().unwrap(),
+                ["default", "Open", "inline-reply", "Reply"]
+            );
+            assert_eq!(first.child_value(1).get::<u32>(), Some(0), "nothing to replace yet");
+            let id = desktop.ids.borrow()["channel-1"];
+
+            desktop.show(&notice(true));
+            until(|| server.calls("Notify").len() == 2);
+            assert_eq!(server.calls("Notify")[1].child_value(1).get::<u32>(), Some(id), "the newer replaces the first");
+            settle(&rig.bus);
+
+            server.signal("ActionInvoked", (id, "default").to_variant());
+            server.signal("ActionInvoked", (id, "something else").to_variant());
+            server.signal("NotificationReplied", (id, "on my way").to_variant());
+            server.signal("ActionInvoked", (id + 100, "default").to_variant());
+            until(|| heard.borrow().len() == 2);
+            assert_eq!(
+                *heard.borrow(),
+                [
+                    ("channel-1".to_owned(), "opened".to_owned()),
+                    ("channel-1".to_owned(), "replied on my way".to_owned())
+                ]
+            );
+
+            desktop.withdraw("channel-1");
+            until(|| !server.calls("CloseNotification").is_empty());
+            assert_eq!(server.calls("CloseNotification")[0].child_value(0).get::<u32>(), Some(id));
+            assert!(desktop.ids.borrow().is_empty());
+            desktop.show(&notice(true));
+            until(|| server.calls("Notify").len() == 3);
+            assert_eq!(
+                server.calls("Notify")[2].child_value(1).get::<u32>(),
+                Some(0),
+                "a withdrawn one isn't replaced"
+            );
+
+            // A server that closed it by itself is forgotten the same way.
+            until(|| desktop.ids.borrow().contains_key("channel-1"));
+            let id = desktop.ids.borrow()["channel-1"];
+            server.signal("NotificationClosed", (id, 2u32).to_variant());
+            until(|| desktop.ids.borrow().is_empty());
+        });
+    }
+
+    #[test]
+    fn an_answer_that_comes_after_the_withdrawal_leaves_nothing_shown() {
+        Rig::run(|rig| {
+            let Rig { server, desktop, .. } = rig;
+
+            server.hold.set(true);
+            desktop.show(&notice(true));
+            until(|| !server.held.borrow().is_empty());
+            desktop.withdraw("channel-1");
+            let shown = server.release();
+            settle(&rig.bus);
+
+            assert!(desktop.ids.borrow().is_empty(), "the withdrawn notification's id was kept");
+            until(|| !server.calls("CloseNotification").is_empty());
+            let closed: Vec<_> =
+                server.calls("CloseNotification").iter().filter_map(|p| p.child_value(0).get::<u32>()).collect();
+            assert_eq!(closed, shown, "the notification the server made after the withdrawal is taken back");
+        });
     }
 
     #[test]
