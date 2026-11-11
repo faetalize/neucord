@@ -383,6 +383,22 @@ changed for unrelated reasons only needs a note in the issue.
   the whole message the setting lives in, unknown fields included, and `RK`
   in 761821 (anchor `mergePartial`) replaces an edited message in the set to
   save instead of merging into it.
+- **What the status and custom status write** (`Setting::Status`,
+  `Setting::CustomStatus`). The protos, `updateAsync` and the expiry
+  managers are watched. Not watched, all unnamed: 827827 (anchor
+  `statusCreatedAtMs`) saves the status, its expiry and, unless the status
+  stays what it was, its creation time; 431273 (anchor `CLEAR_AFTER`) saves
+  a clear instead for text that is empty trimmed and no emoji, writes a
+  server's emoji by id and a Unicode one by its character, and caps the text
+  at 128.
+- **When we send our presence** (`presence.rs`). `emitPresenceUpdate`,
+  `presenceUpdate` and `SelfPresenceStore` (what the presence is) are
+  watched. Not watched: the reporter around `emitPresenceUpdate` in 225123
+  sends after READY and on a change only when the presence differs from the
+  last one it sent (Online to start with), sends that one again after
+  RESUMED, and lets 5 go out in any 20 s.
+- **The languages** (`locales.rs`). 296437 (anchor `Dansk`) lists them with
+  `enabled`; `getAvailableLocales` (watched) sorts those by name.
 
 ## Notifications and unread state
 
