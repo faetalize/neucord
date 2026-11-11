@@ -57,6 +57,7 @@ pub(crate) const LOGIN: Endpoint = Endpoint::post("/auth/login");
 pub(crate) const LOGOUT: Endpoint = Endpoint::post("/auth/logout");
 pub(crate) const SEND_MFA_SMS: Endpoint = Endpoint::post("/auth/mfa/sms/send");
 pub(crate) const VERIFY_MFA: Endpoint = Endpoint::post("/auth/mfa/{method}");
+pub(crate) const FORGOT_PASSWORD: Endpoint = Endpoint::post("/auth/forgot");
 pub(crate) const REMOTE_AUTH_LOGIN: Endpoint = Endpoint::post("/users/@me/remote-auth/login");
 pub(crate) const STICKER_PACKS: Endpoint = Endpoint::get("/sticker-packs");
 pub(crate) const GIFS_SEARCH: Endpoint = Endpoint::get("/gifs/search");
@@ -64,6 +65,7 @@ pub(crate) const GIFS_TRENDING: Endpoint = Endpoint::get("/gifs/trending");
 pub(crate) const GIFS_TRENDING_GIFS: Endpoint = Endpoint::get("/gifs/trending-gifs");
 pub(crate) const GIFS_SUGGEST: Endpoint = Endpoint::get("/gifs/suggest");
 pub(crate) const SAFETY_HUB: Endpoint = Endpoint::get("/safety-hub/@me");
+pub(crate) const SAFETY_HUB_SUSPENDED: Endpoint = Endpoint::post("/safety-hub/suspended/@me");
 
 /// An HTTP method and a path template.
 #[derive(Clone, Copy, Debug)]
