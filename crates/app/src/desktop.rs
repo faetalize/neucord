@@ -46,7 +46,7 @@ pub struct Desktop {
     /// The server's id for each key's notification, while it shows.
     ids: Rc<RefCell<HashMap<String, u32>>>,
     /// What the server says it can do, once it has.
-    capabilities: Rc<RefCell<Vec<String>>>,
+    capabilities: Rc<RefCell<Option<Vec<String>>>>,
     /// The count last given to the launcher.
     launcher: Cell<Option<u32>>,
     _signals: Vec<gio::SignalSubscription>,
@@ -62,7 +62,7 @@ impl Desktop {
         on_event: impl Fn(&str, Event) + 'static,
     ) -> Self {
         let ids: Rc<RefCell<HashMap<String, u32>>> = Rc::default();
-        let capabilities: Rc<RefCell<Vec<String>>> = Rc::default();
+        let capabilities: Rc<RefCell<Option<Vec<String>>>> = Rc::default();
         let on_event = Rc::new(on_event);
         let key_of = {
             let ids = ids.clone();
@@ -120,31 +120,24 @@ impl Desktop {
     fn load_capabilities(&self) {
         let (bus, capabilities) = (self.bus.clone(), self.capabilities.clone());
         glib::spawn_future_local(async move {
-            let call = bus.call_future(
-                Some(SERVER),
-                PATH,
-                SERVER,
-                "GetCapabilities",
-                None,
-                Some(glib::VariantTy::new("(as)").expect("a type")),
-                gio::DBusCallFlags::NONE,
-                -1,
-            );
-            if let Ok(reply) = call.await
-                && let Some((list,)) = reply.get::<(Vec<String>,)>()
-            {
-                *capabilities.borrow_mut() = list;
-            }
+            capabilities_of(&bus, &capabilities).await;
         });
     }
 
     /// Show `notice`, in place of the one with its key, if one shows.
     pub fn show(&self, notice: &Notice) {
         let replaces = self.ids.borrow().get(notice.key).copied().unwrap_or(0);
-        let reply = notice.reply && self.capabilities.borrow().iter().any(|c| c == "inline-reply");
-        let parameters = arguments(self.app_name, self.app_id, replaces, notice, reply);
-        let (bus, ids, key) = (self.bus.clone(), self.ids.clone(), notice.key.to_owned());
+        let (bus, ids, capabilities) = (self.bus.clone(), self.ids.clone(), self.capabilities.clone());
+        let (app_name, app_id) = (self.app_name, self.app_id);
+        let owned = (notice.key.to_owned(), notice.title.to_owned(), notice.body.to_owned());
+        let (icon, sound, reply) = (notice.icon.cloned(), notice.sound, notice.reply);
         glib::spawn_future_local(async move {
+            // The first notification may come before the server has said what it can do.
+            let known = capabilities_of(&bus, &capabilities).await;
+            let reply = reply && known.iter().any(|c| c == "inline-reply");
+            let (key, title, body) = &owned;
+            let notice = Notice { key, title, body, icon: icon.as_ref(), sound, reply };
+            let parameters = arguments(app_name, app_id, replaces, &notice, reply);
             let call = bus.call_future(
                 Some(SERVER),
                 PATH,
@@ -156,9 +149,9 @@ impl Desktop {
                 -1,
             );
             match call.await {
-                Ok(reply) => {
-                    if let Some((id,)) = reply.get::<(u32,)>() {
-                        ids.borrow_mut().insert(key, id);
+                Ok(answer) => {
+                    if let Some((id,)) = answer.get::<(u32,)>() {
+                        ids.borrow_mut().insert(key.clone(), id);
                     }
                 }
                 Err(e) => eprintln!("notification: {e}"),
@@ -195,6 +188,29 @@ impl Desktop {
             eprintln!("launcher: {e}");
         }
     }
+}
+
+/// What the server can do: asked once, and kept.
+async fn capabilities_of(bus: &gio::DBusConnection, cache: &RefCell<Option<Vec<String>>>) -> Vec<String> {
+    if let Some(known) = cache.borrow().clone() {
+        return known;
+    }
+    let call = bus.call_future(
+        Some(SERVER),
+        PATH,
+        SERVER,
+        "GetCapabilities",
+        None,
+        Some(glib::VariantTy::new("(as)").expect("a type")),
+        gio::DBusCallFlags::NONE,
+        -1,
+    );
+    let list = match call.await {
+        Ok(reply) => reply.get::<(Vec<String>,)>().map(|(list,)| list).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    *cache.borrow_mut() = Some(list.clone());
+    list
 }
 
 /// `Notify`'s arguments for `notice`, replacing the notification `replaces`
@@ -273,6 +289,17 @@ mod tests {
         let actions = |reply| arguments("Neucord", "dev.example.app", 0, &notice(true), reply).child_value(5);
         assert_eq!(actions(false).get::<Vec<String>>().unwrap(), ["default", "Open"]);
         assert_eq!(actions(true).get::<Vec<String>>().unwrap(), ["default", "Open", "inline-reply", "Reply"]);
+    }
+
+    #[test]
+    fn the_icon_travels_as_raw_pixels() {
+        let pixels = glib::Bytes::from_owned(vec![200u8; 2 * 3 * 4]);
+        let texture = gdk::MemoryTexture::new(2, 3, gdk::MemoryFormat::R8g8b8a8, &pixels, 8);
+        let with = Notice { icon: Some(texture.upcast_ref()), ..notice(true) };
+        let image = hint(&arguments("Neucord", "dev.example.app", 0, &with, false), "image-data").unwrap();
+        // Width, height, row stride, alpha, bits per sample, channels, the pixels.
+        assert_eq!(image.get::<(i32, i32, i32, bool, i32, i32, Vec<u8>)>(), Some((2, 3, 8, true, 8, 4, vec![200; 24])));
+        assert!(hint(&arguments("Neucord", "dev.example.app", 0, &notice(true), false), "image-data").is_none());
     }
 
     #[test]
@@ -371,7 +398,7 @@ mod tests {
                 heard.borrow_mut().push((key.to_owned(), what));
             }
         });
-        until(|| !desktop.capabilities.borrow().is_empty());
+        until(|| desktop.capabilities.borrow().is_some());
 
         desktop.show(&notice(true));
         until(|| !server.calls("Notify").is_empty() && desktop.ids.borrow().contains_key("channel-1"));
