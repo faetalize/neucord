@@ -358,6 +358,8 @@ pub enum Fetch {
 pub struct Profiles {
     users: HashMap<Snowflake, Held<Profile>>,
     servers: HashMap<(Snowflake, Snowflake), Held<ServerProfile>>,
+    /// What a server says of a member, which only its own popouts show.
+    members: HashMap<(Snowflake, Snowflake), (Option<Member>, Vec<Badge>)>,
     asking: HashSet<(Snowflake, Option<Snowflake>)>,
     mutual_guilds: HashMap<Snowflake, Vec<MutualGuild>>,
     mutual_friends: HashMap<Snowflake, Vec<User>>,
@@ -418,6 +420,9 @@ impl Profiles {
             friends.sort_by_key(|f| f.username.to_lowercase());
             self.mutual_friends.insert(user, friends);
         }
+        if let Some(guild) = request.guild {
+            self.members.insert((user, guild), (profile.member.clone(), profile.server_badges.clone()));
+        }
         if let Some((guild, server)) = &profile.server {
             self.servers.insert((user, *guild), Held { data: Some(server.clone()), ended: now, failed: None });
         }
@@ -445,6 +450,23 @@ impl Profiles {
     /// What we hold of `user`.
     pub fn get(&self, user: Snowflake) -> Option<&Profile> {
         self.users.get(&user)?.data.as_ref()
+    }
+
+    /// What we hold of `user`, as shown in `guild` (none: outside any
+    /// server): what a server says of them is there only for its own.
+    pub fn get_in(&self, user: Snowflake, guild: Option<Snowflake>) -> Option<Profile> {
+        let mut profile = self.get(user)?.clone();
+        profile.member = None;
+        profile.server = None;
+        profile.server_badges = Vec::new();
+        if let Some(guild) = guild {
+            profile.server = self.servers.get(&(user, guild)).and_then(|h| Some((guild, h.data.clone()?)));
+            if let Some((member, badges)) = self.members.get(&(user, guild)) {
+                profile.member = member.clone();
+                profile.server_badges = badges.clone();
+            }
+        }
+        Some(profile)
     }
 
     /// Whether the last request for `user` failed.
@@ -662,6 +684,33 @@ mod tests {
             Decoration::from_value(&json!({"sku_id": "7", "expires_at": "2020-01-01T00:00:00+00:00"})).unwrap();
         assert!(lapsing.url(1_500_000_000, 128).is_some(), "before");
         assert_eq!(lapsing.url(1_700_000_000, 128), None, "after");
+    }
+
+    #[test]
+    fn what_a_server_says_of_a_member_stays_in_that_server() {
+        let mut profiles = Profiles::default();
+        let (user, here, there) = (Snowflake(3), Snowflake(10), Snowflake(11));
+        let mut asked = request(3);
+        asked.guild = Some(here);
+        profiles.answered(&asked, Profile::from_value(&answer(3)).unwrap(), NOW);
+        let shown = profiles.get_in(user, Some(here)).unwrap();
+        assert_eq!(shown.member.as_ref().unwrap().nick.as_deref(), Some("server nick"));
+        assert_eq!(shown.shown().bio, "server bio");
+        for elsewhere in [Some(there), None] {
+            let shown = profiles.get_in(user, elsewhere).unwrap();
+            assert!(shown.member.is_none() && shown.server.is_none());
+            assert_eq!(shown.shown().bio, "hello", "their own");
+        }
+        // An answer for no server leaves what we held of that server alone.
+        profiles.answered(&request(3), Profile::from_value(&answer_without_server(3)).unwrap(), NOW);
+        assert!(profiles.get_in(user, Some(here)).unwrap().member.is_some());
+    }
+
+    fn answer_without_server(user: u64) -> Value {
+        let mut value = answer(user);
+        value.as_object_mut().unwrap().remove("guild_member");
+        value.as_object_mut().unwrap().remove("guild_member_profile");
+        value
     }
 
     #[test]

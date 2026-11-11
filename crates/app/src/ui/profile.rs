@@ -135,9 +135,8 @@ pub(super) struct View {
     note: bool,
     /// The sections the reader opened, which a rebuild leaves open.
     open: RefCell<HashSet<&'static str>>,
-    /// The note's box has the focus: nothing is built over what is being
-    /// written, and what it sends is sent as the box is left.
-    focused: std::cell::Cell<bool>,
+    /// The note's box holds text not sent yet: nothing is built over it.
+    editing: std::cell::Cell<bool>,
 }
 
 /// The profiles on screen: the popout, if one is open, and the panel.
@@ -191,9 +190,13 @@ impl App {
             request,
             note,
             open: RefCell::default(),
-            focused: std::cell::Cell::default(),
+            editing: std::cell::Cell::default(),
         });
-        self.profile_views.borrow_mut().popout = Some(Rc::downgrade(&view));
+        // One at a time: an open one would take this click to dismiss itself.
+        let old = self.profile_views.borrow_mut().popout.replace(Rc::downgrade(&view));
+        if let Some(Host::Popout(old)) = old.and_then(|v| v.upgrade()).as_ref().map(|v| &v.host) {
+            old.popdown();
+        }
         self.begin_profile(&view);
         popover.popup();
     }
@@ -226,7 +229,7 @@ impl App {
             },
             note: false,
             open: RefCell::default(),
-            focused: std::cell::Cell::default(),
+            editing: std::cell::Cell::default(),
         });
         self.profile_views.borrow_mut().panel = Some(view.clone());
         self.begin_profile(&view);
@@ -373,8 +376,8 @@ impl View {
 
     /// Show what we hold now, or a spinner while nothing is held to show.
     fn fill(self: &Rc<Self>, app: &Rc<App>, waiting: bool) {
-        // Leaving the box would send what it holds, half written.
-        if !waiting && self.focused.get() {
+        // Building over the box would lose, or send, what it holds half written.
+        if !waiting && self.editing.get() {
             return;
         }
         let body = match waiting {
@@ -388,7 +391,18 @@ impl View {
             false => self.body(app),
         };
         match &self.host {
-            Host::Popout(popover) => popover.set_child(Some(&body)),
+            // However much a profile holds, the popout is no taller than
+            // the window can show.
+            Host::Popout(popover) => {
+                let height = (app.window.height() - 120).clamp(200, 700);
+                let scroller = gtk::ScrolledWindow::builder()
+                    .child(&body)
+                    .hscrollbar_policy(gtk::PolicyType::Never)
+                    .propagate_natural_height(true)
+                    .max_content_height(height)
+                    .build();
+                popover.set_child(Some(&scroller));
+            }
             Host::Panel(panel) => {
                 while let Some(old) = panel.first_child() {
                     panel.remove(&old);
@@ -400,7 +414,7 @@ impl View {
 
     fn body(self: &Rc<Self>, app: &Rc<App>) -> gtk::Widget {
         let state = app.state.borrow();
-        let held = state.profiles.get(self.target.user.id).cloned();
+        let held = state.profiles.get_in(self.target.user.id, self.target.guild);
         // What Discord says of them replaces what we knew when it was clicked.
         let user = &held.as_ref().map_or_else(|| self.target.user.clone(), |p| p.user.clone());
         let guild = self.target.guild.and_then(|g| state.guilds.iter().find(|x| x.id == g));
@@ -415,13 +429,20 @@ impl View {
                 Banner::User(hash) => discord::cdn::banner_url(user.id.0, hash, 600),
                 Banner::Server { guild, hash } => discord::cdn::member_banner_url(guild.0, user.id.0, hash, 600),
             };
-            let picture = gtk::Picture::builder()
-                .content_fit(gtk::ContentFit::Cover)
-                .height_request(BANNER_HEIGHT)
-                .overflow(gtk::Overflow::Hidden)
-                .build();
-            app.images.set(&picture, &url, false);
-            column.append(&picture);
+            // Shown once it has loaded: until then, or if it never does, it
+            // would be an empty box.
+            let (frame, picture) = fixed_picture(-1, BANNER_HEIGHT, gtk::ContentFit::Cover);
+            frame.set_visible(false);
+            app.images.load(&url, false, {
+                let frame = frame.downgrade();
+                move |paintable| {
+                    picture.set_paintable(Some(&paintable));
+                    if let Some(frame) = frame.upgrade() {
+                        frame.set_visible(true);
+                    }
+                }
+            });
+            column.append(&frame);
         }
 
         let member = held.as_ref().and_then(|p| p.member.clone());
@@ -450,14 +471,11 @@ impl View {
         let decoration = held.as_ref().and_then(|p| p.decoration.as_ref());
         if let Some(url) = decoration.and_then(|d| d.url(now_ms() / 1000, 256)) {
             let size = AVATAR * 6 / 5;
-            let frame = gtk::Picture::builder()
-                .width_request(size)
-                .height_request(size)
-                .halign(gtk::Align::Center)
-                .valign(gtk::Align::Center)
-                .can_target(false)
-                .build();
-            app.images.set(&frame, &url, false);
+            let (frame, picture) = fixed_picture(size, size, gtk::ContentFit::Contain);
+            frame.set_halign(gtk::Align::Center);
+            frame.set_valign(gtk::Align::Center);
+            frame.set_can_target(false);
+            app.images.set(&picture, &url, false);
             avatar.add_overlay(&frame);
             avatar.set_measure_overlay(&frame, false);
         }
@@ -622,9 +640,9 @@ impl View {
             let list = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
             for (guild, nick) in &servers {
                 let row = gtk::Box::builder().spacing(8).build();
-                let icon = super::widgets::round_picture(24);
+                let (icon, picture) = fixed_picture(24, 24, gtk::ContentFit::Cover);
                 if let Some(hash) = &guild.icon {
-                    app.images.set(&icon, &discord::cdn::guild_icon_url(guild.id.0, hash, 64), false);
+                    app.images.set(&picture, &discord::cdn::guild_icon_url(guild.id.0, hash, 64), false);
                 }
                 row.append(&icon);
                 row.append(
@@ -777,11 +795,22 @@ impl View {
             .build();
         let held = state.notes.get(user).unwrap_or_default().to_owned();
         entry.set_text(&held);
+        entry.connect_changed({
+            let (view, held) = (Rc::downgrade(self), held.clone());
+            move |entry| {
+                if let Some(view) = view.upgrade() {
+                    view.editing.set(entry.text() != held);
+                }
+            }
+        });
         let send = {
-            let (app, sent) = (Rc::downgrade(app), std::cell::RefCell::new(held));
+            let (app, view, sent) = (Rc::downgrade(app), Rc::downgrade(self), std::cell::RefCell::new(held));
             move |entry: &gtk::Entry| {
                 let text = entry.text().to_string();
                 let Some(app) = app.upgrade() else { return };
+                if let Some(view) = view.upgrade() {
+                    view.editing.set(false);
+                }
                 if *sent.borrow() == text {
                     return;
                 }
@@ -798,20 +827,9 @@ impl View {
             move |entry| send(entry)
         });
         let focus = gtk::EventControllerFocus::new();
-        focus.connect_enter({
-            let view = Rc::downgrade(self);
-            move |_| {
-                if let Some(view) = view.upgrade() {
-                    view.focused.set(true);
-                }
-            }
-        });
         focus.connect_leave({
-            let (send, entry, view) = (send.clone(), entry.downgrade(), Rc::downgrade(self));
+            let (send, entry) = (send.clone(), entry.downgrade());
             move |_| {
-                if let Some(view) = view.upgrade() {
-                    view.focused.set(false);
-                }
                 if let Some(entry) = entry.upgrade() {
                     send(&entry);
                 }
@@ -845,12 +863,21 @@ fn section(heading: &str, body: &impl IsA<gtk::Widget>) -> gtk::Widget {
 }
 
 fn badge_picture(app: &Rc<App>, badge: &Badge) -> gtk::Widget {
-    let picture = gtk::Picture::builder()
-        .width_request(BADGE)
-        .height_request(BADGE)
-        .content_fit(gtk::ContentFit::Contain)
-        .tooltip_text(&badge.description)
-        .build();
+    let (frame, picture) = fixed_picture(BADGE, BADGE, gtk::ContentFit::Contain);
+    frame.set_tooltip_text(Some(&badge.description));
     app.images.set(&picture, &discord::cdn::badge_icon_url(&badge.icon), false);
-    picture.upcast()
+    frame
+}
+
+/// A picture held to `width` by `height` (`-1`: as wide as it is given),
+/// however large its image is: a `Picture` asks for its image's own size,
+/// which a size request only raises.
+fn fixed_picture(width: i32, height: i32, fit: gtk::ContentFit) -> (gtk::Widget, gtk::Picture) {
+    let frame = gtk::Overlay::builder()
+        .child(&gtk::Box::builder().width_request(width).height_request(height).build())
+        .overflow(gtk::Overflow::Hidden)
+        .build();
+    let picture = gtk::Picture::builder().content_fit(fit).can_shrink(true).build();
+    frame.add_overlay(&picture);
+    (frame.upcast(), picture)
 }
