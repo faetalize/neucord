@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use soup::prelude::*;
 
+use crate::component::Component;
 use crate::embed::Embed;
 use crate::emoji::GuildEmoji;
 use crate::experiments::Experiments;
@@ -79,6 +80,18 @@ pub struct Ready {
     pub required_action: Option<String>,
     /// What Discord rolls out to the account and its servers.
     pub experiments: Experiments,
+    /// This session's id, which interactions name.
+    pub session_id: String,
+}
+
+/// How an interaction of ours ended, as the events `INTERACTION_SUCCESS`,
+/// `INTERACTION_FAILURE`, and `INTERACTION_MODAL_CREATE` and
+/// `INTERACTION_IFRAME_MODAL_CREATE` (a form to fill in) say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    Success,
+    Failure,
+    Form,
 }
 
 #[derive(Debug)]
@@ -168,6 +181,11 @@ pub enum Event {
     MessageDeleteBulk {
         ids: Vec<Snowflake>,
         channel_id: Snowflake,
+    },
+    /// Discord answered the interaction we sent as `nonce`.
+    Interaction {
+        nonce: Snowflake,
+        outcome: Outcome,
     },
     /// Votes on a poll's answers, as `(answer_id, user_id)`: added, or taken back.
     /// `many` is a `MESSAGE_POLL_VOTE_ADD_MANY`, which the client counts
@@ -668,6 +686,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 message_display_compact: settings::message_display_compact(&data["user_settings"]).unwrap_or(false),
                 required_action: data["required_action"].as_str().map(str::to_owned),
                 experiments,
+                session_id: data["session_id"].as_str().unwrap_or_default().to_owned(),
                 account,
                 nitro: Nitro::from_user(&data["user"]),
                 user,
@@ -904,7 +923,21 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 embeds: data.get("embeds").and_then(|e| Vec::<Embed>::deserialize(e).ok()),
                 flags: data["flags"].as_u64(),
                 poll: data.get("poll").and_then(|p| crate::poll::Poll::deserialize(p).ok()),
+                components: data.get("components").and_then(|c| Vec::<Component>::deserialize(c).ok()),
             })
+        }
+        "INTERACTION_SUCCESS"
+        | "INTERACTION_FAILURE"
+        | "INTERACTION_MODAL_CREATE"
+        | "INTERACTION_IFRAME_MODAL_CREATE" => {
+            // Without the nonce we sent, it isn't one of ours.
+            let Some(nonce) = parse_id(&data["nonce"]) else { return };
+            let outcome = match name {
+                "INTERACTION_SUCCESS" => Outcome::Success,
+                "INTERACTION_FAILURE" => Outcome::Failure,
+                _ => Outcome::Form,
+            };
+            Event::Interaction { nonce, outcome }
         }
         "MESSAGE_DELETE" => {
             let (Some(id), Some(channel_id)) = (parse_id(&data["id"]), parse_id(&data["channel_id"])) else {

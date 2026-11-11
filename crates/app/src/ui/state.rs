@@ -100,6 +100,11 @@ pub(super) struct State {
     pub(super) unread: Option<Unread>,
     /// Spoilers revealed in each message's text, by number.
     pub(super) revealed_spoilers: HashMap<Snowflake, HashSet<usize>>,
+    /// This session's id, which interactions name.
+    pub(super) session_id: String,
+    /// Where each interaction of ours that Discord hasn't answered belongs:
+    /// its channel and message, by nonce.
+    pub(super) interactions: HashMap<Snowflake, (Snowflake, Snowflake)>,
     /// Display names by user id, accumulated from every user we see plus lazy
     /// `GET /users/{id}` lookups, so mentions resolve even for people no longer
     /// in the server.

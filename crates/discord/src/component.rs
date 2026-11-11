@@ -1,6 +1,7 @@
 //! Message components: bots' buttons and menus, and the layouts of
-//! messages built from components alone ("components v2"). Neucord shows
-//! them but can't use them yet.
+//! messages built from components alone ("components v2"). Buttons and menus
+//! of options can be used; menus of users, roles, channels and mentionables,
+//! and buttons that buy something, can't yet.
 
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
@@ -14,9 +15,16 @@ pub enum Component {
     Button(Button),
     /// A menu to pick from: of given options, or of users, roles or channels.
     Select {
+        custom_id: Option<String>,
         placeholder: Option<String>,
+        /// Only a menu of given options has any.
         options: Vec<SelectOption>,
         disabled: bool,
+        /// How many may be picked; empty is fine only when `min_values` is 0.
+        min_values: usize,
+        max_values: usize,
+        /// Of given options (type 3), the one kind Neucord can use.
+        of_options: bool,
     },
     /// Text beside a button or thumbnail.
     Section {
@@ -48,6 +56,8 @@ pub enum Component {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Button {
+    /// What the app gets back when it is pressed.
+    pub custom_id: Option<String>,
     pub style: ButtonStyle,
     pub label: Option<String>,
     pub emoji: Option<Emoji>,
@@ -70,6 +80,9 @@ pub enum ButtonStyle {
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct SelectOption {
     pub label: String,
+    /// What the app gets back when it is picked.
+    #[serde(default)]
+    pub value: String,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
@@ -89,6 +102,17 @@ pub struct Media {
 }
 
 impl Component {
+    /// Whether the client turns it off while another interaction of the
+    /// message is on its way, or where we can't chat (`O` in 911408): any
+    /// button but a link, and any menu.
+    pub fn is_interactive(&self) -> bool {
+        match self {
+            Component::Button(button) => button.style != ButtonStyle::Link,
+            Component::Select { .. } => true,
+            _ => false,
+        }
+    }
+
     /// The markup of every text in `components`, nested ones included, in
     /// the order they show.
     pub fn texts(components: &[Component]) -> Vec<&str> {
@@ -116,6 +140,7 @@ impl Component {
         match value["type"].as_u64().unwrap_or(0) {
             1 => Component::Row(children("components")),
             2 => Component::Button(Button {
+                custom_id: text("custom_id"),
                 style: match value["style"].as_u64() {
                     Some(1) => ButtonStyle::Primary,
                     Some(3) => ButtonStyle::Success,
@@ -129,7 +154,8 @@ impl Component {
                 url: text("url"),
                 disabled: flag("disabled"),
             }),
-            3 | 5..=8 => Component::Select {
+            kind @ (3 | 5..=8) => Component::Select {
+                custom_id: text("custom_id"),
                 placeholder: text("placeholder"),
                 options: value["options"]
                     .as_array()
@@ -138,6 +164,9 @@ impl Component {
                     .filter_map(|o| SelectOption::deserialize(o).ok())
                     .collect(),
                 disabled: flag("disabled"),
+                min_values: value["min_values"].as_u64().map_or(1, |n| n as usize),
+                max_values: value["max_values"].as_u64().map_or(1, |n| n as usize),
+                of_options: kind == 3,
             },
             9 => Component::Section {
                 components: children("components"),
@@ -215,9 +244,25 @@ mod tests {
         assert!(matches!(&row[1], Component::Button(b) if b.style == ButtonStyle::Link
             && b.url.as_deref() == Some("https://example.com") && b.emoji.as_ref().is_some_and(|e| e.name.as_deref() == Some("📖"))));
         assert!(
-            matches!(&row[2], Component::Select { placeholder: Some(p), options, .. } if p == "Pick" && options[0].default)
+            matches!(&row[2], Component::Select { placeholder: Some(p), options, custom_id: Some(id), of_options: true, .. }
+                if p == "Pick" && options[0].default && options[0].value == "a" && id == "m")
         );
-        assert!(matches!(&row[3], Component::Select { disabled: true, options, .. } if options.is_empty()));
+        assert!(
+            matches!(&row[3], Component::Select { disabled: true, options, of_options: false, .. } if options.is_empty())
+        );
+        assert!(matches!(&row[0], Component::Button(b) if b.custom_id.as_deref() == Some("y")));
+        assert!(row[0].is_interactive() && row[2].is_interactive() && !row[1].is_interactive(), "not a link");
+    }
+
+    #[test]
+    fn menus_pick_one_unless_they_say_otherwise() {
+        let parse = |extra: &str| parse(&format!(r#"[{{"type":3,"custom_id":"m"{extra}}}]"#));
+        let limits = |c: &Component| match c {
+            Component::Select { min_values, max_values, .. } => (*min_values, *max_values),
+            _ => panic!("a menu"),
+        };
+        assert_eq!(limits(&parse("")[0]), (1, 1));
+        assert_eq!(limits(&parse(r#","min_values":0,"max_values":3"#)[0]), (0, 3));
     }
 
     #[test]

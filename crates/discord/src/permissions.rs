@@ -437,6 +437,21 @@ pub fn vote_held_back(guild: Option<&Guild>, now: i64) -> bool {
     })
 }
 
+/// Whether the client turns a message's buttons and menus off for us in
+/// `channel` (`useComponentState` in 911408): the server's verification
+/// stops us chatting (screening aside), we are still pending, a locked thread
+/// we can't manage or an archived one we can't reopen, or a timeout, which
+/// holds back administrators too.
+pub fn components_blocked(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64) -> bool {
+    let Some(guild) = guild else { return false };
+    let locked = channel.is_locked() && !in_channel(guild, channel, me, now).contains(Permissions::MANAGE_THREADS);
+    verification::gate(guild, me, now).is_some_and(|gate| gate != verification::Gate::Screening)
+        || guild.pending
+        || locked
+        || (channel.is_archived() && !can_unarchive(guild, channel, me, now))
+        || guild.timed_out_until.is_some_and(|until| until > now)
+}
+
 /// Whether the client offers attaching files in `channel` (the attach menu
 /// in 316576, whose `canAttachFiles` is any private channel, else Attach
 /// Files with Send Messages), where [`can_send`] also holds.
@@ -929,6 +944,43 @@ mod tests {
         guild.roles[1].permissions = MANAGE_THREADS;
         guild.my_roles.push(Snowflake(MOD));
         assert!(can_send(Some(&guild), &thread, &me, 0));
+    }
+
+    #[test]
+    fn buttons_and_menus_go_off_where_we_cant_chat() {
+        let me = me();
+        let blocked = |g: &Guild, c: &Channel, now| components_blocked(Some(g), c, &me, now);
+        let open = channel(&[]);
+        let mut guild = guild();
+        assert!(!blocked(&guild, &open, 0) && !components_blocked(None, &open, &me, 0), "a DM has no rules");
+
+        guild.timed_out_until = Some(100);
+        guild.roles[2].permissions = Permissions::ADMINISTRATOR;
+        assert!(blocked(&guild, &open, 99), "a timeout, administrators too");
+        assert!(!blocked(&guild, &open, 100));
+        guild.timed_out_until = None;
+
+        guild.pending = true;
+        assert!(blocked(&guild, &open, 0), "still pending");
+        guild.pending = false;
+
+        // No role to vouch for us, and a level that wants a phone.
+        guild.my_roles.clear();
+        guild.verification.level = crate::verification::VerificationLevel::VeryHigh;
+        assert!(blocked(&guild, &open, 0), "verification");
+        guild.verification.screening = true;
+        guild.verification.level = crate::verification::VerificationLevel::None;
+        assert!(!blocked(&guild, &open, 0), "screening alone isn't part of it");
+
+        let archived = json!({"thread_metadata": {"archived": true, "locked": false}});
+        let (guild, thread) = with_thread(channel(&[]), 11, archived);
+        assert!(blocked(&guild, &thread, 0), "an archived thread we can't reopen");
+        let locked = json!({"thread_metadata": {"archived": false, "locked": true}});
+        let (mut guild, thread) = with_thread(channel(&[(GUILD, Permissions::NONE, IN_THREADS)]), 11, locked);
+        assert!(blocked(&guild, &thread, 0), "a locked thread");
+        guild.roles[1].permissions = MANAGE_THREADS;
+        guild.my_roles.push(Snowflake(MOD));
+        assert!(!blocked(&guild, &thread, 0), "unless we manage threads");
     }
 
     #[test]

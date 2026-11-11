@@ -12,6 +12,7 @@ use soup::prelude::*;
 
 use crate::endpoints::{Call, call};
 use crate::gifs::{Gif, Picker, Request, Tile, Tiles};
+use crate::interaction::{Failure, Press};
 use crate::invalid::{Change, InvalidRequests};
 use crate::model::Emoji;
 use crate::reactions::{Location, Refusal};
@@ -28,6 +29,9 @@ pub const SLOWMODE_RATE_LIMITED: u64 = 20016;
 
 /// One HTTP 429 retry is enough for interactive use; further limits surface as errors.
 const MAX_RATE_LIMIT_RETRIES: u32 = 1;
+
+/// How long the client lets an interaction request take (`timeout` in 964363).
+const INTERACTION_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The longest a request waits on a 429 before trying again. Past this it
 /// fails instead: a retry sent early would only be refused again.
@@ -375,6 +379,21 @@ impl Rest {
     pub async fn end_poll(&self, channel: Snowflake, message: Snowflake) -> Result<(), Error> {
         let _: serde_json::Value = self.request(call!(END_POLL, channel, message), None).await?;
         Ok(())
+    }
+
+    /// Press a button or pick from a menu: `POST /interactions` with the
+    /// press as `nonce`, which comes back in the events that answer it. The
+    /// client gives it three seconds and doesn't send it again after a 429
+    /// (964363), and nor do we. A success only means Discord took it.
+    pub async fn interact(&self, press: &Press<'_>, nonce: Snowflake) -> Result<(), Failure> {
+        let sending = Sending { retry_rate_limit: false, ..Sending::default() };
+        let sent = self.send_with(call!(INTERACT), Some(press.body(nonce)), sending);
+        match glib::future_with_timeout(INTERACTION_TIMEOUT, sent).await {
+            Ok(Ok((status, _))) if (200..300).contains(&status) => Ok(()),
+            Ok(Ok((status, response))) => Err(Failure::from_response(status, &response)),
+            // No answer in time, or none at all: nothing to say why.
+            _ => Err(Failure::default()),
+        }
     }
 
     /// Mark everything in `channel` up to `message` as read, for all our clients.

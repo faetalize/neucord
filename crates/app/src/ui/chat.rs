@@ -263,6 +263,10 @@ impl App {
     }
 
     pub(super) fn on_message(self: &Rc<Self>, message: Message) {
+        // An app's response to a press carries the press's nonce.
+        if let Some(nonce) = message.nonce.as_deref().and_then(|n| n.parse().ok()) {
+            self.on_interaction(Snowflake(nonce), discord::gateway::Outcome::Success);
+        }
         let original = match &message.referenced_message {
             Referenced::Message(original) => Some(&original.author),
             _ => None,
@@ -1684,7 +1688,7 @@ impl App {
             }
             self.append_reactions(content, message);
         } else {
-            self.message_content(content, shown, &self.message_names(shown));
+            self.message_content(content, shown, &self.message_names(shown), true);
             self.append_reactions(content, message);
         }
         // Empty, it would still take the body's spacing.
@@ -1713,8 +1717,9 @@ impl App {
         Spoilers { revealed, on_reveal: Rc::new(on_reveal) }
     }
 
-    /// What a message says, and shows: its text, attachments and embeds.
-    fn message_content(self: &Rc<Self>, body: &gtk::Box, message: &Message, names: &Names) {
+    /// What a message says, and shows: its text, attachments and embeds. Its
+    /// buttons and menus work if `live`: not in a forward.
+    fn message_content(self: &Rc<Self>, body: &gtk::Box, message: &Message, names: &Names, live: bool) {
         let media = self.state.borrow().media;
         let edited = message.edited_timestamp.is_some();
         let embeds = discord::embed::visible(message, &media);
@@ -1757,7 +1762,8 @@ impl App {
             }
         }
         if !message.components.is_empty() {
-            body.append(&components::components(&message.components, &cx));
+            let live = live.then(|| components::Live::new(self, message));
+            body.append(&components::components(&message.components, &cx, live.as_ref()));
         }
         if let Some(original) = message.forwarded() {
             body.append(&self.forward(message, &original, names));
@@ -1772,7 +1778,7 @@ impl App {
         header.append(&gtk::Image::from_icon_name("mail-forward-symbolic"));
         header.append(&gtk::Label::new(Some("Forwarded")));
         bar.append(&header);
-        self.message_content(&bar, original, names);
+        self.message_content(&bar, original, names, false);
 
         // Where it came from, as the official client names it: the channel
         // if it is in this server, else the server.

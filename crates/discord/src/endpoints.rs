@@ -26,6 +26,7 @@ pub(crate) const CREATE_ATTACHMENT: Endpoint = Endpoint::post("/channels/{channe
 pub(crate) const DELETE_UPLOAD: Endpoint = Endpoint::delete("/attachments/{+uploaded_filename}");
 pub(crate) const VOTE: Endpoint = Endpoint::put("/channels/{channel}/polls/{message}/answers/@me");
 pub(crate) const END_POLL: Endpoint = Endpoint::post("/channels/{channel}/polls/{message}/expire");
+pub(crate) const INTERACT: Endpoint = Endpoint::post("/interactions");
 pub(crate) const TYPING: Endpoint = Endpoint::post("/channels/{channel}/typing");
 pub(crate) const ACK: Endpoint = Endpoint::post("/channels/{channel}/messages/{message}/ack");
 pub(crate) const EDIT_CHANNEL: Endpoint = Endpoint::patch("/channels/{channel}");
