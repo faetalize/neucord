@@ -315,7 +315,7 @@ impl App {
                     }
                     self.apply_settings(patch, replace);
                 }
-                Event::FrecencyUpdate { proto, partial } => self.frecency_updated(&proto, partial),
+                Event::FrecencyUpdate { patch, proto, partial } => self.frecency_updated(patch, &proto, partial),
                 Event::RelationshipAdd { relationship, notify } => {
                     self.learn_users(std::iter::once(&relationship.user));
                     let blocked = relationship.kind == discord::relationships::Kind::Blocked;
