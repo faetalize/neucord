@@ -1,5 +1,6 @@
 //! Neucord: a native GTK 4 and libadwaita Discord client.
 
+mod config;
 mod highlight;
 mod images;
 mod kept;
