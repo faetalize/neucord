@@ -182,8 +182,16 @@ changed for unrelated reasons only needs a note in the issue.
 - **Sending files** (`uploads.rs`, `ui/uploads.rs`). The requests, their
   order and the resumable upload are watched (`getUploadPayload`,
   `uploadFileToCloud`, `UploadAttachmentStore`, whose add starts each
-  upload), and so are the conversions Neucord doesn't do
-  (`tryConvertToWebP`, `tryConvertToJpeg`). Not watched: the message's
+  upload), and so are when the conversions run and the hash they send
+  (`tryConvertToWebP`, `tryConvertToJpeg`, `convertFileToJpeg`,
+  `buildHeadersForMd5`). Not watched, in `images.rs`: the JPEG's quality
+  and size limits, `u` in 85582 (anchor `sysimg`); what counts as HEIC or
+  JPEG XR and the new name, 452661 (anchor `image/vnd.ms-photo`); that
+  files are converted as they are added, before the limits are checked,
+  `N` in 111542 (anchor `imageConversionEvaluated`); and the PNG to WebP
+  rules, which stay PNG when animated, transparent, indexed or not sRGB, or
+  when the lossless WebP differs or is larger (`g` in 673060, anchor
+  `pixel_hash_mismatch`, and its ICC reader in 499091). Not watched: the message's
   attachment, `OW` in 292348 (anchor `uploaded_filename`), which names
   `id` by position, `description` once set (the edit dialog hands it over
   for any file), `is_spoiler` only when on, `original_content_type`

@@ -9,11 +9,10 @@
 //! and what is checked before any request is 518960's `R` and 433777's
 //! `UploaderBase`.
 //!
-//! Not copied, since Neucord has no image or audio tooling: the client
-//! re-encodes HEIC and JPEG XR to JPEG, and small images to WebP under the
-//! `2025-09-image-attachment-mezzanine-v2` rollout (which also sends
-//! `X-Discord-Original-MD5`), and a voice message adds `duration_secs` and
-//! `waveform`, from a recording only the desktop app makes.
+//! Images are converted first as the client does ([`crate::images`]); a
+//! converted HEIC or JPEG XR file also tells Discord the original's MD5.
+//! Not copied: a voice message adds `duration_secs` and `waveform`, from a
+//! recording only the desktop app makes.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -77,6 +76,8 @@ pub struct File {
     /// empty when unknown.
     pub content_type: String,
     pub data: Data,
+    /// The MD5 of the file this one was converted from, in hex.
+    pub original_md5: Option<String>,
 }
 
 /// The type a browser gives a file by its name: by the extension alone, and
@@ -394,7 +395,10 @@ pub async fn upload(
     attempts: &Cell<u32>,
     sent: Rc<dyn Fn(u64)>,
 ) -> Result<String, Failure> {
-    let mut slot = rest.create_upload(channel, create_body(&unique_id(), file)).await.map_err(Failure::Request)?;
+    let mut slot = rest
+        .create_upload(channel, create_body(&unique_id(), file), file.original_md5.as_deref())
+        .await
+        .map_err(Failure::Request)?;
     let mut slot_at = glib::real_time();
     let mut backoff = Backoff::new();
     let mut from = 0;
@@ -402,7 +406,8 @@ pub async fn upload(
         attempts.set(attempts.get() + 1);
         let step = async {
             if url_stale(slot_at, glib::real_time()) {
-                let fresh = rest.create_upload(channel, create_body(&unique_id(), file)).await?;
+                let body = create_body(&unique_id(), file);
+                let fresh = rest.create_upload(channel, body, file.original_md5.as_deref()).await?;
                 (slot, slot_at, from) = (fresh, glib::real_time(), 0);
             } else if attempts.get() > 1 {
                 from = rest.upload_position(&slot.url, file.size).await?;
@@ -430,12 +435,15 @@ impl Rest {
     /// An upload URL for a file (`getUploadPayload`'s body). The client's HTTP
     /// layer retries this on a few statuses and on network errors, telling
     /// Discord how often in `X-Failed-Requests`, and never on a rate limit.
-    async fn create_upload(&self, channel: Snowflake, body: Value) -> Result<Slot, Error> {
+    /// A converted file adds its original's hash (`buildOriginalMd5Headers`).
+    async fn create_upload(&self, channel: Snowflake, body: Value, original_md5: Option<&str>) -> Result<Slot, Error> {
         use crate::endpoints::call;
         let mut backoff = Backoff::new();
         let mut failed = 0;
         loop {
-            let result = self.send_upload_request(call!(CREATE_ATTACHMENT, channel), Some(body.clone()), failed).await;
+            let result = self
+                .send_upload_request(call!(CREATE_ATTACHMENT, channel), Some(body.clone()), failed, original_md5)
+                .await;
             let again = match &result {
                 Ok((status, _)) => RETRY_STATUSES.contains(status),
                 Err(e @ Error::Transport(_)) => retryable(e),
@@ -495,6 +503,7 @@ mod tests {
             size,
             content_type: content_type.into(),
             data: Data::Memory(glib::Bytes::from_static(b"")),
+            original_md5: None,
         }
     }
 

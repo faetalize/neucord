@@ -306,6 +306,17 @@ impl Limits<'_> {
         })
     }
 
+    /// The largest PNG we re-encode as WebP before uploading it, for the
+    /// accounts that experiment reaches: variant 1 takes files up to 512 KiB,
+    /// variant 2 up to 256 KiB, any other none (48325).
+    pub fn webp_conversion(&self) -> Option<u64> {
+        match self.experiments.apex_user(self.me, "2025-09-image-attachment-mezzanine-v2")?.variant {
+            1 => Some(524_288),
+            2 => Some(262_144),
+            _ => None,
+        }
+    }
+
     /// Variant 1 raises Nitro's file size to 1 GiB, and everyone's total
     /// per message to 1 GiB (219882).
     fn upload_rollout(&self) -> bool {
@@ -436,6 +447,18 @@ mod tests {
             Some(true),
             "no perk, over"
         );
+    }
+
+    #[test]
+    fn webp_conversion_follows_the_experiments_variant() {
+        let webp = |e: &Experiments| Limits { nitro: &Nitro::default(), experiments: e, me: ME }.webp_conversion();
+        let name = "2025-09-image-attachment-mezzanine-v2";
+        assert_eq!(webp(&Experiments::default()), None, "not in it");
+        assert_eq!(webp(&experiments(&[(name, 0)])), None, "control");
+        assert_eq!(webp(&experiments(&[(name, 1)])), Some(512 * 1024));
+        assert_eq!(webp(&experiments(&[(name, 2)])), Some(256 * 1024));
+        assert_eq!(webp(&experiments(&[(name, 3)])), None, "a variant it doesn't define");
+        assert_eq!(webp(&experiments(&[(name, -1)])), None, "not eligible");
     }
 
     #[test]
