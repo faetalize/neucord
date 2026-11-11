@@ -23,6 +23,7 @@ use super::menus;
 use super::profile::UserTarget;
 use super::state::Target;
 use super::widgets::avatar_widget_in;
+use crate::config;
 use crate::render;
 
 /// How long the list rests before the ranges it shows are sent, as the
@@ -209,6 +210,9 @@ impl App {
                 let show = !this.right.shows_sidebar();
                 if !this.right.is_collapsed() {
                     this.state.borrow_mut().members_closed = !show;
+                    if let Err(e) = this.remembered.set(&config::MEMBERS_CLOSED, !show) {
+                        eprintln!("config: {e}");
+                    }
                 }
                 this.right.set_show_sidebar(show);
             }

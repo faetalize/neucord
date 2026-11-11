@@ -57,8 +57,10 @@ use adw::prelude::*;
 use discord::{Snowflake, session};
 use gtk::{gio, glib, pango};
 
+use crate::config::{self, Store};
 use crate::images::Images;
 use crate::render;
+use crate::theme::Theme;
 use crate::timelines::Timelines;
 
 /// The server rail's width.
@@ -201,6 +203,12 @@ pub struct App {
     /// When scrolling loads another page.
     scroll_loader: RefCell<discord::history::ScrollLoader>,
     state: RefCell<state::State>,
+    /// Neucord's own options, which the settings window sets.
+    config: Store,
+    /// The stylesheets, one of whose options the settings window sets.
+    theme: Theme,
+    /// What Neucord remembers between runs.
+    remembered: Store,
     /// The settings window, while it's open.
     settings_window: RefCell<Option<settings::Window>>,
     /// The member list pane, in the right pane of the chat.
@@ -252,6 +260,7 @@ impl App {
 
         let blank = gio::ListStore::new::<glib::BoxedAnyObject>();
         let selection = gtk::NoSelection::new(Some(blank.clone()));
+        let config = Store::open(config::config_path());
         let this = Rc::new(App {
             window,
             medium,
@@ -390,6 +399,9 @@ impl App {
             rows: RefCell::default(),
             scroll_loader: RefCell::default(),
             state: RefCell::default(),
+            theme: Theme::install(&config),
+            config,
+            remembered: Store::open(config::state_path()),
             settings_window: RefCell::default(),
             members: members::Pane::new(),
             drawn: RefCell::default(),
@@ -405,6 +417,7 @@ impl App {
             &this.folder_css,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+        *this.state.borrow_mut() = this.fresh_state();
         this.build();
 
         // Images from the media proxy are requested at the pixels shown.
