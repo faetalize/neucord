@@ -20,7 +20,7 @@ use super::embeds::{behind_spoiler, embed_widget};
 use super::menus::{self, At, Entry, Item};
 use super::message_row::{MessageRow, Parts};
 use super::state::{Unread, now_ms, now_unix};
-use super::widgets::avatar_widget;
+use super::widgets::avatar_widget_in;
 use super::{attachments, components, polls};
 use crate::images::Row;
 use crate::kept::Made;
@@ -300,7 +300,7 @@ impl App {
         self.learn_users(std::iter::once(&message.author).chain(&message.mentions).chain(original));
         self.forum_message(&message);
         if let (Some(guild), Some(member)) = (message.guild_id, &message.member) {
-            self.state.borrow_mut().members.add(guild, vec![(message.author.id, member.roles.clone())], &[]);
+            self.state.borrow_mut().members.add(guild, vec![(message.author.id, member.known())], &[]);
         }
         let channel = message.channel_id;
         self.state.borrow_mut().typing.message(channel, message.author.id, false);
@@ -1345,7 +1345,22 @@ impl App {
             .and_then(|id| state.guilds.iter().find(|g| g.id == id))
             .map(|guild| guild.roles.iter().map(|r| (r.id.0, (r.name.clone(), guild.role_colour(r)))).collect())
             .unwrap_or_default();
-        Names { users: state.users.clone(), channels, roles }
+        // In a server people are called what they chose there, and in a DM
+        // what we call our friends.
+        let mut users = state.users.clone();
+        match state.guild {
+            Some(guild) => users.extend(state.members.nicks(guild).map(|(user, nick)| (user.0, nick.to_owned()))),
+            None => users.extend(
+                state.channel.into_iter().flat_map(|c| state.private_channels.iter().find(|p| p.id == c)).flat_map(
+                    |dm| {
+                        dm.recipients
+                            .iter()
+                            .filter_map(|u| Some((u.id.0, state.relationships.get(u.id)?.nickname.clone()?)))
+                    },
+                ),
+            ),
+        }
+        Names { users, channels, roles }
     }
 
     /// The line under a channel's name: a server channel's topic, a friend's
@@ -1835,13 +1850,19 @@ impl App {
         match system {
             Some(system) => parts.show_icon(system_icon(system.icon)),
             None if grouped => parts.hide_gutter(),
-            None => parts.show_avatar(&shown.author, || {
-                avatar_widget(&shown.author, 40, Some(&self.images), Row::Group(parts.group.clone()))
-            }),
+            None => {
+                let state = self.state.borrow();
+                let server = state.avatar_in(shown.channel_id, shown.author.id);
+                let hash = server.map(|(_, hash)| hash).or(shown.author.avatar.as_deref());
+                parts.show_avatar(shown.author.id, hash, || {
+                    avatar_widget_in(&shown.author, 40, Some(&self.images), server, Row::Group(parts.group.clone()))
+                })
+            }
         }
         parts.header.set_visible(system.is_none() && !grouped);
         if parts.header.is_visible() {
-            self.set_name(&parts.name, shown.channel_id, &shown.author, shown.author.display_name());
+            let name = self.state.borrow().name_in(shown.channel_id, &shown.author);
+            self.set_name(&parts.name, shown.channel_id, &shown.author, &name);
             parts.time.set_label(&parse_time(&shown.timestamp).map(|t| format_time(&t)).unwrap_or_default());
         }
         parts.edit_button.set_visible(editable);
@@ -2155,10 +2176,12 @@ impl App {
     fn message_kind(&self, message: &Message) -> Kind {
         let state = self.state.borrow();
         let channel = state.find_channel(message.channel_id);
+        let called = |user: &discord::User| state.name_in(message.channel_id, user);
         let place = system::Place {
             me: state.me(),
             guild_name: channel.and_then(|(guild, _)| guild).map(|g| g.name.as_str()),
             group: channel.is_some_and(|(_, c)| c.kind == discord::ChannelKind::GroupDm),
+            name: Some(&called),
         };
         system::kind(message, &place)
     }
@@ -2218,11 +2241,14 @@ impl App {
                 if blocked {
                     preview.append(&gtk::Image::from_icon_name("mail-reply-sender-symbolic"));
                 } else {
-                    preview.append(&avatar_widget(&original.author, 16, Some(&self.images), Row::None));
+                    let state = self.state.borrow();
+                    let server = state.avatar_in(original.channel_id, original.author.id);
+                    preview.append(&avatar_widget_in(&original.author, 16, Some(&self.images), server, Row::None));
                 }
                 // Discord marks replies that pinged the author with an @.
                 let pinged = message.mentions.iter().any(|u| u.id == original.author.id);
-                let name = format!("{}{}", if pinged { "@" } else { "" }, original.author.display_name());
+                let called = self.state.borrow().name_in(original.channel_id, &original.author);
+                let name = format!("{}{}", if pinged { "@" } else { "" }, called);
                 preview.append(&self.name_label(original.channel_id, &original.author, &name));
                 let names = self.message_names(original);
                 // A forward reads as what it forwards.

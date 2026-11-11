@@ -266,6 +266,8 @@ impl App {
                     self.state.borrow_mut().profiles.doubt(user_id);
                     self.state.borrow_mut().relationships.update(user_id, nickname);
                     self.relationships_changed(false);
+                    // What we call them shows in DMs.
+                    self.refresh_rows();
                 }
                 Event::RelationshipRemove(user_id) => {
                     self.withdraw_friend_request(user_id);
@@ -281,6 +283,7 @@ impl App {
                         self.queue_friends_refresh();
                         // A group DM's friends.
                         self.refresh_member_rows();
+                        self.refresh_profile_views();
                     }
                 }
                 Event::GuildFoldersUpdate(folders) => {
@@ -516,6 +519,7 @@ impl App {
     fn relationships_changed(self: &Rc<Self>, blocks_changed: bool) {
         self.refresh_badges();
         self.queue_friends_refresh();
+        self.refresh_profile_views();
         if blocks_changed {
             self.refresh_typing();
             self.refresh_rows();

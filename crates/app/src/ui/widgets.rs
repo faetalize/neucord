@@ -35,6 +35,24 @@ pub(super) fn avatar_widget(user: &User, size: i32, images: Option<&Images>, row
     avatar_from(user.display_name(), size, images, picture, row)
 }
 
+/// [`avatar_widget`] with the picture they set for a server (and which),
+/// where they did.
+pub(super) fn avatar_widget_in(
+    user: &User,
+    size: i32,
+    images: Option<&Images>,
+    server: Option<(discord::Snowflake, &str)>,
+    row: Row,
+) -> gtk::Widget {
+    match server {
+        Some((guild, hash)) => {
+            let url = discord::cdn::member_avatar_url(guild.0, user.id.0, hash, 64);
+            avatar_from(user.display_name(), size, images, Some((url, hash)), row)
+        }
+        None => avatar_widget(user, size, images, row),
+    }
+}
+
 /// [`avatar_widget`] for a picture at `url`, animated if its hash says so.
 pub(super) fn avatar_from(
     name: &str,
