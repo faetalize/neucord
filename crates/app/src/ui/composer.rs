@@ -10,14 +10,14 @@ use discord::emoji::{Item as Emoji, locked_notice};
 use discord::limits::{LengthCount, TooLong, message_length};
 use discord::rest::{Reply, ReplyPing};
 use discord::scheduled;
-use discord::verification::{self, Gate};
+use discord::verification::Gate;
 use discord::{Channel, Message, Snowflake};
 use gtk::glib;
 
 use super::App;
 use super::chat::MessageTarget;
 use super::menus::{self, Entry, Item, Kind};
-use super::state::{now_ms, now_unix};
+use super::state::{Blocked, now_ms, now_unix};
 use super::uploads::{Outgoing, Stopped};
 
 /// Reply to a message from its menu; Shift turns the ping off, as with the
@@ -304,75 +304,64 @@ impl App {
         if let Some(tick) = self.notice_tick.take() {
             tick.remove();
         }
-        // A forum or media channel has its own page and never a box; the
-        // send guard below trusts the box's visibility, not the page's.
-        let forum = {
+        let (blocked, slowmode) = {
             let state = self.state.borrow();
-            state.channel.and_then(|id| state.find_channel(id)).is_some_and(|(_, c)| c.kind.is_forum_like())
+            let open = state.channel.and_then(|id| state.find_channel(id));
+            (
+                state.channel.and_then(|id| state.blocked(id)),
+                open.map_or(0, |(_, c)| state.slowmode.remaining_ms(c, now_ms())),
+            )
         };
-        if forum {
+        let label = |text: String| gtk::Label::builder().label(text).xalign(0.0).wrap(true).hexpand(true).build();
+        // A forum or media channel has its own page and never a box; the
+        // send guard trusts the box's visibility, not the page's.
+        if blocked == Some(Blocked::Forum) {
             self.show_composer(false);
             bar.set_visible(false);
             return;
         }
-        let (system, request, timeout, gate, denied, slowmode) = {
-            let state = self.state.borrow();
-            let open = state.channel.and_then(|id| state.find_channel(id));
-            let system = open.is_some_and(|(_, c)| c.is_system_dm());
-            let denied_here = match open.map(|(_, c)| c) {
-                Some(c) if c.kind == discord::ChannelKind::MediaThread => "This thread can only be read.",
-                Some(c) if c.is_locked() => "This thread is locked. Only moderators can send messages in it.",
-                _ => "You do not have permission to send messages in this channel.",
-            };
-            let guild = open.and_then(|(guild, _)| guild).zip(state.account.as_ref());
-            let timeout = guild.and_then(|(g, a)| g.timeout_left(a, now_unix()));
-            let gate = guild.and_then(|(g, a)| verification::gate(g, a, now_unix()));
-            let denied =
-                (guild.is_some() && !state.channel.is_some_and(|id| state.can_send(id))).then_some(denied_here);
-            let slowmode = open.map_or(0, |(_, c)| state.slowmode.remaining_ms(c, now_ms()));
-            (system, state.open_request().map(|c| (c.id, c.spam, c.title())), timeout, gate, denied, slowmode)
-        };
-        let label = |text: String| gtk::Label::builder().label(text).xalign(0.0).wrap(true).hexpand(true).build();
-        let text = match (&request, timeout) {
-            _ if system => "This chat is reserved for official Discord notifications. \
+        let text = match &blocked {
+            None => {
+                self.show_composer(true);
+                bar.set_visible(slowmode > 0);
+                if slowmode > 0 {
+                    let seconds = (slowmode + 999) / 1000;
+                    bar.append(&label(format!(
+                        "Slowmode is enabled. You can send another message in this channel in {}.",
+                        wait_words(seconds)
+                    )));
+                    self.tick_notice_bar();
+                }
+                return;
+            }
+            Some(Blocked::Forum) => unreachable!("returned above"),
+            Some(Blocked::System) => "This chat is reserved for official Discord notifications. \
                 Discord will never ask for your password or token."
                 .to_owned(),
-            (_, Some(left)) => format!(
+            Some(Blocked::Timeout(left)) => format!(
                 "You're in timeout in this server for {}. Until then you can read, but not send messages or react.",
-                wait_words(left)
+                wait_words(*left)
             ),
-            (Some((_, true, title)), None) => {
+            Some(Blocked::Request { spam: true, title }) => {
                 format!("Discord filed this message request from {title} as likely spam.")
             }
-            (Some((_, false, title)), None) => format!("{title} wants to message you. Accept to reply."),
-            (None, None) => match (&gate, denied) {
-                (Some(gate), _) => gate_notice(gate, now_unix()),
-                (None, Some(denied)) => denied.to_owned(),
-                (None, None) => {
-                    self.show_composer(true);
-                    bar.set_visible(slowmode > 0);
-                    if slowmode > 0 {
-                        let seconds = (slowmode + 999) / 1000;
-                        bar.append(&label(format!(
-                            "Slowmode is enabled. You can send another message in this channel in {}.",
-                            wait_words(seconds)
-                        )));
-                        self.tick_notice_bar();
-                    }
-                    return;
-                }
-            },
+            Some(Blocked::Request { spam: false, title }) => format!("{title} wants to message you. Accept to reply."),
+            Some(Blocked::Gate(gate)) => gate_notice(gate, now_unix()),
+            Some(Blocked::Denied(why)) => (*why).to_owned(),
         };
         self.show_composer(false);
         bar.set_visible(true);
         bar.append(&label(text));
-        if timeout.is_some() || gate.as_ref().and_then(Gate::until).is_some() {
-            self.tick_notice_bar();
-        }
-        if let Some((id, ..)) = request.filter(|_| !system) {
-            for button in self.request_actions(id) {
-                bar.append(&button);
+        let channel = self.state.borrow().channel;
+        match (&blocked, channel) {
+            (Some(Blocked::Timeout(_)), _) => self.tick_notice_bar(),
+            (Some(Blocked::Gate(gate)), _) if gate.until().is_some() => self.tick_notice_bar(),
+            (Some(Blocked::Request { .. }), Some(id)) => {
+                for button in self.request_actions(id) {
+                    bar.append(&button);
+                }
             }
+            _ => {}
         }
     }
 
@@ -772,21 +761,32 @@ impl App {
     /// What follows a message that didn't: slowmode as Discord says it is,
     /// and the reason.
     pub(super) fn message_stopped(self: &Rc<Self>, channel: Snowflake, stopped: &Stopped) {
+        if let Some(why) = self.record_stopped(channel, stopped) {
+            self.show_composer_error(&why);
+        }
+    }
+
+    /// Slowmode as a message that didn't go out leaves it, and what to tell
+    /// of it, unless the user took it back.
+    pub(super) fn record_stopped(self: &Rc<Self>, channel: Snowflake, stopped: &Stopped) -> Option<String> {
         match stopped {
             Stopped::Send(e) if e.slowmode_wait().is_some() => {
                 let wait = e.slowmode_wait().unwrap_or_default();
                 self.record_slowmode(channel, |slowmode, c, _| slowmode.refused(c, wait, now_ms()));
-                self.show_composer_error("Not sent: slowmode is enabled in this channel.");
+                Some("Not sent: slowmode is enabled in this channel.".to_owned())
             }
             Stopped::Send(e) => {
                 self.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c));
-                self.show_composer_error(&format!("Not sent: {e}"));
+                Some(format!("Not sent: {e}"))
             }
             Stopped::Upload(why) => {
                 self.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c));
-                self.show_composer_error(&format!("Not sent: {why}"));
+                Some(format!("Not sent: {why}"))
             }
-            Stopped::Canceled => self.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c)),
+            Stopped::Canceled => {
+                self.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c));
+                None
+            }
         }
     }
 }

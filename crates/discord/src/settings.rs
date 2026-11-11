@@ -51,6 +51,12 @@ pub fn developer_mode(settings: &Value) -> Option<bool> {
     settings.get("developer_mode")?.as_bool()
 }
 
+/// Whether our status is Do Not Disturb, if a settings object mentions it
+/// (`status`, which the client reads as `SelfPresenceStore.getStatus()`, 894768).
+pub fn do_not_disturb(settings: &Value) -> Option<bool> {
+    Some(settings.get("status")?.as_str()? == "dnd")
+}
+
 /// Compact message display, if a settings object mentions it. Neucord has no
 /// compact layout, but the official client sizes its history pages by this.
 pub fn message_display_compact(settings: &Value) -> Option<bool> {
@@ -214,6 +220,13 @@ mod tests {
     fn developer_mode_when_mentioned() {
         assert_eq!(developer_mode(&json!({"developer_mode": true})), Some(true));
         assert_eq!(developer_mode(&json!({"theme": "dark"})), None);
+    }
+
+    #[test]
+    fn do_not_disturb_when_mentioned() {
+        assert_eq!(do_not_disturb(&json!({"status": "dnd"})), Some(true));
+        assert_eq!(do_not_disturb(&json!({"status": "idle"})), Some(false));
+        assert_eq!(do_not_disturb(&json!({"developer_mode": true})), None);
     }
 
     #[test]

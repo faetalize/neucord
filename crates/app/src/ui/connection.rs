@@ -236,6 +236,7 @@ impl App {
                     self.refresh_rows();
                 }
                 Event::DeveloperModeUpdate(on) => self.state.borrow_mut().developer_mode = on,
+                Event::DoNotDisturbUpdate(on) => self.state.borrow_mut().do_not_disturb = on,
                 Event::MessageDisplayCompactUpdate(on) => self.state.borrow_mut().message_display_compact = on,
                 Event::RelationshipAdd { relationship, notify } => {
                     self.learn_users(std::iter::once(&relationship.user));
@@ -339,6 +340,7 @@ impl App {
             guild_folders,
             media_settings,
             developer_mode,
+            do_not_disturb,
             media_takedown_regulated,
             message_display_compact,
             required_action,
@@ -376,6 +378,7 @@ impl App {
             state.notifications = notification_settings;
             state.media = media_settings;
             state.developer_mode = developer_mode;
+            state.do_not_disturb = do_not_disturb;
             state.media_takedown_regulated = media_takedown_regulated;
             state.message_display_compact = message_display_compact;
             state.required_action = required_action;

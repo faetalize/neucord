@@ -72,6 +72,8 @@ pub struct Ready {
     pub guild_folders: Vec<GuildFolder>,
     pub media_settings: MediaSettings,
     pub developer_mode: bool,
+    /// Our status is Do Not Disturb.
+    pub do_not_disturb: bool,
     /// See [`crate::regional::media_takedown_regulated`].
     pub media_takedown_regulated: bool,
     pub message_display_compact: bool,
@@ -285,6 +287,8 @@ pub enum Event {
     /// The user changed how embeds and media show.
     MediaSettingsUpdate(MediaPatch),
     DeveloperModeUpdate(bool),
+    /// Our status changed: to Do Not Disturb, or from it.
+    DoNotDisturbUpdate(bool),
     MessageDisplayCompactUpdate(bool),
     /// Discord started or stopped requiring a step (see [`crate::account`]).
     RequiredActionUpdate(Option<String>),
@@ -715,6 +719,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
                     media
                 },
                 developer_mode: settings::developer_mode(&data["user_settings"]).unwrap_or(false),
+                do_not_disturb: settings::do_not_disturb(&data["user_settings"]).unwrap_or(false),
                 media_takedown_regulated: crate::regional::media_takedown_regulated(&data["regional_feature_config"]),
                 message_display_compact: settings::message_display_compact(&data["user_settings"]).unwrap_or(false),
                 required_action: data["required_action"].as_str().map(str::to_owned),
@@ -759,6 +764,9 @@ fn dispatch(state: &State, name: &str, data: Value) {
             }
             if let Some(on) = settings::developer_mode(&data) {
                 let _ = state.events.try_send(Event::DeveloperModeUpdate(on));
+            }
+            if let Some(on) = settings::do_not_disturb(&data) {
+                let _ = state.events.try_send(Event::DoNotDisturbUpdate(on));
             }
             if let Some(on) = settings::message_display_compact(&data) {
                 let _ = state.events.try_send(Event::MessageDisplayCompactUpdate(on));
