@@ -90,13 +90,27 @@ changed for unrelated reasons only needs a note in the issue.
   request, its error codes, the permission bits and `HAS_THREAD` are watched
   (`POST CHANNEL_THREADS` carries the body of both endpoints). Not watched:
   who is offered it, `C`, `n` and `Tb` in 406704 (anchor
-  `CREATE_PRIVATE_THREADS`); the form in 289287 (anchor
+  `CREATE_PRIVATE_THREADS`), and that the attach button outlives the message
+  box turned off for want of Send Messages, as long as either thread
+  permission holds (`canCreateThreads` in 989161, anchor
+  `requireCreateTherads`); the form in 289287 (anchor
   `useDefaultThreadName`), which wants a name unless the thread is from a
   message and caps it at 100; the default name `V` in 971389 (anchor
   `rawTitle`), the archive time `Gl` in 268761 (anchor
   `defaultAutoArchiveDuration`) and the `location`s, "Plus Button" in 747926
   and "Message" in 519222. The first message goes into the thread once the
   gateway has brought it (`Y` in 971389).
+- **Starting a post** (`post_creation.rs`, `ui/forum_post.rs`). `REQUIRE_TAG`
+  and the error codes are watched, and `POST CHANNEL_THREADS` is, but the
+  snapshot holds only a plain thread's fields: the client builds a post's
+  request with a joined URL, so its query `use_nested_fields=true` and body
+  (`name`, `auto_archive_duration`, `applied_tags`, `message`) are `W` in
+  971389 (anchor `applied_tags`). Also not watched: who sees the form, `AI`
+  in 406704 (Send Messages in the forum, never in a channel of moderator
+  reports); and the form in 745431 (anchor `FOCUS_COMPOSER_TITLE`): a title
+  of up to 100, something to say or a file, at most five tags (`iT`), the
+  tags only Manage Threads may apply left out (`OT` in 691060, anchor
+  `moderated`), and the slowmode that starts when the request answers (`Y`).
 - **Editing and deleting** (`permissions::can_edit`, `can_delete`;
   `ui/edits.rs`, `edits::decide`). The requests are watched (`editMessage`, `deleteMessage`,
   `unarchiveThreadIfNecessary`), as are `canDeleteOwnMessage` and
@@ -130,6 +144,19 @@ changed for unrelated reasons only needs a note in the issue.
   to pick sends when chosen, several when the list closes with a change); and
   what turns components off, `v` in 911408 (anchor
   `getInteractionComponentState`) with `O` and the menu limits in 257249.
+- **Slash commands** (`commands.rs`, `ui/slash.rs`, `Rest::command_index`,
+  `run_command`, `autocomplete`). The endpoints, the gateway events, the
+  index and autocomplete stores (`ApplicationCommandIndexStore` holds how
+  commands are found and ordered) and `handleCommand`, the run's request, are
+  watched. Not watched: where a command may be used, `zl` in 46477 (anchor
+  `MISSING_BASE_PERMISSIONS`) with the place's permissions, `Bh` in 240591
+  (anchor `hasBaseAccessPermissions`), and the rule types, 1 role, 2 user, 3
+  channel (`RA` in 392054); how a command and its sub-commands are
+  listed and what is kept of them, `Lz` in 168186 (anchor `subCommandPath`);
+  what a run sends for each option, `A` in 545152 (anchor
+  `APPLICATION_COMMAND_USED`), and the checks a value passes, `J` in 300541
+  (anchor `allowEmptyValues`); which words the suggestions look up, `Yn` in
+  664929 (anchor `hasSpaceTerminator`).
 - **`ansi` code blocks** (`markup::ansi`, `render::ansi_markup`). Which codes
   read, and how: the parser in 626551 (anchor `brightMagenta`): the style
   codes it takes, in what order a sequence's resets and sets apply, that every
@@ -225,7 +252,7 @@ changed for unrelated reasons only needs a note in the issue.
 - **Captchas** (`Captcha` in `rest.rs`, `ui/captcha.rs`). The retry is
   watched (`interceptResponse`). The fields read are in 295562, and the
   services in 319400 (hCaptcha, reCAPTCHA, reCAPTCHA Enterprise, Turnstile).
-- **QR login retries** (`on_qr`, `qr_failed` in `ui/login.rs`;
+- **QR login retries** (`on_qr`, `retry_qr` in `ui/login.rs`;
   `remote_auth.rs`). How often Neucord reconnects to the remote auth
   gateway. Client: 785161 (logger `useAuthWebsocket`), with the backoff in
   158390.
@@ -433,6 +460,15 @@ changed for unrelated reasons only needs a note in the issue.
   channels, and threads outside forums. A box under a message shows only for
   a known thread of a message with `HAS_THREAD` (`r8` in 679636).
 
+- **The quick switcher** (`switcher.rs`, `ui/switcher.rs`). The empty
+  state (`QuickSwitcherStore`), the channel, server and group DM queries,
+  the single-kind refetch and the unread, mention and speaker lists are
+  watched by name. Not watched: the prefixes and what each result opens (`k`
+  and `H` in 793322, anchor `USER_GLOBAL`), `mod+k` and `mod+t` (161388,
+  anchor `QUICKSWITCHER_SHOW`), the scoring (`eT` and `eC` in 997625, anchor
+  `isFullMatch`, with `ep`'s boosters), and how people rank (the worker,
+  787578, anchor `USER_RESULTS`).
+
 - **Channels we can't view** (`Guild::sidebar`, `permissions::access`).
   Neucord lists, counts unread, opens and posts only where it has a
   channel's `accessPermissions`: View Channel, and Connect too in voice and
@@ -468,6 +504,8 @@ changed for unrelated reasons only needs a note in the issue.
   `CHANNEL` in 901123. Copy Message ID is 50268, only in Developer Mode
   (`developer_mode` in the JSON user settings). Copy for the selection
   (373963) and Copy Link and Open Link (777933) are desktop-only there.
+  Save File (`save-voice-message-audio` in 761304) is for a voice message
+  that has an attachment, and takes the first.
   Neucord leaves out the analytics these send (`MESSAGE_LINK_COPIED`,
   `CONTEXT_MENU_LINK_COPIED`).
 - **What people are called in a server** (`State::name_in`, `Members`).
