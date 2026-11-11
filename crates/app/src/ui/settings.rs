@@ -12,6 +12,7 @@ use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
 use discord::Setting;
+use discord::locales::{self, LOCALES};
 use discord::rest::Rest;
 use discord::settings::{ReactionNotifications, Settings, SettingsPatch, StickerAnimation};
 use discord::settings_sync::{Save, SaveError, Schedule};
@@ -223,6 +224,20 @@ impl App {
         );
         let privacy = page("Privacy", "channel-secure-symbolic", &[&joining]);
 
+        let language = group("Language", "Neucord shows English whatever this is; your other clients follow it.");
+        form.choice(
+            &language,
+            "Language",
+            &LOCALES.map(|(_, name)| name),
+            // An account that never picked one has the default, which is English.
+            |s| {
+                locales::position(s.locale.as_deref().unwrap_or("en-US"))
+                    .map_or(gtk::INVALID_LIST_POSITION, |n| n as u32)
+            },
+            |n| LOCALES.get(n as usize).map(|(code, _)| Setting::Locale((*code).to_owned())),
+        );
+        let language = page("Language", "preferences-desktop-locale-symbolic", &[&language]);
+
         let typing = group("Typing", "");
         option_switch(
             self,
@@ -281,6 +296,7 @@ impl App {
         dialog.add(&chat);
         dialog.add(&notifications);
         dialog.add(&privacy);
+        dialog.add(&language);
         dialog.add(&neucord);
         dialog.connect_closed({
             let this = Rc::downgrade(self);
@@ -327,15 +343,19 @@ impl App {
 
     /// Settings that changed, here or elsewhere, take effect where they show.
     pub(super) fn apply_settings(self: &Rc<Self>, patch: SettingsPatch, replace: bool) {
-        let (media, folders) = {
+        let (media, folders, status) = {
             let mut state = self.state.borrow_mut();
-            let before = (state.settings.media, state.settings.guild_folders.clone());
+            let before = (state.settings.media, state.settings.guild_folders.clone(), state.settings.status.clone());
             if replace {
                 state.settings.replace(patch);
             } else {
                 state.settings.apply(patch);
             }
-            (before.0 != state.settings.media, before.1 != state.settings.guild_folders)
+            (
+                before.0 != state.settings.media,
+                before.1 != state.settings.guild_folders,
+                before.2 != state.settings.status,
+            )
         };
         if folders {
             self.rebuild_rail();
@@ -344,11 +364,16 @@ impl App {
             self.images.motion().set_media(self.state.borrow().settings.media);
             self.refresh_rows();
         }
+        if status {
+            self.refresh_status();
+            self.report_presence();
+            self.manage_expiries();
+        }
         self.settings_replaced();
     }
 
     /// The user changed a setting in the window.
-    fn change_setting(self: &Rc<Self>, setting: Setting) {
+    pub(super) fn change_setting(self: &Rc<Self>, setting: Setting) {
         let edited = self.state.borrow_mut().sync.edit(setting);
         let Some(edited) = edited else {
             // Before READY there's nothing to change.

@@ -310,6 +310,7 @@ impl App {
                     self.state.borrow_mut().members.resumed();
                     self.send_member_requests();
                     self.subscribe_session(false);
+                    self.resend_presence();
                     let name = {
                         let mut state = self.state.borrow_mut();
                         state.reconnect_attempts = 0;
@@ -426,6 +427,7 @@ impl App {
         }
 
         self.settings_replaced();
+        self.status_ready();
         if let Some(schedule) = offline_save {
             self.save_settings_after(schedule);
         }

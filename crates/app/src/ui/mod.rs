@@ -24,6 +24,7 @@ mod menus;
 mod message_row;
 mod notify;
 mod notify_menus;
+mod own_status;
 mod panes;
 mod picker;
 mod poll_composer;
@@ -92,6 +93,12 @@ pub struct App {
     /// What each row of `channels` opens, by row index.
     targets: RefCell<Vec<Option<sidebar::Target>>>,
     me_label: gtk::Label,
+    /// Under our name: the custom status, else the status.
+    me_status: gtk::Box,
+    /// Beside our name, the colour of the status.
+    me_dot: gtk::Box,
+    /// Opens the status menu, which `refresh_status` keeps up to date.
+    status_button: RefCell<Option<gtk::MenuButton>>,
     header: widgets::Title,
     /// The open channel's chat, or one of Home's pages.
     content: gtk::Stack,
@@ -290,6 +297,9 @@ impl App {
             channels: gtk::ListBox::builder().css_classes(["navigation-sidebar"]).build(),
             targets: RefCell::default(),
             me_label: gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(pango::EllipsizeMode::End).build(),
+            me_status: gtk::Box::new(gtk::Orientation::Horizontal, 0),
+            me_dot: gtk::Box::builder().valign(gtk::Align::Center).css_classes(["presence", "online"]).build(),
+            status_button: RefCell::default(),
             header: widgets::Title::new(""),
             content: gtk::Stack::new(),
             friends: friends::FriendsPage::new(),
@@ -585,6 +595,7 @@ impl App {
             })
             .build();
         self.window.add_action_entries([logout, standing, scheduled, find, switch, settings]);
+        self.window.add_action_entries(self.status_actions());
         if let Some(app) = self.window.application() {
             app.set_accels_for_action("win.logout", &["<Control><Shift>l"]);
             app.set_accels_for_action("win.search", &["<Control>f"]);
@@ -713,9 +724,9 @@ impl App {
     /// Who is logged in, with the app's menu: a card floating over the
     /// bottom of the rail and channel list, which scroll on beneath it, the
     /// same size and in the same place as the composer beside it.
-    fn build_account_panel(&self) -> gtk::Widget {
+    fn build_account_panel(self: &Rc<Self>) -> gtk::Widget {
         let row = gtk::Box::builder().spacing(4).css_classes(["card-row"]).build();
-        row.append(&self.me_label);
+        row.append(&self.build_status_button());
         // The app's menu too, as Discord's settings live here.
         let menu = gio::Menu::new();
         menu.append(Some("_User Settings"), Some("win.settings"));
