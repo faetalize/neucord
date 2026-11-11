@@ -974,6 +974,10 @@ pub struct InteractionMetadata {
     /// Keyed by how the app was installed: `"0"` to a server, `"1"` to a user.
     #[serde(default)]
     pub authorizing_integration_owners: std::collections::BTreeMap<String, Value>,
+    /// Why an answer only we can see is hidden from the others, when it
+    /// isn't just the app's choice; see [`crate::interaction::ephemerality_text`].
+    #[serde(default)]
+    pub ephemerality_reason: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]

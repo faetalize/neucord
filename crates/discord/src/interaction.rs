@@ -23,6 +23,33 @@ const UNKNOWN_INTEGRATION: u64 = 10005;
 const COMMAND_OUT_OF_DATE: [&str; 2] =
     ["INTERACTION_APPLICATION_COMMAND_INVALID_VERSION", "INTERACTION_APPLICATION_COMMAND_INVALID"];
 
+/// Why an answer is only ours to see, as the footer under it says it
+/// (`ephemerality_reason` in 376767). A reason it doesn't know, and `NONE`,
+/// read as an unknown error.
+pub fn ephemerality_text(reason: u64) -> &'static str {
+    match reason {
+        1 => "This feature is temporarily limited",
+        2 => "This feature is temporarily limited for this server",
+        3 => "This feature is temporarily limited for you",
+        4 => "You are sending messages too quickly",
+        5 => "You are being rate limited",
+        6 => "You cannot message this user",
+        7 => "You do not meet this server's verification level",
+        8 => "You cannot unarchive this thread",
+        9 => "You cannot join this thread",
+        10 => "You cannot send messages in this channel",
+        11 => "You cannot send attachments in this channel",
+        12 => "You cannot send embeds in this channel",
+        13 => "You cannot send stickers in this channel",
+        14 => "This message was blocked by AutoMod. The message may also be viewed by the community owners.",
+        15 => "This message contains a link blocked by Discord.",
+        16 => "You cannot use this command in this channel",
+        17 => "Only you can see this message during beta",
+        18 => "You cannot use external apps in this channel",
+        _ => "An unknown error occurred",
+    }
+}
+
 /// The interaction a message is waiting on.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pending {
@@ -340,6 +367,18 @@ mod tests {
             failure(404, r#"{"code": 10005, "message": "Unknown Integration"}"#),
             Failure { message: Some("Unknown Integration".into()), stale_command: true, ..Failure::default() }
         );
+    }
+
+    #[test]
+    fn an_answer_only_we_see_says_why_as_the_client_does() {
+        assert_eq!(ephemerality_text(4), "You are sending messages too quickly");
+        assert_eq!(ephemerality_text(18), "You cannot use external apps in this channel");
+        // `NONE` is a reason too, with no words of its own.
+        assert_eq!(ephemerality_text(0), "An unknown error occurred");
+        assert_eq!(ephemerality_text(99), "An unknown error occurred");
+        let metadata: crate::model::InteractionMetadata =
+            serde_json::from_str(r#"{"user": {"id": "7", "username": "u"}, "ephemerality_reason": 10}"#).unwrap();
+        assert_eq!(metadata.ephemerality_reason, Some(10));
     }
 
     #[test]
