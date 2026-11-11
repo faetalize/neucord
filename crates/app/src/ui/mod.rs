@@ -19,11 +19,13 @@ mod menus;
 mod message_row;
 mod notify;
 mod panes;
+mod picker;
 mod polls;
 mod rail;
 mod requests;
 mod sidebar;
 mod state;
+mod stickers;
 mod thread_line;
 mod typing;
 mod unread;
@@ -84,6 +86,9 @@ pub struct App {
     composer_box: gtk::Box,
     /// Opens the emoji picker.
     emoji_button: gtk::Button,
+    /// Opens the sticker picker, and the sticker waiting for the message.
+    sticker_button: gtk::Button,
+    waiting: stickers::Waiting,
     /// Who is typing in the open channel. It keeps its line when empty, so
     /// the bar's height, which pads the message list, doesn't change as people start and stop.
     typing_line: gtk::Label,
@@ -232,6 +237,13 @@ impl App {
                 .valign(gtk::Align::Center)
                 .css_classes(["flat", "circular"])
                 .build(),
+            sticker_button: gtk::Button::builder()
+                .icon_name("image-x-generic-symbolic")
+                .tooltip_text("Stickers")
+                .valign(gtk::Align::Center)
+                .css_classes(["flat", "circular"])
+                .build(),
+            waiting: stickers::Waiting::new(),
             typing_line: gtk::Label::builder()
                 .xalign(0.0)
                 .margin_start(12)

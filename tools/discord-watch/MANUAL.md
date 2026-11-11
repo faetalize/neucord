@@ -229,6 +229,17 @@ changed for unrelated reasons only needs a note in the issue.
   characters at least, only emoji we may send. What a message says for a
   `:name:` is the `emoji` rule in 451909 (anchor `validNonShortcutEmojis`),
   and only a `PREMIUM_LOCKED` emoji in it gets the sender told.
+- **Which stickers we offer, send, and when** (`stickers.rs`, `limits::sticker`,
+  `ui/stickers.rs`). What a sticker needs is `W$` in 361670 (anchor
+  `SENDABLE_WITH_BOOSTED_GUILD`, whose enum is watched). The picker's
+  sections are `pD` in 256449 (anchor `EMPTY_GUILD_UPSELL`): without Use
+  External *Emojis* another server's stickers aren't listed at all. The
+  packs are fetched when the sticker view mounts (`XQ` in 256449, whose call
+  is `YB` in 631576, anchor `STICKER_PACKS_FETCH_START`); the request and
+  the hour they stay loaded (`StickersPackStore`) are watched. A pick sends
+  at once only from an empty box with no files and no sticker waiting, else
+  the sticker waits and goes with the message (`nm` in 989161, anchor
+  `getStickerPreview`).
 
 ## Notifications and unread state
 
@@ -304,8 +315,9 @@ changed for unrelated reasons only needs a note in the issue.
   (373963) and Copy Link and Open Link (777933) are desktop-only there.
   Neucord leaves out the analytics these send (`MESSAGE_LINK_COPIED`,
   `CONTEXT_MENU_LINK_COPIED`).
-- **The emoji picker's menu** (`EXPRESSION_PICKER` in `ui/menus.rs`).
-  Client: 233503; every item needs Developer Mode, and the id is 50268.
+- **The emoji and sticker picker's menu** (`EXPRESSION_PICKER` in
+  `ui/menus.rs`). Client: 233503; every item needs Developer Mode, and the
+  id is 50268. The sticker link is `zg` in 378058.
 - **Poll vote counts and shares** (`poll.rs`). Client: 432005 and 969632
   count the votes, and 951727 works out shares, the leader and when counts
   show.

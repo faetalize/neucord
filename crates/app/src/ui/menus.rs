@@ -15,7 +15,7 @@ use gtk::{gdk, gio, glib};
 
 use super::App;
 use super::chat::{self, MessageTarget};
-use super::{composer, edits, emoji, uploads};
+use super::{composer, edits, emoji, picker, stickers, uploads};
 
 /// One entry of a menu, for what it was opened on: a `T`. `C` is what
 /// entries read and act through: the app, or a stand-in in tests.
@@ -119,12 +119,18 @@ pub(super) const ATTACH: Table<()> = &[&[uploads::UPLOAD_FILE, uploads::UPLOAD_T
 /// emoji). The official client's (194400) also has spellcheck and more.
 pub(super) const COMPOSER: Table<()> = &[];
 
-/// An emoji of the picker (`expression-picker`, 233503). The client offers
-/// Copy Emoji, Copy Emoji ID and Copy Emoji Image Link only in Developer
-/// Mode, and a Favorite item first, which needs the favourites the client
-/// syncs as protobuf settings.
-pub(super) const EXPRESSION_PICKER: Table<emoji::Target> =
-    &[&[emoji::COPY_EMOJI, emoji::COPY_EMOJI_ID, emoji::COPY_EMOJI_LINK]];
+/// An emoji or sticker of the picker (`expression-picker`, 233503). The
+/// client offers Copy Emoji, Copy Emoji ID and Copy Emoji Image Link, or
+/// Copy Sticker ID and Copy Sticker Image Link, only in Developer Mode, and
+/// a Favorite item first, which needs the favourites the client syncs as
+/// protobuf settings.
+pub(super) const EXPRESSION_PICKER: Table<picker::Target> = &[&[
+    emoji::COPY_EMOJI,
+    emoji::COPY_EMOJI_ID,
+    emoji::COPY_EMOJI_LINK,
+    stickers::COPY_STICKER_ID,
+    stickers::COPY_STICKER_LINK,
+]];
 
 /// Where menu items find their actions.
 const PREFIX: &str = "menu";

@@ -10,11 +10,10 @@ use adw::prelude::*;
 use discord::Snowflake;
 use discord::emoji::{Category, Item, Library, Place};
 use discord::permissions::{self, Permissions};
-use discord::settings::RailEntry;
-use gtk::{gio, glib};
 
 use super::App;
 use super::menus::{self, Entry, Item as MenuItem, Kind};
+use super::picker::{self, Row, Spec, Target};
 use super::state::now_unix;
 use crate::images::Images;
 
@@ -28,30 +27,37 @@ const SEARCH: usize = 50;
 /// or sounds to give room to.
 pub(super) const AUTOCOMPLETE: usize = 50;
 
-/// What the picker's menu was opened on.
-pub(super) struct Target {
-    item: Item,
+/// Only in Developer Mode, like the rest of the picker's menu (233503).
+fn developer(app: &App) -> bool {
+    app.state.borrow().developer_mode
 }
 
-/// Only in Developer Mode, like the rest of the picker's menu (233503).
-fn developer(app: &App, _: &Target) -> bool {
-    app.state.borrow().developer_mode
+/// The emoji a menu was opened on.
+fn item(target: &Target) -> Option<&Item> {
+    match target {
+        Target::Emoji(item) => Some(item),
+        Target::Sticker(_) => None,
+    }
 }
 
 pub(super) const COPY_EMOJI: Entry<Target> = Entry::Item(MenuItem {
     name: "copy-emoji",
     label: "Copy _Emoji",
-    shows: |app, target| developer(app, target) && matches!(target.item, Item::Unicode(_)),
-    kind: Kind::Action(|app, target| app.copy(&target.item.text())),
+    shows: |app, target| developer(app) && matches!(item(target), Some(Item::Unicode(_))),
+    kind: Kind::Action(|app, target| {
+        if let Some(item) = item(target) {
+            app.copy(&item.text());
+        }
+    }),
 });
 
 /// Shift copies what a message writes for it, in place of the id.
 pub(super) const COPY_EMOJI_ID: Entry<Target> = Entry::Item(MenuItem {
     name: "copy-emoji-id",
     label: "Copy Emoji _ID",
-    shows: |app, target| developer(app, target) && matches!(target.item, Item::Custom(_)),
+    shows: |app, target| developer(app) && matches!(item(target), Some(Item::Custom(_))),
     kind: Kind::Action(|app, target| {
-        if let Item::Custom(named) = &target.item {
+        if let Some(Item::Custom(named)) = item(target) {
             app.copy(&match app.shift_held() {
                 true => named.emoji.markup(),
                 false => named.emoji.id.to_string(),
@@ -63,19 +69,13 @@ pub(super) const COPY_EMOJI_ID: Entry<Target> = Entry::Item(MenuItem {
 pub(super) const COPY_EMOJI_LINK: Entry<Target> = Entry::Item(MenuItem {
     name: "copy-emoji-link",
     label: "Copy Emoji Image _Link",
-    shows: |app, target| developer(app, target) && matches!(target.item, Item::Custom(_)),
+    shows: |app, target| developer(app) && matches!(item(target), Some(Item::Custom(_))),
     kind: Kind::Action(|app, target| {
-        if let Item::Custom(named) = &target.item {
+        if let Some(Item::Custom(named)) = item(target) {
             app.copy(&discord::cdn::emoji_url(named.emoji.id.0, named.emoji.animated, 32));
         }
     }),
 });
-
-/// One line of the picker's list.
-enum Row {
-    Header(String),
-    Cells(Vec<Item>),
-}
 
 impl App {
     /// The emoji `channel` offers: every server's, the channel's own first
@@ -92,12 +92,7 @@ impl App {
             }
             _ => false,
         };
-        let rail = state.rail_layout().into_iter().flat_map(|entry| match entry {
-            RailEntry::Guild(id) => vec![id],
-            RailEntry::Folder { guilds, .. } => guilds,
-        });
-        let order: Vec<Snowflake> = own.into_iter().chain(rail.filter(|id| Some(*id) != own)).collect();
-        let guilds = order.iter().filter_map(|id| state.guilds.iter().find(|g| g.id == *id));
+        let guilds = state.guilds_in_picker_order(own);
         Library::new(guilds, &state.limits(), &Place { guild: own, external })
     }
 
@@ -111,135 +106,44 @@ impl App {
         picked: impl Fn(&Rc<App>, &Item) + 'static,
     ) {
         let library = Rc::new(self.emoji_library(channel));
-        let store = gio::ListStore::new::<glib::BoxedAnyObject>();
-        let search = gtk::SearchEntry::builder().placeholder_text("Search emoji").build();
-        let popover = gtk::Popover::new();
-        let picked: Rc<dyn Fn(&Item)> = Rc::new({
-            let (this, popover) = (Rc::downgrade(self), popover.downgrade());
-            move |item| {
-                let (Some(this), Some(popover)) = (this.upgrade(), popover.upgrade()) else { return };
-                picked(&this, item);
-                if !this.shift_held() {
-                    popover.popdown();
-                }
-            }
-        });
-
-        let factory = gtk::SignalListItemFactory::new();
-        factory.connect_setup(|_, item| {
-            let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
-            item.set_activatable(false);
-            item.set_selectable(false);
-            item.set_child(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 0)));
-        });
-        factory.connect_bind({
-            let (this, picked) = (Rc::downgrade(self), picked.clone());
-            move |_, item| {
-                let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
-                let (Some(this), Some(row), Some(line)) = (
-                    this.upgrade(),
-                    item.item().and_downcast::<glib::BoxedAnyObject>(),
-                    item.child().and_downcast::<gtk::Box>(),
-                ) else {
-                    return;
-                };
-                match &*row.borrow::<Row>() {
-                    Row::Header(title) => {
-                        let label = gtk::Label::builder()
-                            .label(title)
-                            .xalign(0.0)
-                            .margin_top(6)
-                            .css_classes(["heading"])
-                            .build();
-                        line.append(&label);
-                    }
-                    Row::Cells(cells) => {
-                        for cell in cells {
-                            line.append(&cell_button(&this, cell, &picked));
-                        }
-                    }
-                }
-            }
-        });
-        factory.connect_unbind(|_, item| {
-            let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
-            if let Some(line) = item.child().and_downcast::<gtk::Box>() {
-                while let Some(child) = line.first_child() {
-                    line.remove(&child);
-                }
-            }
-        });
-        let list = gtk::ListView::new(Some(gtk::NoSelection::new(Some(store.clone()))), Some(factory));
-
-        let show = {
-            let (store, library) = (store.clone(), library.clone());
-            move |query: &str| {
-                let rows: Vec<glib::BoxedAnyObject> =
-                    rows(&library, query).into_iter().map(glib::BoxedAnyObject::new).collect();
-                store.splice(0, store.n_items(), &rows);
-            }
+        let spec = Spec {
+            placeholder: "Search emoji",
+            columns: COLUMNS,
+            cell_width: 40,
+            rows: Rc::new({
+                let library = library.clone();
+                move |query| rows(&library, query)
+            }),
+            cell: Rc::new(cell_button),
+            best: Rc::new(move |query| library.search(query, 1).unlocked.first().cloned()),
         };
-        show("");
-        search.connect_search_changed(move |search| show(search.text().trim()));
-        // Enter takes the best match, the one first in the list.
-        search.connect_activate({
-            let (library, picked) = (library.clone(), picked.clone());
-            move |search| {
-                if let Some(item) = library.search(search.text().trim(), 1).unlocked.first() {
-                    picked(item);
-                }
-            }
-        });
-
-        let scroller = gtk::ScrolledWindow::builder()
-            .child(&list)
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .min_content_width(COLUMNS as i32 * 40)
-            .min_content_height(360)
-            .build();
-        let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        content.append(&search);
-        content.append(&scroller);
-        popover.set_child(Some(&content));
-        popover.set_parent(parent);
-        popover.connect_closed(|popover| {
-            // Once the pick has been handled, which may come after closing.
-            let popover = popover.clone();
-            glib::idle_add_local_once(move || popover.unparent());
-        });
-        popover.popup();
-        search.grab_focus();
+        picker::open(self, parent, spec, picked);
     }
 }
 
 /// What the picker lists for `query`: each server's emoji and the Unicode
 /// groups, or what a search finds.
-fn rows(library: &Library, query: &str) -> Vec<Row> {
+fn rows(library: &Library, query: &str) -> Vec<Row<Item>> {
     let mut rows = Vec::new();
-    let mut section = |title: String, items: Vec<Item>| {
-        if !items.is_empty() {
-            rows.push(Row::Header(title));
-            rows.extend(items.chunks(COLUMNS).map(|cells| Row::Cells(cells.to_vec())));
-        }
-    };
     if query.is_empty() {
         for server in library.picker() {
-            section(server.name, server.emoji.into_iter().map(Item::Custom).collect());
+            Row::section(&mut rows, COLUMNS, server.name, server.emoji.into_iter().map(Item::Custom).collect());
         }
         for category in Category::ALL {
-            section(category.label().to_owned(), discord::emoji::unicode_in(category).map(Item::Unicode).collect());
+            let unicode = discord::emoji::unicode_in(category).map(Item::Unicode).collect();
+            Row::section(&mut rows, COLUMNS, category.label().to_owned(), unicode);
         }
     } else {
         let found = library.search(query, SEARCH);
-        section("Search Results".to_owned(), found.unlocked);
-        section("Needs Nitro".to_owned(), found.locked);
+        Row::section(&mut rows, COLUMNS, "Search Results".to_owned(), found.unlocked);
+        Row::section(&mut rows, COLUMNS, "Needs Nitro".to_owned(), found.locked);
     }
     rows
 }
 
 /// An emoji of the picker: a button that picks it, if we may send it, and
 /// opens the picker's menu on a right click.
-fn cell_button(app: &Rc<App>, item: &Item, picked: &Rc<dyn Fn(&Item)>) -> gtk::Button {
+fn cell_button(app: &Rc<App>, item: &Item, picked: &Rc<dyn Fn(&Item)>) -> gtk::Widget {
     let button = gtk::Button::builder()
         .child(&glyph(item, &app.images))
         .css_classes(["flat"])
@@ -257,16 +161,10 @@ fn cell_button(app: &Rc<App>, item: &Item, picked: &Rc<dyn Fn(&Item)>) -> gtk::B
         let (app, item, button) = (Rc::downgrade(app), item.clone(), button.downgrade());
         move |x, y| {
             let (Some(app), Some(button)) = (app.upgrade(), button.upgrade()) else { return };
-            menus::popup(
-                &app,
-                menus::EXPRESSION_PICKER,
-                Target { item: item.clone() },
-                &button,
-                menus::At::Point(x, y),
-            );
+            menus::popup(&app, menus::EXPRESSION_PICKER, Target::Emoji(item.clone()), &button, menus::At::Point(x, y));
         }
     });
-    button
+    button.upcast()
 }
 
 /// The emoji as a widget of [`SIZE`]: the character, or the image.

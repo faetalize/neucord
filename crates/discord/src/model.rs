@@ -7,6 +7,7 @@ use serde_json::Value;
 use crate::embed::Embed;
 use crate::emoji::GuildEmoji;
 use crate::permissions::{self, Permissions};
+use crate::stickers::Listed;
 use crate::verification::{Account, Rules};
 
 /// Discord IDs are 64-bit integers sent as JSON strings.
@@ -394,6 +395,9 @@ pub struct Guild {
     /// The server's custom emoji, every one of them: whether we may use one
     /// is `emoji::Library`'s to say.
     pub emojis: Vec<GuildEmoji>,
+    /// The server's stickers, every one of them: whether we may send one is
+    /// `stickers::Library`'s to say.
+    pub stickers: Vec<Listed>,
 }
 
 /// What Neucord uses of our own member in a server, which READY, GUILD_CREATE
@@ -461,6 +465,9 @@ impl Guild {
         // Like roles: an update without any is one that doesn't mention them.
         if !update.emojis.is_empty() {
             self.emojis = update.emojis;
+        }
+        if !update.stickers.is_empty() {
+            self.stickers = update.stickers;
         }
     }
 
@@ -638,6 +645,7 @@ impl<'de> Deserialize<'de> for Guild {
             premium_tier: props["premium_tier"].as_u64().and_then(|t| u8::try_from(t).ok()).unwrap_or(0),
             rules_channel_id: props["rules_channel_id"].as_str().and_then(|id| id.parse().ok()).map(Snowflake),
             emojis: GuildEmoji::list(raw.id, &value["emojis"]).unwrap_or_default(),
+            stickers: Listed::guild_list(raw.id, &value["stickers"]).unwrap_or_default(),
         })
     }
 }
@@ -1037,6 +1045,24 @@ impl Sticker {
             _ => return None,
         };
         Some((format!("https://media.discordapp.net/stickers/{}.{ext}?size={size}", self.id), animated))
+    }
+
+    /// The picker's image, which the client asks for as a preview: a still,
+    /// so an animated GIF sticker comes as its PNG. `None` for Lottie.
+    pub fn still(&self, size: u32) -> Option<String> {
+        let (url, animated) = self.image(size)?;
+        Some(if animated { url.replace(".gif?", ".png?") } else { url })
+    }
+
+    /// Where the sticker file is, as Copy Sticker Image Link gives it
+    /// (`zg` in 378058): the image at the size the client shows messages
+    /// at, or a Lottie sticker's JSON. `None` for a format the client
+    /// doesn't know.
+    pub fn link(&self) -> Option<String> {
+        match self.format_type {
+            3 => Some(format!("https://cdn.discordapp.com/stickers/{}.json", self.id)),
+            _ => self.image(Self::SIZE).map(|(url, _)| url),
+        }
     }
 }
 
@@ -1471,6 +1497,12 @@ mod tests {
         assert_eq!(sticker(1).image(160), Some(("https://media.discordapp.net/stickers/7.png?size=160".into(), false)));
         assert_eq!(sticker(4).image(320), Some(("https://media.discordapp.net/stickers/7.gif?size=320".into(), true)));
         assert_eq!(sticker(3).image(160), None, "Lottie");
+        assert_eq!(sticker(4).still(160), Some("https://media.discordapp.net/stickers/7.png?size=160".into()));
+        assert_eq!(sticker(1).still(80), Some("https://media.discordapp.net/stickers/7.png?size=80".into()));
+        assert_eq!(sticker(3).still(160), None);
+        assert_eq!(sticker(3).link(), Some("https://cdn.discordapp.com/stickers/7.json".into()));
+        assert_eq!(sticker(4).link(), Some("https://media.discordapp.net/stickers/7.gif?size=160".into()));
+        assert_eq!(sticker(9).link(), None);
     }
 
     #[test]

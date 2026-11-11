@@ -143,7 +143,9 @@ impl App {
         area.append(&self.reply_bar);
         self.build_edit_bar(area);
         self.build_attach(area);
+        self.build_stickers(area);
         self.composer_box.append(&self.composer);
+        self.composer_box.append(&self.sticker_button);
         self.composer_box.append(&self.emoji_button);
         self.composer_box.append(&self.length.root);
         self.emoji_button.connect_clicked({
@@ -225,6 +227,14 @@ impl App {
                 }
                 if key == Key::Escape && this.reply.borrow().is_some() {
                     this.set_reply(None);
+                    return glib::Propagation::Stop;
+                }
+                // A waiting sticker goes after the reply, as in the client (92960).
+                let channel = this.state.borrow().channel;
+                if key == Key::Escape
+                    && let Some(channel) = channel.filter(|c| this.waiting.of(*c).is_some())
+                {
+                    this.set_waiting_sticker(channel, None);
                     return glib::Propagation::Stop;
                 }
                 let enter = matches!(key, Key::Return | Key::KP_Enter);
@@ -623,13 +633,21 @@ impl App {
         };
         let (Some(channel), Some(rest)) = (channel, rest) else { return };
         let files = self.files_for_message(channel);
+        let waiting = self.waiting.of(channel);
         // A hidden message box is a channel we must never post to (#51).
-        if (typed.is_empty() && files.is_empty()) || !self.composer_box.is_visible() {
+        if (typed.is_empty() && files.is_empty() && waiting.is_none()) || !self.composer_box.is_visible() {
             return;
         }
         // The box follows our permissions, but they may have changed since.
         if !self.state.borrow().can_send(channel) {
             return self.update_notice_bar();
+        }
+        // What was true when the sticker was picked may not be now.
+        if let Some(listed) = &waiting
+            && self.sticker_sendable(channel, listed).is_err()
+        {
+            self.set_waiting_sticker(channel, None);
+            return self.show_composer_error("That sticker can't be sent here.");
         }
         // `:name:`s go out as emoji. The length is checked on what goes out,
         // which is longer than what was typed.
@@ -673,6 +691,7 @@ impl App {
         }
         self.set_composer_text("");
         self.set_reply(None);
+        self.set_waiting_sticker(channel, None);
         self.mention_popover.popdown();
         // The client sends the message all the same, and says why an emoji won't show.
         if !translated.locked.is_empty() {
@@ -681,7 +700,10 @@ impl App {
         let this = self.clone();
         glib::spawn_future_local(async move {
             // The gateway echoes our own message back, which is what adds it to the list.
-            match this.send_with_uploads(&rest, channel, &text, reply, files).await {
+            match this
+                .send_with_uploads(&rest, channel, &text, reply, files, waiting.as_ref().map(|w| w.sticker.id))
+                .await
+            {
                 Ok(_) => {
                     this.record_slowmode(channel, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
                     // The client shows every message again on success, which ends what we typed meanwhile.
@@ -710,6 +732,9 @@ impl App {
                     }
                     let buffer = this.composer.buffer();
                     if buffer.char_count() == 0 && this.reply.borrow().is_none() {
+                        if this.waiting.of(channel).is_none() {
+                            this.set_waiting_sticker(channel, waiting);
+                        }
                         this.set_composer_text(&typed);
                         if this.state.borrow().channel == Some(channel) {
                             this.set_reply(replying);

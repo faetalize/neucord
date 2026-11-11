@@ -241,6 +241,7 @@ impl App {
             drafts.tray.append(&upload.row.root);
         }
         drafts.tray.set_visible(!files.is_empty());
+        self.refresh_stickers();
     }
 
     pub(super) fn build_attach(self: &Rc<Self>, area: &gtk::Box) {
@@ -625,14 +626,15 @@ impl App {
         text: &str,
         reply: Option<discord::rest::Reply>,
         files: Vec<Rc<Upload>>,
+        sticker: Option<Snowflake>,
     ) -> Result<Message, Stopped> {
         if files.is_empty() {
-            return rest.send_message(channel, text, reply, &[]).await.map_err(Stopped::Send);
+            return rest.send_message(channel, text, reply, &[], sticker).await.map_err(Stopped::Send);
         }
         let sending = Rc::new(Sending { files: files.clone(), posting: Cell::new(false) });
         self.drafts.sending.borrow_mut().insert(channel, sending.clone());
         self.refresh_attach();
-        let result = self.upload_and_post(rest, channel, text, reply, &sending).await;
+        let result = self.upload_and_post(rest, channel, text, reply, sticker, &sending).await;
         self.drafts.sending.borrow_mut().remove(&channel);
         if result.is_ok() {
             self.forget(channel, &sending);
@@ -647,6 +649,7 @@ impl App {
         channel: Snowflake,
         text: &str,
         reply: Option<discord::rest::Reply>,
+        sticker: Option<Snowflake>,
         sending: &Sending,
     ) -> Result<Message, Stopped> {
         let files = &sending.files;
@@ -685,7 +688,7 @@ impl App {
                 content_type: &types[i],
             })
             .collect();
-        rest.send_message(channel, text, reply, &sent).await.map_err(Stopped::Send)
+        rest.send_message(channel, text, reply, &sent, sticker).await.map_err(Stopped::Send)
     }
 
     /// Cancel a send that is still uploading: the files are taken back, and

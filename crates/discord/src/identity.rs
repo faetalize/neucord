@@ -14,6 +14,10 @@ pub const API_BASE: &str = "https://discord.com/api/v9";
 pub const GATEWAY_QUERY: &str = "encoding=json&v=9&compress=zlib-stream";
 pub const GATEWAY_URL: &str = "wss://gateway.discord.gg/?encoding=json&v=9&compress=zlib-stream";
 
+/// The locale every request names: `X-Discord-Locale`, and the `locale` the
+/// client's sticker packs request carries, which are the same setting there.
+pub const LOCALE: &str = "en-US";
+
 const NAME: &str = "Neucord";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
