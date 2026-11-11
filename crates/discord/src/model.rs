@@ -136,6 +136,12 @@ impl ChannelKind {
         matches!(self, Self::Text | Self::Announcement | Self::Dm | Self::GroupDm)
     }
 
+    /// Voice and stage channels (`isGuildVocal` in 95701). Each also has a text
+    /// chat, which Neucord shows without joining the call.
+    pub fn is_vocal(self) -> bool {
+        matches!(self, Self::Voice | Self::Stage)
+    }
+
     /// DMs and group DMs: channels outside any guild.
     pub fn is_private(self) -> bool {
         matches!(self, Self::Dm | Self::GroupDm)
@@ -334,6 +340,14 @@ impl Channel {
         }
         let names: Vec<&str> = self.recipients.iter().map(User::display_name).collect();
         if names.is_empty() { "Unnamed".to_owned() } else { names.join(", ") }
+    }
+
+    /// The channel's link in Discord's web app, as Copy Link copies it
+    /// (`af` in 147036, with the path from `CHANNEL` in 901123). `guild` is
+    /// its server, `None` for a DM.
+    pub fn link(&self, guild: Option<Snowflake>) -> String {
+        let guild = guild.map_or("@me".to_owned(), |g| g.to_string());
+        format!("https://discord.com/channels/{guild}/{}", self.id)
     }
 
     /// A message request or spam: kept out of the DM list until accepted.
@@ -555,31 +569,34 @@ impl Guild {
         (!admin).then_some(left)
     }
 
-    /// Text, announcement, forum and media channels we can view, in sidebar
-    /// order: uncategorised first, then each category by position, channels
-    /// by position within it. Returns `(category name, channels)` groups.
+    /// Text, announcement, forum, media, voice and stage channels we can view,
+    /// in sidebar order: uncategorised first, then each category by position,
+    /// channels by position within it, with voice and stage after the rest
+    /// (`getShownChannelIds` in 791513 adds 10 000 to their position).
+    /// Returns `(category name, channels)` groups.
     pub fn sidebar(&self, me: &Account, now_unix: i64) -> Vec<(Option<&str>, Vec<&Channel>)> {
         let by_position =
             |a: &&Channel, b: &&Channel| (a.position.unwrap_or(0), a.id).cmp(&(b.position.unwrap_or(0), b.id));
-        let text_in = |parent: Option<Snowflake>| {
+        let place = |c: &&Channel| i64::from(c.position.unwrap_or(0)) + if c.kind.is_vocal() { 10_000 } else { 0 };
+        let channels_in = |parent: Option<Snowflake>| {
             let mut v: Vec<&Channel> = self
                 .channels
                 .iter()
                 .filter(|c| {
-                    (c.kind.is_text() || c.kind.is_forum_like())
+                    (c.kind.is_text() || c.kind.is_forum_like() || c.kind.is_vocal())
                         && c.parent_id == parent
                         && self.can_view(c, me, now_unix)
                 })
                 .collect();
-            v.sort_by(by_position);
+            v.sort_by_key(|c| (place(c), c.id));
             v
         };
 
-        let mut groups = vec![(None, text_in(None))];
+        let mut groups = vec![(None, channels_in(None))];
         let mut categories: Vec<&Channel> = self.channels.iter().filter(|c| c.kind == ChannelKind::Category).collect();
         categories.sort_by(by_position);
         for category in categories {
-            groups.push((category.name.as_deref(), text_in(Some(category.id))));
+            groups.push((category.name.as_deref(), channels_in(Some(category.id))));
         }
         groups.retain(|(_, channels)| !channels.is_empty());
         groups
@@ -1355,9 +1372,49 @@ mod tests {
             .iter()
             .map(|(cat, chans)| (*cat, chans.iter().map(|c| c.name.as_deref().unwrap()).collect()))
             .collect();
-        assert_eq!(names, vec![(None, vec!["top"]), (Some("Cat"), vec!["a", "b"])], "staff is hidden from us");
+        assert_eq!(names, vec![(None, vec!["top"]), (Some("Cat"), vec!["a", "b", "voice"])], "staff is hidden from us");
         let owner = g.sidebar(&Account { id: Snowflake(7), ..Default::default() }, 0);
         assert_eq!(owner[0].1.len(), 2, "but not from the owner");
+    }
+
+    #[test]
+    fn a_channels_link() {
+        let channel: Channel = serde_json::from_str(r#"{"id":"11","type":2}"#).unwrap();
+        assert_eq!(channel.link(Some(Snowflake(3))), "https://discord.com/channels/3/11");
+        assert_eq!(channel.link(None), "https://discord.com/channels/@me/11");
+    }
+
+    #[test]
+    fn voice_and_stage_channels_list_after_the_rest_where_we_can_connect() {
+        // 2 voice and 13 stage: the sidebar sorts them as 10 000 further down, whatever their position.
+        let g: Guild = serde_json::from_str(
+            r#"{"id":"1","name":"G","owner_id":"7","roles":[{"id":"1","name":"@everyone","permissions":"1049600"}],"channels":[
+                {"id":"10","type":4,"name":"Cat","position":0},
+                {"id":"11","type":2,"name":"lounge","position":0,"parent_id":"10"},
+                {"id":"12","type":0,"name":"chat","position":5,"parent_id":"10"},
+                {"id":"13","type":13,"name":"stage","position":1,"parent_id":"10"},
+                {"id":"14","type":15,"name":"forum","position":9,"parent_id":"10"},
+                {"id":"15","type":2,"name":"hall","position":0},
+                {"id":"16","type":0,"name":"rules","position":3},
+                {"id":"17","type":2,"name":"no-connect","position":0,"parent_id":"10",
+                 "permission_overwrites":[{"id":"1","type":0,"allow":"0","deny":"1048576"}]},
+                {"id":"18","type":13,"name":"hidden-stage","position":0,"parent_id":"10",
+                 "permission_overwrites":[{"id":"1","type":0,"allow":"0","deny":"1024"}]},
+                {"id":"19","type":0,"name":"late","position":10002,"parent_id":"10"}
+            ]}"#,
+        )
+        .unwrap();
+        let sidebar = g.sidebar(&Account { id: Snowflake(5), ..Default::default() }, 0);
+        let names: Vec<(Option<&str>, Vec<&str>)> = sidebar
+            .iter()
+            .map(|(cat, chans)| (*cat, chans.iter().map(|c| c.name.as_deref().unwrap()).collect()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![(None, vec!["rules", "hall"]), (Some("Cat"), vec!["chat", "forum", "lounge", "stage", "late"])],
+            "Connect and View Channel both decide, and a text channel past 10 000 sorts after them"
+        );
+        assert!(ChannelKind::Voice.is_vocal() && ChannelKind::Stage.is_vocal() && !ChannelKind::Text.is_vocal());
     }
 
     #[test]

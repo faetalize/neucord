@@ -249,13 +249,26 @@ impl NotificationSettings {
     /// what the server suppresses is already out) decides under "mentions";
     /// a DM is no mention for that, so a DM level of "mentions" needs a ping.
     pub fn should_notify(&self, place: &Place, mentioned: bool, now_unix: i64) -> bool {
+        self.notify(place, mentioned, false, now_unix)
+    }
+
+    /// [`should_notify`](Self::should_notify) for the chat of a voice or stage
+    /// channel. The client lets level "all" notify there only while connected
+    /// to that channel (`RTCConnectionStore`'s, in 411238): anything else
+    /// needs a mention, as under "mentions". Neucord never joins a call, so
+    /// "all" never applies.
+    pub fn should_notify_in_vocal(&self, place: &Place, mentioned: bool, now_unix: i64) -> bool {
+        self.notify(place, mentioned, true, now_unix)
+    }
+
+    fn notify(&self, place: &Place, mentioned: bool, vocal: bool, now_unix: i64) -> bool {
         if self.muted(place, now_unix) {
             return false;
         }
         match self.level(place) {
             Level::Nothing => false,
             Level::Mentions => mentioned,
-            Level::All => true,
+            Level::All => mentioned || !vocal,
         }
     }
 }
@@ -427,6 +440,22 @@ mod tests {
         assert!(!s.should_notify(&place(Some(1), 20, None), false, NOW), "but the level still applies");
         assert!(s.should_notify(&place(None, 98, None), false, NOW), "DM");
         assert!(!s.should_notify(&place(None, 99, None), false, NOW), "muted DM");
+    }
+
+    #[test]
+    fn a_voice_or_stage_chat_notifies_on_a_mention_while_we_are_not_connected() {
+        let s = settings();
+        let notify = |place: &Place, mentioned| s.should_notify_in_vocal(place, mentioned, NOW);
+        let all = place(Some(1), 10, None);
+        assert!(!notify(&all, false), "level all needs the call");
+        assert!(notify(&all, true), "a mention does not");
+        let mentions = place(Some(1), 12, None);
+        assert!(!notify(&mentions, false) && notify(&mentions, true), "level mentions is as anywhere");
+        assert!(!notify(&place(Some(1), 11, None), true), "a mute still silences mentions");
+        assert!(!notify(&place(Some(2), 5, None), true), "a muted server too");
+        let quiet = NotificationSettings::from_ready(&json!([{"guild_id": "3", "message_notifications": 2}]));
+        assert!(!quiet.should_notify_in_vocal(&place(Some(3), 5, None), true, NOW), "level nothing");
+        assert!(s.should_notify(&all, false, NOW), "text channels are unchanged");
     }
 
     #[test]
