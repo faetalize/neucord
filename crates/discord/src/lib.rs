@@ -5,6 +5,7 @@
 //! GTK, so the UI can be replaced without touching this crate.
 
 pub mod account;
+pub mod accounts;
 pub mod apng;
 pub mod auth;
 pub mod cdn;

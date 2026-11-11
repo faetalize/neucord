@@ -160,11 +160,13 @@ struct Sending<'a> {
     /// The hash of a file before it was converted, for
     /// `X-Discord-Original-MD5` (724165's `buildHeadersForMd5`).
     original_md5: Option<&'a str>,
+    /// `Authorization` is sent empty (see [`Rest::adding_account`]).
+    blank_authorization: bool,
 }
 
 impl Default for Sending<'_> {
     fn default() -> Self {
-        Sending { retry_rate_limit: true, failed: 0, original_md5: None }
+        Sending { retry_rate_limit: true, failed: 0, original_md5: None, blank_authorization: false }
     }
 }
 
@@ -172,6 +174,8 @@ impl Default for Sending<'_> {
 pub struct Rest {
     session: soup::Session,
     token: Option<String>,
+    /// The token of the account that is signed in while another logs in.
+    beside: Option<String>,
     captchas: Option<CaptchaSolver>,
     pauses: Option<PauseHandler>,
 }
@@ -186,7 +190,22 @@ impl Rest {
         let session = soup::Session::new();
         session.set_user_agent(&identity::user_agent());
         session.set_timeout(30);
-        Rest { session, token: None, captchas: None, pauses: None }
+        Rest { session, token: None, beside: None, captchas: None, pauses: None }
+    }
+
+    /// For the login endpoints while `signed_in`'s account stays logged in,
+    /// as when the client adds an account. Its HTTP layer (852799) gives
+    /// every request the current token unless one is set, so the two-factor
+    /// and QR requests carry it; the password login sets the header empty
+    /// (`login` in 830215, for `isMultiAccount`).
+    pub fn adding_account(signed_in: impl Into<String>) -> Self {
+        Rest { beside: Some(signed_in.into()), ..Rest::anonymous() }
+    }
+
+    /// Whom this token belongs to: what the client asks of every account's
+    /// token when its list opens (`validate` in 429707).
+    pub async fn me(&self) -> Result<crate::User, Error> {
+        self.request(call!(ME), None).await
     }
 
     /// Have `solver` answer captchas, and send the request again with the
@@ -627,7 +646,12 @@ impl Rest {
         failed: u32,
         original_md5: Option<&str>,
     ) -> Result<(u32, glib::Bytes), Error> {
-        self.send_with(call, body, Sending { retry_rate_limit: false, failed, original_md5 }).await
+        self.send_with(
+            call,
+            body,
+            Sending { retry_rate_limit: false, failed, original_md5, blank_authorization: false },
+        )
+        .await
     }
 
     /// `PUT` to an upload URL, which is Google's and not Discord's: it takes
@@ -696,6 +720,12 @@ impl Rest {
         self.send_with(call, body, Sending::default()).await
     }
 
+    /// [`Self::send`] for the password login, whose header is empty while
+    /// another account is signed in.
+    pub(crate) async fn send_login(&self, call: Call, body: Option<Value>) -> Result<(u32, glib::Bytes), Error> {
+        self.send_with(call, body, Sending { blank_authorization: true, ..Sending::default() }).await
+    }
+
     async fn send_with(
         &self,
         call: Call,
@@ -723,7 +753,9 @@ impl Rest {
             let msg = soup::Message::new(call.method(), &format!("{}{}", identity::API_BASE, call.path()))
                 .expect("API URL is valid");
             let headers = msg.request_headers().expect("request has headers");
-            for (name, value) in base_headers(self.token.as_deref()) {
+            for (name, value) in
+                base_headers(self.token.as_deref(), self.beside.as_deref(), options.blank_authorization)
+            {
                 headers.replace(name, &value);
             }
             if options.failed > 0 {
@@ -963,12 +995,19 @@ fn is_md5(hash: &str) -> bool {
     hash.len() == 32 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-fn base_headers(token: Option<&str>) -> Vec<(&'static str, String)> {
+fn base_headers(token: Option<&str>, beside: Option<&str>, blank: bool) -> Vec<(&'static str, String)> {
     let mut headers = vec![("X-Discord-Locale", identity::LOCALE.to_owned())];
     match token {
         Some(token) => headers.push(("Authorization", token.to_owned())),
-        // Without it, logging in turns down valid two-factor codes.
-        None => headers.push(("X-Super-Properties", identity::super_properties())),
+        None => {
+            // Without it, logging in turns down valid two-factor codes.
+            headers.push(("X-Super-Properties", identity::super_properties()));
+            match beside {
+                Some(_) if blank => headers.push(("Authorization", String::new())),
+                Some(signed_in) => headers.push(("Authorization", signed_in.to_owned())),
+                None => {}
+            }
+        }
     }
     headers
 }
@@ -1235,7 +1274,8 @@ mod tests {
 
     #[test]
     fn logging_in_sends_neucords_properties() {
-        let header = |token, name| base_headers(token).into_iter().find(|(n, _)| *n == name).map(|(_, v)| v);
+        let header =
+            |token, name| base_headers(token, None, false).into_iter().find(|(n, _)| *n == name).map(|(_, v)| v);
         let properties = header(None, "X-Super-Properties").expect("sent without a token");
         let decoded = openssl::base64::decode_block(&properties).unwrap();
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&decoded).unwrap(), identity::client_properties());
@@ -1243,6 +1283,23 @@ mod tests {
 
         assert_eq!(header(Some("t"), "Authorization").as_deref(), Some("t"));
         assert_eq!(header(Some("t"), "X-Super-Properties"), None);
+    }
+
+    #[test]
+    fn adding_an_account_while_signed_in() {
+        let header = |blank, name| {
+            base_headers(None, Some("signed-in"), blank).into_iter().find(|(n, _)| *n == name).map(|(_, v)| v)
+        };
+        // The password login sets Authorization empty; the rest carry the signed-in token.
+        assert_eq!(header(true, "Authorization").as_deref(), Some(""));
+        assert_eq!(header(false, "Authorization").as_deref(), Some("signed-in"));
+        assert!(header(false, "X-Super-Properties").is_some());
+        // An account's own requests never carry the other's token.
+        let own = base_headers(Some("own"), Some("signed-in"), false);
+        assert_eq!(
+            own.iter().filter(|(n, _)| *n == "Authorization").map(|(_, v)| v.as_str()).collect::<Vec<_>>(),
+            ["own"]
+        );
     }
 
     #[test]

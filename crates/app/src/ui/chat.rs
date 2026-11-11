@@ -83,8 +83,12 @@ pub(super) const COPY_MESSAGE_LINK: Entry<MessageTarget> = Entry::Item(Item {
     shows: |_, _| true,
     kind: menus::Kind::Action(|app, target| {
         let message = target.shown();
-        let guild =
-            app.state.borrow().find_channel(message.channel_id).map_or(message.guild_id, |(g, _)| g.map(|g| g.id));
+        let guild = app
+            .account
+            .state
+            .borrow()
+            .find_channel(message.channel_id)
+            .map_or(message.guild_id, |(g, _)| g.map(|g| g.id));
         app.copy(&message.link(guild));
     }),
 });
@@ -114,7 +118,7 @@ pub(super) const OPEN_LINK: Entry<MessageTarget> = Entry::Item(Item {
 pub(super) const COPY_MESSAGE_ID: Entry<MessageTarget> = Entry::Item(Item {
     name: "copy-message-id",
     label: "Copy Message _ID",
-    shows: |app, target| app.state.borrow().developer_mode && target.sticker().is_none(),
+    shows: |app, target| app.account.state.borrow().developer_mode && target.sticker().is_none(),
     kind: menus::Kind::Action(copy_message_id),
 });
 
@@ -215,7 +219,7 @@ impl App {
             let this = Rc::downgrade(self);
             move |_| {
                 let Some(this) = this.upgrade() else { return };
-                if let Some(channel) = this.state.borrow().channel {
+                if let Some(channel) = this.account.state.borrow().channel {
                     this.load_newest(channel);
                 }
             }
@@ -242,7 +246,7 @@ impl App {
             let this = Rc::downgrade(self);
             move |_| {
                 let Some(this) = this.upgrade() else { return };
-                let channel = this.state.borrow().channel;
+                let channel = this.account.state.borrow().channel;
                 if let Some(channel) = channel {
                     this.open_threads(channel);
                 }
@@ -298,15 +302,15 @@ impl App {
         self.learn_users(std::iter::once(&message.author).chain(&message.mentions).chain(original));
         self.forum_message(&message);
         if let (Some(guild), Some(member)) = (message.guild_id, &message.member) {
-            self.state.borrow_mut().members.add(guild, vec![(message.author.id, member.roles.clone())], &[]);
+            self.account.state.borrow_mut().members.add(guild, vec![(message.author.id, member.roles.clone())], &[]);
         }
         let channel = message.channel_id;
-        self.state.borrow_mut().typing.message(channel, message.author.id, false);
+        self.account.state.borrow_mut().typing.message(channel, message.author.id, false);
         self.refresh_typing();
-        let viewing = self.state.borrow().channel == Some(channel) && self.chat_visible();
+        let viewing = self.account.state.borrow().channel == Some(channel) && self.chat_visible();
         let counted_in_thread;
         let notify = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             state.bump_last_message(channel, message.id);
             counted_in_thread = state.count_thread_message(channel, message.id, message.kind);
             let own = state.me() == Some(message.author.id);
@@ -349,7 +353,7 @@ impl App {
                 place.filter(|_| notify)
             }
         };
-        if viewing && self.state.borrow().me() != Some(message.author.id) {
+        if viewing && self.account.state.borrow().me() != Some(message.author.id) {
             self.queue_ack(channel, message.id);
         }
         if let Some(place) = notify {
@@ -363,22 +367,23 @@ impl App {
 
         // Keep every cached timeline current, not only the open one. A
         // detached one would get a gap; scrolling down fetches in order.
-        let Some(store) = self.timelines.borrow().get(channel).filter(|t| !t.detached).map(|t| t.store.clone()) else {
+        let Some(store) = self.account.timelines.borrow().get(channel).filter(|t| !t.detached).map(|t| t.store.clone())
+        else {
             return;
         };
         // A history fetch may have raced this event and already added it.
         if timelines::find(&store, message.id).is_some() {
             return;
         }
-        let open = self.state.borrow().channel == Some(channel);
-        if !self.timelines.borrow().held.live_messages(channel, open) {
+        let open = self.account.state.borrow().channel == Some(channel);
+        if !self.account.timelines.borrow().held.live_messages(channel, open) {
             return;
         }
         let at_bottom = open && self.at_bottom();
         if open {
             self.resolve_mentions(&message.content);
         }
-        let blocked = self.state.borrow().relationships.is_blocked(message.author.id);
+        let blocked = self.account.state.borrow().relationships.is_blocked(message.author.id);
         store.append(&timelines::boxed(message));
         if blocked {
             self.rebind_blocked_run(&store, store.n_items() - 1);
@@ -388,7 +393,7 @@ impl App {
         }
         // The client cuts a channel as messages arrive too: one we aren't
         // looking at doesn't grow without end.
-        if !open && let Some(timeline) = self.timelines.borrow_mut().get_mut(channel) {
+        if !open && let Some(timeline) = self.account.timelines.borrow_mut().get_mut(channel) {
             timelines::keep_newest(timeline);
         }
     }
@@ -400,7 +405,7 @@ impl App {
 
     pub(super) fn on_message_update(self: &Rc<Self>, edit: MessageEdit) {
         self.forum_message_edited(&edit);
-        let Some(store) = self.timelines.borrow().get(edit.channel_id).map(|t| t.store.clone()) else { return };
+        let Some(store) = self.account.timelines.borrow().get(edit.channel_id).map(|t| t.store.clone()) else { return };
         let (id, content) = (edit.id, edit.content.clone());
         // In place: a new object would get a new row, rather than this one
         // changed.
@@ -422,7 +427,7 @@ impl App {
 
     pub(super) fn on_message_delete(self: &Rc<Self>, id: Snowflake, channel_id: Snowflake) {
         self.forum_message_deleted(id, channel_id);
-        let Some(store) = self.timelines.borrow().get(channel_id).map(|t| t.store.clone()) else { return };
+        let Some(store) = self.account.timelines.borrow().get(channel_id).map(|t| t.store.clone()) else { return };
         if let Some((position, _)) = timelines::find(&store, id) {
             self.hand_off_focus(&store, position);
             store.remove(position);
@@ -462,9 +467,9 @@ impl App {
         added: bool,
         many: bool,
     ) {
-        let Some(store) = self.timelines.borrow().get(channel).map(|t| t.store.clone()) else { return };
+        let Some(store) = self.account.timelines.borrow().get(channel).map(|t| t.store.clone()) else { return };
         let (me, dm) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             (state.me(), state.find_channel(channel).is_some_and(|(_, c)| c.kind == ChannelKind::Dm))
         };
         let mut changed = None;
@@ -516,7 +521,7 @@ impl App {
         let previous = position.checked_sub(1).and_then(|p| timelines::message_at(&messages, p));
         let divided = self.fill_divider(parts, &message, previous.as_ref());
         let (run, revealed) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let run = timelines::run_at(&messages, position, |m| state.relationships.is_blocked(m.author.id));
             (run, run.is_some_and(|r| state.revealed_blocked.contains(&r.first)))
         };
@@ -585,7 +590,7 @@ impl App {
     }
 
     fn unread_seen(&self) {
-        if let Some(unread) = self.state.borrow_mut().unread.as_mut() {
+        if let Some(unread) = self.account.state.borrow_mut().unread.as_mut() {
             unread.seen = true;
         }
         self.unread_bar.set_revealed(false);
@@ -593,7 +598,7 @@ impl App {
 
     /// What was unread in the open channel when it opened.
     fn open_unread(&self) -> Option<Unread> {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         state.unread.filter(|u| Some(u.channel) == state.channel)
     }
 
@@ -605,7 +610,7 @@ impl App {
         };
         let store = self.messages();
         let (count, mut more) = discord::read_state::unread_count(&timelines::ids(&store), unread.acked);
-        more &= !self.timelines.borrow().get(unread.channel).is_some_and(|t| t.complete);
+        more &= !self.account.timelines.borrow().get(unread.channel).is_some_and(|t| t.complete);
         if count == 0 {
             return self.unread_bar.set_revealed(false);
         }
@@ -649,8 +654,9 @@ impl App {
     }
 
     pub(super) fn update_present_bar(&self) {
-        let channel = self.state.borrow().channel;
-        let detached = channel.and_then(|c| self.timelines.borrow().get(c).map(|t| t.detached)).unwrap_or(false);
+        let channel = self.account.state.borrow().channel;
+        let detached =
+            channel.and_then(|c| self.account.timelines.borrow().get(c).map(|t| t.detached)).unwrap_or(false);
         self.present_bar.set_revealed(detached);
     }
 
@@ -666,7 +672,7 @@ impl App {
                 let (Some(this), Some(cell)) = (this.upgrade(), cell.upgrade()) else { return };
                 let Some(run) = cell.parts().run.get() else { return };
                 {
-                    let mut state = this.state.borrow_mut();
+                    let mut state = this.account.state.borrow_mut();
                     if !state.revealed_blocked.remove(&run.first) {
                         state.revealed_blocked.insert(run.first);
                     }
@@ -690,7 +696,7 @@ impl App {
     /// bar shows the current count.
     fn rebind_blocked_run(self: &Rc<Self>, store: &gio::ListStore, position: u32) {
         let run = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             timelines::run_at(store, position, |m| state.relationships.is_blocked(m.author.id))
         };
         if let Some(run) = run {
@@ -709,7 +715,7 @@ impl App {
 
     pub(super) fn select_channel(self: &Rc<Self>, id: Snowflake) {
         let (title, forum, rest, left) = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             let left = state.channel.filter(|&c| c != id);
             state.channel = Some(id);
             state.page = None;
@@ -733,10 +739,10 @@ impl App {
         // Names come from the open server, and a change in another one isn't
         // counted, so what was kept there can't be trusted on return.
         if left.is_some() {
-            self.kept_content.borrow_mut().clear();
+            self.account.kept_content.borrow_mut().clear();
         }
         if let Some(left) = left
-            && let Some(timeline) = self.timelines.borrow_mut().get_mut(left)
+            && let Some(timeline) = self.account.timelines.borrow_mut().get_mut(left)
         {
             timelines::keep_newest(timeline);
         }
@@ -752,7 +758,7 @@ impl App {
         // A forum or media channel is made of posts, and never takes a
         // message: nothing to load, and no message box.
         if forum {
-            self.state.borrow_mut().unread = None;
+            self.account.state.borrow_mut().unread = None;
             self.content.set_visible_child_name("forum");
             self.forum.set_title(&title, subtitle.as_deref());
             self.set_content_title(&title);
@@ -764,11 +770,11 @@ impl App {
         }
         // What is unread now, before opening the channel reads it.
         let unread = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let acked = state.find_channel(id).filter(|(_, c)| state.is_unread(c)).and_then(|_| state.read.acked(id));
             acked.map(|acked| Unread { channel: id, acked, seen: false })
         };
-        self.state.borrow_mut().unread = unread;
+        self.account.state.borrow_mut().unread = unread;
         self.content.set_visible_child_name("chat");
         self.rebuild_sidebar();
         self.header.set(&title, subtitle.as_deref());
@@ -781,7 +787,7 @@ impl App {
         // and ask for the newest page, to merge in, unless it's a DM we hold,
         // which the gateway keeps current as the client trusts it to.
         let (system_dm_unread, private) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let found = state.find_channel(id);
             (
                 found.is_some_and(|(_, c)| c.is_system_dm() && state.is_unread(c)),
@@ -789,7 +795,7 @@ impl App {
             )
         };
         let (store, loading, detached, fetch) = {
-            let mut timelines = self.timelines.borrow_mut();
+            let mut timelines = self.account.timelines.borrow_mut();
             let timeline = timelines.reopen(id, u64::try_from(now_ms()).unwrap_or_default());
             let (store, loading, detached) = (timeline.store.clone(), timeline.loading, timeline.detached);
             let fetch = timelines.held.fetch_on_open(id, Opening { loading, system_dm_unread, private });
@@ -813,30 +819,30 @@ impl App {
     /// Fetch the newest page and merge it into the channel's store. This is
     /// also how a jump returns to the present.
     pub(super) fn load_newest(self: &Rc<Self>, id: Snowflake) {
-        let Some(rest) = self.state.borrow().rest.clone() else { return };
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
         let (store, was_detached) = {
-            let mut timelines = self.timelines.borrow_mut();
+            let mut timelines = self.account.timelines.borrow_mut();
             let Some(timeline) = timelines.get_mut(id) else { return };
             timeline.loading = true;
             (timeline.store.clone(), timeline.detached)
         };
         let limit = self.viewport().first_page();
-        let started = self.timelines.borrow().held.started();
+        let started = self.account.timelines.borrow().held.started();
         let this = self.clone();
         glib::spawn_future_local(async move {
             let result = rest.messages(id, limit, Page::Newest).await;
-            if let Some(timeline) = this.timelines.borrow_mut().get_mut(id) {
+            if let Some(timeline) = this.account.timelines.borrow_mut().get_mut(id) {
                 timeline.loading = false;
             }
             match result {
                 Ok(page) => {
-                    let stale = this.timelines.borrow_mut().landed(id, started);
+                    let stale = this.account.timelines.borrow_mut().landed(id, started);
                     this.learn_messages(&page);
                     let full = page.len() == usize::from(limit);
-                    let open = this.state.borrow().channel == Some(id);
+                    let open = this.account.state.borrow().channel == Some(id);
                     let at_bottom = !open || was_detached || this.at_bottom();
                     let replaced = timelines::merge_newest(&store, page);
-                    if let Some(timeline) = this.timelines.borrow_mut().get_mut(id) {
+                    if let Some(timeline) = this.account.timelines.borrow_mut().get_mut(id) {
                         timeline.detached = false;
                         // A short page is the whole channel; a replaced store
                         // lost its scrollback and can page again.
@@ -850,7 +856,7 @@ impl App {
                     this.update_unread_bar();
                     this.reached_present(id, &store);
                     // The user may have switched channels while this was loading.
-                    if open && this.state.borrow().channel == Some(id) {
+                    if open && this.account.state.borrow().channel == Some(id) {
                         if at_bottom {
                             this.settle_at_end();
                         }
@@ -861,7 +867,7 @@ impl App {
                     this.refetch_if_stale(id, stale);
                 }
                 Err(e) => {
-                    if this.state.borrow().channel == Some(id) {
+                    if this.account.state.borrow().channel == Some(id) {
                         this.show_composer_error(&format!("Could not load messages: {e}"));
                     }
                 }
@@ -873,8 +879,8 @@ impl App {
     /// was on its way, and the channel is open, the client asks for it again
     /// at once (`$` in 123363).
     fn refetch_if_stale(self: &Rc<Self>, channel: Snowflake, stale: bool) {
-        let open = self.state.borrow().channel == Some(channel);
-        if self.timelines.borrow_mut().held.refetch(channel, stale, open, Instant::now()) {
+        let open = self.account.state.borrow().channel == Some(channel);
+        if self.account.timelines.borrow_mut().held.refetch(channel, stale, open, Instant::now()) {
             self.load_newest(channel);
         }
     }
@@ -893,14 +899,14 @@ impl App {
         }
         // The page's authors and whom they mention, for their colours.
         let guild = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             messages.first().and_then(|m| state.find_channel(m.channel_id)).and_then(|(g, _)| g.map(|g| g.id))
         };
         // The threads the messages started, which the client keeps for those it
         // doesn't know yet (`LOAD_MESSAGES_SUCCESS` in 734057).
         if let Some(guild) = guild {
             let started: Vec<Channel> = {
-                let state = self.state.borrow();
+                let state = self.account.state.borrow();
                 let known = |id| state.find_channel(id).is_some();
                 messages
                     .iter()
@@ -914,7 +920,7 @@ impl App {
             }
         }
         if let Some(guild) = guild {
-            self.state.borrow_mut().members.page_loaded(guild, messages);
+            self.account.state.borrow_mut().members.page_loaded(guild, messages);
             self.send_member_requests();
         }
     }
@@ -923,7 +929,7 @@ impl App {
     fn reached_present(&self, channel: Snowflake, store: &gio::ListStore) {
         if let Some(newest) = store.n_items().checked_sub(1).and_then(|p| timelines::message_at(store, p)) {
             // READY's newest-message ids can be stale; history is not.
-            self.state.borrow_mut().bump_last_message(channel, newest.id);
+            self.account.state.borrow_mut().bump_last_message(channel, newest.id);
         }
     }
 
@@ -934,7 +940,7 @@ impl App {
         Viewport {
             height: self.window.height(),
             text_scale: if dpi > 0 { f64::from(dpi) / (96.0 * 1024.0) } else { 1.0 },
-            compact: self.state.borrow().message_display_compact,
+            compact: self.account.state.borrow().message_display_compact,
         }
     }
 
@@ -1014,9 +1020,9 @@ impl App {
     /// Fetch the next page if the open channel needs one. `asked` is whether
     /// the user just scrolled, rather than a page having landed.
     fn maybe_load(self: &Rc<Self>, asked: bool) {
-        let Some(channel) = self.state.borrow().channel else { return };
+        let Some(channel) = self.account.state.borrow().channel else { return };
         let unread = self.open_unread().is_some_and(|u| !u.seen);
-        let Some(can) = self.timelines.borrow().get(channel).map(|timeline| Loadable {
+        let Some(can) = self.account.timelines.borrow().get(channel).map(|timeline| Loadable {
             older: !timeline.complete,
             newer: timeline.detached,
             loading: timeline.loading,
@@ -1034,9 +1040,9 @@ impl App {
 
     /// Fetch the page before the oldest loaded message.
     fn load_older(self: &Rc<Self>, channel: Snowflake) {
-        let Some(rest) = self.state.borrow().rest.clone() else { return };
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
         let (store, before) = {
-            let mut timelines = self.timelines.borrow_mut();
+            let mut timelines = self.account.timelines.borrow_mut();
             let Some(timeline) = timelines.get_mut(channel) else { return };
             // Nothing loaded yet: the newest page is still on its way.
             let Some(before) = timelines::oldest_id(&timeline.store) else { return };
@@ -1045,13 +1051,13 @@ impl App {
         };
         self.scroll_loader.borrow_mut().load_started(self.content_height());
         let limit = self.viewport().scroll_page();
-        let started = self.timelines.borrow().held.started();
+        let started = self.account.timelines.borrow().held.started();
         let this = self.clone();
         glib::spawn_future_local(async move {
             let result = rest.messages(channel, limit, Page::Before(before)).await;
-            let stale = result.is_ok() && this.timelines.borrow_mut().landed(channel, started);
-            let still_cached = this.timelines.borrow().get(channel).is_some_and(|t| t.store == store);
-            if let Some(timeline) = this.timelines.borrow_mut().get_mut(channel) {
+            let stale = result.is_ok() && this.account.timelines.borrow_mut().landed(channel, started);
+            let still_cached = this.account.timelines.borrow().get(channel).is_some_and(|t| t.store == store);
+            if let Some(timeline) = this.account.timelines.borrow_mut().get_mut(channel) {
                 timeline.loading = false;
             }
             if !still_cached {
@@ -1063,7 +1069,7 @@ impl App {
                 // a merge that replaced it would make this page a gap.
                 Ok(page) if timelines::oldest_id(&store) == Some(before) => {
                     if page.len() < usize::from(limit)
-                        && let Some(timeline) = this.timelines.borrow_mut().get_mut(channel)
+                        && let Some(timeline) = this.account.timelines.borrow_mut().get_mut(channel)
                     {
                         timeline.complete = true;
                     }
@@ -1076,7 +1082,7 @@ impl App {
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    if this.state.borrow().channel == Some(channel) {
+                    if this.account.state.borrow().channel == Some(channel) {
                         this.show_composer_error(&format!("Could not load older messages: {e}"));
                     }
                 }
@@ -1091,9 +1097,9 @@ impl App {
     /// After a jump, fetch the page after the newest loaded message, until
     /// the store reaches the present again.
     fn load_newer(self: &Rc<Self>, channel: Snowflake) {
-        let Some(rest) = self.state.borrow().rest.clone() else { return };
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
         let (store, after) = {
-            let mut timelines = self.timelines.borrow_mut();
+            let mut timelines = self.account.timelines.borrow_mut();
             let Some(timeline) = timelines.get_mut(channel) else { return };
             let Some(after) = timelines::newest_id(&timeline.store) else { return };
             timeline.loading = true;
@@ -1101,14 +1107,14 @@ impl App {
         };
         self.scroll_loader.borrow_mut().load_started(self.content_height());
         let limit = self.viewport().scroll_page();
-        let started = self.timelines.borrow().held.started();
+        let started = self.account.timelines.borrow().held.started();
         let this = self.clone();
         glib::spawn_future_local(async move {
             let result = rest.messages(channel, limit, Page::After(after)).await;
-            let stale = result.is_ok() && this.timelines.borrow_mut().landed(channel, started);
+            let stale = result.is_ok() && this.account.timelines.borrow_mut().landed(channel, started);
             let landed = result.is_ok();
             let still_detached = {
-                let mut timelines = this.timelines.borrow_mut();
+                let mut timelines = this.account.timelines.borrow_mut();
                 let timeline = timelines.get_mut(channel).filter(|t| t.store == store);
                 timeline.is_some_and(|t| {
                     t.loading = false;
@@ -1123,20 +1129,20 @@ impl App {
                     // A short page came back to the present by itself, with
                     // everything sent meanwhile: no need to ask for it again.
                     if reached_newest {
-                        if let Some(timeline) = this.timelines.borrow_mut().get_mut(channel) {
+                        if let Some(timeline) = this.account.timelines.borrow_mut().get_mut(channel) {
                             timeline.detached = false;
                         }
                         this.reached_present(channel, &store);
                         this.update_present_bar();
                         this.update_unread_bar();
-                        if this.state.borrow().channel == Some(channel) && this.chat_visible() {
+                        if this.account.state.borrow().channel == Some(channel) && this.chat_visible() {
                             this.mark_read(channel);
                         }
                     }
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    if this.state.borrow().channel == Some(channel) {
+                    if this.account.state.borrow().channel == Some(channel) {
                         this.show_composer_error(&format!("Could not load newer messages: {e}"));
                     }
                 }
@@ -1154,7 +1160,7 @@ impl App {
         let this = Rc::downgrade(self);
         self.after_layout(move || {
             if let Some(this) = this.upgrade()
-                && this.state.borrow().channel == Some(channel)
+                && this.account.state.borrow().channel == Some(channel)
             {
                 this.scroll_loader.borrow_mut().load_finished(this.content_height());
                 this.maybe_load(false);
@@ -1182,7 +1188,7 @@ impl App {
     /// Scroll to a message in the open channel and flash it, first loading
     /// the messages around it if they aren't loaded.
     pub(super) fn jump_to(self: &Rc<Self>, channel: Snowflake, id: Snowflake) {
-        if self.state.borrow().channel != Some(channel) {
+        if self.account.state.borrow().channel != Some(channel) {
             return;
         }
         if let Some((position, _)) = timelines::find(&self.messages(), id) {
@@ -1225,22 +1231,22 @@ impl App {
         must_exist: bool,
         then: impl FnOnce(&Rc<Self>, &gio::ListStore) + 'static,
     ) {
-        let Some(rest) = self.state.borrow().rest.clone() else { return };
-        if let Some(timeline) = self.timelines.borrow_mut().get_mut(channel) {
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
+        if let Some(timeline) = self.account.timelines.borrow_mut().get_mut(channel) {
             timeline.loading = true;
         }
-        let started = self.timelines.borrow().held.started();
+        let started = self.account.timelines.borrow().held.started();
         let this = self.clone();
         glib::spawn_future_local(async move {
             let result = rest.messages(channel, AROUND_PAGE, Page::Around(id)).await;
-            if let Some(timeline) = this.timelines.borrow_mut().get_mut(channel) {
+            if let Some(timeline) = this.account.timelines.borrow_mut().get_mut(channel) {
                 timeline.loading = false;
             }
             let page = match result {
                 Ok(page) => page,
                 Err(e) => return this.show_composer_error(&format!("Could not load the message: {e}")),
             };
-            if this.state.borrow().channel != Some(channel) {
+            if this.account.state.borrow().channel != Some(channel) {
                 return;
             }
             if must_exist && !page.iter().any(|m| m.id == id) {
@@ -1250,20 +1256,20 @@ impl App {
             // Like the official client, judge by the page's shape rather than
             // the channel's newest id, which can be stale: a page that comes
             // back short on one side has reached that end of the channel.
-            let newest = this.state.borrow().find_channel(channel).and_then(|(_, c)| c.last_message_id);
+            let newest = this.account.state.borrow().find_channel(channel).and_then(|(_, c)| c.last_message_id);
             let ids: Vec<Snowflake> = page.iter().map(|m| m.id).collect();
             let around = Around::of(&ids, id, newest);
-            let Some(store) = this.timelines.borrow_mut().get_mut(channel).map(|timeline| {
+            let Some(store) = this.account.timelines.borrow_mut().get_mut(channel).map(|timeline| {
                 timelines::replace(timeline, page, around);
                 timeline.store.clone()
             }) else {
                 return;
             };
-            let stale = this.timelines.borrow_mut().landed(channel, started);
+            let stale = this.account.timelines.borrow_mut().landed(channel, started);
             // The client asks for the page around the message again when it
             // lands stale; we don't, but its ten seconds still run.
-            let open = this.state.borrow().channel == Some(channel);
-            this.timelines.borrow_mut().held.refetch(channel, stale, open, Instant::now());
+            let open = this.account.state.borrow().channel == Some(channel);
+            this.account.timelines.borrow_mut().held.refetch(channel, stale, open, Instant::now());
             this.update_present_bar();
             this.update_unread_bar();
             then(&this, &store);
@@ -1316,7 +1322,7 @@ impl App {
 
     /// The users we know and the open guild's channels.
     fn names(&self) -> Names {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let channels = state
             .guild
             .and_then(|id| state.guilds.iter().find(|g| g.id == id))
@@ -1338,7 +1344,7 @@ impl App {
     /// status in a DM, or a group's size.
     fn channel_subtitle(&self, id: Snowflake) -> Option<String> {
         let topic = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             if let Some(dm) = state.private_channels.iter().find(|c| c.id == id) {
                 if dm.kind != discord::ChannelKind::Dm {
                     return Some(format!("{} members", dm.recipients.len() + 1));
@@ -1364,7 +1370,7 @@ impl App {
     pub(super) fn learn_users<'a>(&self, users: impl Iterator<Item = &'a User>) {
         let mut renamed = false;
         {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             for user in users {
                 let name = user.display_name().to_string();
                 renamed |= state.users.insert(user.id.0, name.clone()).is_some_and(|old| old != name);
@@ -1382,14 +1388,14 @@ impl App {
     /// and what rows kept goes.
     pub(super) fn drawn_from_changed(&self) {
         self.row_epoch.set(self.row_epoch.get() + 1);
-        self.kept_content.borrow_mut().clear();
+        self.account.kept_content.borrow_mut().clear();
     }
 
     /// For each `<@id>` in `content` we cannot yet name, fetch the user once and
     /// refresh the view when it arrives. Fixes mentions of people who left.
     pub(super) fn resolve_mentions(self: &Rc<Self>, content: &str) {
         let unknown: Vec<Snowflake> = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             discord::markup::parse(content)
                 .iter()
                 .flat_map(collect_user_mentions)
@@ -1400,10 +1406,10 @@ impl App {
         if unknown.is_empty() {
             return;
         }
-        let rest = self.state.borrow().rest.clone();
+        let rest = self.account.state.borrow().rest.clone();
         let Some(rest) = rest else { return };
         for id in unknown {
-            self.state.borrow_mut().fetched_users.insert(id.0);
+            self.account.state.borrow_mut().fetched_users.insert(id.0);
             let this = self.clone();
             let rest = rest.clone();
             glib::spawn_future_local(async move {
@@ -1728,7 +1734,7 @@ impl App {
 
     /// Put `text` on `label` as [`Self::name_label`] makes it.
     fn set_name(&self, label: &gtk::Label, channel: Snowflake, user: &discord::User, text: &str) {
-        match self.state.borrow().name_colour(channel, user.id) {
+        match self.account.state.borrow().name_colour(channel, user.id) {
             Some(colour) => label.set_markup(&render::coloured(text, &colour)),
             // Unlike `set_label`, this drops the markup a colour left on.
             None => label.set_text(text),
@@ -1830,9 +1836,9 @@ impl App {
         // message would be drawn as.
         if let Some((old, at)) = old.filter(|(_, at)| *at == epoch) {
             clear_selections(&widgets);
-            self.kept_content.borrow_mut().put(old.id, Made { message: old, epoch: at, made: widgets });
+            self.account.kept_content.borrow_mut().put(old.id, Made { message: old, epoch: at, made: widgets });
         }
-        let kept = self.kept_content.borrow_mut().take(&message.id, |kept| kept.fits(message, epoch));
+        let kept = self.account.kept_content.borrow_mut().take(&message.id, |kept| kept.fits(message, epoch));
         if let Some(kept) = kept {
             for widget in &kept.made {
                 content.append(widget);
@@ -1857,7 +1863,8 @@ impl App {
         let message = item.item().and_downcast::<glib::BoxedAnyObject>()?;
         let message = message.borrow::<Message>();
         let shown = message.thread_starter().unwrap_or(&message);
-        let guild = self.state.borrow().find_channel(shown.channel_id).and_then(|(guild, _)| guild.map(|g| g.id));
+        let guild =
+            self.account.state.borrow().find_channel(shown.channel_id).and_then(|(guild, _)| guild.map(|g| g.id));
         Some(super::profile::UserTarget {
             user: shown.author.clone(),
             guild,
@@ -1884,7 +1891,7 @@ impl App {
         id: u64,
         anchor: gtk::Widget,
     ) -> Option<super::profile::UserTarget> {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let user = mentions.iter().find(|u| u.id.0 == id).cloned().unwrap_or_else(|| discord::User {
             id: Snowflake(id),
             username: state.users.get(&id).cloned().unwrap_or_else(|| id.to_string()),
@@ -1914,18 +1921,18 @@ impl App {
             message,
             row: row.clone().upcast(),
         };
-        let regulated = self.state.borrow().media_takedown_regulated;
+        let regulated = self.account.state.borrow().media_takedown_regulated;
         menus::popup(self, menus::message(regulated), target, row, at);
     }
 
     /// The spoilers revealed in a message's text, remembered while the app
     /// runs as its row is rebuilt.
     fn spoilers(self: &Rc<Self>, message: Snowflake) -> Spoilers {
-        let revealed = self.state.borrow().revealed_spoilers.get(&message).cloned().unwrap_or_default();
+        let revealed = self.account.state.borrow().revealed_spoilers.get(&message).cloned().unwrap_or_default();
         let this = Rc::downgrade(self);
         let on_reveal = move |n| {
             if let Some(this) = this.upgrade() {
-                this.state.borrow_mut().revealed_spoilers.entry(message).or_default().insert(n);
+                this.account.state.borrow_mut().revealed_spoilers.entry(message).or_default().insert(n);
             }
         };
         Spoilers { revealed, on_reveal: Rc::new(on_reveal) }
@@ -1945,7 +1952,7 @@ impl App {
     /// What a message says, and shows: its text, attachments and embeds. Its
     /// buttons and menus work if `live`: not in a forward.
     fn message_content(self: &Rc<Self>, body: &gtk::Box, message: &Message, names: &Names, live: bool) {
-        let media = self.state.borrow().media;
+        let media = self.account.state.borrow().media;
         let edited = message.edited_timestamp.is_some();
         let embeds = discord::embed::visible(message, &media);
         let spans = message.markup();
@@ -2009,7 +2016,7 @@ impl App {
         // Where it came from, as the official client names it: the channel
         // if it is in this server, else the server.
         let origin = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let here = state.find_channel(message.channel_id).and_then(|(guild, _)| guild.map(|g| g.id));
             match state.find_channel(original.channel_id) {
                 Some((Some(guild), channel)) if Some(guild.id) == here => {
@@ -2038,9 +2045,9 @@ impl App {
                 let (channel, id) = (original.channel_id, original.id);
                 move |_, _, _, _| {
                     let Some(this) = this.upgrade() else { return };
-                    if this.state.borrow().channel == Some(channel) {
+                    if this.account.state.borrow().channel == Some(channel) {
                         this.jump_to(channel, id);
-                    } else if this.state.borrow().can_view(channel) {
+                    } else if this.account.state.borrow().can_view(channel) {
                         this.open_channel(channel);
                     }
                 }
@@ -2053,7 +2060,7 @@ impl App {
 
     /// How a message shows: as written, as a system message, or not at all.
     fn message_kind(&self, message: &Message) -> Kind {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let channel = state.find_channel(message.channel_id);
         let place = system::Place {
             me: state.me(),
@@ -2114,7 +2121,7 @@ impl App {
             Some(original) => {
                 // As in Discord, a blocked author keeps their name but not
                 // their avatar or words.
-                let blocked = self.state.borrow().relationships.is_blocked(original.author.id);
+                let blocked = self.account.state.borrow().relationships.is_blocked(original.author.id);
                 if blocked {
                     preview.append(&gtk::Image::from_icon_name("mail-reply-sender-symbolic"));
                 } else {

@@ -29,7 +29,7 @@ pub(super) const AUTOCOMPLETE: usize = 50;
 
 /// Only in Developer Mode, like the rest of the picker's menu (233503).
 fn developer(app: &App) -> bool {
-    app.state.borrow().developer_mode
+    app.account.state.borrow().developer_mode
 }
 
 /// The emoji a menu was opened on.
@@ -81,7 +81,7 @@ impl App {
     /// The emoji `channel` offers: every server's, the channel's own first
     /// and then the rail's order, each checked against what we may do there.
     pub(super) fn emoji_library(&self, channel: Snowflake) -> Library {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let found = state.find_channel(channel);
         let own = found.and_then(|(guild, _)| guild).map(|g| g.id);
         // Server channels need Use External Emojis; a DM needs nothing.

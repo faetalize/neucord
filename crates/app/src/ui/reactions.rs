@@ -95,7 +95,7 @@ enum Settled {
 impl App {
     /// Whether Add Reaction shows for `message`.
     pub(super) fn offers_add_reaction(&self, message: &Message) -> bool {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         state.media.render_reactions && state.reacting(message.channel_id).create
     }
 
@@ -119,7 +119,7 @@ impl App {
         }
         let pills = message.reaction_pills();
         let (show, access) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             (state.media.render_reactions, state.reacting(message.channel_id))
         };
         if !show || pills.is_empty() {
@@ -193,7 +193,7 @@ impl App {
             return false;
         };
         let newest = {
-            let timelines = self.timelines.borrow();
+            let timelines = self.account.timelines.borrow();
             let present = timelines.get(channel).filter(|t| !t.detached);
             present.and_then(|t| timelines::newest_id(&t.store))
         };
@@ -217,7 +217,7 @@ impl App {
         creating: bool,
     ) {
         let (rest, access) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             (state.rest.clone(), state.reacting(channel))
         };
         // Our permissions may have changed since the reaction was offered.
@@ -259,7 +259,7 @@ impl App {
         location: Location,
     ) {
         let (rest, access, manager, me) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             (state.rest.clone(), state.reacting(channel), state.can_remove_reactions(channel), state.me())
         };
         let ours = user.is_none_or(|u| Some(u) == me);
@@ -291,7 +291,7 @@ impl App {
     /// Whether the moderators' entries show: Manage Messages, and something
     /// to remove.
     fn may_remove_reactions(&self, message: &Message) -> bool {
-        !message.reactions.is_empty() && self.state.borrow().can_remove_reactions(message.channel_id)
+        !message.reactions.is_empty() && self.account.state.borrow().can_remove_reactions(message.channel_id)
     }
 
     /// Remove everyone's reactions with `emoji` (`Jf` in 649963), after
@@ -351,7 +351,13 @@ impl App {
         Fut: Future<Output = Result<(), Refusal>> + 'static,
     {
         // Our permissions may have changed since the menu opened.
-        let rest = self.state.borrow().rest.clone().filter(|_| self.state.borrow().can_remove_reactions(channel));
+        let rest = self
+            .account
+            .state
+            .borrow()
+            .rest
+            .clone()
+            .filter(|_| self.account.state.borrow().can_remove_reactions(channel));
         let Some(rest) = rest else { return };
         let this = self.clone();
         glib::spawn_future_local(async move {
@@ -403,10 +409,10 @@ impl App {
     /// in again. `change` is told whether the channel is a DM, where the
     /// other side's reactions count once.
     fn change_message(self: &Rc<Self>, channel: Snowflake, message: Snowflake, change: impl Fn(&mut Message, bool)) {
-        let dm = self.state.borrow().find_channel(channel).is_some_and(|(_, c)| c.kind == ChannelKind::Dm);
+        let dm = self.account.state.borrow().find_channel(channel).is_some_and(|(_, c)| c.kind == ChannelKind::Dm);
         // A post's card shows the top reaction of its first message.
         self.forum_change_first(channel, message, |m| change(m, dm));
-        let changed = self.timelines.borrow().change(channel, message, |m| change(m, dm));
+        let changed = self.account.timelines.borrow().change(channel, message, |m| change(m, dm));
         if let Some((store, position)) = changed {
             self.rebind(&store, position, 1);
         }
@@ -426,9 +432,9 @@ impl App {
     /// the client keeps their reactions current, and so must we.
     pub(super) fn on_reaction(self: &Rc<Self>, reacted: &Reacted) {
         let Reacted { channel_id, message_id, user_id, emoji, kind, colors, added } = reacted;
-        let mine = self.state.borrow().me() == Some(*user_id);
+        let mine = self.account.state.borrow().me() == Some(*user_id);
         {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             let known = match (&state.me, state.users.get(&user_id.0)) {
                 (Some(me), _) if mine => Some(me.clone()),
                 (_, Some(name)) => Some(discord::User {
@@ -457,13 +463,13 @@ impl App {
         message: Snowflake,
         reactions: &[(Emoji, Vec<Snowflake>)],
     ) {
-        let me = self.state.borrow().me();
+        let me = self.account.state.borrow().me();
         self.change_message(channel, message, |m, _| m.add_reactions(reactions, me));
     }
 
     /// A moderator removed every reaction, or one emoji's.
     pub(super) fn on_reactions_cleared(self: &Rc<Self>, channel: Snowflake, message: Snowflake, emoji: Option<&Emoji>) {
-        self.state.borrow_mut().reactors.removed(message, emoji);
+        self.account.state.borrow_mut().reactors.removed(message, emoji);
         self.change_message(channel, message, |m, _| match emoji {
             Some(emoji) => m.remove_reactions_for_emoji(emoji),
             None => m.reactions.clear(),

@@ -24,7 +24,7 @@ impl App {
     /// Discord says it's done. The gateway stays connected meanwhile, which
     /// is how that news arrives.
     pub(super) fn apply_required_action(&self) {
-        let action = self.state.borrow().required_action.clone();
+        let action = self.account.state.borrow().required_action.clone();
         match action {
             Some(action) => {
                 self.blocked.set_description(Some(&format!(
@@ -42,7 +42,7 @@ impl App {
 
     /// Discord's Account Standing page, as a dialog.
     pub(super) fn show_standing(self: &Rc<Self>) {
-        let Some(rest) = self.state.borrow().rest.clone() else { return };
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
         let this = self.clone();
         glib::spawn_future_local(async move {
             let dialog = match rest.account_standing().await {

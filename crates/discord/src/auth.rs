@@ -68,7 +68,7 @@ impl Rest {
     /// `login` is an email address or an E.164 phone number.
     pub async fn login(&self, login: &str, password: &str) -> Result<Login, Error> {
         let body = json!({ "login": login, "password": password, "undelete": false });
-        let response = self.auth(call!(LOGIN), body).await?;
+        let response = self.auth_with(call!(LOGIN), body, true).await?;
         // Sent here even when a second factor follows; that answer has none.
         let required: Vec<String> = serde_json::from_value(response["required_actions"].clone()).unwrap_or_default();
         check_required(&required)?;
@@ -106,7 +106,12 @@ impl Rest {
     }
 
     async fn auth(&self, call: Call, body: Value) -> Result<Value, Error> {
-        let (status, response) = self.send(call, Some(body)).await?;
+        self.auth_with(call, body, false).await
+    }
+
+    async fn auth_with(&self, call: Call, body: Value, login: bool) -> Result<Value, Error> {
+        let (status, response) =
+            if login { self.send_login(call, Some(body)).await? } else { self.send(call, Some(body)).await? };
         let value = serde_json::from_slice(&response).unwrap_or(Value::Null);
         match status {
             200..=299 => Ok(value),

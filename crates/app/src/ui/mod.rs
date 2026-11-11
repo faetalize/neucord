@@ -2,6 +2,7 @@
 //! `discord` crate. All of this runs on the GTK main thread.
 
 mod account;
+mod accounts;
 mod attachments;
 mod captcha;
 mod chat;
@@ -46,12 +47,12 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
-use discord::{Snowflake, session};
+use discord::Snowflake;
+use discord::accounts::Roster;
 use gtk::{gio, glib, pango};
 
 use crate::images::Images;
 use crate::render;
-use crate::timelines::Timelines;
 
 /// The server rail's width.
 const RAIL: f64 = 72.0;
@@ -89,7 +90,20 @@ pub struct App {
     selection: gtk::NoSelection,
     /// Shown when no channel is open.
     blank: gio::ListStore,
-    timelines: RefCell<Timelines>,
+    /// The account the window shows.
+    account: state::Account,
+    /// The accounts on this device: who they are, and which was shown last.
+    roster: RefCell<Roster>,
+    /// Where the login page was opened from, which says what Back does.
+    login_origin: Cell<accounts::Origin>,
+    /// Why the list of accounts is shown instead of a login, if it is.
+    accounts_error: gtk::Label,
+    /// The lists of accounts that exist, to redraw as they change.
+    account_lists: RefCell<Vec<(glib::WeakRef<gtk::ListBox>, accounts::Role)>>,
+    /// The accounts in the account menu.
+    switch_items: gio::Menu,
+    /// The Manage Accounts dialog and its note, while it is open.
+    manage: RefCell<Option<(adw::Dialog, gtk::Label)>>,
     list: gtk::ListView,
     scroller: gtk::ScrolledWindow,
     composer: gtk::TextView,
@@ -170,15 +184,11 @@ pub struct App {
     threads_view: RefCell<Option<Rc<threads::View>>>,
     /// Opens the thread browser, from the chat's header.
     threads_button: gtk::Button,
-    /// The content of messages whose rows have moved on to others, for when
-    /// they come back (see [`chat::KeptContent`]).
-    kept_content: RefCell<crate::kept::Kept<Snowflake, chat::KeptContent>>,
     /// Every row the message list has made, to fill in again when what
     /// they show changes.
     rows: RefCell<Vec<glib::WeakRef<message_row::MessageRow>>>,
     /// When scrolling loads another page.
     scroll_loader: RefCell<discord::history::ScrollLoader>,
-    state: RefCell<state::State>,
     /// The member list pane, in the right pane of the chat.
     members: members::Pane,
     /// What the rail and sidebar last drew, so badge refreshes can skip
@@ -246,7 +256,13 @@ impl App {
             list: gtk::ListView::new(Some(selection.clone()), None::<gtk::ListItemFactory>),
             selection,
             blank,
-            timelines: RefCell::default(),
+            account: state::Account::new(),
+            roster: RefCell::default(),
+            login_origin: Cell::default(),
+            accounts_error: gtk::Label::builder().wrap(true).xalign(0.0).visible(false).css_classes(["error"]).build(),
+            account_lists: RefCell::default(),
+            switch_items: gio::Menu::new(),
+            manage: RefCell::default(),
             scroller: gtk::ScrolledWindow::builder().vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build(),
             composer: gtk::TextView::builder()
                 .wrap_mode(gtk::WrapMode::WordChar)
@@ -341,10 +357,8 @@ impl App {
                 .tooltip_text("Threads")
                 .visible(false)
                 .build(),
-            kept_content: RefCell::new(crate::kept::Kept::new(chat::KEPT_CONTENT)),
             rows: RefCell::default(),
             scroll_loader: RefCell::default(),
-            state: RefCell::default(),
             members: members::Pane::new(),
             drawn: RefCell::default(),
             rail_items: RefCell::default(),
@@ -382,18 +396,13 @@ impl App {
         self.window.present();
         self.show_loading("Checking keyring…");
         let this = self.clone();
-        glib::spawn_future_local(async move {
-            match session::load_token().await {
-                Ok(Some(token)) => this.connect(token, true),
-                Ok(None) => this.show_login(None),
-                Err(e) => this.show_login(Some(&e.to_string())),
-            }
-        });
+        glib::spawn_future_local(async move { this.resume_session().await });
     }
 
     fn build(self: &Rc<Self>) {
         self.stack.add_named(&self.build_loading(), Some("loading"));
         self.stack.add_named(&self.build_login(), Some("login"));
+        self.stack.add_named(&self.build_choose_account(), Some("accounts"));
         self.stack.add_named(&self.build_main(), Some("main"));
         self.stack.add_named(&self.build_blocked(), Some("blocked"));
         self.toasts.set_child(Some(&self.stack));
@@ -430,6 +439,9 @@ impl App {
             })
             .build();
         self.window.add_action_entries([logout, standing, scheduled]);
+        for action in self.account_actions() {
+            self.window.add_action(&action);
+        }
         if let Some(app) = self.window.application() {
             app.set_accels_for_action("win.logout", &["<Control><Shift>l"]);
             // Notification clicks arrive as an app action, with the channel id.
@@ -452,7 +464,7 @@ impl App {
                     move |_: &gtk::Application, _, _| {
                         if let Some(this) = this.upgrade() {
                             this.window.present();
-                            this.state.borrow_mut().friends_tab =
+                            this.account.state.borrow_mut().friends_tab =
                                 friends::Tab::List(discord::relationships::List::Pending);
                             this.show_friends();
                             this.show_content();
@@ -468,7 +480,7 @@ impl App {
             let this = Rc::downgrade(self);
             move || {
                 let Some(this) = this.upgrade() else { return };
-                let channel = this.state.borrow().channel;
+                let channel = this.account.state.borrow().channel;
                 if let (true, Some(channel)) = (this.chat_visible(), channel) {
                     this.mark_read(channel);
                 }
@@ -582,24 +594,33 @@ impl App {
     /// Who is logged in, with the app's menu: a card floating over the
     /// bottom of the rail and channel list, which scroll on beneath it, the
     /// same size and in the same place as the composer beside it.
-    fn build_account_panel(&self) -> gtk::Widget {
+    fn build_account_panel(self: &Rc<Self>) -> gtk::Widget {
         let row = gtk::Box::builder().spacing(4).css_classes(["card-row"]).build();
         row.append(&self.me_label);
         // The app's menu too, as Discord's settings live here.
         let menu = gio::Menu::new();
+        menu.append_section(None, &self.switch_menu());
         menu.append(Some("_Scheduled Messages"), Some("win.scheduled-messages"));
         menu.append(Some("Account _Standing"), Some("win.account-standing"));
         menu.append(Some("_About Neucord"), Some("app.about"));
         menu.append(Some("_Log Out"), Some("win.logout"));
-        row.append(
-            &gtk::MenuButton::builder()
-                .icon_name("view-more-symbolic")
-                .tooltip_text("Account")
-                .primary(true)
-                .menu_model(&menu)
-                .css_classes(["flat"])
-                .build(),
-        );
+        let button = gtk::MenuButton::builder()
+            .icon_name("view-more-symbolic")
+            .tooltip_text("Account")
+            .primary(true)
+            .menu_model(&menu)
+            .css_classes(["flat"])
+            .build();
+        // The client asks who each account is when its list opens.
+        button.connect_active_notify({
+            let this = Rc::downgrade(self);
+            move |button| {
+                if let (true, Some(this)) = (button.is_active(), this.upgrade()) {
+                    this.validate_accounts();
+                }
+            }
+        });
+        row.append(&button);
         let panel = gtk::Box::builder().valign(gtk::Align::End).css_classes(["account-panel", "floating-card"]).build();
         panel.append(&row);
 

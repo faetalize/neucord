@@ -28,7 +28,7 @@ pub(super) const END_POLL: Entry<super::chat::MessageTarget> = Entry::Item(Item 
     shows: |app, target| {
         let message = &target.message;
         message.poll.as_ref().is_some_and(|p| p.time_left(now_unix()).is_some())
-            && app.state.borrow().me() == Some(message.author.id)
+            && app.account.state.borrow().me() == Some(message.author.id)
     },
     kind: Kind::Action(|app, target| app.confirm_end_poll(&target.message)),
 });
@@ -38,7 +38,7 @@ pub(super) const END_POLL: Entry<super::chat::MessageTarget> = Entry::Item(Item 
 pub(super) fn poll(app: &Rc<App>, message: &Message, poll: &Poll) -> gtk::Widget {
     let now = now_unix();
     let held_back = {
-        let state = app.state.borrow();
+        let state = app.account.state.borrow();
         permissions::vote_held_back(state.find_channel(message.channel_id).and_then(|(guild, _)| guild), now)
     };
     let view = poll.view(held_back, now);
@@ -175,7 +175,7 @@ impl App {
         message: Snowflake,
         change: impl FnOnce(&mut Poll) -> R,
     ) -> Option<R> {
-        let store = self.timelines.borrow().get(channel).map(|t| t.store.clone())?;
+        let store = self.account.timelines.borrow().get(channel).map(|t| t.store.clone())?;
         let mut result = None;
         let at = timelines::edit(&store, message, |m| result = m.poll.as_mut().map(change))?;
         self.rebind(&store, at, 1);
@@ -205,14 +205,14 @@ impl App {
     }
 
     fn votes_held_back(&self, channel: Snowflake, now: i64) -> bool {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         permissions::vote_held_back(state.find_channel(channel).and_then(|(guild, _)| guild), now)
     }
 
     /// Whether the server's verification stops us from chatting there, as
     /// `canChatInGuild` (834942) says. Membership screening isn't part of it.
     fn verification_blocks(&self, channel: Snowflake) -> bool {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         match (state.find_channel(channel), &state.account) {
             (Some((Some(guild), _)), Some(me)) => {
                 verification::gate(guild, me, now_unix()).is_some_and(|gate| gate != verification::Gate::Screening)
@@ -230,7 +230,7 @@ impl App {
                 "You must complete the verification steps required by this server.",
             );
         }
-        let Some(rest) = self.state.borrow().rest.clone() else { return };
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
         let (now, held_back) = (now_unix(), self.votes_held_back(channel, now_unix()));
         let started = self.edit_poll(channel, message, |poll| {
             if remove {
@@ -276,7 +276,7 @@ impl App {
             if dialog.choose_future(Some(&this.window)).await != "confirm" {
                 return;
             }
-            let Some(rest) = this.state.borrow().rest.clone() else { return };
+            let Some(rest) = this.account.state.borrow().rest.clone() else { return };
             // The gateway's update is what closes it in the list.
             if let Err(e) = rest.end_poll(channel, id).await {
                 this.notice("Oh no! Something went wrong.", &e.to_string());

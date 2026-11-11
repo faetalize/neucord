@@ -27,7 +27,7 @@ pub(super) const EDIT: Entry<MessageTarget> = Entry::Item(Item {
 pub(super) const DELETE: Entry<MessageTarget> = Entry::Item(Item {
     name: "delete",
     label: "_Delete Message",
-    shows: |app, target| app.state.borrow().can_delete(&target.message),
+    shows: |app, target| app.account.state.borrow().can_delete(&target.message),
     kind: Kind::Action(|app, target| match app.shift_held() {
         true => app.delete_message(&target.message),
         false => app.confirm_delete(&target.message, true),
@@ -67,7 +67,7 @@ impl App {
     /// Whether Edit shows for `message`. Neucord edits in the message box,
     /// so not where that is hidden.
     pub(super) fn offers_edit(&self, message: &Message) -> bool {
-        self.composer_box.is_visible() && self.state.borrow().can_edit(message)
+        self.composer_box.is_visible() && self.account.state.borrow().can_edit(message)
     }
 
     /// The message being edited.
@@ -113,7 +113,7 @@ impl App {
         self.refresh_attach();
         self.set_composer_text(&edit.draft);
         // A reply started elsewhere stays there, as when switching channels.
-        if edit.reply.as_ref().is_some_and(|r| Some(r.channel) == self.state.borrow().channel) {
+        if edit.reply.as_ref().is_some_and(|r| Some(r.channel) == self.account.state.borrow().channel) {
             self.set_reply(edit.reply);
         }
         self.refresh_message(edit.message.id);
@@ -127,7 +127,7 @@ impl App {
         let buffer = self.composer.buffer();
         let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
         let bare = message.attachments.is_empty() && message.components.is_empty() && message.sticker_items.is_empty();
-        let decision = edits::decide(&self.state.borrow().limits(), &text, &message.content, bare);
+        let decision = edits::decide(&self.account.state.borrow().limits(), &text, &message.content, bare);
         // A refused edit stays open.
         let text = match decision {
             Edit::Refuse(too_long) => return self.show_too_long(too_long),
@@ -150,9 +150,9 @@ impl App {
             }
         };
         self.end_edit();
-        let Some(rest) = self.state.borrow().rest.clone() else { return };
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
         // Our permissions may have changed since the edit started.
-        if !self.state.borrow().can_edit(&message) {
+        if !self.account.state.borrow().can_edit(&message) {
             return;
         }
         let announced = self.announced(&message);
@@ -171,7 +171,7 @@ impl App {
             }
             // Turned down or failed: back in the box, unless it's busy.
             let undone = result.is_err() || announced;
-            if undone && this.editing().is_none() && this.state.borrow().channel == Some(message.channel_id) {
+            if undone && this.editing().is_none() && this.account.state.borrow().channel == Some(message.channel_id) {
                 this.start_edit(&message, Some(&text));
             }
         });
@@ -214,9 +214,9 @@ impl App {
 
     /// Delete `message`; the gateway then takes it off the list.
     pub(super) fn delete_message(self: &Rc<Self>, message: &Message) {
-        let rest = self.state.borrow().rest.clone();
+        let rest = self.account.state.borrow().rest.clone();
         // Our permissions may have changed since the menu opened.
-        let Some(rest) = rest.filter(|_| self.state.borrow().can_delete(message)) else { return };
+        let Some(rest) = rest.filter(|_| self.account.state.borrow().can_delete(message)) else { return };
         let (channel, id) = (message.channel_id, message.id);
         let this = self.clone();
         glib::spawn_future_local(async move {
@@ -233,14 +233,14 @@ impl App {
     /// Reopen `channel` first if it's a thread an edit, delete or reaction
     /// reopens.
     pub(super) async fn reopen(&self, rest: &Rest, channel: Snowflake) -> Result<(), discord::Error> {
-        let needed = self.state.borrow().unarchives_first(channel);
+        let needed = self.account.state.borrow().unarchives_first(channel);
         if needed { rest.unarchive_thread(channel).await } else { Ok(()) }
     }
 
     /// Whether `message` was published to the servers following its
     /// announcement channel, so changing it changes every copy.
     fn announced(&self, message: &Message) -> bool {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let kind = state.find_channel(message.channel_id).map(|(_, c)| c.kind);
         message.is_crossposted() && kind == Some(ChannelKind::Announcement)
     }

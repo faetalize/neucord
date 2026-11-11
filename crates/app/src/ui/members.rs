@@ -197,7 +197,7 @@ impl App {
                 // follow the pane.
                 let show = !this.right.shows_sidebar();
                 if !this.right.is_collapsed() {
-                    this.state.borrow_mut().members_closed = !show;
+                    this.account.state.borrow_mut().members_closed = !show;
                 }
                 this.right.set_show_sidebar(show);
             }
@@ -208,7 +208,7 @@ impl App {
 
     /// Whether the pane shows a list now, beside the chat or over it.
     fn members_visible(&self) -> bool {
-        self.right.shows_sidebar() && self.state.borrow().member_target().is_some()
+        self.right.shows_sidebar() && self.account.state.borrow().member_target().is_some()
     }
 
     /// Where we are changed: what the pane shows and what we are
@@ -216,10 +216,14 @@ impl App {
     pub(super) fn sync_members(self: &Rc<Self>) {
         // Wherever we are changed, the header's threads button may change.
         self.sync_threads_button();
-        let target = self.state.borrow().member_target();
+        let target = self.account.state.borrow().member_target();
         let wanted = target.is_some() && {
             // Over the chat, the pane stays as it was; docked, as it was left.
-            if self.right.is_collapsed() { self.right.shows_sidebar() } else { !self.state.borrow().members_closed }
+            if self.right.is_collapsed() {
+                self.right.shows_sidebar()
+            } else {
+                !self.account.state.borrow().members_closed
+            }
         };
         for toggle in &*self.members.toggles.borrow() {
             toggle.set_visible(target.is_some());
@@ -244,7 +248,7 @@ impl App {
     /// list showing, to the first rows of that.
     pub(super) fn subscribe_open(&self) {
         let visible = self.members_visible();
-        let state = &mut *self.state.borrow_mut();
+        let state = &mut *self.account.state.borrow_mut();
         let Some(guild) = state.guild else { return };
         let list = match state.member_target() {
             Some(Target::Server { channel, .. }) if visible => Some(channel),
@@ -259,7 +263,7 @@ impl App {
     pub(super) fn subscribe_session(&self, fresh: bool) {
         let visible = self.members_visible();
         {
-            let state = &mut *self.state.borrow_mut();
+            let state = &mut *self.account.state.borrow_mut();
             if fresh {
                 state.member_lists.reset();
             }
@@ -316,7 +320,7 @@ impl App {
             return;
         }
         let ranges = view_ranges(adjustment.value(), adjustment.page_size(), row);
-        let state = &mut *self.state.borrow_mut();
+        let state = &mut *self.account.state.borrow_mut();
         state.subscriptions.ranges(guild, channel, ranges);
         self.send_subscriptions(state);
     }
@@ -337,7 +341,7 @@ impl App {
     fn show_loading_or_list(&self) {
         let loading = match &*self.members.shown.borrow() {
             Some(Target::Server { guild, list, .. }) => {
-                self.state.borrow().member_lists.get(*guild, list).is_none_or(|l| l.is_unknown())
+                self.account.state.borrow().member_lists.get(*guild, list).is_none_or(|l| l.is_unknown())
             }
             _ => false,
         };
@@ -347,7 +351,7 @@ impl App {
     /// How many rows the shown list has: Discord's list, or a group DM's
     /// heading and its people.
     fn member_rows(&self) -> usize {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         match &*self.members.shown.borrow() {
             Some(Target::Server { guild, list, .. }) => {
                 state.member_lists.get(*guild, list).filter(|l| !l.is_unknown()).map_or(0, |l| l.len())
@@ -365,7 +369,7 @@ impl App {
             Some(Target::Server { guild, list, .. }) if *guild == update.guild && *list == update.list
         );
         let (known, change) = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             (state.member_lists.get(update.guild, &update.list).is_some(), state.member_lists.apply(&update))
         };
         if !shown {
@@ -385,7 +389,7 @@ impl App {
         user: Snowflake,
         presence: &discord::relationships::Presence,
     ) {
-        let changes = self.state.borrow_mut().member_lists.set_presence(guild, user, presence);
+        let changes = self.account.state.borrow_mut().member_lists.set_presence(guild, user, presence);
         let shown = self.members.shown.borrow().clone();
         for (g, list, change) in changes {
             if matches!(&shown, Some(Target::Server { guild, list: l, .. }) if *guild == g && *l == list) {
@@ -412,7 +416,7 @@ impl App {
 
     /// What the row at `position` shows.
     fn member_row(self: &Rc<Self>, position: usize) -> gtk::Widget {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         match &*self.members.shown.borrow() {
             Some(Target::Server { guild, list, .. }) => {
                 let Some(guild) = state.guilds.iter().find(|g| g.id == *guild) else { return placeholder() };
@@ -508,7 +512,7 @@ impl App {
             let (this, user, row, presence) = (Rc::downgrade(self), user.clone(), row.downgrade(), presence.clone());
             move || {
                 let (this, row) = (this.upgrade()?, row.upgrade()?);
-                let channel = this.state.borrow().channel;
+                let channel = this.account.state.borrow().channel;
                 let (user, presence) = (user.clone(), Some(presence.clone()));
                 Some((this, UserTarget { user, guild, channel, presence, anchor: row.upcast() }))
             }

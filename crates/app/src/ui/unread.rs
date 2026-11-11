@@ -17,7 +17,7 @@ impl App {
     /// message here and on Discord.
     pub(super) fn mark_read(self: &Rc<Self>, channel: Snowflake) {
         let newest = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             let Some((_, c)) = state.find_channel(channel) else { return };
             let Some(last) = c.last_message_id else { return };
             let pending = state.is_unread(c) || state.read.mentions(channel) > 0;
@@ -38,6 +38,7 @@ impl App {
     pub(super) fn queue_ack(self: &Rc<Self>, channel: Snowflake, message: Snowflake) {
         // The client acks no archived thread.
         let ackable = self
+            .account
             .state
             .borrow()
             .find_channel(channel)
@@ -45,7 +46,7 @@ impl App {
         if !ackable {
             return;
         }
-        let first = self.state.borrow_mut().pending_acks.insert(channel, message).is_none();
+        let first = self.account.state.borrow_mut().pending_acks.insert(channel, message).is_none();
         if !first {
             return;
         }
@@ -53,7 +54,7 @@ impl App {
         glib::timeout_add_local_once(ACK_DELAY, move || {
             let Some(this) = this.upgrade() else { return };
             let (message, rest) = {
-                let mut state = this.state.borrow_mut();
+                let mut state = this.account.state.borrow_mut();
                 (state.pending_acks.remove(&channel), state.rest.clone())
             };
             let (Some(message), Some(rest)) = (message, rest) else { return };
@@ -69,7 +70,7 @@ impl App {
     /// order changed. Called on every message, so it skips no-op rebuilds.
     pub(super) fn refresh_badges(self: &Rc<Self>) {
         let (rail, sidebar) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             (state.rail_signature(), state.sidebar_signature())
         };
         let (rail_changed, sidebar_changed) = {

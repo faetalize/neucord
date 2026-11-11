@@ -1,6 +1,7 @@
 //! Everything the UI knows about the session, and the derived views of it
 //! the rail and sidebar draw from: unread markers, mention counts, order.
 
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
@@ -21,11 +22,13 @@ use discord::subscriptions::Subscriptions;
 use discord::thread_creation;
 use discord::threads;
 use discord::typing::Typing;
-use discord::verification::Account;
+use discord::verification::Account as Verification;
 use discord::{Channel, ChannelKind, Gateway, Guild, Message, Rest, Resume, Snowflake, User};
 use gtk::glib;
 
 use super::friends::Tab;
+use crate::kept::Kept;
+use crate::timelines::Timelines;
 
 /// What Home shows in place of a channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,11 +58,61 @@ pub(super) struct Unread {
     pub(super) seen: bool,
 }
 
+/// Everything that belongs to one account: its session and gateway
+/// connection, what Discord has told us, the messages we hold and what was
+/// made from them. Nothing of it outlives the account, so what the window
+/// shows is always one account's, and leaving one is [`Account::leave`].
+pub(super) struct Account {
+    pub(super) state: RefCell<State>,
+    /// The messages of the channels we hold.
+    pub(super) timelines: RefCell<Timelines>,
+    /// The content of messages whose rows have moved on to others, for when
+    /// they come back (see [`super::chat::KeptContent`]).
+    pub(super) kept_content: RefCell<Kept<Snowflake, super::chat::KeptContent>>,
+    /// The desktop notifications we've shown for the account, by id, so they
+    /// can be taken back when it's left: opening a channel from one would
+    /// look for it in another account.
+    pub(super) notified: RefCell<HashSet<String>>,
+    /// Counts the sessions the window has had with accounts. The event loop
+    /// and reconnect timers of a session that was left see it changed, and
+    /// stop.
+    pub(super) epoch: Cell<u64>,
+}
+
+impl Account {
+    pub(super) fn new() -> Self {
+        Account {
+            state: RefCell::default(),
+            timelines: RefCell::default(),
+            kept_content: RefCell::new(Kept::new(super::chat::KEPT_CONTENT)),
+            notified: RefCell::default(),
+            epoch: Cell::new(0),
+        }
+    }
+
+    /// Let go of the account: its connection closes with the gateway
+    /// dropped, and everything held for it goes. Gives what answered its
+    /// requests, for one that has to be sent still, and the notifications
+    /// to take back.
+    pub(super) fn leave(&self) -> (Option<Rest>, Vec<String>) {
+        self.epoch.set(self.epoch.get() + 1);
+        let rest = std::mem::take(&mut *self.state.borrow_mut()).rest;
+        self.timelines.borrow_mut().clear();
+        self.kept_content.borrow_mut().clear();
+        (rest, self.notified.take().into_iter().collect())
+    }
+}
+
 #[derive(Default)]
 pub(super) struct State {
     pub(super) token: Option<String>,
     /// The token is already in the keyring.
     pub(super) persisted: bool,
+    /// The token came from the keyring entry of earlier versions, which
+    /// READY moves to the account's own.
+    pub(super) migrating: bool,
+    /// Whose stored token the session connects with, which READY has yet to say.
+    pub(super) target: Option<Snowflake>,
     /// READY arrived at least once for this token.
     pub(super) ready_seen: bool,
     pub(super) reconnect_attempts: u32,
@@ -70,7 +123,7 @@ pub(super) struct State {
     pub(super) gateway: Option<Gateway>,
     pub(super) me: Option<User>,
     /// What servers' verification asks of us.
-    pub(super) account: Option<Account>,
+    pub(super) account: Option<Verification>,
     pub(super) nitro: Nitro,
     /// What Discord rolls out to the account and its servers.
     pub(super) experiments: Experiments,
@@ -199,6 +252,11 @@ impl State {
 
     pub(super) fn me(&self) -> Option<Snowflake> {
         self.me.as_ref().map(|u| u.id)
+    }
+
+    /// [`Self::me`], or before READY the account whose token is being used.
+    pub(super) fn known_id(&self) -> Option<Snowflake> {
+        self.me().or(self.target)
     }
 
     /// The guild a channel or thread belongs to and the channel itself;
@@ -635,7 +693,7 @@ mod tests {
         .unwrap();
         guild.my_roles = vec![Snowflake(40)];
         State {
-            account: Some(Account { id: Snowflake(5), ..Account::default() }),
+            account: Some(Verification { id: Snowflake(5), ..Verification::default() }),
             guild: Some(guild.id),
             guilds: vec![guild],
             ..State::default()

@@ -152,20 +152,20 @@ impl App {
     /// with it stay; a reply goes with it, and ends. What the client checks
     /// first (`nA.i` in 710272) is checked here: length and slowmode.
     fn send_gif(self: &Rc<Self>, channel: Snowflake, link: &str) {
-        let rest = self.state.borrow().rest.clone();
+        let rest = self.account.state.borrow().rest.clone();
         let Some(rest) = rest else { return };
         // A hidden message box is a channel we must never post to (#51).
-        if !self.composer_box.is_visible() || !self.state.borrow().can_send(channel) {
+        if !self.composer_box.is_visible() || !self.account.state.borrow().can_send(channel) {
             return self.update_notice_bar();
         }
-        let too_long = self.state.borrow().limits().check_length(link);
+        let too_long = self.account.state.borrow().limits().check_length(link);
         if let Err(too_long) = too_long {
             return self.show_too_long(too_long);
         }
         if self.slowmode_left(channel) > 0 {
             return self.update_notice_bar();
         }
-        let can_reply = self.state.borrow().can_reply(channel);
+        let can_reply = self.account.state.borrow().can_reply(channel);
         let replying = self.reply.borrow().clone().filter(|r| r.channel == channel && can_reply);
         let reply = replying.as_ref().map(|r| discord::rest::Reply {
             to: r.to,
@@ -182,7 +182,7 @@ impl App {
                 Ok(_) => this.message_sent(channel),
                 Err(e) => {
                     this.message_stopped(channel, &Stopped::Send(e));
-                    if this.reply.borrow().is_none() && this.state.borrow().channel == Some(channel) {
+                    if this.reply.borrow().is_none() && this.account.state.borrow().channel == Some(channel) {
                         this.set_reply(replying);
                         this.reply_ping.set_active(ping);
                     }
@@ -205,7 +205,7 @@ impl Session {
         let note = |text: &str| vec![Row::Header(text.to_owned())];
         match view.screen() {
             Screen::Front => {
-                let state = app.state.borrow();
+                let state = app.account.state.borrow();
                 let tiles = state.gif_tiles.all();
                 if tiles.is_empty() {
                     return note("Loading…");
@@ -321,7 +321,7 @@ impl Session {
     /// Ask for the front page, if it has none yet.
     fn fetch_tiles(self: &Rc<Self>) {
         let Some(app) = self.app.upgrade() else { return };
-        let request = app.state.borrow_mut().gif_tiles.opened();
+        let request = app.account.state.borrow_mut().gif_tiles.opened();
         if let Some(request) = request {
             self.send(request);
         }
@@ -386,14 +386,14 @@ impl Session {
 
     /// Make `request` and take in the answer.
     fn send(self: &Rc<Self>, request: Request) {
-        let Some(rest) = self.app.upgrade().and_then(|app| app.state.borrow().rest.clone()) else { return };
+        let Some(rest) = self.app.upgrade().and_then(|app| app.account.state.borrow().rest.clone()) else { return };
         let this = self.clone();
         glib::spawn_future_local(async move {
             match request {
                 Request::Trending => {
                     let tiles = rest.gif_tiles().await.map_err(|e| eprintln!("gifs: {e}")).ok();
                     if let Some(app) = this.app.upgrade() {
-                        app.state.borrow_mut().gif_tiles.fetched(tiles);
+                        app.account.state.borrow_mut().gif_tiles.fetched(tiles);
                     }
                 }
                 Request::TrendingGifs => {

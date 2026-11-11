@@ -156,7 +156,7 @@ impl App {
             let this = Rc::downgrade(self);
             move |button| {
                 let Some(this) = this.upgrade() else { return };
-                let Some(channel) = this.state.borrow().channel else { return };
+                let Some(channel) = this.account.state.borrow().channel else { return };
                 this.open_emoji_picker(channel, button, |app, item| app.insert_emoji(item));
             }
         });
@@ -235,7 +235,7 @@ impl App {
                     return glib::Propagation::Stop;
                 }
                 // The scheduled time goes after the reply, and a waiting sticker after it (92960).
-                let channel = this.state.borrow().channel;
+                let channel = this.account.state.borrow().channel;
                 if key == Key::Escape
                     && let Some(channel) = channel.filter(|c| this.scheduled_time(*c).is_some())
                 {
@@ -279,7 +279,7 @@ impl App {
             timer.remove();
         }
         let timeout = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let guild = state.channel.and_then(|id| state.find_channel(id)).and_then(|(guild, _)| guild);
             guild.and_then(|g| Some((g.id, g.timed_out_until?)))
         };
@@ -307,7 +307,7 @@ impl App {
         // A forum or media channel has its own page and never a box; the
         // send guard below trusts the box's visibility, not the page's.
         let forum = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             state.channel.and_then(|id| state.find_channel(id)).is_some_and(|(_, c)| c.kind.is_forum_like())
         };
         if forum {
@@ -316,7 +316,7 @@ impl App {
             return;
         }
         let (system, request, timeout, gate, denied, slowmode) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let open = state.channel.and_then(|id| state.find_channel(id));
             let system = open.is_some_and(|(_, c)| c.is_system_dm());
             let denied_here = match open.map(|(_, c)| c) {
@@ -408,19 +408,19 @@ impl App {
     /// Whether Reply shows for `message`: what the official client replies
     /// to, where it lets us.
     pub(super) fn offers_reply(&self, message: &Message) -> bool {
-        message.is_replyable() && self.state.borrow().can_reply(message.channel_id)
+        message.is_replyable() && self.account.state.borrow().can_reply(message.channel_id)
     }
 
     /// Reply to `message`. Like Discord, the reply pings unless `no_ping`
     /// (Shift held when clicking Reply).
     pub(super) fn start_reply(self: &Rc<Self>, message: &Message, no_ping: bool) {
         // Message requests and the system DM have no message box to reply from.
-        if !self.composer_box.is_visible() || !self.state.borrow().can_reply(message.channel_id) {
+        if !self.composer_box.is_visible() || !self.account.state.borrow().can_reply(message.channel_id) {
             return;
         }
         self.end_edit();
         let (own, guild) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let guild = state.find_channel(message.channel_id).and_then(|(guild, _)| guild.map(|g| g.id));
             (state.me() == Some(message.author.id), guild)
         };
@@ -469,7 +469,7 @@ impl App {
     pub(super) fn update_length_indicator(&self) {
         let buffer = self.composer.buffer();
         let length = message_length(&buffer.text(&buffer.start_iter(), &buffer.end_iter(), false));
-        let count = self.state.borrow().limits().length_count(length, self.editing().is_some());
+        let count = self.account.state.borrow().limits().length_count(length, self.editing().is_some());
         self.length.show(count);
     }
 
@@ -517,7 +517,7 @@ impl App {
 
     fn mention_candidates(&self, prefix: &str) -> Vec<Completion> {
         let prefix = prefix.to_lowercase();
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         let mut matches: Vec<(u64, String)> = state
             .users
             .iter()
@@ -536,7 +536,7 @@ impl App {
     /// The emoji we may send in the open channel that `query` finds. Locked
     /// ones aren't offered here, as in the client.
     fn emoji_candidates(&self, query: &str) -> Vec<Completion> {
-        let Some(channel) = self.state.borrow().channel else { return Vec::new() };
+        let Some(channel) = self.account.state.borrow().channel else { return Vec::new() };
         let found = self.emoji_library(channel).search(query, super::emoji::AUTOCOMPLETE);
         found.unlocked.into_iter().map(Completion::Emoji).collect()
     }
@@ -605,7 +605,7 @@ impl App {
 
     /// Milliseconds before we may post in `channel` again.
     pub(super) fn slowmode_left(&self, channel: Snowflake) -> i64 {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         state.find_channel(channel).map_or(0, |(_, c)| state.slowmode.remaining_ms(c, now_ms()))
     }
 
@@ -618,7 +618,7 @@ impl App {
         record: impl FnOnce(&mut Slowmode, &Channel, bool),
     ) {
         let open = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             let state = &mut *state;
             let Some((guild, c)) = state.find_channel(channel) else { return };
             let bypass =
@@ -639,7 +639,7 @@ impl App {
         let buffer = self.composer.buffer();
         let typed = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).trim().to_owned();
         let (channel, rest) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             (state.channel, state.rest.clone())
         };
         let (Some(channel), Some(rest)) = (channel, rest) else { return };
@@ -650,7 +650,7 @@ impl App {
             return;
         }
         // The box follows our permissions, but they may have changed since.
-        if !self.state.borrow().can_send(channel) {
+        if !self.account.state.borrow().can_send(channel) {
             return self.update_notice_bar();
         }
         // What was true when the sticker was picked may not be now.
@@ -666,16 +666,16 @@ impl App {
         let translated = library.translate(&typed);
         let text = translated.text;
         // The client checks length before slowmode. The text stays in the box to be shortened.
-        let too_long = self.state.borrow().limits().check_length(&text);
+        let too_long = self.account.state.borrow().limits().check_length(&text);
         if let Err(too_long) = too_long {
             return self.show_too_long(too_long);
         }
         if !files.is_empty() {
-            if !self.state.borrow().can_attach(channel) {
+            if !self.account.state.borrow().can_attach(channel) {
                 return self.update_notice_bar();
             }
             let allowed = {
-                let state = self.state.borrow();
+                let state = self.account.state.borrow();
                 state.limits().uploads(state.find_channel(channel).and_then(|(guild, _)| guild))
             };
             if let Err(refusal) = discord::uploads::check_send(&allowed, &Self::sizes(&files)) {
@@ -699,7 +699,7 @@ impl App {
             self.mention_popover.popdown();
             return;
         }
-        let can_reply = self.state.borrow().can_reply(channel);
+        let can_reply = self.account.state.borrow().can_reply(channel);
         let replying = self.reply.borrow().clone().filter(|r| r.channel == channel && can_reply);
         let reply = replying.as_ref().map(|r| Reply {
             to: r.to,
@@ -746,7 +746,7 @@ impl App {
                             this.set_waiting_sticker(channel, waiting);
                         }
                         this.set_composer_text(&typed);
-                        if this.state.borrow().channel == Some(channel) {
+                        if this.account.state.borrow().channel == Some(channel) {
                             this.set_reply(replying);
                             this.reply_ping.set_active(ping);
                         }
@@ -764,7 +764,7 @@ impl App {
         // The client shows every message again on success, which ends what we typed meanwhile.
         self.typing_message_sent(channel);
         // Sending from an old stretch of history returns to the present.
-        if self.timelines.borrow().get(channel).is_some_and(|t| t.detached) {
+        if self.account.timelines.borrow().get(channel).is_some_and(|t| t.detached) {
             self.load_newest(channel);
         }
     }

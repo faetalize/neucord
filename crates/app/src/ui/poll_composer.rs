@@ -316,13 +316,13 @@ impl Editor {
         show_error(&self.banner, None);
         let channel = self.channel;
         // The editor follows our permissions, but they may have changed since.
-        if !app.state.borrow().can_post_polls(channel) {
+        if !app.account.state.borrow().can_post_polls(channel) {
             return self.fail("You do not have permission to post polls in this channel.");
         }
         if app.slowmode_left(channel) > 0 {
             return self.fail("Slowmode is enabled in this channel. Try again once it ends.");
         }
-        let Some(rest) = app.state.borrow().rest.clone() else { return };
+        let Some(rest) = app.account.state.borrow().rest.clone() else { return };
         self.sending.set(true);
         self.post.set_sensitive(false);
         let body = self.draft.borrow().body();
@@ -376,7 +376,7 @@ impl Editor {
             Ok(_) => {
                 app.record_slowmode(channel, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
                 // Sending from an old stretch of history returns to the present.
-                if app.timelines.borrow().get(channel).is_some_and(|t| t.detached) {
+                if app.account.timelines.borrow().get(channel).is_some_and(|t| t.detached) {
                     app.load_newest(channel);
                 }
                 if let Some(dialog) = self.dialog.upgrade() {
@@ -400,11 +400,11 @@ impl App {
     /// The open channel, if the client would offer Create Poll in it now:
     /// the message box shows, no edit has it, and polls may be posted there.
     pub(super) fn poll_channel(&self) -> Option<Snowflake> {
-        let channel = self.state.borrow().channel?;
+        let channel = self.account.state.borrow().channel?;
         let allowed = self.composer_box.is_visible()
             && self.editing().is_none()
             && !self.has_voice_draft(channel)
-            && self.state.borrow().can_post_polls(channel);
+            && self.account.state.borrow().can_post_polls(channel);
         allowed.then_some(channel)
     }
 

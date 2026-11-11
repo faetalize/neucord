@@ -14,7 +14,7 @@ impl App {
     pub(super) fn send_notification(&self, message: &Message, place: &Place) {
         let Some(app) = self.window.application().filter(|_| self.notifications_allowed()) else { return };
         let (title, body) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             let author = message.author.display_name();
             let title = match state.find_channel(message.channel_id) {
                 Some((Some(guild), channel)) => {
@@ -42,7 +42,9 @@ impl App {
         notification.set_body(Some(&body));
         notification
             .set_default_action_and_target_value("app.open-channel", Some(&place.channel.to_string().to_variant()));
-        app.send_notification(Some(&notification_id(place.channel)), &notification);
+        let id = notification_id(place.channel);
+        self.account.notified.borrow_mut().insert(id.clone());
+        app.send_notification(Some(&id), &notification);
     }
 
     pub(super) fn notify_friend_request(&self, request: &discord::relationships::Relationship) {
@@ -50,25 +52,31 @@ impl App {
         let notification = gio::Notification::new(request.user.display_name());
         notification.set_body(Some("Sent you a friend request"));
         notification.set_default_action("app.open-friends");
-        app.send_notification(Some(&friend_request_id(request.user.id)), &notification);
+        let id = friend_request_id(request.user.id);
+        self.account.notified.borrow_mut().insert(id.clone());
+        app.send_notification(Some(&id), &notification);
     }
 
     /// The request was answered, here or elsewhere.
     /// Not while Discord requires a step: the official client stays quiet
     /// then too, and a notification would lead nowhere.
     fn notifications_allowed(&self) -> bool {
-        self.state.borrow().required_action.is_none()
+        self.account.state.borrow().required_action.is_none()
     }
 
     pub(super) fn withdraw_friend_request(&self, user: Snowflake) {
+        let id = friend_request_id(user);
+        self.account.notified.borrow_mut().remove(&id);
         if let Some(app) = self.window.application() {
-            app.withdraw_notification(&friend_request_id(user));
+            app.withdraw_notification(&id);
         }
     }
 
     pub(super) fn withdraw_notification(&self, channel: Snowflake) {
+        let id = notification_id(channel);
+        self.account.notified.borrow_mut().remove(&id);
         if let Some(app) = self.window.application() {
-            app.withdraw_notification(&notification_id(channel));
+            app.withdraw_notification(&id);
         }
     }
 
@@ -76,7 +84,7 @@ impl App {
     /// click, or a forward's footer).
     pub(super) fn open_channel(self: &Rc<Self>, id: Snowflake) {
         let found = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             let guild = state.find_channel(id).filter(|_| state.can_view(id)).map(|(guild, _)| guild.map(|g| g.id));
             if let Some(guild) = guild {
                 state.guild = guild;

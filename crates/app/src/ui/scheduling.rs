@@ -123,11 +123,11 @@ impl App {
     /// The open channel, if the client would offer Schedule Message in it
     /// now: the message box shows, no edit has it, and we may post there.
     pub(super) fn schedule_channel(&self) -> Option<Snowflake> {
-        let channel = self.state.borrow().channel?;
+        let channel = self.account.state.borrow().channel?;
         let allowed = self.composer_box.is_visible()
             && self.editing().is_none()
             && !self.has_voice_draft(channel)
-            && self.state.borrow().can_send(channel);
+            && self.account.state.borrow().can_send(channel);
         allowed.then_some(channel)
     }
 
@@ -149,7 +149,8 @@ impl App {
 
     /// The bar over the message box: the open channel's time, if it has one.
     pub(super) fn refresh_schedule_bar(&self) {
-        let shown = self.state.borrow().channel.filter(|_| self.composer_box.is_visible() && self.editing().is_none());
+        let shown =
+            self.account.state.borrow().channel.filter(|_| self.composer_box.is_visible() && self.editing().is_none());
         let at = shown.and_then(|channel| self.scheduled_time(channel));
         self.scheduling.bar.set_visible(at.is_some());
         if let Some(at) = at {
@@ -169,7 +170,7 @@ impl App {
             let this = Rc::downgrade(self);
             move |_| {
                 let Some(this) = this.upgrade() else { return };
-                let Some(channel) = this.state.borrow().channel else { return };
+                let Some(channel) = this.account.state.borrow().channel else { return };
                 this.schedule_custom_time_in(channel);
             }
         });
@@ -182,7 +183,7 @@ impl App {
             let this = Rc::downgrade(self);
             move |_| {
                 let Some(this) = this.upgrade() else { return };
-                let Some(channel) = this.state.borrow().channel else { return };
+                let Some(channel) = this.account.state.borrow().channel else { return };
                 this.clear_schedule(channel);
                 this.composer.grab_focus();
             }
@@ -365,7 +366,7 @@ impl App {
 
     /// Over `parent`, which may be a dialog of the window.
     pub(super) fn show_limit_reached(self: &Rc<Self>, parent: &impl IsA<gtk::Widget>) {
-        let max = self.state.borrow().limits().scheduled_messages().max;
+        let max = self.account.state.borrow().limits().scheduled_messages().max;
         let dialog = adw::AlertDialog::new(
             Some("Oops! Limit reached."),
             Some(&format!("You've reached the limit of {max} scheduled messages. Cancel one to schedule another.")),
@@ -383,7 +384,7 @@ impl App {
     /// The list of what is waiting, fetched as it opens, as the client does
     /// when its inbox's Scheduled tab opens.
     pub(super) fn show_scheduled_messages(self: &Rc<Self>) {
-        let Some(rest) = self.state.borrow().rest.clone() else { return };
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
         let dialog = adw::Dialog::builder().title("Scheduled Messages").content_width(520).content_height(560).build();
         let list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::None)
@@ -480,7 +481,7 @@ impl View {
     fn row(self: &Rc<Self>, app: &Rc<App>, rest: &Rest, item: &Scheduled, editing: Option<&str>) -> gtk::ListBoxRow {
         let busy = self.busy.borrow().contains(&item.id);
         let id = item.id;
-        let channel = app.state.borrow().find_channel(item.channel).map(|(guild, c)| match guild {
+        let channel = app.account.state.borrow().find_channel(item.channel).map(|(guild, c)| match guild {
             Some(g) => format!("{} · {}", c.title(), g.name),
             None => c.title(),
         });
@@ -658,7 +659,7 @@ impl View {
             Rc::new(move || {
                 let buffer = view.buffer();
                 let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
-                let edit = edits::decide(&app.state.borrow().limits(), &text, &original, bare);
+                let edit = edits::decide(&app.account.state.borrow().limits(), &text, &original, bare);
                 match edit {
                     Edit::Unchanged => this.redraw(&app, &rest, id, None),
                     Edit::Refuse(too_long) => app.show_too_long(too_long),

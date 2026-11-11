@@ -40,7 +40,7 @@ pub(super) const ATTACH_MENU: Entry<()> = Entry::Item(Item {
 pub(super) const MESSAGE_MENU: Entry<MessageTarget> = Entry::Item(Item {
     name: "create-thread",
     label: "Create T_hread",
-    shows: |app, target| app.state.borrow().can_start_thread_from(target.shown()),
+    shows: |app, target| app.account.state.borrow().can_start_thread_from(target.shown()),
     kind: Kind::Action(|app, target| {
         let message = target.shown();
         app.open_thread_form(message.channel_id, Some(message.clone()));
@@ -85,10 +85,10 @@ impl Form {
 impl App {
     /// The open channel, if the attach menu offers Create Thread there now.
     pub(super) fn thread_channel(&self) -> Option<Snowflake> {
-        let channel = self.state.borrow().channel?;
+        let channel = self.account.state.borrow().channel?;
         let offered = self.composer_box.is_visible()
             && self.editing().is_none()
-            && self.state.borrow().offers_thread_in_attach_menu(channel);
+            && self.account.state.borrow().offers_thread_in_attach_menu(channel);
         offered.then_some(channel)
     }
 
@@ -98,7 +98,7 @@ impl App {
     pub(super) fn open_thread_form(self: &Rc<Self>, parent: Snowflake, from: Option<Message>) {
         let privacy = match from {
             Some(_) => Privacy::Public,
-            None => self.state.borrow().thread_privacy(parent),
+            None => self.account.state.borrow().thread_privacy(parent),
         };
         let default = from.as_ref().map(|message| self.default_thread_name(message));
         let form = Rc::new(self.build_thread_form(privacy, default.as_deref()));
@@ -342,14 +342,14 @@ impl App {
         let library = self.emoji_library(parent);
         let translated = library.translate(&text);
         let text = translated.text;
-        if let Err(too_long) = self.state.borrow().limits().check_length(&text) {
+        if let Err(too_long) = self.account.state.borrow().limits().check_length(&text) {
             let dialog = adw::AlertDialog::new(Some(too_long.heading()), Some(&too_long.body()));
             dialog.add_response("okay", "_Okay");
             dialog.present(Some(&form.dialog));
             return;
         }
         let (rest, channel) = {
-            let state = self.state.borrow();
+            let state = self.account.state.borrow();
             (state.rest.clone(), state.find_channel(parent).map(|(_, c)| c.clone()))
         };
         let (Some(rest), Some(channel)) = (rest, channel) else { return };
@@ -390,7 +390,7 @@ impl App {
             if from_composer {
                 this.set_composer_text("");
             }
-            if this.state.borrow().channel == Some(parent) {
+            if this.account.state.borrow().channel == Some(parent) {
                 this.select_channel(thread.id);
             }
             match rest.send_message(thread.id, &text, None, &[], None).await {
@@ -445,7 +445,7 @@ impl App {
 
     /// Let those waiting for a thread know if it is here.
     pub(super) fn thread_arrivals(&self) {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         self.thread_waiters.borrow_mut().retain(|(id, sender)| {
             let here = state.can_view(*id);
             if here {

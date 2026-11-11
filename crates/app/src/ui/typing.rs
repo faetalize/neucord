@@ -23,9 +23,9 @@ impl App {
     /// Our message to `channel` was shown as sent (138399's `receiveMessage`):
     /// what we were typing is over, and the schedule starts afresh.
     pub(super) fn typing_message_sent(&self, channel: Snowflake) {
-        let me = self.state.borrow().me();
+        let me = self.account.state.borrow().me();
         if let Some(me) = me {
-            self.state.borrow_mut().typing.message(channel, me, true);
+            self.account.state.borrow_mut().typing.message(channel, me, true);
         }
     }
 
@@ -38,7 +38,7 @@ impl App {
         let buffer = self.composer.buffer();
         let input = Input::of(&buffer.text(&buffer.start_iter(), &buffer.end_iter(), false));
         let scheduled = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             let (Some(channel), Some(me)) = (state.channel, state.me()) else { return };
             match input {
                 Input::Typed => state.typing.typed(channel, me, now_ms()),
@@ -63,7 +63,7 @@ impl App {
     /// wait Discord may answer with.
     fn send_typing(self: &Rc<Self>, token: u64) {
         let (channel, rest) = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             (state.typing.send_due(token, now_ms()), state.rest.clone())
         };
         let (Some(channel), Some(rest)) = (channel, rest) else { return };
@@ -82,7 +82,7 @@ impl App {
     /// Someone started typing in `channel`.
     pub(super) fn on_typing(self: &Rc<Self>, channel: Snowflake, user: Snowflake, named: Option<&discord::User>) {
         self.learn_users(named.into_iter());
-        self.state.borrow_mut().typing.start(channel, user, now_ms());
+        self.account.state.borrow_mut().typing.start(channel, user, now_ms());
         self.refresh_typing();
     }
 
@@ -94,7 +94,7 @@ impl App {
         }
         let now = now_ms();
         let (names, next) = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             state.typing.prune(now);
             let Some((channel, me)) = state.channel.zip(state.me()) else { return self.show_typing(&[]) };
             let typers = state.typing.typers(channel, now);

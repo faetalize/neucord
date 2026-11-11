@@ -33,7 +33,7 @@ impl App {
     /// Bring the rail up to date: rebuild it if servers, folders or their
     /// looks changed, else only move its markers.
     pub(super) fn rebuild_rail(self: &Rc<Self>) {
-        let shape = self.state.borrow().rail_shape();
+        let shape = self.account.state.borrow().rail_shape();
         if *self.rail_shape.borrow() != shape {
             self.build_rail();
             *self.rail_shape.borrow_mut() = shape;
@@ -48,7 +48,7 @@ impl App {
             }
         }
         let mut items = Vec::new();
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
 
         let home = gtk::Button::builder()
             .icon_name("user-home-symbolic")
@@ -126,7 +126,7 @@ impl App {
 
     /// Set every rail button's markers from state: open, unread, mentions.
     fn mark_rail(&self) {
-        let state = self.state.borrow();
+        let state = self.account.state.borrow();
         self.drawn.borrow_mut().0 = state.rail_signature();
         let badge = |id: &Snowflake| state.guilds.iter().find(|g| g.id == *id).map(|g| state.guild_badge(g));
         for item in self.rail_items.borrow().iter() {
@@ -194,7 +194,7 @@ impl App {
 
     pub(super) fn toggle_folder(self: &Rc<Self>, id: u64) {
         {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             if !state.open_folders.remove(&id) {
                 state.open_folders.insert(id);
             }
@@ -204,7 +204,7 @@ impl App {
 
     pub(super) fn select_guild(self: &Rc<Self>, id: Snowflake) {
         let first_channel = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             state.guild = Some(id);
             state.guilds.iter().find(|g| g.id == id).and_then(|g| {
                 // A channel with messages first, rather than a forum. Never a
@@ -220,7 +220,7 @@ impl App {
             Some(channel) => self.select_channel(channel),
             None => {
                 {
-                    let mut state = self.state.borrow_mut();
+                    let mut state = self.account.state.borrow_mut();
                     state.channel = None;
                     state.page = None;
                 }
@@ -239,7 +239,7 @@ impl App {
     /// Open Home: the most recent DM, or the friends page if there are none.
     pub(super) fn select_home(self: &Rc<Self>) {
         let latest = {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.account.state.borrow_mut();
             state.guild = None;
             state.dms().max_by_key(|c| c.activity()).map(|c| c.id)
         };
