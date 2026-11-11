@@ -270,9 +270,12 @@ pub enum Event {
         user: Option<User>,
     },
     /// One of our clients (maybe this one) marked `channel_id` read up to `message_id`.
+    /// `manual` carries the mentions left to read when it was "Mark Unread",
+    /// which moves the read point back.
     MessageAck {
         channel_id: Snowflake,
         message_id: Snowflake,
+        manual: Option<u32>,
     },
     /// Newest message ids for some of a server's channels, sent after READY
     /// because READY's can be stale.
@@ -782,7 +785,8 @@ fn dispatch(state: &State, name: &str, data: Value) {
             else {
                 return;
             };
-            Event::MessageAck { channel_id, message_id }
+            let manual = (data["manual"] == true).then(|| data["mention_count"].as_u64().unwrap_or(0) as u32);
+            Event::MessageAck { channel_id, message_id, manual }
         }
         "CHANNEL_UNREAD_UPDATE" => {
             let Some(guild_id) = parse_id(&data["guild_id"]) else { return };

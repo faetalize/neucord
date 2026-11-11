@@ -17,8 +17,8 @@ use gtk::{gdk, gio, glib};
 use super::App;
 use super::chat::{self, MessageTarget};
 use super::{
-    attachments, composer, create_thread, edits, emoji, forum, gifs, picker, poll_composer, polls, profile, reactions,
-    reactors, scheduling, sidebar, slash, stickers, threads, uploads, viewer, voice,
+    attachments, composer, create_thread, edits, emoji, forum, gifs, notify_menus, picker, poll_composer, polls,
+    profile, reactions, reactors, scheduling, sidebar, slash, stickers, threads, uploads, viewer, voice,
 };
 
 /// An item that copies or opens a link, shown when the link `$link` finds in
@@ -69,7 +69,6 @@ pub(super) enum Kind<T: 'static, C: 'static = App> {
     /// Runs when chosen.
     Action(fn(&Rc<C>, &T)),
     /// A checkbox, ticked as `checked` says; `set` gets its new state.
-    #[cfg_attr(not(test), expect(dead_code, reason = "for the entries #10 and #13 bring"))]
     Check { checked: fn(&C, &T) -> bool, set: fn(&Rc<C>, &T, bool) },
     /// More sections, opened from this item. It shows only with something
     /// in them.
@@ -112,7 +111,6 @@ pub(super) struct Choice {
     pub(super) ticked: bool,
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "for the entries #10 and #13 bring"))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Style {
     Plain,
@@ -135,7 +133,7 @@ const MESSAGE: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
     &[reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
     &[edits::EDIT, composer::REPLY, create_thread::MESSAGE_MENU],
-    &[chat::COPY_TEXT, slash::MESSAGE_APPS, chat::COPY_MESSAGE_LINK, polls::END_POLL],
+    &[chat::COPY_TEXT, slash::MESSAGE_APPS, notify_menus::MARK_UNREAD, chat::COPY_MESSAGE_LINK, polls::END_POLL],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
     &[chat::COPY_IMAGE, chat::SAVE_IMAGE, attachments::SAVE_FILE],
     &LINKS,
@@ -149,7 +147,7 @@ const MESSAGE_REGULATED: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
     &[reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
     &[edits::EDIT, composer::REPLY, create_thread::MESSAGE_MENU],
-    &[chat::COPY_TEXT, slash::MESSAGE_APPS, chat::COPY_MESSAGE_LINK, polls::END_POLL],
+    &[chat::COPY_TEXT, slash::MESSAGE_APPS, notify_menus::MARK_UNREAD, chat::COPY_MESSAGE_LINK, polls::END_POLL],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
     &[chat::COPY_MESSAGE_ID, stickers::MESSAGE_DETAILS],
     &[chat::COPY_IMAGE, chat::SAVE_IMAGE, attachments::SAVE_FILE],
@@ -214,11 +212,39 @@ pub(super) const FORUM_TAG: Table<forum::Tagged> = &[&[forum::COPY_TAG_ID]];
 /// A channel's menu, from its row in the sidebar: what Neucord has of the
 /// client's (428631 for voice and stage channels, 823255 for the others), in
 /// its order. Copy Link is among the channel's actions, Open Chat among the
-/// voice ones, and Copy Channel ID is last. The rest needs what Neucord
-/// doesn't have yet: Mark As Read, Mute and Notification Settings are #13's,
-/// joining and what happens in a call is #12's.
-pub(super) const CHANNEL: Table<sidebar::ChannelTarget> =
-    &[&[sidebar::COPY_CHANNEL_LINK], &[sidebar::OPEN_CHAT], &[sidebar::COPY_CHANNEL_ID]];
+/// voice ones, and Copy Channel ID is last. Mark As Read comes first and Mute
+/// and Notification Settings follow the channel's actions. Mark Unread is
+/// offered by an experiment (`2026-08-mark-channel-unread`, off unless the
+/// account has it), which Neucord doesn't read yet. The rest needs what
+/// Neucord doesn't have yet: joining and what happens in a call is #12's.
+pub(super) const CHANNEL: Table<sidebar::ChannelTarget> = &[
+    &[notify_menus::MARK_CHANNEL_READ],
+    &[sidebar::COPY_CHANNEL_LINK],
+    &[sidebar::OPEN_CHAT],
+    &[notify_menus::MUTE_CHANNEL, notify_menus::UNMUTE_CHANNEL, notify_menus::CHANNEL_NOTIFICATIONS],
+    &[sidebar::COPY_CHANNEL_ID],
+];
+
+/// A category's menu, from its heading in the sidebar: Mark As Read, Mute
+/// Category and Notification Settings, as the client has them among items
+/// Neucord has no use for yet (collapsing, editing).
+pub(super) const CATEGORY: Table<sidebar::ChannelTarget> = &[
+    &[notify_menus::MARK_CHANNEL_READ],
+    &[notify_menus::MUTE_CATEGORY, notify_menus::UNMUTE_CATEGORY, notify_menus::CHANNEL_NOTIFICATIONS],
+];
+
+/// A server icon's menu (871638): Mark As Read, then Mute Server and
+/// Notification Settings, which the client groups together. What else the
+/// menu holds needs what Neucord doesn't have yet.
+pub(super) const GUILD: Table<notify_menus::GuildTarget> = &[
+    &[notify_menus::MARK_GUILD_READ],
+    &[notify_menus::MUTE_GUILD, notify_menus::UNMUTE_GUILD, notify_menus::GUILD_NOTIFICATIONS],
+];
+
+/// A DM's or group DM's menu (385913, 4027): Mark As Read first, and Mute
+/// Conversation in a group of its own.
+pub(super) const DIRECT_MESSAGE: Table<sidebar::ChannelTarget> =
+    &[&[notify_menus::MARK_CHANNEL_READ], &[notify_menus::MUTE_CONVERSATION, notify_menus::UNMUTE_CONVERSATION]];
 
 /// A person's menu, opened from a message's author, a mention and a member
 /// list row: what Neucord has of the official client's (`user-context`,
