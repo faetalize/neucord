@@ -240,6 +240,11 @@ impl Subscriptions {
         }
     }
 
+    /// Whether we're subscribed to `guild`'s threads (`isSubscribedToThreads`).
+    pub fn threads(&self, guild: Snowflake) -> bool {
+        self.guilds.get(&guild).is_some_and(|s| s.threads)
+    }
+
     /// The member list of `channel` shows these rows now (`GUILD_SUBSCRIPTIONS_CHANNEL`).
     pub fn ranges(&mut self, guild: Snowflake, channel: Snowflake, ranges: Ranges) {
         self.channel(guild, channel, ranges, false);

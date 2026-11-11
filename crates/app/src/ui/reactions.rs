@@ -147,7 +147,7 @@ impl App {
     /// or takes back ours, unless it can't be clicked. A super reaction is
     /// shown and counted but never clicked: Nitro's to send, and to take
     /// back.
-    fn pill(self: &Rc<Self>, message: &Message, pill: &Pill<'_>, clickable: bool) -> gtk::Widget {
+    pub(super) fn pill(self: &Rc<Self>, message: &Message, pill: &Pill<'_>, clickable: bool) -> gtk::Widget {
         let content = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         content.append(&polls::emoji_widget(pill.emoji, &self.images));
         content.append(&gtk::Label::new(Some(&pill.count.to_string())));
@@ -402,13 +402,10 @@ impl App {
     /// Change `message` wherever we hold it, open or not, and fill its row
     /// in again. `change` is told whether the channel is a DM, where the
     /// other side's reactions count once.
-    fn change_message(
-        self: &Rc<Self>,
-        channel: Snowflake,
-        message: Snowflake,
-        change: impl FnOnce(&mut Message, bool),
-    ) {
+    fn change_message(self: &Rc<Self>, channel: Snowflake, message: Snowflake, change: impl Fn(&mut Message, bool)) {
         let dm = self.state.borrow().find_channel(channel).is_some_and(|(_, c)| c.kind == ChannelKind::Dm);
+        // A post's card shows the top reaction of its first message.
+        self.forum_change_first(channel, message, |m| change(m, dm));
         let changed = self.timelines.borrow().change(channel, message, |m| change(m, dm));
         if let Some((store, position)) = changed {
             self.rebind(&store, position, 1);

@@ -12,6 +12,7 @@ mod create_thread;
 mod edits;
 mod embeds;
 mod emoji;
+mod forum;
 mod friends;
 mod gifs;
 mod login;
@@ -119,9 +120,8 @@ pub struct App {
     thread_expiry: RefCell<Option<glib::SourceId>>,
     /// Threads we started and are waiting for the gateway to bring.
     thread_waiters: RefCell<Vec<(Snowflake, async_channel::Sender<()>)>>,
-    /// What opening a forum or media channel shows, until #70 lists posts.
-    forum_page: adw::StatusPage,
-    forum_title: widgets::Title,
+    /// The post list a forum or media channel shows.
+    forum: forum::Page,
     composer_error: gtk::Label,
     images: Images,
     /// Autocomplete for mentions and emoji, anchored to the composer.
@@ -293,12 +293,7 @@ impl App {
             timeout_end: RefCell::default(),
             thread_expiry: RefCell::default(),
             thread_waiters: RefCell::default(),
-            forum_page: adw::StatusPage::builder()
-                .title("No Posts Shown")
-                .description("Neucord can't list posts yet. Posts you've joined are under the channel in the sidebar.")
-                .vexpand(true)
-                .build(),
-            forum_title: widgets::Title::new(""),
+            forum: forum::Page::new(),
             composer_error: gtk::Label::builder()
                 .xalign(0.0)
                 .wrap(true)
@@ -551,11 +546,7 @@ impl App {
         self.content.add_named(&self.build_chat(), Some("chat"));
         self.content.add_named(&self.build_friends(), Some("friends"));
         self.content.add_named(&self.build_requests(), Some("requests"));
-        let forum = adw::ToolbarView::builder().content(&self.forum_page).build();
-        let forum_header = self.forum_title.header_bar(&[self.sidebar_toggle().upcast_ref()]);
-        forum_header.pack_end(&self.members_toggle());
-        forum.add_top_bar(&forum_header);
-        self.content.add_named(&forum, Some("forum"));
+        self.content.add_named(&self.build_forum(), Some("forum"));
         self.right.set_sidebar(Some(&self.build_members()));
         self.right.set_content(Some(&self.content));
         self.split.set_content(Some(&self.right));

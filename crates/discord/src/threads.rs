@@ -218,6 +218,9 @@ pub struct ArchivedPage {
     pub threads: Vec<Channel>,
     pub members: Vec<(Snowflake, ThreadMember)>,
     pub has_more: bool,
+    /// The posts' first messages, for the pages of a forum's posts (see
+    /// [`crate::forum::FirstMessages`]).
+    pub first_messages: Option<Vec<crate::Message>>,
 }
 
 impl ArchivedPage {
@@ -237,7 +240,10 @@ impl ArchivedPage {
             .flatten()
             .filter_map(|m| Some((m["id"].as_str()?.parse().ok().map(Snowflake)?, ThreadMember::deserialize(m).ok()?)))
             .collect();
-        Some(ArchivedPage { threads, members, has_more: answer["has_more"].as_bool().unwrap_or(false) })
+        let first_messages = answer["first_messages"]
+            .as_array()
+            .map(|messages| messages.iter().filter_map(|m| crate::Message::deserialize(m).ok()).collect());
+        Some(ArchivedPage { threads, members, has_more: answer["has_more"].as_bool().unwrap_or(false), first_messages })
     }
 }
 
@@ -483,6 +489,7 @@ mod tests {
         assert_eq!(page.threads.len(), 1, "a channel that isn't a thread is left out");
         assert_eq!(page.members.iter().map(|(id, m)| (id.0, m.flags)).collect::<Vec<_>>(), [(5, 2)]);
         assert!(page.has_more);
+        assert_eq!(page.first_messages.as_ref().map(Vec::len), Some(0));
         let last = ArchivedPage::from_value(&json!({"threads": []})).unwrap();
         assert!(!last.has_more && last.members.is_empty());
         assert!(ArchivedPage::from_value(&json!({"threads": null})).is_none(), "the client treats it as a failure");

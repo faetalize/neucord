@@ -122,7 +122,9 @@ impl Members {
         }
     }
 
-    fn request(&mut self, guild: Snowflake, user: Snowflake) {
+    /// Ask for `user`'s member in `guild`, unless we know it or asked
+    /// (`requestMember`).
+    pub fn request(&mut self, guild: Snowflake, user: Snowflake) {
         if self.roles.contains_key(&(guild, user)) {
             return;
         }

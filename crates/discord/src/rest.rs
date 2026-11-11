@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use soup::prelude::*;
 
 use crate::endpoints::{Call, call};
+use crate::forum::Search;
 use crate::gifs::{Gif, Picker, Request, Tile, Tiles};
 use crate::interaction::{Failure, Press};
 use crate::invalid::{Change, InvalidRequests};
@@ -20,7 +21,7 @@ use crate::profile::{self, Profile};
 use crate::reactions::{Location, Refusal};
 use crate::scheduled::{self, Scheduled};
 use crate::stickers::Pack;
-use crate::threads::{self, ArchivedPage};
+use crate::threads::ArchivedPage;
 use crate::uploads::Sent;
 use crate::{Channel, Error, Message, Snowflake, identity, notes};
 
@@ -458,11 +459,11 @@ impl Rest {
         Ok(())
     }
 
-    /// The page of `channel`'s archived threads that starts at `offset`
+    /// The page of a channel's archived threads that `search` names
     /// (`loadArchivedThreads` in 7909). Unlike the client, a failure isn't
     /// tried again (its `retries: 2`): fewer requests, never more.
-    pub async fn archived_threads(&self, channel: Snowflake, offset: u32) -> Result<ArchivedPage, Error> {
-        let answer: Value = self.request(archived_threads_call(channel, offset), None).await?;
+    pub async fn archived_threads(&self, search: &Search) -> Result<ArchivedPage, Error> {
+        let answer: Value = self.request(archived_threads_call(search), None).await?;
         ArchivedPage::from_value(&answer).ok_or_else(|| Error::Protocol("archived threads without threads".into()))
     }
 
@@ -475,6 +476,30 @@ impl Rest {
             Some(guild) if thread.kind.is_thread() => Ok((Snowflake(guild), thread)),
             _ => Err(Error::Protocol("not a thread in a server".into())),
         }
+    }
+
+    /// Pin a forum post, or unpin it: its flags as they should be
+    /// (`updateFlags` in 7909). Pinning an archived post reopens it in the
+    /// same request.
+    pub async fn set_thread_flags(&self, thread: Snowflake, flags: u64, reopen: bool) -> Result<(), Error> {
+        let call = call!(EDIT_CHANNEL, channel = thread);
+        let body = if reopen { json!({ "flags": flags, "archived": false }) } else { json!({ "flags": flags }) };
+        let _: serde_json::Value = self.request(call, Some(body)).await?;
+        Ok(())
+    }
+
+    /// Set the tags a forum post carries (`updateForumPostTags` in 919577),
+    /// which the client does after reopening the post if it was archived.
+    pub async fn set_post_tags(&self, thread: Snowflake, tags: &[Snowflake]) -> Result<(), Error> {
+        let call = call!(EDIT_CHANNEL, channel = thread);
+        let _: serde_json::Value = self.request(call, Some(json!({ "applied_tags": tags }))).await?;
+        Ok(())
+    }
+
+    /// The first messages of up to ten of a forum's posts, as `post-data`
+    /// answers (473503).
+    pub async fn post_data(&self, forum: Snowflake, posts: &[Snowflake]) -> Result<Value, Error> {
+        self.request(call!(POST_DATA, channel = forum), Some(json!({ "thread_ids": posts }))).await
     }
 
     /// Cast our vote on a poll: `answers`, or none to take it back. It
@@ -801,13 +826,9 @@ fn leave_thread_call(thread: Snowflake, location: &str) -> Call {
 }
 
 /// The request for a page of archived threads, its query in the order
-/// `loadArchivedThreads` writes it: always the latest activity first, with no
-/// tags (which forums filter by), whose `tag_setting` is sent all the same.
-fn archived_threads_call(channel: Snowflake, offset: u32) -> Call {
-    let limit = threads::PAGE;
-    call!(SEARCH_THREADS, channel).query(&format!(
-        "archived=true&sort_by=last_message_time&sort_order=desc&limit={limit}&tag_setting=match_some&offset={offset}"
-    ))
+/// `loadArchivedThreads` writes it ([`Search::query`]).
+fn archived_threads_call(search: &Search) -> Call {
+    call!(SEARCH_THREADS, channel = search.channel).query(&search.query())
 }
 
 /// The request for who reacted: `limit`, `after` when paging, and `type`,
@@ -1067,7 +1088,7 @@ mod tests {
             ("DELETE", "/channels/7/thread-members/@me?location=Context%20Menu")
         );
         // `loadArchivedThreads` in 7909: no `tag`, since none is chosen.
-        let page = archived_threads_call(thread, 25);
+        let page = archived_threads_call(&crate::forum::Search::plain(thread, 25));
         assert_eq!(page.method(), "GET");
         assert_eq!(
             page.path(),

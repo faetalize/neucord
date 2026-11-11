@@ -586,6 +586,41 @@ pub fn unarchives_first(guild: Option<&Guild>, channel: &Channel, me: &Account, 
     channel.is_archived() && (!channel.is_locked() || guild.is_some_and(manage))
 }
 
+/// The forum or media channel `post` is a post of: a public thread under one
+/// (`isForumPost`, 95701).
+fn forum_of<'a>(guild: &'a Guild, post: &Channel) -> Option<&'a Channel> {
+    let parent = post.parent_id.and_then(|id| guild.channel(id))?;
+    (post.kind == ChannelKind::PublicThread && parent.kind.is_forum_like()).then_some(parent)
+}
+
+/// Whether the posts of `forum` we can't see in our lists, the archived ones,
+/// may be asked for (`O3` in 435470, and the load in 424798): reading the
+/// forum's history, and in a channel of moderator reports only once we've
+/// asked for resolved ones too, which Neucord has no way to.
+pub fn can_read_post_history(guild: &Guild, forum: &Channel, me: &Account, now: i64) -> bool {
+    forum.flags & IS_MODERATOR_REPORT_CHANNEL == 0
+        && in_channel(guild, forum, me, now).contains(Permissions::READ_MESSAGE_HISTORY)
+}
+
+/// Whether Pin Post and Unpin Post show on `post` (`A` in 41402, with `H_`
+/// in 406704): Manage Threads, in a forum or media channel's post.
+pub fn can_pin_post(guild: &Guild, post: &Channel, me: &Account, now: i64) -> bool {
+    forum_of(guild, post).is_some() && in_channel(guild, post, me, now).contains(Permissions::MANAGE_THREADS)
+}
+
+/// Whether Edit Tags shows on `post` (565846, with `NI` in 406704): for
+/// someone with Manage Threads, or the post's author unless it's locked, in
+/// a forum that has tags, as long as the post is open or can be reopened
+/// ([`can_change`]). Moderator reports have none.
+pub fn can_edit_post_tags(guild: &Guild, post: &Channel, me: &Account, now: i64) -> bool {
+    let Some(forum) = forum_of(guild, post) else { return false };
+    let manage = in_channel(guild, forum, me, now).contains(Permissions::MANAGE_THREADS);
+    (manage || (!post.is_locked() && post.owner_id == Some(me.id)))
+        && !forum.available_tags.is_empty()
+        && forum.flags & IS_MODERATOR_REPORT_CHANNEL == 0
+        && can_change(Some(guild), post, me, now)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -933,6 +968,67 @@ mod tests {
         let hidden = channel(&[(GUILD, VIEW, IN_THREADS)]);
         let (guild, thread) = with_thread(hidden, 11, json!({}));
         assert!(!can_view(&guild, &thread, &me, 0) && !can_send(Some(&guild), &thread, &me, 0));
+    }
+
+    /// A forum (channel 9, which has `tags` tags) with a post of ours or of
+    /// someone else's.
+    fn forum_post(mine: bool, tags: usize, extra: serde_json::Value) -> (Guild, Channel) {
+        let mut forum = channel(&[(GUILD, Permissions::NONE, IN_THREADS)]);
+        forum.kind = serde_json::from_value(json!(15)).unwrap();
+        forum.available_tags = (0..tags)
+            .map(|i| serde_json::from_value(json!({"id": (100 + i).to_string(), "name": "t"})).unwrap())
+            .collect();
+        let owner = if mine { ME.0 } else { 3 };
+        let mut extra = extra;
+        extra.as_object_mut().unwrap().insert("owner_id".into(), json!(owner.to_string()));
+        with_thread(forum, 11, extra)
+    }
+
+    #[test]
+    fn pinning_and_editing_tags_follow_manage_threads_and_who_made_the_post() {
+        let me = me();
+        let (mut guild, post) = forum_post(false, 2, json!({}));
+        assert!(!can_pin_post(&guild, &post, &me, 0) && !can_edit_post_tags(&guild, &post, &me, 0), "someone else's");
+        guild.roles[1].permissions = MANAGE_THREADS;
+        guild.my_roles.push(Snowflake(MOD));
+        assert!(can_pin_post(&guild, &post, &me, 0) && can_edit_post_tags(&guild, &post, &me, 0));
+
+        let (guild, mine) = forum_post(true, 2, json!({}));
+        assert!(!can_pin_post(&guild, &mine, &me, 0), "pinning is for moderators");
+        assert!(can_edit_post_tags(&guild, &mine, &me, 0), "our own post's tags");
+        let (guild, none) = forum_post(true, 0, json!({}));
+        assert!(!can_edit_post_tags(&guild, &none, &me, 0), "a forum with no tags");
+        let locked = json!({"thread_metadata": {"archived": false, "locked": true}});
+        let (guild, locked) = forum_post(true, 2, locked);
+        assert!(!can_edit_post_tags(&guild, &locked, &me, 0), "locked");
+        let archived = json!({"thread_metadata": {"archived": true, "locked": false}});
+        let (guild, archived) = forum_post(true, 2, archived);
+        assert!(can_edit_post_tags(&guild, &archived, &me, 0), "reopened first, which we may");
+        let (mut guild, archived) =
+            forum_post(true, 2, json!({"thread_metadata": {"archived": true, "locked": false}}));
+        guild.channels[0].permission_overwrites[0].allow = Permissions::NONE;
+        assert!(!can_edit_post_tags(&guild, &archived, &me, 0), "but not where we may not post");
+    }
+
+    #[test]
+    fn a_thread_of_a_text_channel_is_no_post() {
+        let me = me();
+        let (mut guild, thread) = with_thread(channel(&[]), 11, json!({"owner_id": "5"}));
+        guild.roles[1].permissions = MANAGE_THREADS;
+        guild.my_roles.push(Snowflake(MOD));
+        assert!(!can_pin_post(&guild, &thread, &me, 0) && !can_edit_post_tags(&guild, &thread, &me, 0));
+    }
+
+    #[test]
+    fn archived_posts_are_asked_for_with_history_and_not_in_moderator_reports() {
+        let me = me();
+        let (mut guild, _) = forum_post(false, 0, json!({}));
+        assert!(can_read_post_history(&guild, &guild.channels[0].clone(), &me, 0));
+        guild.channels[0].permission_overwrites[0].deny = HISTORY;
+        assert!(!can_read_post_history(&guild, &guild.channels[0].clone(), &me, 0), "no history");
+        guild.channels[0].permission_overwrites[0].deny = Permissions::NONE;
+        guild.channels[0].flags = 1 << 19;
+        assert!(!can_read_post_history(&guild, &guild.channels[0].clone(), &me, 0), "a channel of reports");
     }
 
     #[test]

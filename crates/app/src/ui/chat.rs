@@ -296,6 +296,7 @@ impl App {
             _ => None,
         };
         self.learn_users(std::iter::once(&message.author).chain(&message.mentions).chain(original));
+        self.forum_message(&message);
         if let (Some(guild), Some(member)) = (message.guild_id, &message.member) {
             self.state.borrow_mut().members.add(guild, vec![(message.author.id, member.roles.clone())], &[]);
         }
@@ -307,7 +308,7 @@ impl App {
         let notify = {
             let mut state = self.state.borrow_mut();
             state.bump_last_message(channel, message.id);
-            counted_in_thread = state.count_thread_message(channel, message.kind);
+            counted_in_thread = state.count_thread_message(channel, message.id, message.kind);
             let own = state.me() == Some(message.author.id);
             // No notifications for message requests, or for what `is_dropped` drops (as in Discord).
             let group_dm = state.find_channel(channel).is_some_and(|(_, c)| c.kind == ChannelKind::GroupDm);
@@ -398,6 +399,7 @@ impl App {
     }
 
     pub(super) fn on_message_update(self: &Rc<Self>, edit: MessageEdit) {
+        self.forum_message_edited(&edit);
         let Some(store) = self.timelines.borrow().get(edit.channel_id).map(|t| t.store.clone()) else { return };
         let (id, content) = (edit.id, edit.content.clone());
         // In place: a new object would get a new row, rather than this one
@@ -419,6 +421,7 @@ impl App {
     }
 
     pub(super) fn on_message_delete(self: &Rc<Self>, id: Snowflake, channel_id: Snowflake) {
+        self.forum_message_deleted(id, channel_id);
         let Some(store) = self.timelines.borrow().get(channel_id).map(|t| t.store.clone()) else { return };
         if let Some((position, _)) = timelines::find(&store, id) {
             self.hand_off_focus(&store, position);
@@ -751,11 +754,12 @@ impl App {
         if forum {
             self.state.borrow_mut().unread = None;
             self.content.set_visible_child_name("forum");
-            self.forum_title.set(&title, subtitle.as_deref());
+            self.forum.set_title(&title, subtitle.as_deref());
             self.set_content_title(&title);
             self.rebuild_sidebar();
             self.update_notice_bar();
             self.sync_members();
+            self.open_forum(id);
             return;
         }
         // What is unread now, before opening the channel reads it.

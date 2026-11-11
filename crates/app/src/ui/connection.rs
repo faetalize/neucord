@@ -114,16 +114,27 @@ impl App {
                 }
                 Event::PrivateChannelDelete(id) => self.on_private_channel_delete(id),
                 Event::GuildChannelUpdate { guild_id, channel } => self.on_guild_channel(guild_id, channel),
-                Event::ThreadUpdate { guild_id, thread } => self.on_threads(guild_id, |g| g.set_thread(thread)),
+                Event::ThreadUpdate { guild_id, thread } => {
+                    self.on_threads(guild_id, |g| g.set_thread(thread.clone()));
+                    self.forum_thread_updated(&thread);
+                }
+                Event::ThreadCreate { guild_id, thread, newly_created } => {
+                    self.on_threads(guild_id, |g| g.set_thread(thread.clone()));
+                    self.forum_thread_created(guild_id, &thread, newly_created);
+                }
                 Event::ThreadDelete { guild_id, id } => self.on_thread_delete(guild_id, id),
-                Event::ThreadListSync { guild_id, threads, members } => self.on_threads(guild_id, |g| {
-                    for thread in threads {
-                        g.set_thread(thread);
-                    }
-                    for (thread, member) in members {
-                        g.set_thread_member(thread, Some(member));
-                    }
-                }),
+                Event::ThreadListSync { guild_id, threads, members, complete } => {
+                    self.on_threads(guild_id, |g| {
+                        for thread in threads {
+                            g.set_thread(thread);
+                        }
+                        for (thread, member) in members {
+                            g.set_thread_member(thread, Some(member));
+                        }
+                    });
+                    self.forum_synced(guild_id, complete);
+                }
+                Event::ForumUnreads { threads, .. } => self.forum_unreads_answered(&threads),
                 Event::ThreadMember { guild_id, thread, member } => {
                     self.on_threads(guild_id, |g| g.set_thread_member(thread, member))
                 }
@@ -203,6 +214,7 @@ impl App {
                 }
                 Event::MessageAck { channel_id, message_id } => {
                     self.state.borrow_mut().read.ack(channel_id, message_id);
+                    self.forum_read(channel_id);
                     self.withdraw_notification(channel_id);
                     self.refresh_badges();
                 }
@@ -312,6 +324,7 @@ impl App {
     pub(super) fn on_ready(self: &Rc<Self>, ready: Ready) {
         // A new session: what we hold for each channel may have missed events.
         self.timelines.borrow_mut().held.opened();
+        self.forum_new_session();
         self.state.borrow_mut().reactors.clear();
         let Ready {
             user,
@@ -555,13 +568,17 @@ impl App {
 
     /// A thread was deleted. If it was open, its parent opens instead.
     fn on_thread_delete(self: &Rc<Self>, guild_id: Snowflake, id: Snowflake) {
-        let parent = {
+        let (parent, gone) = {
             let mut state = self.state.borrow_mut();
             let Some(guild) = state.guilds.iter_mut().find(|g| g.id == guild_id) else { return };
-            let parent = guild.thread(id).and_then(|t| t.parent_id);
+            let gone = guild.thread(id).cloned();
+            let parent = gone.as_ref().and_then(|t| t.parent_id);
             guild.threads.retain(|t| t.id != id);
-            parent.filter(|_| state.channel == Some(id))
+            (parent.filter(|_| state.channel == Some(id)), gone)
         };
+        if let Some(gone) = gone {
+            self.forum_thread_deleted(&gone);
+        }
         match parent {
             Some(parent) if self.state.borrow().can_view(parent) => self.select_channel(parent),
             _ => self.on_threads(guild_id, |_| {}),

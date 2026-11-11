@@ -27,6 +27,7 @@ impl App {
             state.read.ack(channel, last);
             last
         };
+        self.forum_read(channel);
         self.withdraw_notification(channel);
         self.queue_ack(channel, newest);
         self.refresh_badges();
