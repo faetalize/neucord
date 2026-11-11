@@ -260,6 +260,7 @@ impl App {
                     }
                     self.apply_settings(patch, replace);
                 }
+                Event::FrecencyUpdate { proto, partial } => self.frecency_updated(&proto, partial),
                 Event::RelationshipAdd { relationship, notify } => {
                     self.learn_users(std::iter::once(&relationship.user));
                     let blocked = relationship.kind == discord::relationships::Kind::Blocked;
@@ -305,7 +306,11 @@ impl App {
                     self.refresh_badges();
                 }
                 Event::Resumed => {
-                    self.state.borrow_mut().sync.disconnected();
+                    {
+                        let mut state = self.state.borrow_mut();
+                        state.sync.disconnected();
+                        state.frecency_sync.disconnected();
+                    }
                     self.timelines.borrow_mut().held.resumed();
                     self.state.borrow_mut().members.resumed();
                     self.send_member_requests();
@@ -320,7 +325,11 @@ impl App {
                     // Replayed messages have already updated the open channel.
                 }
                 Event::Closed { code, reason, resume } => {
-                    self.state.borrow_mut().sync.disconnected();
+                    {
+                        let mut state = self.state.borrow_mut();
+                        state.sync.disconnected();
+                        state.frecency_sync.disconnected();
+                    }
                     self.timelines.borrow_mut().held.closed();
                     {
                         let mut state = self.state.borrow_mut();

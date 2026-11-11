@@ -316,9 +316,11 @@ pub(super) const COMPOSER: Table<()> = &[];
 /// An emoji or sticker of the picker (`expression-picker`, 233503). The
 /// client offers Copy Emoji, Copy Emoji ID and Copy Emoji Image Link, or
 /// Copy Sticker ID and Copy Sticker Image Link, only in Developer Mode, and
-/// a Favorite item first, which needs the favourites the client syncs as
-/// protobuf settings.
+/// a Favorite item first, which Neucord has for emoji (the client's
+/// favourite stickers are not here yet).
 pub(super) const EXPRESSION_PICKER: Table<picker::Target> = &[&[
+    emoji::FAVORITE,
+    emoji::UNFAVORITE,
     emoji::COPY_EMOJI,
     emoji::COPY_EMOJI_ID,
     emoji::COPY_EMOJI_LINK,

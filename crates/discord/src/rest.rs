@@ -41,9 +41,6 @@ pub const SLOWMODE_RATE_LIMITED: u64 = 20016;
 /// Error code for settings Discord took for ones that cannot be.
 pub const INVALID_USER_SETTINGS_DATA: u64 = 50105;
 
-/// The `type` of `PreloadedUserSettings` among the settings protos.
-const PRELOADED_USER_SETTINGS: u8 = 1;
-
 /// One HTTP 429 retry is enough for interactive use; further limits surface as errors.
 const MAX_RATE_LIMIT_RETRIES: u32 = 1;
 
@@ -287,11 +284,12 @@ impl Rest {
         self.request(call!(SET_NOTE, user), Some(json!({ "note": note }))).await
     }
 
-    /// The account's settings as Discord has them, a `PreloadedUserSettings`:
-    /// what the client loads again when Discord refuses what it saved
-    /// (`loadIfNecessary` in 594061).
-    pub async fn settings_proto(&self) -> Result<Vec<u8>, Error> {
-        let answer: Value = self.request(call!(SETTINGS_PROTO, kind = PRELOADED_USER_SETTINGS), None).await?;
+    /// The account's settings of one `type` as Discord has them: 1 is a
+    /// `PreloadedUserSettings`, which the client loads again when Discord
+    /// refuses what it saved, and 2 the `FrecencyUserSettings` it loads the
+    /// first time something needs them (`loadIfNecessary` in 594061).
+    pub async fn settings_proto(&self, kind: u8) -> Result<Vec<u8>, Error> {
+        let answer: Value = self.request(call!(SETTINGS_PROTO, kind), None).await?;
         let settings = answer["settings"].as_str().ok_or_else(|| Error::Protocol("settings without a proto".into()))?;
         Ok(settings_proto::decode(settings))
     }
@@ -299,7 +297,7 @@ impl Rest {
     /// Save edited settings, as `persistChanges` does in 594061: the body is
     /// `settings` and, for an offline edit, `required_data_version`.
     pub async fn save_settings(&self, save: &Save) -> Result<Saved, SaveError> {
-        let call = call!(SAVE_SETTINGS_PROTO, kind = PRELOADED_USER_SETTINGS);
+        let call = call!(SAVE_SETTINGS_PROTO, kind = save.kind);
         let (status, response, retry_after) =
             self.send_full(call, Some(save.body()), Sending::default()).await.map_err(SaveError::Other)?;
         save_answer(status, &response, retry_after)

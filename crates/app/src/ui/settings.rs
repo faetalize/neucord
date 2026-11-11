@@ -464,7 +464,7 @@ impl App {
             Err(SaveError::Invalid) => {
                 // The client asks for the settings again and starts over.
                 self.settings_toast("Discord refused those settings. Loading them again");
-                match rest.settings_proto().await {
+                match rest.settings_proto(1).await {
                     Ok(proto) => {
                         let patch = self.state.borrow_mut().sync.reloaded(proto);
                         if let Some(patch) = patch {

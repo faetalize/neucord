@@ -15,7 +15,7 @@ use discord::{Setting, Snowflake};
 use super::App;
 use super::menus::{self, Entry, Item as MenuItem, Kind};
 use super::picker::{self, Row, Spec, Target};
-use super::state::now_unix;
+use super::state::{now_ms, now_unix};
 use crate::images::Images;
 
 /// Emoji to a row of the picker.
@@ -40,6 +40,30 @@ fn item(target: &Target) -> Option<&Item> {
         Target::Sticker(_) | Target::Gif(_) => None,
     }
 }
+
+/// Favorite and Unfavorite lead the emoji's menu, whether or not Developer
+/// Mode is on (253925).
+pub(super) const FAVORITE: Entry<Target> = Entry::Item(MenuItem {
+    name: "favorite-emoji",
+    label: "_Favorite",
+    shows: |app, target| item(target).is_some_and(|item| !app.is_favorite_emoji(item)),
+    kind: Kind::Action(|app, target| {
+        if let Some(item) = item(target) {
+            app.favorite_emoji(item, true);
+        }
+    }),
+});
+
+pub(super) const UNFAVORITE: Entry<Target> = Entry::Item(MenuItem {
+    name: "unfavorite-emoji",
+    label: "_Unfavorite",
+    shows: |app, target| item(target).is_some_and(|item| app.is_favorite_emoji(item)),
+    kind: Kind::Action(|app, target| {
+        if let Some(item) = item(target) {
+            app.favorite_emoji(item, false);
+        }
+    }),
+});
 
 pub(super) const COPY_EMOJI: Entry<Target> = Entry::Item(MenuItem {
     name: "copy-emoji",
@@ -127,8 +151,11 @@ impl App {
             columns: COLUMNS,
             cell_width: 40,
             rows: Rc::new({
-                let (library, tone) = (library.clone(), tone.clone());
-                move |query| rows(&library, query, tone())
+                let (library, tone, app) = (library.clone(), tone.clone(), Rc::downgrade(self));
+                move |query| {
+                    let shortcuts = app.upgrade().map(|app| app.emoji_shortcuts(&library)).unwrap_or_default();
+                    rows(&library, query, tone(), shortcuts)
+                }
             }),
             cell: Rc::new(cell_button),
             best: Rc::new(move |query| {
@@ -149,6 +176,26 @@ impl App {
             ..Default::default()
         };
         *handle.borrow_mut() = Some(picker::open_with(self, parent, spec, hooks, picked));
+        // The favourites come from Discord the first time, and fill in then.
+        self.load_frecency({
+            let handle = handle.clone();
+            move || {
+                if let Some(handle) = handle.borrow().as_ref() {
+                    handle.reload();
+                }
+            }
+        });
+    }
+
+    /// The emoji the picker lists first: the favourites, then those used
+    /// most, as far as `library` has them.
+    fn emoji_shortcuts(&self, library: &Library) -> Shortcuts {
+        let state = self.state.borrow();
+        let favorites = state.frecency.favorite_emojis.iter().filter_map(|key| library.item(key)).collect();
+        let frequent = discord::frecency::frequently_used(&state.frecency.emoji_usage, now_ms() as u64, |key| {
+            library.item(key).is_some()
+        });
+        Shortcuts { favorites, frequent: frequent.iter().filter_map(|key| library.item(key)).collect() }
     }
 
     /// The skin tone button of the picker: the tone emoji take by default,
@@ -197,9 +244,19 @@ impl App {
 
 /// What the picker lists for `query`: each server's emoji and the Unicode
 /// groups, or what a search finds.
-fn rows(library: &Library, query: &str, tone: Option<Tone>) -> Vec<Row<Item>> {
+/// The emoji the picker lists before the servers and groups.
+#[derive(Default)]
+struct Shortcuts {
+    favorites: Vec<Item>,
+    frequent: Vec<Item>,
+}
+
+fn rows(library: &Library, query: &str, tone: Option<Tone>, shortcuts: Shortcuts) -> Vec<Row<Item>> {
     let mut rows = Vec::new();
     if query.is_empty() {
+        let toned = |items: Vec<Item>| items.into_iter().map(|item| toned(item, tone)).collect();
+        Row::section(&mut rows, COLUMNS, "Favorites".to_owned(), toned(shortcuts.favorites));
+        Row::section(&mut rows, COLUMNS, "Frequently Used".to_owned(), toned(shortcuts.frequent));
         for server in library.picker() {
             Row::section(&mut rows, COLUMNS, server.name, server.emoji.into_iter().map(Item::Custom).collect());
         }
