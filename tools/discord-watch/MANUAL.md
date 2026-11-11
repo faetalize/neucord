@@ -415,6 +415,13 @@ changed for unrelated reasons only needs a note in the issue.
   that holds its width times the screen's scale: the popout's `bannerWidth`
   (watched), the panel's, or the popout's in the redesign (`specOverrides` in
   289287).
+- **What a settings change puts in the save** (`Setting::written`,
+  `SettingsSync::edit`). The save, its timing and the schema are watched
+  (`updateAsync`, `markDirty`, `persistChanges`, the protos). Not watched, as
+  both are unnamed: `a` in 159201 (anchor `Unknown proto field name`) copies
+  the whole message the setting lives in, unknown fields included, and `RK`
+  in 761821 (anchor `mergePartial`) replaces an edited message in the set to
+  save instead of merging into it.
 
 ## Notifications and unread state
 

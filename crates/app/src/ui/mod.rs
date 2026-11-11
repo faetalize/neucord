@@ -33,6 +33,7 @@ mod reactors;
 mod requests;
 mod scheduling;
 mod search;
+mod settings;
 mod sidebar;
 mod slash;
 mod state;
@@ -199,6 +200,8 @@ pub struct App {
     /// When scrolling loads another page.
     scroll_loader: RefCell<discord::history::ScrollLoader>,
     state: RefCell<state::State>,
+    /// The settings window, while it's open.
+    settings_window: RefCell<Option<settings::Window>>,
     /// The member list pane, in the right pane of the chat.
     members: members::Pane,
     /// What the rail and sidebar last drew, so badge refreshes can skip
@@ -386,6 +389,7 @@ impl App {
             rows: RefCell::default(),
             scroll_loader: RefCell::default(),
             state: RefCell::default(),
+            settings_window: RefCell::default(),
             members: members::Pane::new(),
             drawn: RefCell::default(),
             rail_items: RefCell::default(),
@@ -536,7 +540,17 @@ impl App {
                 }
             })
             .build();
-        self.window.add_action_entries([logout, standing, scheduled, find, switch]);
+        let settings = gio::ActionEntry::builder("settings")
+            .activate({
+                let this = Rc::downgrade(self);
+                move |_: &adw::ApplicationWindow, _, _| {
+                    if let Some(this) = this.upgrade() {
+                        this.show_settings();
+                    }
+                }
+            })
+            .build();
+        self.window.add_action_entries([logout, standing, scheduled, find, switch, settings]);
         if let Some(app) = self.window.application() {
             app.set_accels_for_action("win.logout", &["<Control><Shift>l"]);
             app.set_accels_for_action("win.search", &["<Control>f"]);
@@ -670,6 +684,7 @@ impl App {
         row.append(&self.me_label);
         // The app's menu too, as Discord's settings live here.
         let menu = gio::Menu::new();
+        menu.append(Some("_User Settings"), Some("win.settings"));
         menu.append(Some("_Scheduled Messages"), Some("win.scheduled-messages"));
         menu.append(Some("Account _Standing"), Some("win.account-standing"));
         menu.append(Some("_About Neucord"), Some("app.about"));
