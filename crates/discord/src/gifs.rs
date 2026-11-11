@@ -129,47 +129,115 @@ impl Gif {
 
     /// Whether the account has it as a favourite.
     pub fn is_favorite(&self, favorites: &[FavoriteGif]) -> bool {
-        favorites.iter().any(|f| f.url == self.url)
+        is_favorite(favorites, &self.url)
     }
 
-    /// The favourite this result makes (`wg`, 497685), after those held. The
-    /// client stores what the picker's store listed (`GIF_PICKER_QUERY_SUCCESS`,
-    /// 821102): the link under which it is filed (`T`, which leaves the
-    /// provider's links as they are), the source without its scheme and
-    /// then with `https:` put back, and the size. The picture is the GIF file where the source is a
-    /// video and there is one, which is never for `tinywebp` results. The
-    /// client's rewrite of Discord's own hosts and its check for them don't
-    /// apply: the source has no scheme, so it is never one. The format is an image: the one asked
-    /// for is, and what is named `webp`, `avif` or `gif` is too.
-    pub fn favorite(&self, held: &[FavoriteGif]) -> FavoriteGif {
-        let src = without_scheme(&self.src);
-        let gif_src = self.gif_src.as_deref().map(without_scheme).unwrap_or_default();
-        let chosen =
-            if has_extension(&src, &["mp4", "webm"]) && !gif_src.is_empty() && gif_src != src { gif_src } else { src };
-        let src = if chosen.starts_with("//") { format!("https:{chosen}") } else { chosen };
-        FavoriteGif {
+    /// What its star hands `wg` (497685). The client stores what the
+    /// picker's store listed (`GIF_PICKER_QUERY_SUCCESS`, 821102): the source
+    /// without its scheme (`g`), which then is never one of Discord's own
+    /// links, so the rewrite of those doesn't apply. The format is an image:
+    /// the one asked for is, and what is named `webp`, `avif` or `gif` is too.
+    pub fn starred(&self) -> Starred {
+        Starred {
             url: self.url.clone(),
+            src: without_scheme(&self.src),
+            gif_src: self.gif_src.as_deref().map(without_scheme),
+            width: self.width,
+            height: self.height,
             format: GifFormat::Image,
+        }
+    }
+}
+
+/// What a star on a GIF hands `wg` (497685): the picker's results, and a GIF
+/// of a message (`b` in 343552 for an embed's, `cM` in 679636 for an
+/// attachment's).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Starred {
+    /// The link it is filed under, less the signature of an attachment's.
+    pub url: String,
+    pub src: String,
+    /// The still-animated file, where one is offered for a video.
+    pub gif_src: Option<String>,
+    pub width: u32,
+    pub height: u32,
+    pub format: GifFormat,
+}
+
+impl Starred {
+    /// The favourite this makes, after those held (`wg`). Where `src` is a
+    /// video, with a different `gif_src` to show instead, that is the
+    /// picture; so it is where `src` is one of Discord's own links and
+    /// there is any. A Discord link that is a WebP, AVIF or GIF is
+    /// asked for as an animated WebP, and what is stored as one of those is
+    /// an image, whatever the star said.
+    pub fn favorite(&self, held: &[FavoriteGif]) -> FavoriteGif {
+        let video = has_extension(&self.src, &["mp4", "webm"]);
+        let discord = cdn::is_media(&self.src);
+        let chosen = match &self.gif_src {
+            Some(gif_src) if (video && !gif_src.is_empty() && *gif_src != self.src) || discord => gif_src,
+            _ => &self.src,
+        };
+        let rewritten = if discord && has_extension(chosen, &["webp", "avif", "gif"]) {
+            cdn::stored_animated(chosen)
+        } else {
+            chosen.clone()
+        };
+        let src = if rewritten.starts_with("//") { format!("https:{rewritten}") } else { rewritten };
+        let format = if has_extension(&src, &["webp", "avif", "gif"]) { GifFormat::Image } else { self.format };
+        FavoriteGif {
+            url: cdn::without_signature(&self.url),
+            format,
             src,
             width: self.width,
             height: self.height,
             order: held.iter().map(|f| f.order).max().unwrap_or(0) + 1,
         }
     }
+
+    /// Whether the account has it as a favourite.
+    pub fn is_favorite(&self, favorites: &[FavoriteGif]) -> bool {
+        is_favorite(favorites, &self.url)
+    }
+
+    /// The star on an attachment (`cM`, 679636): one the proxy serves as a
+    /// GIF, or as a WebP or AVIF flagged animated, and that has a size. The
+    /// proxied link is the picture, and the attachment's own the link.
+    pub fn attachment(attachment: &crate::Attachment) -> Option<Starred> {
+        let (width, height) = attachment.width.zip(attachment.height)?;
+        let proxy = attachment.proxy_url.as_deref()?;
+        let animated = attachment.flags & crate::embed::IS_ANIMATED != 0;
+        let shown = names_file(proxy, &["gif"]) || (animated && names_file(proxy, &["webp", "avif"]));
+        shown.then(|| Starred {
+            url: attachment.url.clone(),
+            src: proxy.to_owned(),
+            gif_src: None,
+            width,
+            height,
+            format: GifFormat::Image,
+        })
+    }
+}
+
+/// Whether `favorites` holds the GIF of `url` (`km` of `T`).
+pub fn is_favorite(favorites: &[FavoriteGif], url: &str) -> bool {
+    let key = cdn::without_signature(url);
+    favorites.iter().any(|f| f.url == key)
 }
 
 /// Why a GIF could not be favourited.
 #[derive(Debug, PartialEq, Eq)]
 pub struct TooBig;
 
-/// The favourites after `gif` is added, or why not (`wg`): the settings
+/// The favourites after `star` is added, or why not (`wg`): the settings
 /// message can only be so big.
-pub fn favorited(gif: &Gif, held: &[FavoriteGif], hide_tooltip: bool) -> Result<(Vec<FavoriteGif>, bool), TooBig> {
+pub fn favorited(star: &Starred, held: &[FavoriteGif], hide_tooltip: bool) -> Result<(Vec<FavoriteGif>, bool), TooBig> {
     // One filed under the same link is replaced where it was.
     let mut gifs = held.to_vec();
-    match gifs.iter_mut().find(|f| f.url == gif.url) {
-        Some(same) => *same = gif.favorite(held),
-        None => gifs.push(gif.favorite(held)),
+    let favorite = star.favorite(held);
+    match gifs.iter_mut().find(|f| f.url == favorite.url) {
+        Some(same) => *same = favorite,
+        None => gifs.push(favorite),
     }
     if favorite_gifs_size(&gifs, hide_tooltip) > MAX_FAVORITE_GIFS_BYTES {
         return Err(TooBig);
@@ -178,9 +246,11 @@ pub fn favorited(gif: &Gif, held: &[FavoriteGif], hide_tooltip: bool) -> Result<
     Ok((gifs.clone(), hide_tooltip || gifs.len() > 2))
 }
 
-/// The favourites after `url` is taken out (`Tr`).
+/// The favourites after the one of `url` is taken out (`Tr`): filed under
+/// the link as it is, or else without its signature.
 pub fn unfavorited(held: &[FavoriteGif], url: &str) -> Vec<FavoriteGif> {
-    held.iter().filter(|f| f.url != url).cloned().collect()
+    let key = if held.iter().any(|f| f.url == url) { url.to_owned() } else { cdn::without_signature(url) };
+    held.iter().filter(|f| f.url != key).cloned().collect()
 }
 
 /// The favourites the Favorites page lists for `query`, newest first (`IE`,
@@ -207,12 +277,21 @@ fn without_scheme(src: &str) -> String {
 /// Whether `url` has one of `extensions` before a `?` or its end, wherever
 /// (`/\.(a|b)(\?|$)/i`).
 fn has_extension(url: &str, extensions: &[&str]) -> bool {
+    names(url, extensions, &['?'])
+}
+
+/// The same with a `#` ending it too (`/\.a($|\?|#)/i`, 619517).
+fn names_file(url: &str, extensions: &[&str]) -> bool {
+    names(url, extensions, &['?', '#'])
+}
+
+fn names(url: &str, extensions: &[&str], ends: &[char]) -> bool {
     let lower = url.to_ascii_lowercase();
     extensions.iter().any(|e| {
         let dotted = format!(".{e}");
         lower
             .match_indices(&dotted)
-            .any(|(at, _)| matches!(lower[at + dotted.len()..].chars().next(), None | Some('?')))
+            .any(|(at, _)| lower[at + dotted.len()..].chars().next().is_none_or(|next| ends.contains(&next)))
     })
 }
 
@@ -659,8 +738,9 @@ mod tests {
 
     #[test]
     fn a_result_is_favorited_as_the_client_stores_it() {
-        let favorite =
-            result("//media.example/a/1.webp", "//media.example/a/1.gif").favorite(&[held("a", 4), held("b", 2)]);
+        let favorite = result("//media.example/a/1.webp", "//media.example/a/1.gif")
+            .starred()
+            .favorite(&[held("a", 4), held("b", 2)]);
         assert_eq!(
             favorite,
             FavoriteGif {
@@ -673,36 +753,138 @@ mod tests {
             },
             "the link it is filed under, the source with its scheme back, the size, after the newest"
         );
-        assert_eq!(result("//m.example/1.webp", "").favorite(&[]).order, 1, "the first is 1");
+        assert_eq!(result("//m.example/1.webp", "").starred().favorite(&[]).order, 1, "the first is 1");
         // A video source gives way to the GIF file, if there is one that differs.
-        assert_eq!(result("//m.example/1.mp4", "//m.example/1.gif").favorite(&[]).src, "https://m.example/1.gif");
-        assert_eq!(result("//m.example/1.mp4?x=1", "//m.example/1.gif").favorite(&[]).src, "https://m.example/1.gif");
-        assert_eq!(result("//m.example/1.mp4", "//m.example/1.mp4").favorite(&[]).src, "https://m.example/1.mp4");
-        assert_eq!(result("//m.example/1.mp4", "").favorite(&[]).src, "https://m.example/1.mp4");
         assert_eq!(
-            result("//m.example/1.mp4#x.gif", "//m.example/g.gif").favorite(&[]).src,
+            result("//m.example/1.mp4", "//m.example/1.gif").starred().favorite(&[]).src,
+            "https://m.example/1.gif"
+        );
+        assert_eq!(
+            result("//m.example/1.mp4?x=1", "//m.example/1.gif").starred().favorite(&[]).src,
+            "https://m.example/1.gif"
+        );
+        assert_eq!(
+            result("//m.example/1.mp4", "//m.example/1.mp4").starred().favorite(&[]).src,
+            "https://m.example/1.mp4"
+        );
+        assert_eq!(result("//m.example/1.mp4", "").starred().favorite(&[]).src, "https://m.example/1.mp4");
+        assert_eq!(
+            result("//m.example/1.mp4#x.gif", "//m.example/g.gif").starred().favorite(&[]).src,
             "https://m.example/1.mp4#x.gif"
+        );
+    }
+
+    fn attachment(proxy: Option<&str>, flags: u64, size: bool) -> crate::Attachment {
+        let mut value = json!({"id": "1", "filename": "a.gif", "url": "https://cdn.discordapp.com/attachments/1/2/a.gif?ex=65a0&is=6590&hm=ab&", "flags": flags});
+        if let Some(proxy) = proxy {
+            value["proxy_url"] = proxy.into();
+        }
+        if size {
+            value["width"] = 320.into();
+            value["height"] = 240.into();
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn an_attachment_has_a_star_as_a_gif_or_a_flagged_animation_with_a_size() {
+        let media = "https://media.discordapp.net/attachments/1/2/a";
+        let star = |proxy: Option<&str>, flags, size| Starred::attachment(&attachment(proxy, flags, size));
+        assert!(star(Some(&format!("{media}.gif?ex=65a0&is=6590&hm=ab&")), 0, true).is_some());
+        assert!(star(Some(&format!("{media}.GIF#x")), 0, true).is_some(), "`#` ends it too, whatever the case");
+        assert!(star(Some(&format!("{media}.webp")), 0, true).is_none(), "a WebP only when flagged");
+        assert!(star(Some(&format!("{media}.webp")), 1 << 5, true).is_some());
+        assert!(star(Some(&format!("{media}.avif?x=1")), 1 << 5, true).is_some());
+        assert!(star(Some(&format!("{media}.png")), 1 << 5, true).is_none());
+        assert!(star(Some(&format!("{media}.gifx")), 0, true).is_none());
+        assert!(star(None, 0, true).is_none(), "no proxied link");
+        assert!(star(Some(&format!("{media}.gif")), 0, false).is_none(), "no size");
+    }
+
+    #[test]
+    fn an_attachment_is_stored_by_its_proxied_link_asked_animated_under_its_unsigned_link() {
+        let proxied = "https://media.discordapp.net/attachments/1/2/a.gif?ex=65a0&is=6590&hm=ab&";
+        let star = Starred::attachment(&attachment(Some(proxied), 0, true)).unwrap();
+        let favorite = star.favorite(&[held("a", 7)]);
+        assert_eq!(
+            favorite,
+            FavoriteGif {
+                url: "https://cdn.discordapp.com/attachments/1/2/a.gif".into(),
+                format: GifFormat::Image,
+                src: format!("{}&format=webp&animated=true", proxied.trim_end_matches('&')),
+                width: 320,
+                height: 240,
+                order: 8,
+            },
+            "the signature is no part of the key, but stays in the source"
+        );
+        // Found and taken back out by the link as the message has it, or by the key.
+        assert!(star.is_favorite(std::slice::from_ref(&favorite)));
+        assert!(is_favorite(std::slice::from_ref(&favorite), &star.url));
+        assert!(unfavorited(std::slice::from_ref(&favorite), &star.url).is_empty());
+        // One filed before the signature was dropped goes by the link it was filed under.
+        let old = FavoriteGif { url: star.url.clone(), ..favorite };
+        assert!(unfavorited(&[old], &star.url).is_empty());
+    }
+
+    #[test]
+    fn what_the_star_of_an_embed_hands_over_is_stored_as_wg_does() {
+        let star = |src: &str, gif_src: Option<&str>, format| Starred {
+            url: "https://klipy.test/gif/1".into(),
+            src: src.into(),
+            gif_src: gif_src.map(Into::into),
+            width: 4,
+            height: 3,
+            format,
+        };
+        let proxy = "https://images-ext-1.discordapp.net/external/k/https/klipy.test/1";
+        // A proxied video gives way to the thumbnail, which is a picture and so an image.
+        let klipy = star(&format!("{proxy}.mp4"), Some(&format!("{proxy}.webp")), GifFormat::Video).favorite(&[]);
+        assert_eq!(
+            (klipy.src.as_str(), klipy.format),
+            (format!("{proxy}.webp?animated=true").as_str(), GifFormat::Image)
+        );
+        // A GIF of the proxy is asked for as a WebP; so is an AVIF.
+        assert_eq!(
+            star(&format!("{proxy}.gif"), None, GifFormat::Image).favorite(&[]).src,
+            format!("{proxy}.gif?format=webp&animated=true")
+        );
+        assert_eq!(
+            star(&format!("{proxy}.avif"), None, GifFormat::Image).favorite(&[]).src,
+            format!("{proxy}.avif?format=webp&animated=true")
+        );
+        // Another provider's GIF link is the video, as a video.
+        let tenor = star(&format!("{proxy}.mp4"), None, GifFormat::Video).favorite(&[]);
+        assert_eq!((tenor.src.as_str(), tenor.format), (format!("{proxy}.mp4").as_str(), GifFormat::Video));
+        // A link off Discord's hosts is left alone, and a video there only gives way to a different GIF.
+        assert_eq!(
+            star("https://x.test/1.mp4", Some("https://x.test/1.gif"), GifFormat::Video).favorite(&[]).src,
+            "https://x.test/1.gif"
+        );
+        assert_eq!(
+            star("https://x.test/1.gif", Some("https://x.test/2.gif"), GifFormat::Image).favorite(&[]).src,
+            "https://x.test/1.gif"
         );
     }
 
     #[test]
     fn favouriting_adds_in_place_hides_the_hint_at_three_and_stops_at_the_size() {
         let gif = result("//m.example/1.webp", "");
-        let (one, hide) = favorited(&gif, &[], false).unwrap();
+        let (one, hide) = favorited(&gif.starred(), &[], false).unwrap();
         assert_eq!((one.len(), hide), (1, false));
-        let (two, _) = favorited(&gif, &[held("a", 1), held("b", 2)], false).unwrap();
+        let (two, _) = favorited(&gif.starred(), &[held("a", 1), held("b", 2)], false).unwrap();
         assert!(
-            two.len() == 3 && favorited(&gif, &[held("a", 1), held("b", 2)], false).unwrap().1,
+            two.len() == 3 && favorited(&gif.starred(), &[held("a", 1), held("b", 2)], false).unwrap().1,
             "the third hides it"
         );
         // The same link again replaces itself.
-        let (same, _) = favorited(&gif, &one, false).unwrap();
+        let (same, _) = favorited(&gif.starred(), &one, false).unwrap();
         assert_eq!(same.len(), 1);
         assert_eq!(same[0].order, 2);
         // Past what the client allows nothing more is added.
         let big: Vec<FavoriteGif> =
             (0..3000).map(|n| FavoriteGif { src: "x".repeat(300), ..held(&format!("{n}"), n) }).collect();
-        assert_eq!(favorited(&gif, &big, false), Err(TooBig));
+        assert_eq!(favorited(&gif.starred(), &big, false), Err(TooBig));
         assert_eq!(unfavorited(&two, &two[0].url).len(), 2);
     }
 

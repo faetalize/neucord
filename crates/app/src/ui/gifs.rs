@@ -339,7 +339,7 @@ impl Session {
     /// account's, so it is drawn again when that changes: the Favorites page
     /// lists again, which drops a GIF no longer a favourite.
     fn star(self: &Rc<Self>, app: &Rc<App>, found: &Gif) -> gtk::Button {
-        let favorite = app.is_favorite_gif(found);
+        let favorite = app.is_favorite_gif(&found.starred());
         let star = gtk::Button::builder()
             .icon_name(if favorite { "starred-symbolic" } else { "non-starred-symbolic" })
             .tooltip_text(if favorite { "Remove from Favorites" } else { "Add to Favorites" })
@@ -353,8 +353,9 @@ impl Session {
             let (this, found) = (self.clone(), found.clone());
             move |_| {
                 let Some(app) = this.app.upgrade() else { return };
-                let favorite = app.is_favorite_gif(&found);
-                app.favorite_gif(&found, !favorite);
+                let star = found.starred();
+                let favorite = app.is_favorite_gif(&star);
+                app.favorite_gif(&star, !favorite);
                 this.reload();
             }
         });

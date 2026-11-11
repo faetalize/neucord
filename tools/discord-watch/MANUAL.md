@@ -466,6 +466,16 @@ changed for unrelated reasons only needs a note in the issue.
     newest, 762880 bytes at most, the hint hidden past two), which is what
     `GIFPickerViewStore` lists; 649529 (anchor `favoritesTile`) the Favorites
     tile and its search, 996566 the order, 439401 the star.
+  - The star on a message's GIF (`ui/favorites.rs`, `discord::gifs::Starred`):
+    679636 (anchor `gifFavoriteButton`) gives it to an attachment with a size
+    that the proxy serves as `.gif`, or `.webp` or `.avif` flagged
+    animated; 343552 (anchor `gifSrc`) to an embed's image or video, where
+    Klipy's thumbnail is `gifSrc`, a GIF link is filed under its page and a
+    video makes it a video; 265705 (anchor `srcIsAnimated`) to each animated
+    image of a gallery, and to the one image of an embed only when it animates.
+    `wg` and `T` (497685) file an attachment under its link without `ex`, `is`
+    and `hm`, and store a Discord link of `.webp`, `.avif` or `.gif` as an
+    animated WebP.
   - 761304 (anchor `quickreact-`) offers up to four quick reactions from 822123
     (`getEmojiInPriorityOrder`), without Nitro-locked emoji and five faces,
     sent with the location "Message Context Menu".
@@ -489,6 +499,16 @@ changed for unrelated reasons only needs a note in the issue.
   `link_status`) says a parent is linked, 116774 and
   953298 the region's teen defaults and age gate (anchors
   `MESSAGE_REQUEST_RESTRICTIONS`, `DM_PRIVACY_SETTINGS`).
+  A server's dialog (`ui/server_privacy.rs`, 632038, anchor
+  `SERVER_PRIVACY_MODAL`) has the same two rows and two more: Share my
+  activity and Activity joining, a server's presence in
+  `activity_restricted_guild_ids` and `activity_joining_restricted_guild_ids`.
+  Unset, the default sharing is large servers where the region's teen
+  defaults say so (253932, anchor `isEligible`), else none. After the Profile
+  Privacy row changes, 365258 (anchor `large_only`) says whether to ask
+  whether sharing follows it (`gS`, with `A` and the rank `E`), for which servers
+  (`p`: 200 members is large, an unknown count counts when restricting)
+  and what yes writes (`gF`); 413201 is the dialog.
 - **When we send our presence** (`presence.rs`). `emitPresenceUpdate`,
   `presenceUpdate` and `SelfPresenceStore` (what the presence is) are
   watched. Not watched: the reporter around `emitPresenceUpdate` in 225123
