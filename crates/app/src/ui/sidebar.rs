@@ -115,7 +115,7 @@ impl App {
 
     /// A thread's row, under its parent's, joined to it by a line; `last`
     /// if no thread of the same parent follows.
-    fn append_thread(&self, state: &super::state::State, thread: &Channel, last: bool) {
+    fn append_thread(self: &Rc<Self>, state: &super::state::State, thread: &Channel, last: bool) {
         let row = gtk::Box::builder().spacing(6).build();
         row.append(&ThreadLine::new(last));
         row.append(
@@ -129,6 +129,7 @@ impl App {
         if let Some(badge) = badge(state.read.mentions(thread.id)) {
             row.append(&badge);
         }
+        self.thread_menu_on(&row, thread.id);
         let row = self.append_row(&row, Some(Target::Channel(thread.id)), state.channel == Some(thread.id));
         if super::state::State::thread_muted(thread) {
             row.add_css_class("muted");

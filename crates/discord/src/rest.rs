@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use soup::prelude::*;
@@ -18,6 +19,7 @@ use crate::model::Emoji;
 use crate::reactions::{Location, Refusal};
 use crate::scheduled::{self, Scheduled};
 use crate::stickers::Pack;
+use crate::threads::{self, ArchivedPage};
 use crate::uploads::Sent;
 use crate::{Channel, Error, Message, Snowflake, identity};
 
@@ -424,6 +426,39 @@ impl Rest {
         Ok(())
     }
 
+    /// Join `thread` (`joinThread` in 7909): no body, and the `location` the
+    /// client names where the join came from. Discord answers with who is in
+    /// it now, which comes as events too.
+    pub async fn join_thread(&self, thread: Snowflake, location: &str) -> Result<(), Error> {
+        let _: Value = self.request(join_thread_call(thread, location), None).await?;
+        Ok(())
+    }
+
+    /// Leave `thread` (`leaveThread` in 7909), the same way.
+    pub async fn leave_thread(&self, thread: Snowflake, location: &str) -> Result<(), Error> {
+        let _: Value = self.request(leave_thread_call(thread, location), None).await?;
+        Ok(())
+    }
+
+    /// The page of `channel`'s archived threads that starts at `offset`
+    /// (`loadArchivedThreads` in 7909). Unlike the client, a failure isn't
+    /// tried again (its `retries: 2`): fewer requests, never more.
+    pub async fn archived_threads(&self, channel: Snowflake, offset: u32) -> Result<ArchivedPage, Error> {
+        let answer: Value = self.request(archived_threads_call(channel, offset), None).await?;
+        ArchivedPage::from_value(&answer).ok_or_else(|| Error::Protocol("archived threads without threads".into()))
+    }
+
+    /// A thread we don't know, by id (`loadThread` in 353202), with the
+    /// server it is in. The client asks only for what it has no record of.
+    pub async fn thread(&self, id: Snowflake) -> Result<(Snowflake, Channel), Error> {
+        let answer: Value = self.request(call!(GET_CHANNEL, channel = id), None).await?;
+        let thread = Channel::deserialize(&answer)?;
+        match answer["guild_id"].as_str().and_then(|g| g.parse().ok()) {
+            Some(guild) if thread.kind.is_thread() => Ok((Snowflake(guild), thread)),
+            _ => Err(Error::Protocol("not a thread in a server".into())),
+        }
+    }
+
     /// Cast our vote on a poll: `answers`, or none to take it back. It
     /// replaces any vote we had, and the ids go out as strings
     /// (`handlePollSubmitVote` in 180662, which sends `answer_ids` through
@@ -736,6 +771,27 @@ fn remove_reaction_call(
     call!(REMOVE_REACTION, channel, message, emoji, user).query(&format!("location={location}&burst=false"))
 }
 
+/// The request that joins a thread: `location` is its only query field.
+fn join_thread_call(thread: Snowflake, location: &str) -> Call {
+    let location = glib::uri_escape_string(location, None::<&str>, false);
+    call!(JOIN_THREAD, channel = thread).query(&format!("location={location}"))
+}
+
+fn leave_thread_call(thread: Snowflake, location: &str) -> Call {
+    let location = glib::uri_escape_string(location, None::<&str>, false);
+    call!(LEAVE_THREAD, channel = thread).query(&format!("location={location}"))
+}
+
+/// The request for a page of archived threads, its query in the order
+/// `loadArchivedThreads` writes it: always the latest activity first, with no
+/// tags (which forums filter by), whose `tag_setting` is sent all the same.
+fn archived_threads_call(channel: Snowflake, offset: u32) -> Call {
+    let limit = threads::PAGE;
+    call!(SEARCH_THREADS, channel).query(&format!(
+        "archived=true&sort_by=last_message_time&sort_order=desc&limit={limit}&tag_setting=match_some&offset={offset}"
+    ))
+}
+
 /// The request for who reacted: `limit`, `after` when paging, and `type`,
 /// in the order `ao` writes them.
 fn reactors_call(channel: Snowflake, message: Snowflake, emoji: &Emoji, limit: u32, after: Option<Snowflake>) -> Call {
@@ -889,9 +945,11 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        Captcha, Page, Reply, ReplyPing, add_reaction_call, base_headers, edit_body, edit_scheduled_body, is_md5,
-        message_body, poll_body, rate_limit_wait, reactors_call, remove_reaction_call, schedule_body, vote_body,
+        Captcha, Page, Reply, ReplyPing, add_reaction_call, archived_threads_call, base_headers, edit_body,
+        edit_scheduled_body, is_md5, join_thread_call, leave_thread_call, message_body, poll_body, rate_limit_wait,
+        reactors_call, remove_reaction_call, schedule_body, vote_body,
     };
+    use crate::endpoints::call;
     use crate::model::Emoji;
     use crate::reactions::Location;
     use crate::uploads::Sent;
@@ -979,6 +1037,26 @@ mod tests {
         assert_eq!(Page::Before(id).query(24), "before=7&limit=24");
         assert_eq!(Page::After(id).query(24), "after=7&limit=24");
         assert_eq!(Page::Around(id).query(30), "limit=30&around=7");
+    }
+
+    #[test]
+    fn thread_requests_read_like_the_clients() {
+        let thread = Snowflake(7);
+        let (join, leave) = (join_thread_call(thread, "Context Menu"), leave_thread_call(thread, "Context Menu"));
+        assert_eq!((join.method(), join.path()), ("POST", "/channels/7/thread-members/@me?location=Context%20Menu"));
+        assert_eq!(
+            (leave.method(), leave.path()),
+            ("DELETE", "/channels/7/thread-members/@me?location=Context%20Menu")
+        );
+        // `loadArchivedThreads` in 7909: no `tag`, since none is chosen.
+        let page = archived_threads_call(thread, 25);
+        assert_eq!(page.method(), "GET");
+        assert_eq!(
+            page.path(),
+            "/channels/7/threads/search?archived=true&sort_by=last_message_time&sort_order=desc&limit=25\
+             &tag_setting=match_some&offset=25"
+        );
+        assert_eq!(call!(GET_CHANNEL, channel = thread).path(), "/channels/7");
     }
 
     #[test]

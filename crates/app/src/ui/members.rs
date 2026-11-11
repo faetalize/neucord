@@ -212,6 +212,8 @@ impl App {
     /// Where we are changed: what the pane shows and what we are
     /// subscribed to follow.
     pub(super) fn sync_members(self: &Rc<Self>) {
+        // Wherever we are changed, the header's threads button may change.
+        self.sync_threads_button();
         let target = self.state.borrow().member_target();
         let wanted = target.is_some() && {
             // Over the chat, the pane stays as it was; docked, as it was left.

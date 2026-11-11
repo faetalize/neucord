@@ -241,6 +241,9 @@ pub struct Channel {
     /// milliseconds since 1970.
     #[serde(default, rename = "last_non_message_activity_timestamp", deserialize_with = "iso_ms")]
     pub last_activity: Option<i64>,
+    /// How many messages a thread holds, as of when Discord sent it.
+    #[serde(default)]
+    pub message_count: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -847,6 +850,26 @@ pub struct Message {
     /// A Nitro trial offered to a friend, which can't be edited.
     #[serde(default)]
     pub referral_trial_offer_id: Option<Snowflake>,
+    /// The thread this message started, which history sends along.
+    #[serde(default, deserialize_with = "started_thread")]
+    pub thread: Option<StartedThread>,
+}
+
+/// A thread a message started, as the message carries it.
+#[derive(Clone, Debug)]
+pub struct StartedThread(pub std::sync::Arc<Channel>);
+
+/// Two are equal when they are the same object: a message only changes
+/// when Discord sends it again.
+impl PartialEq for StartedThread {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+fn started_thread<'de, D: Deserializer<'de>>(d: D) -> Result<Option<StartedThread>, D::Error> {
+    let thread = Option::<Channel>::deserialize(d)?;
+    Ok(thread.filter(|t| t.kind.is_thread()).map(|t| StartedThread(std::sync::Arc::new(t))))
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -885,7 +908,8 @@ impl Message {
         self.flags & Self::IS_COMPONENTS_V2 != 0
     }
 
-    /// A thread has been started from it.
+    /// A thread has been started from it, with the message's id: the client
+    /// looks it up as `castMessageIdAsChannelId`.
     pub fn has_thread(&self) -> bool {
         self.flags & Self::HAS_THREAD != 0
     }
@@ -935,6 +959,7 @@ impl Message {
     }
 
     const FORWARD: u8 = 1;
+    const THREAD_CREATED: u8 = 18;
     const THREAD_STARTER: u8 = 21;
     const AUTO_MODERATION_ACTION: u8 = 24;
     const MEDIA_MENTION: u8 = 68;
@@ -1048,6 +1073,15 @@ impl Message {
             Referenced::Message(original) if self.kind == Self::THREAD_STARTER => Some(original),
             _ => None,
         }
+    }
+
+    /// The thread a "started a thread" message (`THREAD_CREATED`) is about:
+    /// the channel it references.
+    pub fn created_thread(&self) -> Option<Snowflake> {
+        if self.kind != Self::THREAD_CREATED {
+            return None;
+        }
+        self.message_reference.as_ref()?.channel_id
     }
 
     /// The id of the message this one replies to.
@@ -1391,6 +1425,30 @@ mod tests {
         let mut kept = nested;
         kept.update(none);
         assert_eq!(kept.rules_channel_id, None, "GUILD_UPDATE clears it too");
+    }
+
+    #[test]
+    fn a_message_knows_its_thread() {
+        let message = |extra: &str| -> Message {
+            serde_json::from_str(&format!(
+                r#"{{"id":"20","channel_id":"9","author":{{"id":"6","username":"bob"}},"content":"hi",
+                    "timestamp":"2026-10-26T12:00:00.000000+00:00"{extra}}}"#
+            ))
+            .unwrap()
+        };
+        let started = message(
+            r#","flags":32,"thread":{"id":"20","type":11,"parent_id":"9","name":"plans","message_count":4,
+                "thread_metadata":{"archived":true,"auto_archive_duration":60}}"#,
+        );
+        assert!(started.has_thread());
+        let thread = started.thread.as_ref().expect("the thread comes along");
+        assert_eq!((thread.0.id, thread.0.message_count, thread.0.is_archived()), (Snowflake(20), Some(4), true));
+        assert!(!message("").has_thread() && message("").thread.is_none());
+        let not_a_thread = message(r#","thread":{"id":"20","type":0}"#);
+        assert!(not_a_thread.thread.is_none(), "only a thread counts");
+        let created = message(r#","type":18,"message_reference":{"channel_id":"20"}"#);
+        assert_eq!(created.created_thread(), Some(Snowflake(20)));
+        assert_eq!(message(r#","message_reference":{"channel_id":"20"}"#).created_thread(), None);
     }
 
     #[test]

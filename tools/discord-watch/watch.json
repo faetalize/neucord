@@ -62,6 +62,8 @@
       "DEFAULT",
       "REPLY",
       "CHANNEL_PINNED_MESSAGE",
+      "THREAD_CREATED",
+      "THREAD_STARTER_MESSAGE",
       "AUTO_MODERATION_ACTION",
       "MEDIA_MENTION_MESSAGE"
     ],
@@ -181,7 +183,11 @@
     "isSessionEstablished",
     "isSystemDM",
     "isSystemUser",
+    "joinThread",
+    "leaveThread",
+    "loadArchivedThreads",
     "loadComplete",
+    "loadThread",
     "parseRangeHeader",
     "queryStickers",
     "removeReaction",
@@ -208,6 +214,7 @@
   "stores": [
     "ActiveJoinedThreadsStore",
     "ActiveThreadsStore",
+    "ArchivedThreadsStore",
     "ChannelMemberStore",
     "EmojiStore",
     "GIFPickerViewStore",
@@ -230,6 +237,7 @@
     "SlowmodeStore",
     "StickerMessagePreviewStore",
     "StickersPackStore",
+    "ThreadMessageStore",
     "TypingStore",
     "UploadAttachmentStore"
   ],

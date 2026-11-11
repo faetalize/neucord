@@ -11,7 +11,7 @@ use discord::notifications;
 use discord::read_state::starts_unread;
 use discord::rest::Page;
 use discord::system::{self, Kind};
-use discord::{ChannelKind, Message, MessageEdit, Referenced, Snowflake, User};
+use discord::{Channel, ChannelKind, Message, MessageEdit, Referenced, Snowflake, User};
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib, graphene};
 
@@ -236,6 +236,17 @@ impl App {
         page.add_controller(self.drop_target());
         let header = self.header.header_bar(&[self.sidebar_toggle().upcast_ref()]);
         header.pack_end(&self.members_toggle());
+        header.pack_end(&self.threads_button);
+        self.threads_button.connect_clicked({
+            let this = Rc::downgrade(self);
+            move |_| {
+                let Some(this) = this.upgrade() else { return };
+                let channel = this.state.borrow().channel;
+                if let Some(channel) = channel {
+                    this.open_threads(channel);
+                }
+            }
+        });
         page.add_top_bar(&header);
         page.add_top_bar(&self.present_bar);
         page.add_top_bar(&self.unread_bar);
@@ -291,9 +302,11 @@ impl App {
         self.state.borrow_mut().typing.message(channel, message.author.id, false);
         self.refresh_typing();
         let viewing = self.state.borrow().channel == Some(channel) && self.chat_visible();
+        let counted_in_thread;
         let notify = {
             let mut state = self.state.borrow_mut();
             state.bump_last_message(channel, message.id);
+            counted_in_thread = state.count_thread_message(channel, message.kind);
             let own = state.me() == Some(message.author.id);
             // No notifications for message requests, or for what `is_dropped` drops (as in Discord).
             let group_dm = state.find_channel(channel).is_some_and(|(_, c)| c.kind == ChannelKind::GroupDm);
@@ -337,6 +350,10 @@ impl App {
             self.send_notification(&message, &place);
         }
         self.refresh_badges();
+        if counted_in_thread {
+            // The thread's box under the message that started it counts one more.
+            self.refresh_message(channel);
+        }
 
         // Keep every cached timeline current, not only the open one. A
         // detached one would get a gap; scrolling down fetches in order.
@@ -869,6 +886,23 @@ impl App {
             let state = self.state.borrow();
             messages.first().and_then(|m| state.find_channel(m.channel_id)).and_then(|(g, _)| g.map(|g| g.id))
         };
+        // The threads the messages started, which the client keeps for those it
+        // doesn't know yet (`LOAD_MESSAGES_SUCCESS` in 734057).
+        if let Some(guild) = guild {
+            let started: Vec<Channel> = {
+                let state = self.state.borrow();
+                let known = |id| state.find_channel(id).is_some();
+                messages
+                    .iter()
+                    .filter_map(|m| m.thread.as_ref())
+                    .filter(|t| !known(t.0.id))
+                    .map(|t| (*t.0).clone())
+                    .collect()
+            };
+            if !started.is_empty() {
+                self.on_threads(guild, |g| started.into_iter().for_each(|t| g.set_thread(t)));
+            }
+        }
         if let Some(guild) = guild {
             self.state.borrow_mut().members.page_loaded(guild, messages);
             self.send_member_requests();
@@ -1687,6 +1721,16 @@ impl App {
                 parts.reply.replace(Some(preview));
             }
         }
+        // Rebuilt every time, since the thread changes without the message.
+        if let Some(old) = parts.thread.take() {
+            parts.thread_slot.remove(&old);
+        }
+        if system.is_none()
+            && let Some(accessory) = self.thread_accessory(message)
+        {
+            parts.thread_slot.append(&accessory);
+            parts.thread.replace(Some(accessory));
+        }
         if !changed {
             return;
         }
@@ -1885,9 +1929,13 @@ impl App {
             let this = Rc::downgrade(self);
             let channel = message.channel_id;
             move |_, uri| {
-                let Some(to) = render::jump_target(uri) else { return glib::Propagation::Proceed };
+                let Some(link) = render::system_link(uri) else { return glib::Propagation::Proceed };
                 if let Some(this) = this.upgrade() {
-                    this.jump_to(channel, to);
+                    match link {
+                        render::SystemLink::Jump(to) => this.jump_to(channel, to),
+                        render::SystemLink::Thread(thread) => this.open_thread(thread),
+                        render::SystemLink::Threads => this.open_threads(channel),
+                    }
                 }
                 glib::Propagation::Stop
             }

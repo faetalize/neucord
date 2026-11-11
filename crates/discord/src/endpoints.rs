@@ -37,7 +37,11 @@ pub(crate) const ACK: Endpoint = Endpoint::post("/channels/{channel}/messages/{m
 pub(crate) const CREATE_THREAD: Endpoint = Endpoint::post("/channels/{channel}/threads");
 #[rustfmt::skip]
 pub(crate) const CREATE_THREAD_FROM_MESSAGE: Endpoint = Endpoint::post("/channels/{channel}/messages/{message}/threads");
+pub(crate) const GET_CHANNEL: Endpoint = Endpoint::get("/channels/{channel}");
 pub(crate) const EDIT_CHANNEL: Endpoint = Endpoint::patch("/channels/{channel}");
+pub(crate) const SEARCH_THREADS: Endpoint = Endpoint::get("/channels/{channel}/threads/search");
+pub(crate) const JOIN_THREAD: Endpoint = Endpoint::post("/channels/{channel}/thread-members/@me");
+pub(crate) const LEAVE_THREAD: Endpoint = Endpoint::delete("/channels/{channel}/thread-members/@me");
 pub(crate) const USER: Endpoint = Endpoint::get("/users/{user}");
 pub(crate) const OPEN_DM: Endpoint = Endpoint::post("/users/@me/channels");
 pub(crate) const SEND_FRIEND_REQUEST: Endpoint = Endpoint::post("/users/@me/relationships");

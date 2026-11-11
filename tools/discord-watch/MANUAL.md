@@ -386,6 +386,17 @@ changed for unrelated reasons only needs a note in the issue.
   thread stays relevant is in 826767 (anchor
   `lastNonMessageActivityTimestamp`).
 
+- **When and what the thread browser asks for** (`Archive`, `threads::browser`,
+  `sync_threads_button`). `loadArchivedThreads`, `loadThread` and
+  `ArchivedThreadsStore` are watched; the hook calling them isn't: `Fr` in
+  424798 (anchor `loadArchivedThreads`) asks for the first page when the
+  browser opens and none was asked for, and the next within 200px of the
+  list's end (`R` in 628707), both only with Read Message History. Its
+  active sections are `jO` there. The header button is in
+  `renderHeaderToolbar` (289287, anchor `"browser"`): text and announcement
+  channels, and threads outside forums. A box under a message shows only for
+  a known thread of a message with `HAS_THREAD` (`r8` in 679636).
+
 - **Channels we can't view** (`Guild::sidebar`, `permissions::access`).
   Neucord lists, counts unread, opens and posts only where it has a
   channel's `accessPermissions`: View Channel, and Connect too in voice and

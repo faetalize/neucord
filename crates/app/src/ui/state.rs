@@ -137,6 +137,10 @@ pub(super) struct State {
     pub(super) subscriptions: Subscriptions,
     /// The rows of the member lists we asked for.
     pub(super) member_lists: MemberLists,
+    /// What the thread browser asked of each channel's archived threads.
+    pub(super) archives: threads::Archives,
+    /// Threads we asked Discord for by id, once each a session, found or not.
+    pub(super) fetched_threads: HashSet<Snowflake>,
     /// The user closed the member list pane beside the chat, which is open
     /// until they do.
     pub(super) members_closed: bool,
@@ -395,6 +399,38 @@ impl State {
         listed.into_iter().filter(|t| guild.can_view(t, me, now_unix())).collect()
     }
 
+    /// Whether we may read `id`'s history, which the client's thread browser
+    /// asks before it loads archived threads (`READ_MESSAGE_HISTORY`).
+    pub(super) fn can_read_history(&self, id: Snowflake) -> bool {
+        match (self.find_channel(id), &self.account) {
+            (Some((Some(guild), channel)), Some(me)) => permissions::in_channel(guild, channel, me, now_unix())
+                .contains(permissions::Permissions::READ_MESSAGE_HISTORY),
+            (Some((None, _)), _) => true,
+            _ => false,
+        }
+    }
+
+    /// Whether we are in the thread: `None` for what isn't one we know.
+    pub(super) fn thread_joined(&self, id: Snowflake) -> Option<bool> {
+        let (_, thread) = self.find_channel(id)?;
+        thread.kind.is_thread().then_some(thread.member.is_some())
+    }
+
+    /// A message came to `channel`: a thread has one more, but its starter
+    /// message, which isn't counted (`MESSAGE_CREATE` in 456874). Whether it
+    /// counted.
+    pub(super) fn count_thread_message(&mut self, channel: Snowflake, kind: u8) -> bool {
+        const THREAD_STARTER: u8 = 21;
+        let thread = self.guilds.iter_mut().find_map(|g| g.threads.iter_mut().find(|t| t.id == channel));
+        match thread {
+            Some(thread) if kind != THREAD_STARTER => {
+                thread.message_count = Some((thread.message_count.unwrap_or(0) + 1).min(100_000));
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// A thread we muted.
     pub(super) fn thread_muted(thread: &Channel) -> bool {
         thread.member.as_ref().is_some_and(|m| m.is_muted(now_unix()))
@@ -626,6 +662,42 @@ mod tests {
         assert_eq!(state.member_target(), None, "a DM shows a profile, not a list");
         state.channel = Some(Snowflake(31));
         assert_eq!(state.member_target(), Some(Target::Group(Snowflake(31))));
+    }
+
+    #[test]
+    fn threads_count_their_messages_and_say_whether_we_are_in() {
+        let mut state = open_server(None, json!({}));
+        let thread = |id: &str, member: serde_json::Value| -> Channel {
+            serde_json::from_value(
+                json!({"id": id, "type": 11, "parent_id": "9", "message_count": 3, "member": member}),
+            )
+            .unwrap()
+        };
+        state.guilds[0].threads = vec![thread("20", json!({"flags": 0})), thread("21", serde_json::Value::Null)];
+        let count = |state: &State, id: u64| state.guilds[0].thread(Snowflake(id)).unwrap().message_count;
+        assert_eq!(state.thread_joined(Snowflake(20)), Some(true));
+        assert_eq!(state.thread_joined(Snowflake(21)), Some(false));
+        assert_eq!(state.thread_joined(Snowflake(9)), None, "a channel isn't a thread");
+        assert!(state.count_thread_message(Snowflake(20), 0));
+        assert_eq!(count(&state, 20), Some(4));
+        assert!(!state.count_thread_message(Snowflake(20), 21), "the starter message isn't counted");
+        assert!(!state.count_thread_message(Snowflake(9), 0), "a channel has no count");
+        assert_eq!(count(&state, 20), Some(4));
+        state.guilds[0].threads[1].message_count = Some(100_000);
+        state.count_thread_message(Snowflake(21), 0);
+        assert_eq!(count(&state, 21), Some(100_000), "the count stops at a hundred thousand");
+    }
+
+    #[test]
+    fn archived_threads_wait_for_history_access() {
+        let mut state = open_server(None, json!({}));
+        let everyone =
+            |permissions: &str| serde_json::from_value(json!({"id": "1", "permissions": permissions})).unwrap();
+        state.guilds[0].set_role(everyone("1024"));
+        assert!(!state.can_read_history(Snowflake(9)), "View Channel alone");
+        state.guilds[0].set_role(everyone("66560"));
+        assert!(state.can_read_history(Snowflake(9)));
+        assert!(!state.can_read_history(Snowflake(77)), "not a channel we know");
     }
 
     #[test]
