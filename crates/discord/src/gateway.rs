@@ -21,6 +21,7 @@ use crate::component::Component;
 use crate::embed::Embed;
 use crate::emoji::GuildEmoji;
 use crate::experiments::Experiments;
+use crate::gates::Gates;
 use crate::inflate::Inflater;
 use crate::limits::Nitro;
 use crate::member_list::Update as MemberListUpdate;
@@ -86,6 +87,11 @@ pub struct Ready {
     pub experiments: Experiments,
     /// This session's id, which interactions name.
     pub session_id: String,
+    /// What holds privacy settings back, see [`crate::gates`].
+    pub gates: Gates,
+    /// How many of our servers READY could not give (an outage): the
+    /// restrictions of servers we are no longer in are kept while any is.
+    pub unavailable_guilds: usize,
     /// Who is in the voice channels of every server READY carries.
     pub voice_states: VoiceStates,
 }
@@ -794,6 +800,8 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 required_action: data["required_action"].as_str().map(str::to_owned),
                 experiments,
                 session_id: data["session_id"].as_str().unwrap_or_default().to_owned(),
+                gates: Gates::from_ready(&data),
+                unavailable_guilds: raw_guilds.iter().filter(|g| g["unavailable"] == true).count(),
                 voice_states,
                 account,
                 nitro: Nitro::from_user(&data["user"]),

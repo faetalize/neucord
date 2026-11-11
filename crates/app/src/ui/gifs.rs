@@ -123,6 +123,7 @@ impl App {
                 let session = session.clone();
                 move || session.back()
             })),
+            ..Default::default()
         };
         let handle = picker::open_with(self, parent, spec, hooks, |_, _| ());
         *session.handle.borrow_mut() = Some(handle);

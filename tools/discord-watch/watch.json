@@ -1,6 +1,8 @@
 {
   "enums": {
     "AccountStanding": ["ALL_GOOD", "LIMITED", "VERY_LIMITED", "AT_RISK", "SUSPENDED"],
+    "AgeGatedFeature": ["DM_PRIVACY_SETTINGS", "MESSAGE_REQUEST_RESTRICTIONS_TOGGLE"],
+    "AgeVerificationStatus": ["UNVERIFIED", "VERIFIED_TEEN", "VERIFIED_ADULT", "INFERRED_ADULT", "INFERRED_TEEN"],
     "ActivityType": ["PLAYING", "STREAMING", "LISTENING", "WATCHING", "CUSTOM_STATUS", "COMPETING"],
     "ApiErrorCode": [
       "ACCOUNT_SCHEDULED_FOR_DELETION",
@@ -55,6 +57,7 @@
     ],
     "ForgotPasswordMethod": ["ONE_TIME_LOGIN", "PASSWORD_RESET"],
     "ForumLayout": ["DEFAULT", "LIST", "GRID"],
+    "FriendSourceFlags": ["MUTUAL_FRIENDS", "MUTUAL_GUILDS", "NO_RELATION"],
     "ForumTagSetting": ["MATCH_ALL", "MATCH_SOME"],
     "ComponentType": ["ACTION_ROW", "BUTTON", "STRING_SELECT", "SECTION", "TEXT_DISPLAY", "CONTAINER"],
     "ConsentStatus": ["UNSPECIFIED", "PENDING", "ACCEPTED", "REJECTED"],
@@ -91,6 +94,8 @@
       "AUTOMOD_QUARANTINED_SERVER_TAG"
     ],
     "InteractionType": ["PING", "APPLICATION_COMMAND", "MESSAGE_COMPONENT", "APPLICATION_COMMAND_AUTOCOMPLETE"],
+    "LinkStatus": ["PENDING", "ACTIVE", "INACTIVE", "DECLINED", "EXPIRED"],
+    "LinkType": ["PARENT", "CHILD"],
     "LoginRequiredAction": ["UPDATE_PASSWORD"],
     "MFALevel": ["NONE", "ELEVATED"],
     "MediaTakedownRegulation": ["TIDA", "UK_STOPNCII", "BRAZIL_ONLINE_SAFETY_OF_WOMEN"],
@@ -141,9 +146,11 @@
       "STREAM_HIGH_QUALITY",
       "INCREASED_MESSAGE_LENGTH"
     ],
+    "ProfileVisibility": ["UNSET", "FRIENDS_ONLY", "FRIENDS_AND_SMALL_GUILDS", "FRIENDS_AND_ALL_GUILDS"],
     "ReactionType": ["NORMAL", "BURST", "VOTE"],
     "ReactionNotifications": ["NOTIFICATIONS_ENABLED", "ONLY_DMS", "NOTIFICATIONS_DISABLED"],
     "RelationshipType": ["FRIEND", "BLOCKED", "PENDING_INCOMING", "PENDING_OUTGOING"],
+    "RegionalSetting": ["MESSAGE_REQUEST_RESTRICTIONS"],
     "RequiredAction": [
       "AGREEMENTS",
       "REQUIRE_CAPTCHA",
@@ -369,6 +376,7 @@
     "discord_protos.discord_users.v1.StatusSettings",
     "discord_protos.discord_users.v1.TextAndImagesSettings",
     "discord_protos.discord_users.v1.Versions",
+    "discord_protos.discord_users.v1.VoiceAndVideoSettings",
     "google.protobuf.BoolValue",
     "google.protobuf.Int64Value",
     "google.protobuf.StringValue",
