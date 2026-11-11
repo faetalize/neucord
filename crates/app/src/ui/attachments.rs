@@ -5,12 +5,14 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use discord::gifs::Starred;
 use discord::settings::{MediaSettings, StickerAnimation};
 use discord::{Attachment, Snowflake, Sticker};
 use gtk::glib;
 use gtk::prelude::*;
 
 use super::embeds::{behind_spoiler, fitted_picture};
+use super::favorites::Stars;
 use crate::images::Images;
 
 /// The official client's box for a single image or video attachment.
@@ -32,7 +34,13 @@ enum Shown {
 }
 
 /// One attachment of a message, `voice` if the message is a voice message.
-pub(super) fn attachment(attachment: &Attachment, voice: bool, images: &Images, media: &MediaSettings) -> gtk::Widget {
+pub(super) fn attachment(
+    attachment: &Attachment,
+    voice: bool,
+    images: &Images,
+    media: &MediaSettings,
+    stars: &Stars,
+) -> gtk::Widget {
     let inline = media.inline_attachment_media;
     let shown = if voice && attachment.is_audio() {
         Shown::Voice
@@ -46,10 +54,11 @@ pub(super) fn attachment(attachment: &Attachment, voice: bool, images: &Images, 
     } else {
         return file(attachment);
     };
+    let stars = stars.clone();
     let build = move |attachment: &Attachment, images: &Images| match shown {
         Shown::Voice => voice_message(attachment, images),
         Shown::Audio => audio(attachment, images),
-        Shown::Image { autoplay } => image(attachment, images, autoplay),
+        Shown::Image { autoplay } => image(attachment, images, autoplay, &stars),
         Shown::Video => video(attachment, images),
     };
     if attachment.is_spoiler() {
@@ -110,15 +119,15 @@ pub(super) fn sticker_id(widget: &gtk::Widget) -> Option<Snowflake> {
     widget.widget_name().strip_prefix(STICKER_NAME)?.parse().ok().map(Snowflake)
 }
 
-/// An inline image, scaled to fit a reasonable box.
-fn image(attachment: &Attachment, images: &Images, autoplay: bool) -> gtk::Widget {
+/// An inline image, scaled to fit a reasonable box. A GIF has a star.
+fn image(attachment: &Attachment, images: &Images, autoplay: bool, stars: &Stars) -> gtk::Widget {
     let fitted = fitted_picture(attachment.width, attachment.height, MAX_W, MAX_H);
     fitted.picture.set_css_classes(&["attachment-image"]);
     // Through the media proxy when we can, which sends it at the size shown.
     let url = attachment.proxy_url.as_deref().unwrap_or(&attachment.url);
     let original = attachment.width.zip(attachment.height);
     images.set_sized(&fitted.picture, url, fitted.size, original, autoplay && attachment.is_animated());
-    fitted.frame.upcast()
+    stars.over(&fitted.frame, Starred::attachment(attachment).as_ref())
 }
 
 /// A video, its box kept for it, fetched and played once clicked.

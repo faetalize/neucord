@@ -70,20 +70,35 @@ pub fn proxy_sized(url: &str, width: u32, height: u32) -> String {
     with_params(url, &[("width", &width.to_string()), ("height", &height.to_string())])
 }
 
+/// A link to a file of Discord's own: an attachment of the CDN or the media
+/// proxy, or the proxy's `/external/` copy of another site's file (`E` and
+/// `v4`, 679164 and 534573).
+pub fn is_media(url: &str) -> bool {
+    parse(url).is_some_and(|parsed| is_attachment(&parsed) || is_external(&parsed))
+}
+
+/// An attachment (`E`, 679164): on a host of the CDN or media proxy, under
+/// `/attachments/` or `/ephemeral-attachments/`.
+fn is_attachment(url: &Url) -> bool {
+    is_cdn_host(&url.host)
+        && ["/attachments/", "/ephemeral-attachments/"].iter().any(|prefix| url.path.starts_with(prefix))
+}
+
+/// The proxy's copy of another site's file (`v4`, 534573).
+fn is_external(url: &Url) -> bool {
+    url.host.starts_with("images-ext-") && url.host.ends_with(".discordapp.net") && url.path.starts_with("/external/")
+}
+
 /// An image of Discord's media proxy asked to stay animated, as the GIF
 /// picker's previews are (`F` in 884037): a WebP or AVIF of the proxy's
 /// `/external/` or of an attachment says `animated=true`, and a GIF there
 /// is asked for as an animated WebP. Any other URL comes back unchanged.
 pub fn animated(url: &str) -> String {
     let Some(parsed) = parse(url) else { return url.to_owned() };
-    let proxy = parsed.host.starts_with("images-ext-") && parsed.host.ends_with(".discordapp.net");
-    let external = proxy && parsed.path.starts_with("/external/");
-    let attachment = is_cdn_host(&parsed.host)
-        && ["/attachments/", "/ephemeral-attachments/"].iter().any(|prefix| parsed.path.starts_with(prefix));
-    let path = parsed.path.to_ascii_lowercase();
-    if !(external || attachment) {
+    if !(is_attachment(&parsed) || is_external(&parsed)) {
         return url.to_owned();
     }
+    let path = parsed.path.to_ascii_lowercase();
     if path.ends_with(".webp") || path.ends_with(".avif") {
         with_params(url, &[("animated", "true")])
     } else if path.ends_with(".gif") {
@@ -91,6 +106,37 @@ pub fn animated(url: &str) -> String {
     } else {
         url.to_owned()
     }
+}
+
+/// The picture a favourite GIF stores (the rewrite inside `wg`, 497685), for
+/// a link of Discord's own: a WebP says `animated=true`, and an AVIF or GIF
+/// is asked for as an animated WebP, which `animated` does only for a GIF.
+pub fn stored_animated(url: &str) -> String {
+    let Some(parsed) = parse(url) else { return url.to_owned() };
+    let path = parsed.path.to_ascii_lowercase();
+    if path.ends_with(".webp") {
+        with_params(url, &[("animated", "true")])
+    } else if path.ends_with(".avif") || path.ends_with(".gif") {
+        with_params(url, &[("format", "webp"), ("animated", "true")])
+    } else {
+        url.to_owned()
+    }
+}
+
+/// An attachment's link without the signature that expires (`T` and `w6`,
+/// 497685 and 679164): the key a favourite GIF is filed under. Any other
+/// link is its own key.
+pub fn without_signature(url: &str) -> String {
+    let Some(parsed) = parse(url).filter(is_attachment) else { return url.to_owned() };
+    let (rest, fragment) = url.split_once('#').map_or((url, None), |(rest, fragment)| (rest, Some(fragment)));
+    let base = rest.split_once('?').map_or(rest, |(base, _)| base);
+    let kept: Vec<&str> = parsed
+        .query
+        .split('&')
+        .filter(|param| !param.is_empty() && !matches!(param.split('=').next(), Some("ex" | "is" | "hm")))
+        .collect();
+    let query = if kept.is_empty() { String::new() } else { format!("?{}", kept.join("&")) };
+    format!("{base}{query}{}", fragment.map_or(String::new(), |fragment| format!("#{fragment}")))
 }
 
 /// Set query parameters on a URL, replacing any it already has by those names.
@@ -210,6 +256,41 @@ mod tests {
             animated("https://cdn.discordapp.com/avatars/1/a.webp"),
             "https://cdn.discordapp.com/avatars/1/a.webp"
         );
+    }
+
+    #[test]
+    fn a_favourite_gif_stores_a_webp_where_an_avif_is_only_kept_animated() {
+        let external = "https://images-ext-1.discordapp.net/external/x/https/example.test/a";
+        assert_eq!(stored_animated(&format!("{external}.avif")), format!("{external}.avif?format=webp&animated=true"));
+        assert_eq!(animated(&format!("{external}.avif")), format!("{external}.avif?animated=true"));
+        assert_eq!(stored_animated(&format!("{external}.webp")), format!("{external}.webp?animated=true"));
+        assert_eq!(stored_animated(&format!("{external}.png")), format!("{external}.png"));
+    }
+
+    #[test]
+    fn a_link_is_discords_media_on_the_proxy_externally_and_on_the_cdn_for_attachments() {
+        assert!(is_media("https://images-ext-2.discordapp.net/external/x/a.gif"));
+        assert!(is_media("https://cdn.discordapp.com/attachments/1/2/a.gif?ex=1"));
+        assert!(is_media("https://media.discordapp.net/ephemeral-attachments/1/2/a.gif"));
+        assert!(!is_media("https://images-ext-1.discordapp.net/a.gif"));
+        assert!(!is_media("https://cdn.discordapp.com/avatars/1/a.gif"));
+        assert!(!is_media("//cdn.discordapp.com/attachments/1/2/a.gif"), "no scheme, no host");
+        assert!(!is_media("https://example.test/attachments/1/2/a.gif"));
+    }
+
+    #[test]
+    fn an_attachments_signature_is_dropped_and_nothing_else_is() {
+        let base = "https://cdn.discordapp.com/attachments/1/2/a.gif";
+        assert_eq!(without_signature(&format!("{base}?ex=65a0&is=6590&hm=ab&")), base);
+        assert_eq!(
+            without_signature(&format!("{base}?ex=65a0&format=webp&is=6590&hm=ab#t")),
+            format!("{base}?format=webp#t")
+        );
+        assert_eq!(without_signature(base), base);
+        // Only attachments are signed: anything else is its own key.
+        let external = "https://images-ext-1.discordapp.net/external/x/a.gif?ex=1";
+        assert_eq!(without_signature(external), external);
+        assert_eq!(without_signature("https://tenor.com/view/x?ex=1"), "https://tenor.com/view/x?ex=1");
     }
 
     #[test]

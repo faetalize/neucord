@@ -6,6 +6,7 @@ use discord::settings::MediaSettings;
 use gtk::prelude::*;
 use gtk::{glib, pango};
 
+use super::favorites::Stars;
 use super::media_frame::MediaFrame;
 use crate::images::Images;
 use crate::render::{self, Context, Names};
@@ -28,34 +29,35 @@ pub(super) fn embed_widget(
     names: &Names,
     images: Option<&Images>,
     settings: &MediaSettings,
+    stars: &Stars,
 ) -> gtk::Widget {
     let show_media = settings.inline_embed_media && images.is_some();
     let autoplay = settings.gif_auto_play;
     match (embed.display(show_media), images) {
-        (Display::Bare(media), Some(images)) => large(&media, embed, images, autoplay),
-        (Display::Card { media, thumbnail }, images) => card(embed, names, images, autoplay, media, thumbnail),
+        (Display::Bare(media), Some(images)) => large(&media, embed, images, autoplay, stars),
+        (Display::Card { media, thumbnail }, images) => card(embed, names, images, autoplay, media, thumbnail, stars),
         // `display` only offers media when told it may show it.
-        (Display::Bare(_), None) => card(embed, names, None, autoplay, None, None),
+        (Display::Bare(_), None) => card(embed, names, None, autoplay, None, None, stars),
     }
 }
 
-/// Large media, bare or inside a card.
-fn large(media: &Large, embed: &Embed, images: &Images, autoplay: bool) -> gtk::Widget {
+/// Large media, bare or inside a card. A GIF that animates has a star.
+fn large(media: &Large, embed: &Embed, images: &Images, autoplay: bool, stars: &Stars) -> gtk::Widget {
     match media {
-        Large::Image(media) => image(media, images, autoplay, MAX_W, MAX_H).upcast(),
-        Large::Gallery(media) => gallery(media, images, autoplay),
-        Large::Gifv { video, still } => gifv(video, still, images, autoplay),
+        Large::Image(media) => stars.over(&image(media, images, autoplay, MAX_W, MAX_H), media.star.as_ref()),
+        Large::Gallery(media) => gallery(media, images, autoplay, stars),
+        Large::Gifv { video, still } => stars.over(&gifv(video, still, images, autoplay), video.star.as_ref()),
         Large::Video { video: Some(video), still } => self::video(video, still, images),
         Large::Video { video: None, still } => page_video(still, embed.url.as_deref(), images),
     }
 }
 
 /// Images gathered from embeds sharing a URL, two to a row.
-fn gallery(media: &[Media], images: &Images, autoplay: bool) -> gtk::Widget {
+fn gallery(media: &[Media], images: &Images, autoplay: bool, stars: &Stars) -> gtk::Widget {
     let grid = gtk::Grid::builder().column_spacing(4).row_spacing(4).halign(gtk::Align::Start).build();
     for (i, media) in media.iter().enumerate() {
         let picture = image(media, images, autoplay, MAX_W / 2.0 - 2.0, MAX_H / 2.0 - 2.0);
-        grid.attach(&picture, i as i32 % 2, i as i32 / 2, 1, 1);
+        grid.attach(&stars.over(&picture, media.star.as_ref()), i as i32 % 2, i as i32 / 2, 1, 1);
     }
     grid.upcast()
 }
@@ -235,6 +237,7 @@ fn card(
     autoplay: bool,
     media: Option<Large>,
     thumbnail: Option<Media>,
+    stars: &Stars,
 ) -> gtk::Widget {
     let card =
         gtk::Box::builder().halign(gtk::Align::Start).overflow(gtk::Overflow::Hidden).css_classes(["embed"]).build();
@@ -277,7 +280,7 @@ fn card(
     body.append(&top);
 
     if let (Some(media), Some(images)) = (media, images) {
-        body.append(&large(&media, embed, images, autoplay));
+        body.append(&large(&media, embed, images, autoplay, stars));
     }
 
     let footer_text = embed.footer.as_ref().map(|f| f.text.as_str()).filter(|t| !t.is_empty());

@@ -17,6 +17,7 @@ use gtk::{gdk, gio, glib, graphene};
 
 use super::App;
 use super::embeds::{behind_spoiler, embed_widget};
+use super::favorites::Stars;
 use super::menus::{self, At, Entry, Item};
 use super::message_row::{MessageRow, Parts};
 use super::state::{Unread, now_ms, now_unix};
@@ -1970,13 +1971,14 @@ impl App {
             body.append(&polls::poll(self, message, poll));
         }
         let voice = message.is_voice_message();
+        let stars = Stars::new(self, media.gif_auto_play);
         // A poll's attachments are its answers' images, which the official
         // client shows with them, not under it.
         // Nor do messages built from components show theirs: the components do.
         let shown = message.poll.is_none() && !message.is_components_v2();
         let attached = message.attachments.iter().filter(|a| !a.is_hidden() && shown);
         for attachment in attached {
-            body.append(&attachments::attachment(attachment, voice, &self.images, &media));
+            body.append(&attachments::attachment(attachment, voice, &self.images, &media, &stars));
         }
         for sticker in &message.sticker_items {
             body.append(&attachments::sticker(sticker, &self.images, media.animate_stickers));
@@ -1985,10 +1987,10 @@ impl App {
         let spoilered = discord::embed::has_spoilered_link(&message.content);
         for embed in embeds {
             if spoilered {
-                let (names, images) = (names.clone(), self.images.clone());
-                body.append(&behind_spoiler(move || embed_widget(&embed, &names, Some(&images), &media)));
+                let (names, images, stars) = (names.clone(), self.images.clone(), stars.clone());
+                body.append(&behind_spoiler(move || embed_widget(&embed, &names, Some(&images), &media, &stars)));
             } else {
-                body.append(&embed_widget(&embed, names, Some(&self.images), &media));
+                body.append(&embed_widget(&embed, names, Some(&self.images), &media, &stars));
             }
         }
         if !message.components.is_empty() {
