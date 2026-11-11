@@ -69,10 +69,11 @@ impl App {
     /// order changed, and the tray icon with them. Called on every message, so it skips no-op rebuilds.
     pub(super) fn refresh_badges(self: &Rc<Self>) {
         self.refresh_tray();
-        let (rail, sidebar) = {
+        let ((rail, count), sidebar) = {
             let state = self.state.borrow();
             (state.rail_signature(), state.sidebar_signature())
         };
+        self.show_unread_count(count);
         let (rail_changed, sidebar_changed) = {
             let drawn = self.drawn.borrow();
             (drawn.0 != rail, drawn.1 != sidebar)
@@ -82,6 +83,18 @@ impl App {
         }
         if sidebar_changed {
             self.rebuild_sidebar();
+        }
+    }
+
+    /// Put the unread count on the app icon and in front of the window's
+    /// title, as the client does.
+    fn show_unread_count(self: &Rc<Self>, count: i64) {
+        if self.unread_count.replace(count) == count {
+            return;
+        }
+        self.apply_title();
+        if let Some(desktop) = self.desktop() {
+            desktop.set_launcher_count(discord::badge::launcher_count(count));
         }
     }
 }

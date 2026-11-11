@@ -60,6 +60,50 @@ window.
 You can still log in with a token. Guard it: anyone who has it controls your
 account SO NEVER SHARE IT ANYWHERE!
 
+## Theming
+
+Neucord follows the system's light or dark preference and accent colour
+(libadwaita reads both from the desktop's appearance settings). Settings →
+Neucord turns the translucent, blurred bars off.
+
+Your own stylesheet goes in `~/.config/neucord/style.css`
+(`$XDG_CONFIG_HOME/neucord/`). It loads after Neucord's own at user priority,
+so its rules win whatever their specificity, and saving it applies it without
+a restart. GTK's `~/.config/gtk-4.0/gtk.css` applies as well. A mistake is
+reported on stderr with its line, and the rest of the file still applies.
+
+A theme only needs to set variables on `:root`:
+
+```css
+:root {
+  --accent-bg-color: #d946ef;
+  --neucord-rail-bg: #2a1740;
+  --neucord-bar-opacity: 0.4;
+}
+```
+
+Neucord's own are `--neucord-*`; unset, each is a libadwaita colour or a shade
+of the text colour, so libadwaita's (`--window-bg-color`, `--sidebar-bg-color`,
+`--accent-bg-color`, ...) retheme everything Neucord draws with them.
+
+- Server rail: `--neucord-rail-bg`, `--neucord-guild-bg`,
+  `--neucord-guild-hover-bg`, `--neucord-guild-active-bg` (also the pill beside
+  the open one) and `--neucord-guild-active-fg`, `--neucord-badge-bg`,
+  `--neucord-badge-fg`, and `--neucord-folder-bg` for a folder without a
+  colour of its own.
+- Messages: `--neucord-message-hover-bg`, `--neucord-reply-color` (the message
+  being replied to or edited), `--neucord-highlight-color` (the one you jumped
+  to), `--neucord-embed-bg` (also code blocks and image placeholders) and
+  `--neucord-line` (reply spines and quotes).
+- Bars over the messages (the headers, composer and a sliding sidebar):
+  `--neucord-bar-opacity` and `--neucord-blur`. Off, the switch sets them to
+  `1` and `0px`; a value in your stylesheet wins over it.
+- Presence dots: `--neucord-online`, `--neucord-idle`, `--neucord-dnd` and
+  `--neucord-offline`.
+
+Not variables: a mention follows the accent colour, an embed's colour bar is
+the embed's own, and a server folder's colour is the one set on your account.
+
 ## Privacy
 
 Neucord connects only to Discord's API, gateway and CDN, and to hCaptcha

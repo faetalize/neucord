@@ -232,6 +232,22 @@ impl App {
             &config::SEND_TYPING,
             |app, sending| app.state.borrow_mut().typing.set_sending(sending),
         );
+        let appearance = group(
+            "Appearance",
+            &format!(
+                "Colours follow your system's light or dark preference and accent colour. \
+                 Put your own stylesheet in {}.",
+                glib::markup_escape_text(&config::stylesheet_path().display().to_string())
+            ),
+        );
+        option_switch(
+            self,
+            &appearance,
+            "Translucent bars and panels",
+            "Let the chat show through, blurred, behind the headers, composer and sliding sidebar.",
+            &config::TRANSLUCENT,
+            |app, on| app.theme.set_translucent(on),
+        );
         let background = group("Background", "");
         option_switch(
             self,
@@ -258,7 +274,7 @@ impl App {
             &config::UNREAD_BADGE,
             |app, _| app.refresh_tray(),
         );
-        let neucord = page("Neucord", "preferences-system-symbolic", &[&typing, &background]);
+        let neucord = page("Neucord", "preferences-system-symbolic", &[&appearance, &typing, &background]);
         neucord.set_description("These are saved on this computer only, not to your Discord account.");
 
         let dialog = adw::PreferencesDialog::builder().title("Settings").build();
@@ -315,9 +331,10 @@ impl App {
             let mut state = self.state.borrow_mut();
             let before = (state.settings.media, state.settings.guild_folders.clone());
             if replace {
-                state.settings = Settings::default();
+                state.settings.replace(patch);
+            } else {
+                state.settings.apply(patch);
             }
-            state.settings.apply(patch);
             (before.0 != state.settings.media, before.1 != state.settings.guild_folders)
         };
         if folders {

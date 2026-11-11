@@ -101,6 +101,7 @@ impl SettingsPatch {
             // A plain `bool`: `false` is not sent, so appearance without it is off.
             developer_mode: settings.message(APPEARANCE).map(|a| a.bool(DEVELOPER_MODE).unwrap_or(false)),
             message_display_compact: flag(MESSAGE_DISPLAY_COMPACT),
+            do_not_disturb: None,
         })
     }
 }
