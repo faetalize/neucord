@@ -3,6 +3,8 @@
 //! `limits.rs`'s ([`Limits::sticker`]); this is the rest of what the client
 //! does with them.
 
+use std::collections::HashMap;
+
 use serde_json::Value;
 
 use crate::emoji;
@@ -202,6 +204,11 @@ impl Library {
         Library { servers, packs: packs.filter(|p| !p.stickers.is_empty()).collect(), guild_names, pack_names }
     }
 
+    /// The sticker with `id`, if the library has it.
+    pub fn find(&self, id: Snowflake) -> Option<&Entry> {
+        self.all().find(|e| e.listed.sticker.id == id)
+    }
+
     fn all(&self) -> impl Iterator<Item = &Entry> {
         self.servers.iter().chain(&self.packs).flat_map(|s| &s.stickers)
     }
@@ -220,12 +227,12 @@ impl Library {
     /// names don't match in the middle) times a weight (its name 11, its
     /// server's or pack's name 8, the emoji its tag names 6, its tag 1), and
     /// the best counts. What we may send comes first and what Nitro would
-    /// unlock after; the rest isn't offered. The client also scales by how
-    /// often a sticker was used, which a setting only the protobuf settings
-    /// carry.
-    pub fn search(&self, query: &str) -> Found {
+    /// unlock after; the rest isn't offered. A sticker that was used is
+    /// scaled by its score over a hundred (`scores`, by sticker id, as
+    /// [`crate::usage::History::scores`] has them), which can also lower it.
+    pub fn search(&self, query: &str, scores: &HashMap<String, f64>) -> Found {
         let query = query.to_lowercase();
-        let mut scored: Vec<(u32, &Entry)> = Vec::new();
+        let mut scored: Vec<(f64, &Entry)> = Vec::new();
         for entry in self.all() {
             let sticker = &entry.listed.sticker;
             let mut names = vec![(Match::Name, sticker.name.trim().to_lowercase(), 11)];
@@ -246,13 +253,17 @@ impl Library {
                 }
                 names.push((Match::Other, tags, 1));
             }
-            let score = names.iter().map(|(kind, value, weight)| weight * kind.fit(value, &query)).max().unwrap_or(0);
-            if score > 0 {
+            let fit = names.iter().map(|(kind, value, weight)| weight * kind.fit(value, &query)).max().unwrap_or(0);
+            let score = match scores.get(&sticker.id.0.to_string()) {
+                Some(used) => f64::from(fit) * used / 100.0,
+                None => f64::from(fit),
+            };
+            if score > 0.0 {
                 scored.push((score, entry));
             }
         }
         // A stable sort, so equals keep the picker's order.
-        scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        scored.sort_by(|(a, _), (b, _)| b.total_cmp(a));
         let mut found = Found::default();
         for (_, entry) in scored {
             match entry.status {
@@ -384,23 +395,47 @@ mod tests {
     #[test]
     fn search_ranks_by_name_then_tag_and_offers_what_nitro_unlocks_apart() {
         let lib = library(open(Some(1), true, true), false);
-        let found = lib.search("wav");
+        let found = lib.search("wav", &HashMap::new());
         // wave (own, 7*11), Wavy's hello (pack name prefix, 7*8), waving (needs Nitro).
         assert_eq!(names(&found.unlocked), ["wave", "hello"]);
         assert_eq!(names(&found.locked), ["waving"]);
         // A tag matches from its start but never in the middle, and names its emoji.
-        assert_eq!(names(&lib.search("smi").locked), ["waving"]);
-        assert_eq!(names(&lib.search("mile").locked), Vec::<&str>::new());
-        assert_eq!(names(&lib.search("😄").locked), ["waving"]);
+        assert_eq!(names(&lib.search("smi", &HashMap::new()).locked), ["waving"]);
+        assert_eq!(names(&lib.search("mile", &HashMap::new()).locked), Vec::<&str>::new());
+        assert_eq!(names(&lib.search("😄", &HashMap::new()).locked), ["waving"]);
         // A sticker whose server lost its boosts isn't offered at all.
-        assert!(lib.search("lost").unlocked.is_empty() && lib.search("lost").locked.is_empty());
+        assert!(
+            lib.search("lost", &HashMap::new()).unlocked.is_empty()
+                && lib.search("lost", &HashMap::new()).locked.is_empty()
+        );
+    }
+
+    #[test]
+    fn a_sticker_that_was_used_is_scaled_by_its_score_over_a_hundred() {
+        let lib = library(open(Some(1), true, true), false);
+        let id =
+            |name: &str| lib.all().find(|e| e.listed.sticker.name == name).unwrap().listed.sticker.id.0.to_string();
+        // wave 77 and hello 56 without use.
+        let used = HashMap::from([(id("hello"), 200.0)]);
+        assert_eq!(names(&lib.search("wav", &used).unlocked), ["hello", "wave"], "112 over 77");
+        let little = HashMap::from([(id("wave"), 50.0)]);
+        assert_eq!(
+            names(&lib.search("wav", &little).unlocked),
+            ["hello", "wave"],
+            "a low score lowers it: 38 under 56"
+        );
+        assert!(lib.find(Snowflake(0)).is_none());
+        assert_eq!(
+            lib.find(lib.all().next().unwrap().listed.sticker.id).map(|e| e.listed.sticker.id.0.to_string()),
+            Some(id("wave"))
+        );
     }
 
     #[test]
     fn a_servers_name_finds_its_tagged_stickers_only() {
         let lib = library(open(Some(1), true, true), true);
         // `Away` names waving (tagged) but not lost (untagged, and unavailable anyway).
-        assert_eq!(names(&lib.search("away").unlocked), ["waving"]);
-        assert_eq!(names(&lib.search("home").unlocked), ["wave"]);
+        assert_eq!(names(&lib.search("away", &HashMap::new()).unlocked), ["waving"]);
+        assert_eq!(names(&lib.search("home", &HashMap::new()).unlocked), ["wave"]);
     }
 }

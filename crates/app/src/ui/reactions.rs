@@ -21,10 +21,40 @@ use super::menus::{Choice, Choices, Entry, Item, Kind as MenuKind, Style, Table}
 use super::polls;
 use crate::timelines;
 
+/// The emoji the account reacts with most, after its favourites: up to four
+/// at the top of the menu (`tr` in 761304), below nothing when text is
+/// selected. The client draws them as a row of buttons, and its Add Reaction
+/// opens a submenu of twelve more as well as the picker; this item opens
+/// only the picker.
+pub(super) const QUICK_REACTIONS: Entry<MessageTarget> = Entry::Choices(Choices {
+    name: "quick-reaction",
+    choices: |app, target| {
+        let selected = target.selection.as_deref().is_some_and(|s| !s.is_empty());
+        if selected || !app.offers_add_reaction(&target.message) {
+            return Vec::new();
+        }
+        let list = app.quick_reactions(target.message.channel_id);
+        let label = |item: &discord::emoji::Item| match item {
+            discord::emoji::Item::Unicode(e) => e.glyph.to_owned(),
+            custom => format!(":{}:", custom.name()),
+        };
+        list.iter()
+            .enumerate()
+            .map(|(n, item)| Choice { value: n.to_string(), label: label(item), ticked: false })
+            .collect()
+    },
+    style: Style::Plain,
+    choose: |app, target, value, _| {
+        let channel = target.message.channel_id;
+        let item = value.parse().ok().and_then(|n: usize| app.quick_reactions(channel).into_iter().nth(n));
+        if let Some(item) = item {
+            app.add_reaction(channel, target.message.id, Emoji::from(&item), Location::ContextMenu, true);
+        }
+    },
+});
+
 /// Opens the emoji picker, as the client's does. The picker lists the
-/// favourites and the emoji used most first (the usage is the account's
-/// other clients'), but the client's quick reactions beside the menu, which
-/// come from the same settings, aren't here.
+/// favourites and the emoji used most first.
 pub(super) const ADD_REACTION: Entry<MessageTarget> = Entry::Item(Item {
     name: "add-reaction",
     label: "Add _Reaction",
@@ -98,6 +128,37 @@ impl App {
     pub(super) fn offers_add_reaction(&self, message: &Message) -> bool {
         let state = self.state.borrow();
         state.settings.media.render_reactions && state.reacting(message.channel_id).create
+    }
+
+    /// The emoji the quick reactions offer in `channel`: the favourites then
+    /// the reactions used most, each once, up to four, without those Nitro
+    /// locks and without the faces the client leaves out (`getEmojiInPriorityOrder`,
+    /// 121681, and 761304).
+    pub(super) fn quick_reactions(&self, channel: Snowflake) -> Vec<discord::emoji::Item> {
+        use discord::emoji::{Intention, Item as EmojiItem, Library};
+        use discord::limits::Unavailable;
+        const LEFT_OUT: [&str; 5] = ["slight_smile", "frowning", "smile", "stuck_out_tongue", "wink"];
+        let library = self.emoji_library(channel);
+        let tone = self.state.borrow().settings.skin_tone;
+        let shortcuts = self.emoji_shortcuts(&library, Intention::Reaction);
+        let mut seen = Vec::new();
+        shortcuts
+            .favorites
+            .into_iter()
+            .chain(shortcuts.frequent)
+            .filter(|item| {
+                let key = Library::usage_key(item);
+                let new = !seen.contains(&key);
+                seen.push(key);
+                new
+            })
+            .filter(|item| match item {
+                EmojiItem::Unicode(e) => !LEFT_OUT.contains(&e.names[0]),
+                EmojiItem::Custom(n) => n.status != Err(Unavailable::Nitro),
+            })
+            .take(4)
+            .map(|item| super::emoji::toned(item, tone))
+            .collect()
     }
 
     /// Put the reactions under `message` at the end of `content`.
@@ -179,7 +240,7 @@ impl App {
     }
 
     fn pick_emoji(self: &Rc<Self>, channel: Snowflake, message: Snowflake, parent: &gtk::Widget, at: Location) {
-        self.open_emoji_picker(channel, parent, move |app, item| {
+        self.open_emoji_picker(channel, parent, discord::emoji::Intention::Reaction, move |app, item| {
             app.add_reaction(channel, message, Emoji::from(item), at, true);
         });
     }
@@ -226,6 +287,10 @@ impl App {
         let clash = self.message_in(channel, message).is_some_and(|m| m.reacted_the_other_way(&emoji, Kind::Normal));
         if clash {
             return self.show_reaction_notice(Notice::Clash);
+        }
+        // Counted as it shows, whether or not Discord takes it.
+        if let Some(key) = discord::emoji::reaction_key(&emoji) {
+            self.track_reaction_use(&key);
         }
         let this = self.clone();
         glib::spawn_future_local(async move {

@@ -134,7 +134,7 @@ pub(super) type Table<T, C = App> = &'static [&'static [Entry<T, C>]];
 /// Remind Me), and precedes Copy Message Link.
 const MESSAGE: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
-    &[reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
+    &[reactions::QUICK_REACTIONS, reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
     &[edits::EDIT, composer::REPLY, create_thread::MESSAGE_MENU],
     &[chat::COPY_TEXT, slash::MESSAGE_APPS, notify_menus::MARK_UNREAD, chat::COPY_MESSAGE_LINK, polls::END_POLL],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
@@ -148,7 +148,7 @@ const MESSAGE: Table<MessageTarget> = &[
 /// (777933).
 const MESSAGE_REGULATED: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
-    &[reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
+    &[reactions::QUICK_REACTIONS, reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
     &[edits::EDIT, composer::REPLY, create_thread::MESSAGE_MENU],
     &[chat::COPY_TEXT, slash::MESSAGE_APPS, notify_menus::MARK_UNREAD, chat::COPY_MESSAGE_LINK, polls::END_POLL],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
@@ -316,11 +316,12 @@ pub(super) const COMPOSER: Table<()> = &[];
 /// An emoji or sticker of the picker (`expression-picker`, 233503). The
 /// client offers Copy Emoji, Copy Emoji ID and Copy Emoji Image Link, or
 /// Copy Sticker ID and Copy Sticker Image Link, only in Developer Mode, and
-/// a Favorite item first, which Neucord has for emoji (the client's
-/// favourite stickers are not here yet).
+/// a Favorite item first.
 pub(super) const EXPRESSION_PICKER: Table<picker::Target> = &[&[
     emoji::FAVORITE,
     emoji::UNFAVORITE,
+    stickers::FAVORITE,
+    stickers::UNFAVORITE,
     emoji::COPY_EMOJI,
     emoji::COPY_EMOJI_ID,
     emoji::COPY_EMOJI_LINK,

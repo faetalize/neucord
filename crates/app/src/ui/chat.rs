@@ -792,6 +792,7 @@ impl App {
     /// around it is asked for, not the newest, as the client does when a
     /// link or a search result takes it there.
     pub(super) fn select_channel_at(self: &Rc<Self>, id: Snowflake, target: Option<Snowflake>) {
+        self.track_channel_use(id);
         let (title, forum, rest, left) = {
             let mut state = self.state.borrow_mut();
             let left = state.channel.filter(|&c| c != id);
@@ -2089,6 +2090,8 @@ impl App {
             row: row.clone().upcast(),
         };
         let regulated = self.state.borrow().media_takedown_regulated;
+        // The quick reactions are the account's favourites and use, loaded when the menu opens (`D6`, 822123).
+        self.load_frecency(|| {});
         menus::popup(self, menus::message(regulated), target, row, at);
     }
 

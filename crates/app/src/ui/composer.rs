@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use adw::prelude::*;
 use discord::cooldowns::{Slowmode, bypasses_slowmode, wait_words};
-use discord::emoji::{Item as Emoji, locked_notice};
+use discord::emoji::{Intention, Item as Emoji, locked_notice};
 use discord::limits::{LengthCount, TooLong, message_length};
 use discord::notice::Notice;
 use discord::rest::{Reply, ReplyPing};
@@ -179,7 +179,7 @@ impl App {
             move |button| {
                 let Some(this) = this.upgrade() else { return };
                 let Some(channel) = this.state.borrow().channel else { return };
-                this.open_emoji_picker(channel, button, |app, item| app.insert_emoji(item));
+                this.open_emoji_picker(channel, button, Intention::Chat, |app, item| app.insert_emoji(item));
             }
         });
         self.build_voice();
@@ -578,12 +578,18 @@ impl App {
         matches.into_iter().map(|(id, name)| Completion::Mention(id, name)).collect()
     }
 
-    /// The emoji we may send in the open channel that `query` finds. Locked
-    /// ones aren't offered here, as in the client.
-    fn emoji_candidates(&self, query: &str) -> Vec<Completion> {
+    /// The emoji we may send in the open channel that `query` finds, best
+    /// first by how much the account uses them, in its skin tone. Locked
+    /// ones aren't offered here, as in the client. Looking for emoji loads
+    /// the counts of use (`queryEmojiResults`, 997625), which rank them once
+    /// they are there.
+    fn emoji_candidates(self: &Rc<Self>, query: &str) -> Vec<Completion> {
         let Some(channel) = self.state.borrow().channel else { return Vec::new() };
-        let found = self.emoji_library(channel).search(query, super::emoji::AUTOCOMPLETE);
-        found.unlocked.into_iter().map(Completion::Emoji).collect()
+        self.load_frecency(|| {});
+        let scores = self.emoji_scores(Intention::Chat);
+        let tone = self.state.borrow().settings.skin_tone;
+        let found = self.emoji_library(channel).search(query, super::emoji::AUTOCOMPLETE, &scores);
+        found.unlocked.into_iter().map(|item| Completion::Emoji(super::emoji::toned(item, tone))).collect()
     }
 
     /// Put `item` in the message box at the cursor, as the picker chooses it.
@@ -716,7 +722,7 @@ impl App {
         // which is longer than what was typed.
         let library = self.emoji_library(channel);
         let translated = library.translate(&typed);
-        let text = translated.text;
+        let (text, used) = (translated.text, translated.used);
         // The client checks length before slowmode. The text stays in the box to be shortened.
         let too_long = self.state.borrow().limits().check_length(&text);
         if let Err(too_long) = too_long {
@@ -785,7 +791,11 @@ impl App {
             match this.send_with_uploads(&rest, channel, &message, files).await {
                 Ok(()) => match scheduled {
                     Some(at) => this.message_scheduled(channel, at),
-                    None => this.message_sent(channel),
+                    None => {
+                        // Once Discord took it; a scheduled message is not counted.
+                        this.track_message_use(&used, sticker);
+                        this.message_sent(channel)
+                    }
                 },
                 Err(stopped) => {
                     match scheduled {

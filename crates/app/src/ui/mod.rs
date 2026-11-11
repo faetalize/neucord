@@ -49,6 +49,7 @@ mod threads;
 mod typing;
 mod unread;
 mod uploads;
+mod usage;
 mod video;
 mod viewer;
 mod voice;
