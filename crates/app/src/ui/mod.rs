@@ -38,6 +38,7 @@ mod reactors;
 mod requests;
 mod scheduling;
 mod search;
+mod server_privacy;
 mod settings;
 mod sidebar;
 mod slash;
@@ -225,6 +226,8 @@ pub struct App {
     remembered: Store,
     /// The settings window, while it's open.
     settings_window: RefCell<Option<settings::Window>>,
+    /// A server's Privacy Settings, while open.
+    server_privacy: RefCell<Option<server_privacy::Dialog>>,
     /// The icon in the panel, which is also what lets the window hide.
     tray: Tray,
     /// The Background portal turned down running with no window.
@@ -425,6 +428,7 @@ impl App {
             config,
             remembered: Store::open(config::state_path()),
             settings_window: RefCell::default(),
+            server_privacy: RefCell::default(),
             tray: Tray::new(),
             background_refused: Cell::new(false),
             members: members::Pane::new(),

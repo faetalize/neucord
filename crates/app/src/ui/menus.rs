@@ -18,7 +18,8 @@ use super::App;
 use super::chat::{self, MessageTarget};
 use super::{
     attachments, composer, create_thread, edits, emoji, forum, gifs, notify_menus, picker, poll_composer, polls,
-    profile, reactions, reactors, scheduling, sidebar, slash, stickers, threads, uploads, viewer, voice,
+    profile, reactions, reactors, scheduling, server_privacy, sidebar, slash, stickers, threads, uploads, viewer,
+    voice,
 };
 
 /// An item that copies or opens a link, shown when the link `$link` finds in
@@ -255,7 +256,9 @@ pub(super) const CATEGORY: Table<sidebar::ChannelTarget> = &[
 
 /// A server icon's menu (871638): Mark As Read, then Mute Server,
 /// Notification Settings and Hide Muted Channels, which the client groups
-/// together. What else the menu holds needs what Neucord doesn't have yet.
+/// together, and Privacy Settings, which it puts after Server Settings (not
+/// here, with the rest of the server's editing). What else the menu holds
+/// needs what Neucord doesn't have yet.
 pub(super) const GUILD: Table<notify_menus::GuildTarget> = &[
     &[notify_menus::MARK_GUILD_READ],
     &[
@@ -264,6 +267,7 @@ pub(super) const GUILD: Table<notify_menus::GuildTarget> = &[
         notify_menus::GUILD_NOTIFICATIONS,
         notify_menus::HIDE_MUTED_CHANNELS,
     ],
+    &[server_privacy::PRIVACY_SETTINGS],
 ];
 
 /// A server folder's menu, from its button in the rail (865815): Mark Folder

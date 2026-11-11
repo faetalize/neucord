@@ -359,6 +359,9 @@ impl App {
     /// Say how a save went where it's seen: the window covers the app's own
     /// toasts, so it shows its own.
     pub(super) fn settings_toast(&self, text: &str) {
+        if let Some(dialog) = self.server_privacy.borrow().as_ref() {
+            return dialog.toast(text);
+        }
         match self.settings_window.borrow().as_ref() {
             Some(window) => window.dialog.add_toast(adw::Toast::new(text)),
             None => self.toast(text),
@@ -369,6 +372,9 @@ impl App {
     pub(super) fn settings_replaced(&self) {
         if let Some(window) = self.settings_window.borrow().as_ref() {
             (window.show)(&self.state.borrow().settings);
+        }
+        if let Some(dialog) = self.server_privacy.borrow().as_ref() {
+            dialog.show(&self.state.borrow().settings);
         }
     }
 
