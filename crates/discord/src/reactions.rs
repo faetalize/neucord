@@ -416,6 +416,8 @@ pub enum Location {
     InlineButton,
     /// The emoji picker the message menu's Add Reaction opens.
     ReactionPicker,
+    /// One of the quick reactions at the top of the message menu.
+    ContextMenu,
 }
 
 impl Location {
@@ -424,6 +426,7 @@ impl Location {
             Location::Message => "Message",
             Location::InlineButton => "Message Inline Button",
             Location::ReactionPicker => "Message Reaction Picker",
+            Location::ContextMenu => "Message Context Menu",
         }
     }
 }
@@ -830,5 +833,6 @@ mod tests {
         assert_eq!(Location::Message.name(), "Message");
         assert_eq!(Location::InlineButton.name(), "Message Inline Button");
         assert_eq!(Location::ReactionPicker.name(), "Message Reaction Picker");
+        assert_eq!(Location::ContextMenu.name(), "Message Context Menu");
     }
 }

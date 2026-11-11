@@ -5,23 +5,38 @@
 //! The client loads it the first time something needs it (the emoji picker
 //! opening, `loadIfNecessary`) and saves changes to it as it does for the
 //! other proto, which [`crate::settings_sync::SettingsSync`] does for both.
-//! A favourite is saved at once; what the client records of how often each
-//! emoji is used it sends in the background, with other usage it keeps, and
-//! Neucord sends none of that.
+//! A favourite is saved at once; how often things are used is recorded by
+//! [`crate::usage`] and goes in the background, with whatever else is saved.
 
 use std::time::Duration;
 
-use crate::protobuf::{Message, Value};
+use crate::protobuf::{Message, Value, build};
 use crate::settings_sync::Kind;
+use crate::usage::{Stores, Usage};
 
 // FrecencyUserSettings.
+const FAVORITE_GIFS: u32 = 2;
+const FAVORITE_STICKERS: u32 = 3;
+const STICKER_FRECENCY: u32 = 4;
 const FAVORITE_EMOJIS: u32 = 5;
 const EMOJI_FRECENCY: u32 = 6;
+const GUILD_AND_CHANNEL_FRECENCY: u32 = 12;
+const EMOJI_REACTION_FRECENCY: u32 = 13;
 
-// FavoriteEmojis.
+// FavoriteEmojis, FavoriteStickers.
 const EMOJIS: u32 = 1;
+const STICKER_IDS: u32 = 1;
 
-// EmojiFrecency's map entries, and FrecencyItem.
+// FavoriteGIFs and FavoriteGIF.
+const GIFS: u32 = 1;
+const HIDE_TOOLTIP: u32 = 2;
+const GIF_FORMAT: u32 = 1;
+const GIF_SRC: u32 = 2;
+const GIF_WIDTH: u32 = 3;
+const GIF_HEIGHT: u32 = 4;
+const GIF_ORDER: u32 = 5;
+
+// A frecency's map entries, and FrecencyItem.
 const ENTRY_KEY: u32 = 1;
 const ENTRY_VALUE: u32 = 2;
 const TOTAL_USES: u32 = 1;
@@ -30,18 +45,54 @@ const RECENT_USES: u32 = 2;
 /// How many favourite emoji there can be (554375).
 pub const MAX_FAVORITE_EMOJI: usize = 250;
 
-/// The most recent uses the client scores an emoji by.
-const MAX_SAMPLES: usize = 10;
-/// How many frequently used emoji the picker lists (`numFrequentlyItems` in
-/// `eu`, 121681).
-const FREQUENTLY_USED: usize = 42;
+/// What the client lists as used most for an account with no use of emoji,
+/// and of reactions, until it has some (`eT`, 121681). Listing one counts as
+/// a use, so a name twice is two.
+const SEEDED_EMOJI: [&str; 10] =
+    ["thumbsup", "eyes", "laughing", "watermelon", "fork_and_knife", "yum", "weary", "tired_face", "poop", "100"];
+const SEEDED_REACTIONS: [&str; 13] = [
+    "100",
+    "100",
+    "thumbsup",
+    "thumbsup",
+    "thumbsdown",
+    "thumbsdown",
+    "heart",
+    "point_up",
+    "eyes",
+    "weary",
+    "laughing",
+    "white_check_mark",
+    "x",
+];
 
-/// How often and when an emoji was used: a `FrecencyItem`.
+/// A favourite GIF: a `FavoriteGIF`, filed under the GIF's link.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Usage {
-    pub total_uses: u64,
-    /// Milliseconds since 1970, in the order sent.
-    pub recent_uses: Vec<u64>,
+pub struct FavoriteGif {
+    pub url: String,
+    pub format: GifFormat,
+    pub src: String,
+    pub width: u32,
+    pub height: u32,
+    pub order: u32,
+}
+
+/// `GIFType`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GifFormat {
+    None,
+    Image,
+    Video,
+}
+
+impl GifFormat {
+    fn from_raw(raw: u64) -> GifFormat {
+        match raw {
+            1 => GifFormat::Image,
+            2 => GifFormat::Video,
+            _ => GifFormat::None,
+        }
+    }
 }
 
 /// The settings a payload mentions; the rest are `None`.
@@ -50,8 +101,35 @@ pub struct FrecencyPatch {
     /// `favorite_emojis.emojis`: a custom emoji's id, or a Unicode one's
     /// name, in the order the account favourited them.
     pub favorite_emojis: Option<Vec<String>>,
+    /// `favorite_stickers.sticker_ids`.
+    pub favorite_stickers: Option<Vec<u64>>,
+    /// `favorite_gifs`: the GIFs, and whether the hint to favourite one is
+    /// hidden.
+    pub favorite_gifs: Option<(Vec<FavoriteGif>, bool)>,
     /// `emoji_frecency.emojis`, in the order sent, by the same keys.
     pub emoji_usage: Option<Vec<(String, Usage)>>,
+    /// `emoji_reaction_frecency.emojis`.
+    pub reaction_usage: Option<Vec<(String, Usage)>>,
+    /// `sticker_frecency.stickers`, by sticker id.
+    pub sticker_usage: Option<Vec<(String, Usage)>>,
+    /// `guild_and_channel_frecency.guild_and_channels`, by id.
+    pub channel_usage: Option<Vec<(String, Usage)>>,
+}
+
+/// The entries of a frecency message: a map of `FrecencyItem`s whose keys
+/// are strings, or ids when `ids` says.
+fn usage_of(frecency: Message<'_>, ids: bool) -> Vec<(String, Usage)> {
+    frecency
+        .messages(1)
+        .into_iter()
+        .filter_map(|entry| {
+            let item = entry.message(ENTRY_VALUE).unwrap_or_default();
+            let usage =
+                Usage { total_uses: item.varint(TOTAL_USES).unwrap_or(0), recent_uses: item.varints(RECENT_USES) };
+            let key = if ids { entry.fixed64(ENTRY_KEY)?.to_string() } else { entry.string(ENTRY_KEY)?.to_owned() };
+            Some((key, usage))
+        })
+        .collect()
 }
 
 impl FrecencyPatch {
@@ -61,38 +139,90 @@ impl FrecencyPatch {
             let strings = favorites.strings(EMOJIS);
             strings.into_iter().map(str::to_owned).collect()
         });
-        let emoji_usage = settings.message(EMOJI_FRECENCY).map(|frecency| {
-            frecency
-                .messages(1)
+        let favorite_stickers = settings.message(FAVORITE_STICKERS).map(|stickers| stickers.fixed64s(STICKER_IDS));
+        let favorite_gifs = settings.message(FAVORITE_GIFS).map(|gifs| {
+            let list = gifs
+                .messages(GIFS)
                 .into_iter()
                 .filter_map(|entry| {
-                    let item = entry.message(ENTRY_VALUE).unwrap_or_default();
-                    let usage = Usage {
-                        total_uses: item.varint(TOTAL_USES).unwrap_or(0),
-                        recent_uses: item.varints(RECENT_USES),
-                    };
-                    Some((entry.string(ENTRY_KEY)?.to_owned(), usage))
+                    let gif = entry.message(ENTRY_VALUE).unwrap_or_default();
+                    Some(FavoriteGif {
+                        url: entry.string(ENTRY_KEY)?.to_owned(),
+                        format: GifFormat::from_raw(gif.varint(GIF_FORMAT).unwrap_or(0)),
+                        src: gif.string(GIF_SRC).unwrap_or_default().to_owned(),
+                        width: gif.varint(GIF_WIDTH).unwrap_or(0) as u32,
+                        height: gif.varint(GIF_HEIGHT).unwrap_or(0) as u32,
+                        order: gif.varint(GIF_ORDER).unwrap_or(0) as u32,
+                    })
                 })
-                .collect()
+                .collect();
+            (list, gifs.bool(HIDE_TOOLTIP).unwrap_or(false))
         });
-        Some(FrecencyPatch { favorite_emojis, emoji_usage })
+        Some(FrecencyPatch {
+            favorite_emojis,
+            favorite_stickers,
+            favorite_gifs,
+            emoji_usage: settings.message(EMOJI_FRECENCY).map(|m| usage_of(m, false)),
+            reaction_usage: settings.message(EMOJI_REACTION_FRECENCY).map(|m| usage_of(m, false)),
+            sticker_usage: settings.message(STICKER_FRECENCY).map(|m| usage_of(m, true)),
+            channel_usage: settings.message(GUILD_AND_CHANNEL_FRECENCY).map(|m| usage_of(m, true)),
+        })
     }
 }
 
 /// What the account has, as [`FrecencyPatch`]es said.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Frecency {
     pub favorite_emojis: Vec<String>,
-    pub emoji_usage: Vec<(String, Usage)>,
+    pub favorite_stickers: Vec<u64>,
+    pub favorite_gifs: Vec<FavoriteGif>,
+    pub hide_gif_tooltip: bool,
+    /// What is used, and what of it is not saved yet.
+    pub stores: Stores,
 }
 
 impl Frecency {
-    pub fn apply(&mut self, patch: FrecencyPatch) {
+    /// The settings were loaded, or sent whole: what they say replaces
+    /// what is held, and what they leave out is empty. `now_ms` is when the
+    /// seeded uses count from.
+    pub fn load(&mut self, patch: FrecencyPatch, now_ms: u64) {
+        self.favorite_emojis.clear();
+        self.favorite_stickers.clear();
+        self.favorite_gifs.clear();
+        self.hide_gif_tooltip = false;
+        let patch = FrecencyPatch {
+            emoji_usage: Some(patch.emoji_usage.clone().unwrap_or_default()),
+            reaction_usage: Some(patch.reaction_usage.clone().unwrap_or_default()),
+            sticker_usage: Some(patch.sticker_usage.clone().unwrap_or_default()),
+            channel_usage: Some(patch.channel_usage.clone().unwrap_or_default()),
+            ..patch
+        };
+        self.apply(patch, now_ms);
+    }
+
+    /// What a patch says replaces what is held; the rest is left.
+    pub fn apply(&mut self, patch: FrecencyPatch, now_ms: u64) {
         if let Some(emojis) = patch.favorite_emojis {
             self.favorite_emojis = emojis;
         }
+        if let Some(stickers) = patch.favorite_stickers {
+            self.favorite_stickers = stickers;
+        }
+        if let Some((gifs, hide_tooltip)) = patch.favorite_gifs {
+            self.favorite_gifs = gifs;
+            self.hide_gif_tooltip = hide_tooltip;
+        }
         if let Some(usage) = patch.emoji_usage {
-            self.emoji_usage = usage;
+            self.stores.emoji.reload(&usage, &SEEDED_EMOJI, now_ms);
+        }
+        if let Some(usage) = patch.reaction_usage {
+            self.stores.reactions.reload(&usage, &SEEDED_REACTIONS, now_ms);
+        }
+        if let Some(usage) = patch.sticker_usage {
+            self.stores.stickers.reload(&usage, &[], now_ms);
+        }
+        if let Some(usage) = patch.channel_usage {
+            self.stores.channels.reload(&usage, &[], now_ms);
         }
     }
 }
@@ -102,6 +232,9 @@ impl Frecency {
 pub enum Setting {
     /// The whole list, which the client writes whole.
     FavoriteEmojis(Vec<String>),
+    FavoriteStickers(Vec<u64>),
+    /// The whole message: the GIFs and whether the hint is hidden.
+    FavoriteGifs(Vec<FavoriteGif>, bool),
 }
 
 /// Why an emoji could not be favourited.
@@ -131,45 +264,74 @@ pub fn toggled(favorites: &[String], key: &str, favorite: bool) -> Result<Option
     }
 }
 
-/// The keys of the emoji used most, best first, as the client orders
-/// `emojiFrecency` (`compute` in 283047): each is scored by how long ago its
-/// most recent uses were, scaled by how often it was used, and the best 42
-/// that `known` finds are listed. `now_ms` is the time to score by.
-pub fn frequently_used(usage: &[(String, Usage)], now_ms: u64, known: impl Fn(&str) -> bool) -> Vec<String> {
-    // How much a use counts for, by the whole days since (`computeWeight`).
-    let weight = |days: i64| match days {
-        ..=3 => 100,
-        4..=15 => 70,
-        16..=30 => 50,
-        31..=45 => 30,
-        46..=80 => 10,
-        _ => 1,
-    };
-    let mut scored: Vec<(&str, i64)> = usage
-        .iter()
-        .filter(|(_, u)| !u.recent_uses.is_empty())
-        .filter(|(key, _)| known(key))
-        .map(|(key, u)| {
-            let score: i64 = u
-                .recent_uses
-                .iter()
-                .take(MAX_SAMPLES)
-                .map(|at| weight((now_ms as i64 - *at as i64) / Duration::from_secs(86_400).as_millis() as i64))
-                .sum();
-            // `Math.ceil(totalUses * (score / numOfRecentUses))`.
-            let frecency = (u.total_uses as f64 * (score as f64 / u.recent_uses.len() as f64)).ceil() as i64;
-            (key.as_str(), frecency)
-        })
-        .collect();
-    // Stable, so equals stay in the order they were sent.
-    scored.sort_by_key(|(_, frecency)| std::cmp::Reverse(*frecency));
-    scored.into_iter().take(FREQUENTLY_USED).map(|(key, _)| key.to_owned()).collect()
+/// How many favourite stickers there can be (`uK`, 631576).
+pub const MAX_FAVORITE_STICKERS: usize = 250;
+
+/// The favourite stickers after `id` is favourited or not (`uK` and `vr` in
+/// 631576), or `None` when that changes nothing. A new one goes at the end.
+/// The client also drops the stickers it can no longer find when it saves
+/// one; those stay here until it does.
+pub fn toggled_sticker(favorites: &[u64], id: u64, favorite: bool) -> Result<Option<Vec<u64>>, TooMany> {
+    let present = favorites.contains(&id);
+    match (favorite, present) {
+        (false, false) | (true, true) => Ok(None),
+        (false, true) => Ok(Some(favorites.iter().copied().filter(|&s| s != id).collect())),
+        (true, false) if favorites.len() >= MAX_FAVORITE_STICKERS => Err(TooMany),
+        (true, false) => Ok(Some(favorites.iter().copied().chain([id]).collect())),
+    }
 }
 
 /// `FavoriteEmojis`: a repeated string is a field for each, one after another.
 fn favorites_message(emojis: &[String]) -> Vec<u8> {
     let empty = Message::parse(&[]).unwrap_or_default();
     emojis.iter().flat_map(|emoji| empty.with(EMOJIS, Some(Value::Bytes(emoji.clone().into_bytes())))).collect()
+}
+
+/// `FavoriteStickers`: the ids as `fixed64`s.
+fn stickers_message(ids: &[u64]) -> Vec<u8> {
+    ids.iter().flat_map(|id| build(&[(STICKER_IDS, Value::Fixed64(*id))])).collect()
+}
+
+/// `FavoriteGIFs`, as the client's `toBinary` writes it: a map entry for each
+/// GIF, then the hint's flag when it is set.
+fn gifs_message(gifs: &[FavoriteGif], hide_tooltip: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    for gif in gifs {
+        let format = match gif.format {
+            GifFormat::None => 0u64,
+            GifFormat::Image => 1,
+            GifFormat::Video => 2,
+        };
+        // A field left at its default is not written.
+        let mut fields = Vec::new();
+        if format != 0 {
+            fields.push((GIF_FORMAT, Value::Varint(format)));
+        }
+        if !gif.src.is_empty() {
+            fields.push((GIF_SRC, Value::Bytes(gif.src.clone().into_bytes())));
+        }
+        for (number, value) in [(GIF_WIDTH, gif.width), (GIF_HEIGHT, gif.height), (GIF_ORDER, gif.order)] {
+            if value != 0 {
+                fields.push((number, Value::Varint(u64::from(value))));
+            }
+        }
+        let item = Value::Bytes(build(&fields));
+        let entry = build(&[(ENTRY_KEY, Value::Bytes(gif.url.clone().into_bytes())), (ENTRY_VALUE, item)]);
+        out.extend(build(&[(GIFS, Value::Bytes(entry))]));
+    }
+    if hide_tooltip {
+        out.extend(build(&[(HIDE_TOOLTIP, Value::Varint(1))]));
+    }
+    out
+}
+
+/// How big the client lets `FavoriteGIFs` be (`wg`, 497685): past it, no
+/// more GIFs can be favourited.
+pub const MAX_FAVORITE_GIFS_BYTES: usize = 762_880;
+
+/// The size `gifs` would be saved at.
+pub fn favorite_gifs_size(gifs: &[FavoriteGif], hide_tooltip: bool) -> usize {
+    gifs_message(gifs, hide_tooltip).len()
 }
 
 /// `FrecencyUserSettings`, saved like `PreloadedUserSettings`.
@@ -183,6 +345,8 @@ impl Kind for Frecent {
     fn written(setting: Setting, _proto: &[u8]) -> Option<(u32, Vec<u8>)> {
         match setting {
             Setting::FavoriteEmojis(emojis) => Some((FAVORITE_EMOJIS, favorites_message(&emojis))),
+            Setting::FavoriteStickers(ids) => Some((FAVORITE_STICKERS, stickers_message(&ids))),
+            Setting::FavoriteGifs(gifs, hide_tooltip) => Some((FAVORITE_GIFS, gifs_message(&gifs, hide_tooltip))),
         }
     }
 
@@ -200,6 +364,10 @@ impl Kind for Frecent {
 mod tests {
     use super::*;
     use crate::protobuf::tests::{bytes_field, varint_bytes, varint_field};
+
+    fn fixed64_field(number: u32, value: u64) -> Vec<u8> {
+        build(&[(number, Value::Fixed64(value))])
+    }
     use crate::settings_sync::SettingsSync;
 
     fn entry(key: &str, total: u64, recent: &[u64]) -> Vec<u8> {
@@ -221,8 +389,8 @@ mod tests {
         // Nothing said of either is nothing.
         assert_eq!(FrecencyPatch::from_proto_bytes(&[]).unwrap(), FrecencyPatch::default());
         let mut frecency = Frecency::default();
-        frecency.apply(patch);
-        frecency.apply(FrecencyPatch::default());
+        frecency.apply(patch, 0);
+        frecency.apply(FrecencyPatch::default(), 0);
         assert_eq!(frecency.favorite_emojis.len(), 2, "an update that says nothing leaves them");
     }
 
@@ -240,35 +408,168 @@ mod tests {
     }
 
     #[test]
-    fn frequently_used_by_recent_weight_and_how_often() {
-        const DAY: u64 = 86_400_000;
-        let now = 1_000_000 * DAY;
-        let usage = vec![
-            ("old".to_owned(), Usage { total_uses: 50, recent_uses: vec![now - 100 * DAY] }),
-            ("often".to_owned(), Usage { total_uses: 10, recent_uses: vec![now - DAY, now - 2 * DAY] }),
-            ("gone".to_owned(), Usage { total_uses: 9, recent_uses: vec![] }),
-            ("new".to_owned(), Usage { total_uses: 3, recent_uses: vec![now] }),
-            ("unknown".to_owned(), Usage { total_uses: 99, recent_uses: vec![now] }),
-        ];
-        // often: 10 × (100 + 100) / 2 = 1000; new: 3 × 100 = 300; old: 50 × 1 = 50.
-        let known = |key: &str| key != "unknown";
-        assert_eq!(frequently_used(&usage, now, known), ["often", "new", "old"]);
+    fn favouriting_a_sticker_adds_to_the_end_removes_and_stops_at_250() {
+        assert_eq!(toggled_sticker(&[1, 2], 3, true), Ok(Some(vec![1, 2, 3])));
+        assert_eq!(toggled_sticker(&[1, 2], 2, true), Ok(None));
+        assert_eq!(toggled_sticker(&[1, 2], 1, false), Ok(Some(vec![2])));
+        assert_eq!(toggled_sticker(&[1], 9, false), Ok(None));
+        let full: Vec<u64> = (0..250).collect();
+        assert_eq!(toggled_sticker(&full, 999, true), Err(TooMany));
+        assert!(toggled_sticker(&full, 5, false).unwrap().is_some());
+    }
 
-        // Older uses weigh less, by the day counts the client has.
-        let at = |days: u64| vec![("e".to_owned(), Usage { total_uses: 1, recent_uses: vec![now - days * DAY] })];
-        let weight = |days| {
-            // One use, once: its frecency is its weight, which orders it against a fixed rival.
-            let rival = ("r".to_owned(), Usage { total_uses: 1, recent_uses: vec![now - 4 * DAY] });
-            let mut both = at(days);
-            both.push(rival);
-            frequently_used(&both, now, |_| true)[0].clone()
+    #[test]
+    fn reads_the_other_usage_and_the_favourite_media() {
+        let id_entry = |id: u64, total: u64| {
+            let item = varint_field(TOTAL_USES, total);
+            bytes_field(1, &[fixed64_field(ENTRY_KEY, id), bytes_field(ENTRY_VALUE, &item)].concat())
         };
-        assert_eq!(weight(3), "e", "3 days is 100, over the rival's 70");
-        assert_eq!(weight(5), "e", "5 days is 70 too, a tie: the order sent holds");
-        assert_eq!(weight(16), "r", "16 days is 50");
-        // Only the first ten uses count, the number of them still divides.
-        let many = vec![("m".to_owned(), Usage { total_uses: 2, recent_uses: vec![now; 12] })];
-        assert_eq!(frequently_used(&many, now, |_| true), ["m"]);
+        let gif = [
+            varint_field(GIF_FORMAT, 1),
+            bytes_field(GIF_SRC, b"https://media.example/a.webp"),
+            varint_field(GIF_WIDTH, 320),
+            varint_field(GIF_HEIGHT, 240),
+            varint_field(GIF_ORDER, 2),
+        ]
+        .concat();
+        let gifs = [
+            bytes_field(
+                GIFS,
+                &[bytes_field(ENTRY_KEY, b"https://example.test/a"), bytes_field(ENTRY_VALUE, &gif)].concat(),
+            ),
+            varint_field(HIDE_TOOLTIP, 1),
+        ]
+        .concat();
+        let proto = [
+            bytes_field(FAVORITE_GIFS, &gifs),
+            bytes_field(FAVORITE_STICKERS, &[fixed64_field(STICKER_IDS, 7), fixed64_field(STICKER_IDS, 9)].concat()),
+            bytes_field(STICKER_FRECENCY, &id_entry(7, 3)),
+            bytes_field(GUILD_AND_CHANNEL_FRECENCY, &id_entry(11, 2)),
+            bytes_field(EMOJI_REACTION_FRECENCY, &entry("heart", 4, &[1])),
+        ]
+        .concat();
+        let patch = FrecencyPatch::from_proto_bytes(&proto).unwrap();
+        assert_eq!(patch.favorite_stickers, Some(vec![7, 9]));
+        let (gifs, hidden) = patch.favorite_gifs.clone().unwrap();
+        assert!(hidden);
+        assert_eq!(
+            gifs,
+            [FavoriteGif {
+                url: "https://example.test/a".into(),
+                format: GifFormat::Image,
+                src: "https://media.example/a.webp".into(),
+                width: 320,
+                height: 240,
+                order: 2
+            }]
+        );
+        assert_eq!(patch.sticker_usage.as_ref().unwrap()[0].0, "7", "an id key is read as a number");
+        assert_eq!(
+            patch.channel_usage.as_ref().unwrap()[0],
+            ("11".to_owned(), Usage { total_uses: 2, recent_uses: vec![] })
+        );
+        assert_eq!(patch.reaction_usage.as_ref().unwrap()[0].0, "heart");
+    }
+
+    #[test]
+    fn loading_empties_what_the_settings_leave_out_and_seeds_the_account_with_no_use() {
+        let mut frecency = Frecency { favorite_emojis: vec!["x".into()], ..Default::default() };
+        frecency.load(FrecencyPatch::default(), 1_000_000_000_000);
+        assert!(frecency.favorite_emojis.is_empty());
+        let now = 1_000_000_000_000;
+        let listed = frecency.stores.emoji.history.frequently(now, |_| true);
+        assert_eq!(listed.len(), 10);
+        assert_eq!(listed[0], "thumbsup");
+        let reactions = frecency.stores.reactions.history.frequently(now, |_| true);
+        assert_eq!(&reactions[..2], ["100", "thumbsup"], "used twice, a name that was listed twice");
+        assert!(!frecency.stores.has_pending(), "seeded uses are never sent");
+    }
+
+    #[test]
+    fn the_first_save_of_an_account_with_no_use_carries_the_seeded_ones_too() {
+        let now = 1_700_000_000_000;
+        let mut frecency = Frecency::default();
+        frecency.load(FrecencyPatch::default(), now);
+        frecency.stores.emoji.track("x", now);
+        let (groups, _) = frecency.stores.before_send(now);
+        let emoji = Message::parse(&groups[0].1).unwrap();
+        // The client's history holds them, and it saves the history whole.
+        assert_eq!(emoji.messages(1).len(), SEEDED_EMOJI.len() + 1);
+        // Loaded after the use, there is nothing to seed: the use is pending.
+        let mut late = Frecency::default();
+        late.stores.emoji.track("x", now);
+        late.load(FrecencyPatch::default(), now);
+        let (groups, _) = late.stores.before_send(now);
+        assert_eq!(Message::parse(&groups[0].1).unwrap().messages(1).len(), 1);
+    }
+
+    #[test]
+    fn favourite_media_save_as_whole_messages() {
+        let mut sync = SettingsSync::<Frecent>::new();
+        assert_eq!(sync.connected(bytes_field(1, &varint_field(3, 7))), None);
+        let gif = FavoriteGif {
+            url: "https://example.test/a".into(),
+            format: GifFormat::Image,
+            src: "https://media.example/a.webp".into(),
+            width: 320,
+            height: 240,
+            order: 1,
+        };
+        let edited = sync.edit(Setting::FavoriteGifs(vec![gif.clone()], false)).unwrap();
+        assert_eq!(edited.patch.favorite_gifs, Some((vec![gif.clone()], false)));
+        let save = sync.save(edited.schedule.unwrap().generation).unwrap();
+        let item = [
+            varint_field(GIF_FORMAT, 1),
+            bytes_field(GIF_SRC, b"https://media.example/a.webp"),
+            varint_field(GIF_WIDTH, 320),
+            varint_field(GIF_HEIGHT, 240),
+            varint_field(GIF_ORDER, 1),
+        ]
+        .concat();
+        let entry = bytes_field(
+            GIFS,
+            &[bytes_field(ENTRY_KEY, b"https://example.test/a"), bytes_field(ENTRY_VALUE, &item)].concat(),
+        );
+        assert_eq!(crate::settings_proto::decode(&save.settings), bytes_field(FAVORITE_GIFS, &entry));
+        assert_eq!(favorite_gifs_size(&[gif], false), entry.len());
+
+        let edited = sync.edit(Setting::FavoriteStickers(vec![7, 9])).unwrap();
+        let save = sync.save(edited.schedule.unwrap().generation).unwrap();
+        let stickers = [fixed64_field(STICKER_IDS, 7), fixed64_field(STICKER_IDS, 9)].concat();
+        let sent = crate::settings_proto::decode(&save.settings);
+        assert!(sent.windows(stickers.len()).any(|w| w == stickers), "ids are fixed64s, one field each");
+    }
+
+    #[test]
+    fn what_is_used_goes_in_a_save_with_whatever_else_is_saved() {
+        let now = 1_700_000_000_000;
+        let mut sync = SettingsSync::<Frecent>::new();
+        let mut frecency = Frecency::default();
+        assert_eq!(sync.touch(), None, "nothing before it is loaded");
+        sync.connected(Vec::new());
+        let before = vec![("heart".to_owned(), Usage { total_uses: 1, recent_uses: vec![now - 86_400_000] })];
+        frecency.load(FrecencyPatch { emoji_usage: Some(before), ..Default::default() }, now);
+        frecency.stores.emoji.track("thumbsup", now);
+        let schedule = sync.touch().unwrap();
+        assert_eq!(schedule.after, Duration::ZERO);
+        let (added, sent) = frecency.stores.before_send(now);
+        let save = sync.save_with(schedule.generation, added).unwrap();
+        assert_eq!(save.kind, 2);
+        let proto = crate::settings_proto::decode(&save.settings);
+        let message = Message::parse(&proto).unwrap();
+        assert!(message.message(EMOJI_FRECENCY).is_some());
+        assert!(message.message(EMOJI_REACTION_FRECENCY).is_some(), "emoji and reactions go together");
+        assert!(message.message(FAVORITE_EMOJIS).is_none());
+        // Answered, the pending use is the account's.
+        let saved = crate::settings_sync::Saved { settings: Some(proto), out_of_date: false };
+        let applied = sync.saved(&save, &saved).unwrap();
+        frecency.stores.saved(sent);
+        frecency.load(applied.patch, now);
+        assert!(!frecency.stores.has_pending());
+        assert_eq!(frecency.stores.emoji.history.frequently(now, |_| true), ["heart", "thumbsup"]);
+        // Nothing pending is a save with nothing to send.
+        let schedule = sync.touch().unwrap();
+        assert!(sync.save_with(schedule.generation, frecency.stores.before_send(now).0).is_none());
     }
 
     #[test]
