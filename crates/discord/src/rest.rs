@@ -454,6 +454,22 @@ impl Rest {
         }
     }
 
+    /// Start a thread in `channel`, from `message` if given, with what
+    /// [`crate::thread_creation::body`] makes. The thread arrives on the
+    /// gateway as well.
+    pub async fn create_thread(
+        &self,
+        channel: Snowflake,
+        message: Option<Snowflake>,
+        body: serde_json::Value,
+    ) -> Result<Channel, Error> {
+        let call = match message {
+            Some(message) => call!(CREATE_THREAD_FROM_MESSAGE, channel, message),
+            None => call!(CREATE_THREAD, channel),
+        };
+        self.request(call, Some(body)).await
+    }
+
     /// Mark everything in `channel` up to `message` as read, for all our clients.
     pub async fn ack(&self, channel: Snowflake, message: Snowflake) -> Result<(), Error> {
         let body = json!({ "token": null });

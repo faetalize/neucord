@@ -230,6 +230,10 @@ pub struct Channel {
     /// A thread's state.
     #[serde(default)]
     pub thread_metadata: Option<ThreadMetadata>,
+    /// Minutes without activity before a thread started here archives
+    /// itself, when its starter doesn't pick one.
+    #[serde(default)]
+    pub default_auto_archive_duration: Option<u32>,
     /// Ours, in a thread we've joined.
     #[serde(default)]
     pub member: Option<ThreadMember>,
@@ -871,6 +875,7 @@ pub struct Call {
 impl Message {
     const CROSSPOSTED: u64 = 1 << 0;
     const SUPPRESS_EMBEDS: u64 = 1 << 2;
+    const HAS_THREAD: u64 = 1 << 5;
     const EPHEMERAL: u64 = 1 << 6;
     pub const IS_VOICE_MESSAGE: u64 = 1 << 13;
     const IS_COMPONENTS_V2: u64 = 1 << 15;
@@ -878,6 +883,11 @@ impl Message {
     /// Built from components alone: its attachments are what they show.
     pub fn is_components_v2(&self) -> bool {
         self.flags & Self::IS_COMPONENTS_V2 != 0
+    }
+
+    /// A thread has been started from it.
+    pub fn has_thread(&self) -> bool {
+        self.flags & Self::HAS_THREAD != 0
     }
 
     /// A recorded voice message: its audio attachment plays with a waveform.

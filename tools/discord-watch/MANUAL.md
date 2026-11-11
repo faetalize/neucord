@@ -86,6 +86,17 @@ changed for unrelated reasons only needs a note in the issue.
   covers. Posting in an archived thread sends nothing first:
   `sendMessage` in 138399 doesn't call `unarchiveThreadIfNecessary`
   (7909), while edits and deletes do.
+- **Starting a thread** (`thread_creation.rs`, `ui/create_thread.rs`). The
+  request, its error codes, the permission bits and `HAS_THREAD` are watched
+  (`POST CHANNEL_THREADS` carries the body of both endpoints). Not watched:
+  who is offered it, `C`, `n` and `Tb` in 406704 (anchor
+  `CREATE_PRIVATE_THREADS`); the form in 289287 (anchor
+  `useDefaultThreadName`), which wants a name unless the thread is from a
+  message and caps it at 100; the default name `V` in 971389 (anchor
+  `rawTitle`), the archive time `Gl` in 268761 (anchor
+  `defaultAutoArchiveDuration`) and the `location`s, "Plus Button" in 747926
+  and "Message" in 519222. The first message goes into the thread once the
+  gateway has brought it (`Y` in 971389).
 - **Editing and deleting** (`permissions::can_edit`, `can_delete`;
   `ui/edits.rs`, `edits::decide`). The requests are watched (`editMessage`, `deleteMessage`,
   `unarchiveThreadIfNecessary`), as are `canDeleteOwnMessage` and

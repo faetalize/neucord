@@ -34,6 +34,9 @@ pub(crate) const END_POLL: Endpoint = Endpoint::post("/channels/{channel}/polls/
 pub(crate) const INTERACT: Endpoint = Endpoint::post("/interactions");
 pub(crate) const TYPING: Endpoint = Endpoint::post("/channels/{channel}/typing");
 pub(crate) const ACK: Endpoint = Endpoint::post("/channels/{channel}/messages/{message}/ack");
+pub(crate) const CREATE_THREAD: Endpoint = Endpoint::post("/channels/{channel}/threads");
+#[rustfmt::skip]
+pub(crate) const CREATE_THREAD_FROM_MESSAGE: Endpoint = Endpoint::post("/channels/{channel}/messages/{message}/threads");
 pub(crate) const EDIT_CHANNEL: Endpoint = Endpoint::patch("/channels/{channel}");
 pub(crate) const USER: Endpoint = Endpoint::get("/users/{user}");
 pub(crate) const OPEN_DM: Endpoint = Endpoint::post("/users/@me/channels");

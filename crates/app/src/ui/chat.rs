@@ -51,7 +51,7 @@ pub(super) struct MessageTarget {
 impl MessageTarget {
     /// The message the row shows: for a thread's first message, the one
     /// the thread was started from.
-    fn shown(&self) -> &Message {
+    pub(super) fn shown(&self) -> &Message {
         self.message.thread_starter().unwrap_or(&self.message)
     }
 
