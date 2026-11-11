@@ -3,6 +3,7 @@
 
 mod account;
 mod attachments;
+mod background;
 mod captcha;
 mod chat;
 mod components;
@@ -62,6 +63,7 @@ use crate::images::Images;
 use crate::render;
 use crate::theme::Theme;
 use crate::timelines::Timelines;
+use crate::tray::Tray;
 
 /// The server rail's width.
 const RAIL: f64 = 72.0;
@@ -211,6 +213,10 @@ pub struct App {
     remembered: Store,
     /// The settings window, while it's open.
     settings_window: RefCell<Option<settings::Window>>,
+    /// The icon in the panel, which is also what lets the window hide.
+    tray: Tray,
+    /// The Background portal turned down running with no window.
+    background_refused: Cell<bool>,
     /// The member list pane, in the right pane of the chat.
     members: members::Pane,
     /// What the rail and sidebar last drew, so badge refreshes can skip
@@ -403,6 +409,8 @@ impl App {
             config,
             remembered: Store::open(config::state_path()),
             settings_window: RefCell::default(),
+            tray: Tray::new(),
+            background_refused: Cell::new(false),
             members: members::Pane::new(),
             drawn: RefCell::default(),
             rail_items: RefCell::default(),
@@ -431,7 +439,11 @@ impl App {
         // the window is open. Released on close, which breaks the cycle.
         let keep_alive = RefCell::new(Some(this.clone()));
         let popover = this.mention_popover.clone();
-        this.window.connect_close_request(move |_| {
+        this.window.connect_close_request(move |window| {
+            if keep_alive.borrow().as_ref().is_some_and(|app| app.keeps_running()) {
+                window.set_visible(false);
+                return glib::Propagation::Stop;
+            }
             // A manually-parented popover must be unparented before teardown.
             popover.unparent();
             keep_alive.take();
@@ -440,8 +452,13 @@ impl App {
         this
     }
 
-    pub fn start(self: &Rc<Self>) {
-        self.window.present();
+    /// `hidden`: started with the session, so the window waits behind the
+    /// tray icon (see [`App::start_background`]).
+    pub fn start(self: &Rc<Self>, hidden: bool) {
+        self.start_background(hidden);
+        if !hidden {
+            self.window.present();
+        }
         self.show_loading("Checking keyring…");
         let this = self.clone();
         glib::spawn_future_local(async move {

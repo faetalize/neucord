@@ -88,7 +88,7 @@ fn option_switch(
     title: &str,
     subtitle: &str,
     key: &'static Key,
-    changed: fn(&App, bool),
+    changed: fn(&Rc<App>, bool),
 ) {
     let row = adw::SwitchRow::builder().title(title).subtitle(subtitle).active(app.config.get(key)).build();
     let app = Rc::downgrade(app);
@@ -248,7 +248,33 @@ impl App {
             &config::TRANSLUCENT,
             |app, on| app.theme.set_translucent(on),
         );
-        let neucord = page("Neucord", "preferences-system-symbolic", &[&appearance, &typing]);
+        let background = group("Background", "");
+        option_switch(
+            self,
+            &background,
+            "Minimize Neucord to the system tray",
+            "Clicking X minimizes Neucord instead of closing it. Needs a panel with tray icons (on GNOME, the \
+             AppIndicator extension); without one, closing quits.",
+            &config::MINIMIZE_TO_TRAY,
+            |app, _| app.sync_background(false),
+        );
+        option_switch(
+            self,
+            &background,
+            "Open Neucord when your computer starts up",
+            "It starts hidden, behind the tray icon.",
+            &config::OPEN_ON_STARTUP,
+            |app, _| app.sync_background(false),
+        );
+        option_switch(
+            self,
+            &background,
+            "Show unread messages on the tray icon",
+            "Adds a badge when you have unread messages or mentions.",
+            &config::UNREAD_BADGE,
+            |app, _| app.refresh_tray(),
+        );
+        let neucord = page("Neucord", "preferences-system-symbolic", &[&appearance, &typing, &background]);
         neucord.set_description("These are saved on this computer only, not to your Discord account.");
 
         let dialog = adw::PreferencesDialog::builder().title("Settings").build();
@@ -285,7 +311,7 @@ impl App {
 
     /// Say how a save went where it's seen: the window covers the app's own
     /// toasts, so it shows its own.
-    fn settings_toast(&self, text: &str) {
+    pub(super) fn settings_toast(&self, text: &str) {
         match self.settings_window.borrow().as_ref() {
             Some(window) => window.dialog.add_toast(adw::Toast::new(text)),
             None => self.toast(text),
