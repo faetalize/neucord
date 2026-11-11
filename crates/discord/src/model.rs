@@ -152,6 +152,25 @@ impl ChannelKind {
     pub fn is_forum_like(self) -> bool {
         matches!(self, Self::Forum | Self::Media)
     }
+
+    /// The channel types polls may be posted in (`POLLS` in 478437): not
+    /// categories, forums or media channels.
+    pub fn takes_polls(self) -> bool {
+        matches!(
+            self,
+            Self::Text
+                | Self::Dm
+                | Self::Voice
+                | Self::GroupDm
+                | Self::Announcement
+                | Self::AnnouncementThread
+                | Self::PublicThread
+                | Self::PrivateThread
+                | Self::Stage
+                | Self::MediaThread
+                | Self::Other(17 | 18 | 21)
+        )
+    }
 }
 
 impl<'de> Deserialize<'de> for ChannelKind {

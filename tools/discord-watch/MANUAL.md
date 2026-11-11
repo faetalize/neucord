@@ -219,6 +219,17 @@ changed for unrelated reasons only needs a note in the issue.
   which no web build holds: 198620 only maps its extension to a type (webm,
   wav, m4a, mp4, caf, else ogg), so a new case there means the container
   changed.
+- **Creating polls** (`poll_draft.rs`, `ui/poll_composer.rs`). The body
+  (`createPoll`, `sendPollMessage`), the channel types (`POLLS`), the
+  durations and the layouts are watched. Not watched: who is offered it,
+  `I7` in 969632 (anchor `POLLS.has`: a private channel, else Send Messages
+  and Send Polls) with the attach item in 316576 (anchor `canPostPolls`);
+  the editor in 50518 (anchor `POLL_EDITOR_VIEWED`): `maxLength` 300 on the
+  question and 55 on an answer, ten answers at most, an emoji without text
+  refused, and the question to confirm before leaving what was written
+  (`Wn` in 969632); and the emoji it picks, which follow chat's rules since
+  `Re` in 307731 leaves `POLLS` out of the intentions that refuse other
+  servers' emoji.
 - **What Nitro, boosts and experiments allow** (`limits.rs`, and its message
   length in `ui/composer.rs`). `R` in 722178, below the perks each premium
   type includes (anchor `ProductCatalog.tsx`), asks the `perks` bitmask when

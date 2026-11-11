@@ -444,6 +444,15 @@ pub fn can_record_voice_message(guild: Option<&Guild>, channel: &Channel, me: &A
         && guild.is_none_or(|g| in_channel(g, channel, me, now).contains(Permissions::SEND_VOICE_MESSAGES))
 }
 
+/// Whether the client offers Create Poll in `channel` (`I7` in 969632): a
+/// channel type that takes polls, and in a server Send Polls with Send
+/// Messages, which [`can_send`] checks and which the box it belongs to needs.
+pub fn can_post_polls(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64) -> bool {
+    channel.kind.takes_polls()
+        && can_send(guild, channel, me, now)
+        && guild.is_none_or(|g| in_channel(g, channel, me, now).contains(Permissions::SEND_POLLS))
+}
+
 /// Whether the client offers Reply in `channel` (517997), with
 /// [`crate::Message::is_replyable`] for the message itself: not in the
 /// system DM, in a server only with Send Messages and Read Message History
@@ -837,6 +846,37 @@ mod tests {
         )
         .unwrap();
         assert!(!can_record_voice_message(None, &system, &me, 0));
+    }
+
+    #[test]
+    fn polls_take_send_polls_in_servers() {
+        let (mut guild, me) = (guild(), me());
+        let open = channel(&[]);
+        assert!(can_send(Some(&guild), &open, &me, 0) && !can_post_polls(Some(&guild), &open, &me, 0));
+        guild.my_roles.push(Snowflake(MOD));
+        let moderator = guild.roles.iter_mut().find(|r| r.id == Snowflake(MOD)).unwrap();
+        moderator.permissions = moderator.permissions | Permissions::SEND_POLLS;
+        assert!(can_post_polls(Some(&guild), &open, &me, 0));
+        let muted = channel(&[(GUILD, SEND, Permissions::NONE)]);
+        assert!(!can_post_polls(Some(&guild), &muted, &me, 0), "Send Polls alone isn't enough");
+
+        let mut forum = channel(&[]);
+        forum.kind = serde_json::from_value(json!(15)).unwrap();
+        assert!(!can_post_polls(Some(&guild), &forum, &me, 0));
+        let dm: Channel = serde_json::from_value(json!({"id": "9", "type": 1})).unwrap();
+        assert!(can_post_polls(None, &dm, &me, 0), "a private channel needs no permission");
+        let system: Channel = serde_json::from_value(
+            json!({"id": "9", "type": 1, "recipients": [{"id": "2", "username": "d", "system": true}]}),
+        )
+        .unwrap();
+        assert!(!can_post_polls(None, &system, &me, 0));
+    }
+
+    #[test]
+    fn polls_go_in_the_clients_channel_types() {
+        let types: Vec<u8> =
+            (0..=21).filter(|&t| serde_json::from_value::<ChannelKind>(json!(t)).unwrap().takes_polls()).collect();
+        assert_eq!(types, [0, 1, 2, 3, 5, 10, 11, 12, 13, 17, 18, 19, 21]);
     }
 
     #[test]

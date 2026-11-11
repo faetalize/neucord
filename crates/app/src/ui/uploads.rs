@@ -229,7 +229,7 @@ impl App {
         let drafts = &self.drafts;
         let channel = self.attach_channel();
         // The menu holds more than files: it shows wherever anything in it does.
-        drafts.attach.set_visible(channel.is_some() || self.voice_channel().is_some());
+        drafts.attach.set_visible(channel.is_some() || self.voice_channel().is_some() || self.poll_channel().is_some());
         while let Some(child) = drafts.tray.first_child() {
             drafts.tray.remove(&child);
         }

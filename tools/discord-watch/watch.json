@@ -64,6 +64,8 @@
       "USE_EXTERNAL_STICKERS",
       "ADD_REACTIONS"
     ],
+    "PollDuration": ["ONE_HOUR", "FOUR_HOURS", "EIGHT_HOURS", "ONE_DAY", "THREE_DAYS", "SEVEN_DAYS", "FOURTEEN_DAYS"],
+    "PollLayoutType": ["DEFAULT", "IMAGE_ONLY_ANSWERS"],
     "PremiumPerk": [
       "ANIMATED_EMOJIS",
       "EMOJIS_EVERYWHERE",
@@ -108,6 +110,7 @@
     "canUseEmojisEverywhere",
     "canUseIncreasedMessageLength",
     "createAttachmentUrlRetryOpts",
+    "createPoll",
     "createResponseHandler",
     "deleteMessage",
     "editMessage",
@@ -158,6 +161,7 @@
     "requestGuildMembers",
     "resolvedMessageNotifications",
     "retryOpts",
+    "sendPollMessage",
     "startOrResumeUpload",
     "translateInlineEmojiToSurrogates",
     "truncate",
@@ -197,5 +201,5 @@
     "TypingStore",
     "UploadAttachmentStore"
   ],
-  "constants": ["ACCOUNT_AGE", "FONT_SIZES", "MEMBER_AGE", "REPLYABLE", "UNDELETABLE", "USER_MESSAGE"]
+  "constants": ["ACCOUNT_AGE", "FONT_SIZES", "MEMBER_AGE", "POLLS", "REPLYABLE", "UNDELETABLE", "USER_MESSAGE"]
 }
