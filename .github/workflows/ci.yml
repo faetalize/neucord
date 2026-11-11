@@ -14,8 +14,9 @@ jobs:
     # Neucord needs GTK 4.24 or newer, which Ubuntu does not ship yet.
     container: archlinux:latest
     steps:
+      # libheif is glycin's optional HEIC loader; the image tests need it.
       - name: Install dependencies
-        run: pacman -Syu --noconfirm --needed base-devel git rust gtk4 libadwaita libsoup3 webkitgtk-6.0 gtksourceview5 libsecret openssl
+        run: pacman -Syu --noconfirm --needed base-devel git rust gtk4 libadwaita libsoup3 webkitgtk-6.0 gtksourceview5 libsecret openssl libheif
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - name: Format

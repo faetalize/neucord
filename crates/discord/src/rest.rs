@@ -139,16 +139,19 @@ thread_local! {
 
 /// What sets one request apart from the usual.
 #[derive(Clone, Copy)]
-struct Sending {
+struct Sending<'a> {
     /// Try again once after a 429, which is how requests usually go.
     retry_rate_limit: bool,
     /// Requests that failed before this one, for `X-Failed-Requests`.
     failed: u32,
+    /// The hash of a file before it was converted, for
+    /// `X-Discord-Original-MD5` (724165's `buildHeadersForMd5`).
+    original_md5: Option<&'a str>,
 }
 
-impl Default for Sending {
+impl Default for Sending<'_> {
     fn default() -> Self {
-        Sending { retry_rate_limit: true, failed: 0 }
+        Sending { retry_rate_limit: true, failed: 0, original_md5: None }
     }
 }
 
@@ -244,8 +247,9 @@ impl Rest {
     /// wait before posting in the channel: slowmode we may not have known of
     /// (`message_send_cooldown_ms`, only in a 200), or 0.
     pub async fn typing(&self, channel: Snowflake) -> Result<i64, Error> {
-        let (status, response) =
-            self.send_with(call!(TYPING, channel), None, Sending { retry_rate_limit: false, failed: 0 }).await?;
+        let (status, response) = self
+            .send_with(call!(TYPING, channel), None, Sending { retry_rate_limit: false, ..Sending::default() })
+            .await?;
         let answer: Value = Self::answer(status, &response)?;
         let cooldown = if status == 200 { answer["message_send_cooldown_ms"].as_f64() } else { None };
         Ok(cooldown.map_or(0, |ms| ms as i64))
@@ -306,8 +310,9 @@ impl Rest {
         call: Call,
         body: Option<Value>,
         failed: u32,
+        original_md5: Option<&str>,
     ) -> Result<(u32, glib::Bytes), Error> {
-        self.send_with(call, body, Sending { retry_rate_limit: false, failed }).await
+        self.send_with(call, body, Sending { retry_rate_limit: false, failed, original_md5 }).await
     }
 
     /// `PUT` to an upload URL, which is Google's and not Discord's: it takes
@@ -344,7 +349,7 @@ impl Rest {
     /// Take back an upload (`delete` in 48325): the client sends it and
     /// ignores what comes of it.
     pub(crate) async fn delete_upload(&self, uploaded_filename: &str) {
-        let _ = self.send_upload_request(call!(DELETE_UPLOAD, uploaded_filename), None, 0).await;
+        let _ = self.send_upload_request(call!(DELETE_UPLOAD, uploaded_filename), None, 0, None).await;
     }
 
     pub(crate) async fn request<T: DeserializeOwned>(
@@ -376,7 +381,12 @@ impl Rest {
         self.send_with(call, body, Sending::default()).await
     }
 
-    async fn send_with(&self, call: Call, body: Option<Value>, options: Sending) -> Result<(u32, glib::Bytes), Error> {
+    async fn send_with(
+        &self,
+        call: Call,
+        body: Option<Value>,
+        options: Sending<'_>,
+    ) -> Result<(u32, glib::Bytes), Error> {
         let mut retries = 0;
         let mut captchas = 0;
         let mut answer: Option<(String, Captcha)> = None;
@@ -393,6 +403,9 @@ impl Rest {
             }
             if options.failed > 0 {
                 headers.replace("X-Failed-Requests", &options.failed.to_string());
+            }
+            if let Some(md5) = options.original_md5.filter(|md5| is_md5(md5)) {
+                headers.replace("X-Discord-Original-MD5", md5);
             }
             if let Some((key, captcha)) = &answer {
                 headers.replace("X-Captcha-Key", key);
@@ -507,6 +520,12 @@ fn rate_limit_wait(body: &[u8]) -> Option<f64> {
 }
 
 /// The headers every request starts with.
+/// What `buildHeadersForMd5` (724165) lets through as the original's hash:
+/// 32 lowercase hex digits, or no header at all.
+fn is_md5(hash: &str) -> bool {
+    hash.len() == 32 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 fn base_headers(token: Option<&str>) -> Vec<(&'static str, String)> {
     let mut headers = vec![("X-Discord-Locale", "en-US".to_owned())];
     match token {
@@ -527,7 +546,7 @@ pub(crate) fn is_captcha(body: &Value) -> bool {
 mod tests {
     use serde_json::json;
 
-    use super::{Captcha, Page, Reply, ReplyPing, base_headers, edit_body, message_body, rate_limit_wait};
+    use super::{Captcha, Page, Reply, ReplyPing, base_headers, edit_body, is_md5, message_body, rate_limit_wait};
     use crate::uploads::Sent;
     use crate::{Message, Snowflake, identity};
 
@@ -544,6 +563,14 @@ mod tests {
         }
         assert_eq!(ping(false, true, true).fixed(), Some(false));
         assert_eq!(ping(false, false, true).fixed(), None);
+    }
+
+    #[test]
+    fn only_a_lowercase_md5_is_sent_as_the_originals_hash() {
+        assert!(is_md5("d41d8cd98f00b204e9800998ecf8427e"));
+        assert!(!is_md5("D41D8CD98F00B204E9800998ECF8427E"), "uppercase fails the client's regex");
+        assert!(!is_md5("d41d8cd98f00b204e9800998ecf8427") && !is_md5("d41d8cd98f00b204e9800998ecf8427ef"));
+        assert!(!is_md5("g41d8cd98f00b204e9800998ecf8427e") && !is_md5(""));
     }
 
     #[test]

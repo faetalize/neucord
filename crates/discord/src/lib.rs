@@ -19,6 +19,7 @@ pub mod gateway;
 pub mod held;
 pub mod history;
 mod identity;
+pub mod images;
 mod inflate;
 mod invalid;
 pub mod limits;

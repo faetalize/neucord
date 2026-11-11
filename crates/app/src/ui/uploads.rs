@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use adw::prelude::*;
+use discord::images;
 use discord::uploads::{self, Data, File, Refusal, Sent};
 use discord::{Message, Rest, Snowflake};
 use gtk::{gdk, gio, glib};
@@ -46,7 +47,11 @@ enum Status {
 /// A file in a channel's draft, and the upload of it.
 pub(super) struct Upload {
     channel: Snowflake,
-    file: File,
+    /// What goes up: the file as added, or what it was converted to.
+    file: RefCell<File>,
+    /// Whether the WebP conversion has had its turn, which the client gives
+    /// a file once as well (its result replaces the file).
+    optimized: Cell<bool>,
     /// What the message calls it, which the edit dialog may change.
     name: RefCell<String>,
     spoiler: Cell<bool>,
@@ -70,8 +75,9 @@ struct Row {
 
 impl Upload {
     fn set_status(&self, status: Status) {
+        let size = self.file.borrow().size;
         let words = match &status {
-            Status::Uploading(sent) if self.file.size > 0 => format!("{}%", (sent * 100 / self.file.size).min(100)),
+            Status::Uploading(sent) if size > 0 => format!("{}%", (sent * 100 / size).min(100)),
             Status::Uploading(_) => String::new(),
             Status::Done(_) => "Uploaded".to_owned(),
             Status::Failed(why, _) => why.clone(),
@@ -79,7 +85,7 @@ impl Upload {
         };
         let failed = matches!(status, Status::Failed(..));
         let finished = !matches!(status, Status::Uploading(_));
-        let size = uploads::size_words(self.file.size);
+        let size = uploads::size_words(size);
         let shown = if words.is_empty() { size } else { format!("{size} · {words}") };
         // Progress comes in small steps; only a change of the words is drawn.
         if self.row.state.label() != shown {
@@ -347,8 +353,9 @@ impl App {
                     size: bytes.len() as u64,
                     content_type: "image/png".to_owned(),
                     data: Data::Memory(bytes),
+                    original_md5: None,
                 };
-                this.add_files(channel, vec![image]);
+                this.add_files(channel, vec![image]).await;
             }
         });
     }
@@ -368,14 +375,34 @@ impl App {
                 filename: name,
                 size,
                 data: Data::File(path),
+                original_md5: None,
             });
         }
-        self.add_files(channel, files);
+        self.add_files(channel, files).await;
+    }
+
+    /// Add files to `channel`'s draft as the client's `R` does (518960): an
+    /// empty file is turned back first, then HEIC and JPEG XR files become
+    /// JPEGs (all at once, unseen), and only then are the limits checked, on
+    /// what will be uploaded.
+    async fn add_files(self: &Rc<Self>, channel: Snowflake, files: Vec<File>) {
+        if files.is_empty() || self.attach_channel() != Some(channel) {
+            return;
+        }
+        if files.iter().any(|f| f.size == 0) {
+            return self.show_refusal(&Refusal::Empty);
+        }
+        let tasks: Vec<_> = files.into_iter().map(|file| glib::spawn_future_local(images::prepare(file))).collect();
+        let mut prepared = Vec::new();
+        for task in tasks {
+            prepared.extend(task.await);
+        }
+        self.add_prepared(channel, prepared);
     }
 
     /// Put files in `channel`'s draft and start uploading them, unless
     /// they're over what a message may carry, in which case none are added.
-    fn add_files(self: &Rc<Self>, channel: Snowflake, files: Vec<File>) {
+    fn add_prepared(self: &Rc<Self>, channel: Snowflake, files: Vec<File>) {
         if files.is_empty() || self.attach_channel() != Some(channel) {
             return;
         }
@@ -383,7 +410,7 @@ impl App {
             let state = self.state.borrow();
             state.limits().uploads(state.find_channel(channel).and_then(|(guild, _)| guild))
         };
-        let queued: Vec<u64> = self.drafts.of(channel).iter().map(|u| u.file.size).collect();
+        let queued: Vec<u64> = self.drafts.of(channel).iter().map(|u| u.file.borrow().size).collect();
         let added: Vec<u64> = files.iter().map(|f| f.size).collect();
         if let Err(refusal) = uploads::check_added(&limits, &queued, &added) {
             return self.show_refusal(&refusal);
@@ -437,7 +464,8 @@ impl App {
         let upload = Rc::new(Upload {
             channel,
             name: RefCell::new(file.filename.clone()),
-            file,
+            file: RefCell::new(file),
+            optimized: Cell::new(false),
             spoiler: Cell::new(false),
             description: RefCell::default(),
             status: RefCell::new(Status::Uploading(0)),
@@ -481,9 +509,20 @@ impl App {
         let channel = upload.channel;
         upload.set_status(Status::Uploading(0));
         let weak = Rc::downgrade(upload);
-        let file = upload.file.clone();
         let attempts = upload.attempts.clone();
+        // Decided here, from the account's experiments, for the file's turn.
+        let webp = self.state.borrow().limits().webp_conversion();
         let task = glib::spawn_future_local(async move {
+            let Some(upload) = weak.upgrade() else { return };
+            let file = upload.file.borrow().clone();
+            if let (false, Some(max)) = (upload.optimized.replace(true), webp)
+                && let Some(smaller) = images::optimize(&file, max).await
+            {
+                upload.file.replace(smaller);
+                upload.set_status(Status::Uploading(0));
+            }
+            let file = upload.file.borrow().clone();
+            drop(upload);
             let progress: Rc<dyn Fn(u64)> = Rc::new({
                 let weak = weak.clone();
                 move |sent| {
@@ -524,7 +563,8 @@ impl App {
             .build();
         let fields = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).build();
         fields.append(&name);
-        let alt = uploads::is_image(&upload.file.content_type) || uploads::is_video(&upload.file.content_type);
+        let alt = uploads::is_image(&upload.file.borrow().content_type)
+            || uploads::is_video(&upload.file.borrow().content_type);
         if alt {
             fields.append(&description);
         }
@@ -565,9 +605,11 @@ impl App {
             size: bytes.len() as u64,
             content_type: "text/plain".to_owned(),
             data: Data::Memory(bytes),
+            original_md5: None,
         };
         let before = self.drafts.of(channel).len();
-        self.add_files(channel, vec![file]);
+        // Text is never converted.
+        self.add_prepared(channel, vec![file]);
         // The text leaves the box only once it has become a file.
         if self.drafts.of(channel).len() > before {
             self.set_composer_text(&split.rest);
@@ -631,6 +673,7 @@ impl App {
         self.refresh_attach();
         let (names, descriptions): (Vec<String>, Vec<Option<String>>) =
             files.iter().map(|u| (u.name.borrow().clone(), u.description.borrow().clone())).unzip();
+        let types: Vec<String> = files.iter().map(|u| u.file.borrow().content_type.clone()).collect();
         let sent: Vec<Sent> = files
             .iter()
             .enumerate()
@@ -639,7 +682,7 @@ impl App {
                 uploaded_filename: &uploaded[i],
                 description: descriptions[i].as_deref(),
                 spoiler: u.spoiler.get(),
-                content_type: &u.file.content_type,
+                content_type: &types[i],
             })
             .collect();
         rest.send_message(channel, text, reply, &sent).await.map_err(Stopped::Send)
@@ -688,6 +731,6 @@ impl App {
 
     /// The sizes of `files`, for the checks before sending.
     pub(super) fn sizes(files: &[Rc<Upload>]) -> Vec<u64> {
-        files.iter().map(|u| u.file.size).collect()
+        files.iter().map(|u| u.file.borrow().size).collect()
     }
 }

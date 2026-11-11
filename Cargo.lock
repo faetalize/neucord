@@ -95,6 +95,7 @@ name = "discord"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "gdk-pixbuf",
  "gio",
  "glib",
  "libsecret",
