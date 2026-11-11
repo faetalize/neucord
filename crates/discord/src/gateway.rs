@@ -32,6 +32,7 @@ use crate::component::Component;
 use crate::embed::Embed;
 use crate::emoji::GuildEmoji;
 use crate::experiments::Experiments;
+use crate::frecency::FrecencyPatch;
 use crate::gates::Gates;
 use crate::inflate::Inflater;
 use crate::limits::Nitro;
@@ -343,8 +344,9 @@ pub enum Event {
     },
     /// The favourites and counts of use changed (the settings proto of type
     /// 2, see [`crate::frecency`]): all of them, or with `partial` the
-    /// messages that changed in them.
+    /// messages that changed in them. `proto` is what arrived.
     FrecencyUpdate {
+        patch: FrecencyPatch,
         proto: Vec<u8>,
         partial: bool,
     },
@@ -1011,10 +1013,12 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
                 return eprintln!("gateway: bad USER_SETTINGS_PROTO_UPDATE");
             };
             if kind == Some(2) {
-                return send_event(
-                    state,
-                    Event::FrecencyUpdate { proto, partial: data["partial"].as_bool() == Some(true) },
-                );
+                let patch = FrecencyPatch::from_proto_bytes(&proto).unwrap_or_default();
+                return parser.push(Event::FrecencyUpdate {
+                    patch,
+                    proto,
+                    partial: data["partial"].as_bool() == Some(true),
+                });
             }
             if kind != Some(1) {
                 return;
@@ -1875,15 +1879,16 @@ mod tests {
 
     #[test]
     fn an_update_of_the_favourites_is_told_apart_from_the_settings() {
-        let (state, rx) = fresh_state();
+        let state = fresh_state();
         let update = |kind: u64, partial: bool| json!({"settings": {"type": kind, "proto": settings_proto::encode(&[0x2a, 0x00])}, "partial": partial});
         dispatch(&state, "USER_SETTINGS_PROTO_UPDATE", update(2, true));
-        let Ok(Event::FrecencyUpdate { proto, partial }) = rx.try_recv() else { panic!("no update") };
+        let Ok(Event::FrecencyUpdate { patch, proto, partial }) = state.try_recv() else { panic!("no update") };
         assert_eq!((proto, partial), (vec![0x2a, 0x00], true));
+        assert_eq!(patch.favorite_emojis, Some(Vec::new()), "read where the payload is, not by the app");
         dispatch(&state, "USER_SETTINGS_PROTO_UPDATE", update(2, false));
-        assert!(matches!(rx.try_recv(), Ok(Event::FrecencyUpdate { partial: false, .. })));
+        assert!(matches!(state.try_recv(), Ok(Event::FrecencyUpdate { partial: false, .. })));
         dispatch(&state, "USER_SETTINGS_PROTO_UPDATE", update(3, false));
-        assert!(rx.try_recv().is_err(), "a type nobody reads");
+        assert!(state.try_recv().is_err(), "a type nobody reads");
     }
 
     #[test]

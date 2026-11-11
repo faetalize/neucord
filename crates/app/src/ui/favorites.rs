@@ -48,7 +48,7 @@ impl App {
     }
 
     /// Another client changed the favourites.
-    pub(super) fn frecency_updated(&self, proto: &[u8], partial: bool) {
+    pub(super) fn frecency_updated(&self, patch: FrecencyPatch, proto: &[u8], partial: bool) {
         let mut state = self.state.borrow_mut();
         if !state.frecency_sync.is_loaded() {
             return;
@@ -57,7 +57,7 @@ impl App {
         if !partial {
             state.frecency = Frecency::default();
         }
-        state.frecency.apply(FrecencyPatch::from_proto_bytes(proto).unwrap_or_default());
+        state.frecency.apply(patch);
     }
 
     /// Whether the emoji is one of the account's favourites.
