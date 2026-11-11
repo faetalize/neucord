@@ -4,11 +4,11 @@
 //!
 //! `config.ini` under `$XDG_CONFIG_HOME/neucord/` holds the options the user
 //! sets in the settings window. It is meant to be edited by hand too, next to
-//! the user stylesheet (#17) that also lives there, so a save rewrites only
-//! the keys it owns and leaves comments and keys it doesn't know. What the
-//! app writes on its own, such as whether the member pane is open, goes to
-//! `state.ini` under `$XDG_STATE_HOME/neucord/`, so a hand-edited config
-//! isn't rewritten every time a pane is toggled.
+//! the user stylesheet (`style.css`, see `theme`) that also lives there, so a
+//! save rewrites only the keys it owns and leaves comments and keys it doesn't
+//! know. What the app writes on its own, such as whether the member pane is
+//! open, goes to `state.ini` under `$XDG_STATE_HOME/neucord/`, so a
+//! hand-edited config isn't rewritten every time a pane is toggled.
 //!
 //! A key file instead of GSettings: that needs a compiled schema installed
 //! system-wide, which packaging provides (#26) and `cargo run` doesn't.
@@ -32,12 +32,21 @@ pub struct Key {
 /// Whether others see us typing (`POST /channels/{id}/typing`).
 pub const SEND_TYPING: Key = Key { group: "Chat", name: "send-typing", default: true };
 
+/// Bars and panels that let the content scrolling beneath them show through,
+/// blurred (`--neucord-bar-opacity` and `--neucord-blur` in `style.css`).
+pub const TRANSLUCENT: Key = Key { group: "Appearance", name: "translucent", default: true };
+
 /// The member pane, docked beside the chat, was closed by the user.
 pub const MEMBERS_CLOSED: Key = Key { group: "Window", name: "members-closed", default: false };
 
 /// The user's options.
 pub fn config_path() -> PathBuf {
     glib::user_config_dir().join("neucord").join("config.ini")
+}
+
+/// The user's stylesheet, loaded after Neucord's own.
+pub fn stylesheet_path() -> PathBuf {
+    glib::user_config_dir().join("neucord").join("style.css")
 }
 
 /// What the app remembers.
@@ -129,6 +138,7 @@ mod tests {
         let dir = Dir::new("missing");
         let store = Store::open(dir.file());
         assert!(store.get(&SEND_TYPING));
+        assert!(store.get(&TRANSLUCENT));
         assert!(!store.get(&MEMBERS_CLOSED));
         assert!(!dir.file().exists(), "reading creates nothing");
     }

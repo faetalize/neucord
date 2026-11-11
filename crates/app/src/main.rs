@@ -7,11 +7,12 @@ mod kept;
 mod recorder;
 mod render;
 mod rich_text;
+mod theme;
 mod timelines;
 mod ui;
 
 use adw::prelude::*;
-use gtk::{gdk, gio};
+use gtk::gio;
 
 const APP_ID: &str = "dev.faetalize.neucord";
 
@@ -19,14 +20,6 @@ fn main() -> glib::ExitCode {
     let app = adw::Application::new(Some(APP_ID), gio::ApplicationFlags::default());
 
     app.connect_startup(|app| {
-        let provider = gtk::CssProvider::new();
-        provider.load_from_string(include_str!("style.css"));
-        gtk::style_context_add_provider_for_display(
-            &gdk::Display::default().expect("a display"),
-            &provider,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-
         let quit = gio::ActionEntry::builder("quit").activate(|app: &adw::Application, _, _| app.quit()).build();
         let about = gio::ActionEntry::builder("about")
             .activate(|app: &adw::Application, _, _| {
