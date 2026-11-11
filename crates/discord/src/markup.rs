@@ -423,55 +423,177 @@ fn text_default(c: char) -> bool {
 pub struct Ansi {
     pub text: String,
     pub bold: bool,
+    pub italic: bool,
     pub underline: bool,
-    /// One of the eight colours, 0 to 7 (codes 30 to 37 and 40 to 47).
-    pub foreground: Option<u8>,
-    pub background: Option<u8>,
+    pub strikethrough: bool,
+    pub overline: bool,
+    pub foreground: Option<Colour>,
+    pub background: Option<Colour>,
 }
 
-/// Split an `ansi` code block by the escape codes in it (`ESC[1;31m`),
-/// which are dropped. Unknown codes change nothing.
-pub fn ansi(code: &str) -> Vec<Ansi> {
-    let mut out: Vec<Ansi> = Vec::new();
-    let mut current = Ansi::default();
-    let mut rest = code;
-    while !rest.is_empty() {
-        let Some(escape) = rest.find("\u{1b}[") else {
-            current.text.push_str(rest);
-            break;
-        };
-        current.text.push_str(&rest[..escape]);
-        let after = &rest[escape + 2..];
-        let Some(end) = after.find(|c: char| !(c.is_ascii_digit() || c == ';')) else {
-            break;
-        };
-        if !after[end..].starts_with('m') {
-            // Not a style code: keep it as text.
-            current.text.push_str(&rest[escape..escape + 2]);
-            rest = after;
-            continue;
-        }
-        let mut next = Ansi { text: String::new(), ..current.clone() };
-        for code in after[..end].split(';') {
-            match code.parse::<u8>().unwrap_or(0) {
-                0 => next = Ansi::default(),
-                1 => next.bold = true,
-                4 => next.underline = true,
-                n @ 30..=37 => next.foreground = Some(n - 30),
-                n @ 40..=47 => next.background = Some(n - 40),
-                _ => {}
+/// A colour an escape code picks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Colour {
+    /// One of the sixteen: black, red, green, yellow, blue, magenta, cyan and
+    /// white, then the bright ones. The client takes their colours from its
+    /// theme, and so does Neucord.
+    Named(u8),
+    /// A place in the 256-colour table (`38;5;n`). Past 255 it has no colour.
+    Table(u32),
+    Rgb([u8; 3]),
+}
+
+impl Colour {
+    /// The colour of a place in the table past the sixteen named: the
+    /// 6×6×6 cube, then 24 greys, as the client computes them. `None` for the
+    /// named ones, which a theme paints, and for what the table doesn't reach.
+    pub fn table(index: u32) -> Option<[u8; 3]> {
+        const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+        match index {
+            16..=231 => {
+                let i = index as usize - 16;
+                Some([LEVELS[i / 36], LEVELS[i / 6 % 6], LEVELS[i % 6]])
             }
+            232..=255 => Some([8 + 10 * (index as u8 - 232); 3]),
+            _ => None,
         }
-        if !current.text.is_empty() {
-            out.push(std::mem::take(&mut current));
-        }
-        current = next;
-        rest = &after[end + 1..];
     }
-    if !current.text.is_empty() {
-        out.push(current);
+}
+
+/// Split an `ansi` code block by the escape codes in it (`ESC[1;31m`), as the
+/// client does (`$M` in 626551): the text between them keeps the state they
+/// left, and every escape sequence is dropped, those that aren't styles
+/// included. Within one sequence the resets act before the sets, whatever
+/// their order, and an empty one (`ESC[m`) changes nothing.
+pub fn ansi(code: &str) -> Vec<Ansi> {
+    let mut out = Vec::new();
+    let mut state = Ansi::default();
+    let mut at = 0;
+    while at < code.len() {
+        let Some((start, end, sequence)) = next_sequence(code, at) else {
+            push_text(&mut out, &state, &code[at..]);
+            break;
+        };
+        push_text(&mut out, &state, &code[at..start]);
+        apply(&mut state, &sequence);
+        at = end;
     }
     out
+}
+
+fn push_text(out: &mut Vec<Ansi>, state: &Ansi, text: &str) {
+    if !text.is_empty() {
+        out.push(Ansi { text: text.to_owned(), ..state.clone() });
+    }
+}
+
+/// The next `ESC [`, parameters (`0-?`), intermediates (` -/`) and final
+/// byte (`@-~`) from `from`: where it starts and ends, and the parameters of
+/// a style (`m`) as separate strings; none for any other kind.
+fn next_sequence(code: &str, from: usize) -> Option<(usize, usize, Vec<&str>)> {
+    let bytes = code.as_bytes();
+    let mut search = from;
+    while let Some(found) = code[search..].find("\u{1b}[") {
+        let start = search + found;
+        let params_at = start + 2;
+        let mut i = params_at;
+        while bytes.get(i).is_some_and(|b| (0x30..=0x3F).contains(b)) {
+            i += 1;
+        }
+        let params = &code[params_at..i];
+        let intermediates_at = i;
+        while bytes.get(i).is_some_and(|b| (0x20..=0x2F).contains(b)) {
+            i += 1;
+        }
+        let intermediates = i - intermediates_at;
+        if let Some(&last) = bytes.get(i).filter(|b| (0x40..=0x7E).contains(*b)) {
+            let style = last == b'm' && intermediates == 0 && !params.starts_with(['<', '=', '>', '?']);
+            return Some((start, i + 1, if style { params.split(';').collect() } else { Vec::new() }));
+        }
+        search = start + 1;
+    }
+    None
+}
+
+/// JavaScript's `parseInt` on a parameter: its leading digits.
+fn leading_number(text: &str) -> Option<u32> {
+    let digits = text.bytes().take_while(u8::is_ascii_digit).count();
+    text[..digits].parse().ok().or((digits > 0).then_some(u32::MAX))
+}
+
+/// The colour after `38` or `48`: `2;r;g;b` or `5;n`. Its parameters are
+/// taken whether or not they make one.
+fn extended<'a>(params: &mut impl Iterator<Item = &'a str>) -> Option<Colour> {
+    match params.next()? {
+        "2" => {
+            let rgb: Vec<Option<u32>> = params.by_ref().take(3).map(leading_number).collect();
+            match rgb.as_slice() {
+                [Some(r), Some(g), Some(b)] => Some(Colour::Rgb([*r, *g, *b].map(|c| c.min(255) as u8))),
+                _ => None,
+            }
+        }
+        "5" => params.next().filter(|n| !n.is_empty()).map(|n| Colour::Table(leading_number(n).unwrap_or(u32::MAX))),
+        _ => None,
+    }
+}
+
+/// What one style sequence does, resets first.
+fn apply(state: &mut Ansi, params: &[&str]) {
+    enum Change {
+        ResetAll,
+        ResetForeground,
+        ResetBackground,
+        Reset(fn(&mut Ansi)),
+        Set(fn(&mut Ansi)),
+        Foreground(Colour),
+        Background(Colour),
+    }
+    let mut changes = Vec::new();
+    let mut params = params.iter().copied();
+    while let Some(param) = params.next() {
+        let Some(code) = leading_number(param).filter(|_| !param.is_empty()) else { continue };
+        match code {
+            0 => changes.push(Change::ResetAll),
+            1 => changes.push(Change::Set(|a| a.bold = true)),
+            3 => changes.push(Change::Set(|a| a.italic = true)),
+            4 => changes.push(Change::Set(|a| a.underline = true)),
+            9 => changes.push(Change::Set(|a| a.strikethrough = true)),
+            // Dim, reverse and hidden are kept by the client and drawn by no one.
+            21 => changes.push(Change::Reset(|a| a.bold = false)),
+            22 => changes.push(Change::Reset(|a| a.bold = false)),
+            23 => changes.push(Change::Reset(|a| a.italic = false)),
+            24 => changes.push(Change::Reset(|a| a.underline = false)),
+            29 => changes.push(Change::Reset(|a| a.strikethrough = false)),
+            30..=37 => changes.push(Change::Foreground(Colour::Named(code as u8 - 30))),
+            38 => changes.extend(extended(&mut params).map(Change::Foreground)),
+            39 => changes.push(Change::ResetForeground),
+            40..=47 => changes.push(Change::Background(Colour::Named(code as u8 - 40))),
+            48 => changes.extend(extended(&mut params).map(Change::Background)),
+            49 => changes.push(Change::ResetBackground),
+            53 => changes.push(Change::Set(|a| a.overline = true)),
+            55 => changes.push(Change::Reset(|a| a.overline = false)),
+            90..=97 => changes.push(Change::Foreground(Colour::Named(code as u8 - 90 + 8))),
+            100..=107 => changes.push(Change::Background(Colour::Named(code as u8 - 100 + 8))),
+            _ => {}
+        }
+    }
+    for change in &changes {
+        match change {
+            Change::ResetAll => *state = Ansi::default(),
+            Change::ResetForeground => state.foreground = None,
+            Change::ResetBackground => state.background = None,
+            Change::Reset(reset) => reset(state),
+            _ => {}
+        }
+    }
+    for change in changes {
+        match change {
+            Change::Set(set) => set(state),
+            Change::Foreground(colour) => state.foreground = Some(colour),
+            Change::Background(colour) => state.background = Some(colour),
+            _ => {}
+        }
+    }
 }
 
 /// Inline markup within a block of text.
@@ -736,20 +858,88 @@ mod tests {
         assert!(!is_jumbo(&parse(&"😀".repeat(JUMBO_MAX + 1))));
     }
 
+    fn styled(text: &str, change: impl FnOnce(&mut Ansi)) -> Ansi {
+        let mut ansi = Ansi { text: text.into(), ..Default::default() };
+        change(&mut ansi);
+        ansi
+    }
+
     #[test]
     fn ansi_codes() {
-        let plain = |text: &str| Ansi { text: text.into(), ..Default::default() };
+        let plain = |text: &str| styled(text, |_| {});
         assert_eq!(ansi("plain"), vec![plain("plain")]);
         assert_eq!(
             ansi("a\u{1b}[1;31mred\u{1b}[0m b \u{1b}[4;44mc"),
             vec![
                 plain("a"),
-                Ansi { text: "red".into(), bold: true, foreground: Some(1), ..Default::default() },
+                styled("red", |a| (a.bold, a.foreground) = (true, Some(Colour::Named(1)))),
                 plain(" b "),
-                Ansi { text: "c".into(), underline: true, background: Some(4), ..Default::default() },
+                styled("c", |a| (a.underline, a.background) = (true, Some(Colour::Named(4)))),
             ]
         );
-        assert_eq!(ansi("x\u{1b}[2Jy"), vec![plain("x\u{1b}[2Jy")], "only style codes are read");
+        assert_eq!(ansi(""), vec![]);
+    }
+
+    #[test]
+    fn every_sequence_is_dropped_not_only_styles() {
+        // `$M` in 626551 moves past any escape sequence, and the text on each side keeps its state.
+        let plain = |text: &str| styled(text, |_| {});
+        assert_eq!(ansi("x\u{1b}[2Jy"), vec![plain("x"), plain("y")]);
+        assert_eq!(ansi("x\u{1b}[?25hy\u{1b}[1 qz"), vec![plain("x"), plain("y"), plain("z")]);
+        assert_eq!(ansi("a\u{1b}[<1mb"), vec![plain("a"), plain("b")], "`<` isn't a style's");
+        // Not a whole sequence: it stays as text.
+        assert_eq!(ansi("a\u{1b}[31"), vec![plain("a\u{1b}[31")]);
+        assert_eq!(ansi("a\u{1b}b"), vec![plain("a\u{1b}b")]);
+    }
+
+    #[test]
+    fn the_client_reads_more_than_eight_colours() {
+        let fg = |text: &str, c| styled(text, |a| a.foreground = Some(c));
+        assert_eq!(ansi("\u{1b}[97mx")[0], fg("x", Colour::Named(15)), "bright white");
+        assert_eq!(ansi("\u{1b}[90mx")[0], fg("x", Colour::Named(8)));
+        let bg = |text: &str, c| styled(text, |a| a.background = Some(c));
+        assert_eq!(ansi("\u{1b}[103mx")[0], bg("x", Colour::Named(11)));
+        assert_eq!(ansi("\u{1b}[38;5;196mx")[0], fg("x", Colour::Table(196)));
+        assert_eq!(ansi("\u{1b}[48;2;1;2;300mx")[0], bg("x", Colour::Rgb([1, 2, 255])), "clamped");
+        assert_eq!(ansi("\u{1b}[38;2;1;2mx")[0], styled("x", |_| {}), "too few numbers: none, and they're taken");
+        assert_eq!(ansi("\u{1b}[38;5;1;31mx")[0], fg("x", Colour::Named(1)), "after a table colour 31 reads again");
+        assert_eq!(ansi("\u{1b}[31m\u{1b}[39mx")[0], styled("x", |_| {}), "39 takes the colour off");
+        assert_eq!(ansi("\u{1b}[31;39mx")[0], fg("x", Colour::Named(1)), "but resets go first, so not here");
+    }
+
+    #[test]
+    fn decorations_set_and_reset() {
+        let all = ansi("\u{1b}[1;3;4;9;53ma\u{1b}[22;23;24;29;55mb");
+        assert_eq!(
+            all[0],
+            styled("a", |a| (a.bold, a.italic, a.underline, a.strikethrough, a.overline) =
+                (true, true, true, true, true))
+        );
+        assert_eq!(all[1], styled("b", |_| {}));
+        // 21 puts bold away as 22 does; dim, reverse and hidden change nothing drawn.
+        assert_eq!(ansi("\u{1b}[1;21mx")[0], styled("x", |a| a.bold = true), "resets go first, sets after");
+        assert_eq!(ansi("\u{1b}[1m\u{1b}[21mx")[0], styled("x", |_| {}));
+        assert_eq!(ansi("\u{1b}[2;7;8mx")[0], styled("x", |_| {}));
+    }
+
+    #[test]
+    fn within_a_sequence_resets_go_first() {
+        // A terminal would end up plain; the client keeps the red.
+        assert_eq!(ansi("\u{1b}[31;0mx")[0], styled("x", |a| a.foreground = Some(Colour::Named(1))));
+        assert_eq!(ansi("\u{1b}[31m\u{1b}[0mx")[0], styled("x", |_| {}), "in a sequence of its own it resets");
+        // `ESC[m` has no parameter, and the client reads none as a reset.
+        assert_eq!(ansi("\u{1b}[31m\u{1b}[mx")[0], styled("x", |a| a.foreground = Some(Colour::Named(1))));
+    }
+
+    #[test]
+    fn the_256_colour_table_past_the_named_ones() {
+        assert_eq!(Colour::table(15), None, "the sixteen are the theme's");
+        assert_eq!(Colour::table(16), Some([0, 0, 0]));
+        assert_eq!(Colour::table(196), Some([255, 0, 0]));
+        assert_eq!(Colour::table(231), Some([255, 255, 255]));
+        assert_eq!(Colour::table(232), Some([8, 8, 8]));
+        assert_eq!(Colour::table(255), Some([238, 238, 238]));
+        assert_eq!(Colour::table(256), None);
     }
 
     #[test]

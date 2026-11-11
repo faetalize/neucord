@@ -225,22 +225,85 @@ fn code_block(lang: Option<&str>, code: &str) -> gtk::Widget {
     container.upcast()
 }
 
-/// An `ansi` block without its escape codes, bold and underlined where they
-/// say. Their colours are left out.
+/// An `ansi` block without its escape codes, drawn as they say: bold,
+/// italic, underlined, struck or overlined, in their colours.
 fn ansi_markup(code: &str) -> String {
     let mut out = String::new();
     for part in discord::markup::ansi(code) {
+        let mut attributes = String::new();
+        for (on, attribute) in [
+            (part.bold, " weight=\"bold\""),
+            (part.italic, " style=\"italic\""),
+            (part.underline, " underline=\"single\""),
+            (part.strikethrough, " strikethrough=\"true\""),
+            (part.overline, " overline=\"single\""),
+        ] {
+            if on {
+                attributes += attribute;
+            }
+        }
+        if let Some(colour) = part.foreground.and_then(ansi_colour) {
+            attributes += &format!(" foreground=\"{colour}\"");
+        }
+        if let Some(colour) = part.background.and_then(ansi_colour) {
+            attributes += &format!(" background=\"{colour}\"");
+        }
         let text = escape(&part.text);
-        out += &match (part.bold, part.underline) {
-            (false, false) => text,
-            (bold, underline) => format!(
-                "<span{}{}>{text}</span>",
-                if bold { " weight=\"bold\"" } else { "" },
-                if underline { " underline=\"single\"" } else { "" }
-            ),
+        out += &match attributes.is_empty() {
+            true => text,
+            false => format!("<span{attributes}>{text}</span>"),
         };
     }
     out
+}
+
+/// A colour an escape code picks, as `#rrggbb`. The 256 table past the
+/// sixteen and the RGB ones are as written; none past the table.
+fn ansi_colour(colour: discord::markup::Colour) -> Option<String> {
+    use discord::markup::Colour;
+    let rgb = |[r, g, b]: [u8; 3]| format!("#{r:02x}{g:02x}{b:02x}");
+    match colour {
+        Colour::Named(n) => Some(named_colour(n)),
+        Colour::Table(n) if n < 16 => Some(named_colour(n as u8)),
+        Colour::Table(n) => Colour::table(n).map(rgb),
+        Colour::Rgb(c) => Some(rgb(c)),
+    }
+}
+
+/// The sixteen named colours, black to white and then their bright ones, in
+/// libadwaita's palette (`@red_3`, `@dark_1` and so on) so they sit with the
+/// rest of the app. The client paints them from its own theme, so this is
+/// Neucord's choice and a table to change: a name for each colour and the
+/// shade of it. Cyan, which the palette has no hue for, is the Teal accent.
+fn named_colour(index: u8) -> String {
+    // libadwaita's named colours: https://gnome.pages.gitlab.gnome.org/libadwaita/doc/main/named-colors.html
+    const PALETTE: [&str; 16] = [
+        "#000000", // black: dark_5
+        "#e01b24", // red: red_3
+        "#26a269", // green: green_5
+        "#e5a50a", // yellow: yellow_5
+        "#3584e4", // blue: blue_3
+        "#9141ac", // magenta: purple_3
+        "",        // cyan: the Teal accent
+        "#deddda", // white: light_3
+        "#77767b", // bright black: dark_1
+        "#f66151", // bright red: red_1
+        "#57e389", // bright green: green_2
+        "#f8e45c", // bright yellow: yellow_2
+        "#99c1f1", // bright blue: blue_1
+        "#dc8add", // bright magenta: purple_1
+        "",        // bright cyan: the Teal accent, as text on a dark window has it
+        "#ffffff", // bright white: light_1
+    ];
+    let teal = |colour: gtk::gdk::RGBA| {
+        let byte = |c: f32| (c * 255.0).round() as u8;
+        format!("#{:02x}{:02x}{:02x}", byte(colour.red()), byte(colour.green()), byte(colour.blue()))
+    };
+    match index {
+        6 => teal(adw::AccentColor::Teal.to_rgba()),
+        14 => teal(adw::AccentColor::Teal.to_standalone_rgba(true)),
+        n => PALETTE[usize::from(n) % 16].to_owned(),
+    }
 }
 
 /// A custom emoji waiting for its image.
@@ -548,6 +611,26 @@ fn escape(s: &str) -> String {
 mod tests {
     use super::*;
     use discord::markup::parse;
+
+    #[test]
+    fn an_ansi_block_is_drawn_as_its_codes_say() {
+        let markup = ansi_markup("a\u{1b}[1;3;31mb\u{1b}[0m \u{1b}[4;9;53;48;2;1;2;3mc<\u{1b}[38;5;196md\u{1b}[103me");
+        assert_eq!(
+            markup,
+            "a<span weight=\"bold\" style=\"italic\" foreground=\"#e01b24\">b</span> \
+             <span underline=\"single\" strikethrough=\"true\" overline=\"single\" background=\"#010203\">c&lt;</span>\
+             <span underline=\"single\" strikethrough=\"true\" overline=\"single\" foreground=\"#ff0000\" background=\"#010203\">d</span>\
+             <span underline=\"single\" strikethrough=\"true\" overline=\"single\" foreground=\"#ff0000\" background=\"#f8e45c\">e</span>"
+        );
+    }
+
+    #[test]
+    fn the_sixteen_named_colours_are_the_palettes_not_the_tables_greys() {
+        // A place in the table below 16 is the named colour, as in the client.
+        assert_eq!(ansi_colour(discord::markup::Colour::Table(9)), Some("#f66151".to_owned()));
+        assert_eq!(ansi_colour(discord::markup::Colour::Table(232)), Some("#080808".to_owned()));
+        assert_eq!(ansi_colour(discord::markup::Colour::Table(256)), None);
+    }
 
     fn names() -> Names {
         Names {
