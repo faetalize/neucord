@@ -17,7 +17,7 @@ use gtk::{gio, glib, pango};
 use super::App;
 use super::embeds::{behind_spoiler, colour_bar, fitted_picture};
 use super::polls::emoji_widget;
-use super::state::now_unix;
+use super::state::{Pending, now_unix};
 use crate::images::Images;
 use crate::render::{self, Context};
 use crate::timelines;
@@ -449,14 +449,15 @@ impl App {
                 }
             });
             let Some(at) = at.filter(|_| free) else { return };
-            this.state.borrow_mut().interactions.insert(nonce, (channel, message));
+            let application = held.application_id.unwrap_or(held.author.id);
+            this.state.borrow_mut().interactions.insert(nonce, Pending { channel, message, application });
             this.rebind(&store, at, 1);
             let sent = Press {
                 guild,
                 channel,
                 message,
                 message_flags: held.flags,
-                application: held.application_id.unwrap_or(held.author.id),
+                application,
                 session: &session,
                 component_type,
                 custom_id: &custom_id,
@@ -469,8 +470,17 @@ impl App {
     }
 
     /// Discord answered the interaction of ours sent as `nonce`.
-    pub(super) fn on_interaction(self: &Rc<Self>, nonce: Snowflake, outcome: discord::gateway::Outcome) {
+    pub(super) fn on_interaction(
+        self: &Rc<Self>,
+        nonce: Snowflake,
+        outcome: discord::gateway::Outcome,
+        reason: Option<u64>,
+    ) {
         use discord::gateway::Outcome;
+        // A command of ours, or an app's choices for one, is not a message's.
+        if self.command_answered(nonce, outcome, reason) {
+            return;
+        }
         self.interaction_ended(nonce, outcome != Outcome::Failure, None);
         if outcome == Outcome::Form {
             // The client opens it.
@@ -481,7 +491,9 @@ impl App {
     /// The interaction is over: answered, or `answered` false, refused. Ours
     /// that the request itself failed (`failure`) is told, when the client does.
     fn interaction_ended(self: &Rc<Self>, nonce: Snowflake, answered: bool, failure: Option<Failure>) {
-        let Some((channel, message)) = self.state.borrow_mut().interactions.remove(&nonce) else { return };
+        let Some(Pending { channel, message, .. }) = self.state.borrow_mut().end_press(nonce, failure.as_ref()) else {
+            return;
+        };
         let Some(store) = self.timelines.borrow().get(channel).map(|t| t.store.clone()) else { return };
         let at = timelines::edit(&store, message, |m| {
             _ = if answered { m.local.answered(nonce) } else { m.local.refused(nonce) };
@@ -507,7 +519,7 @@ fn picture(media: &Media, images: &Images, max_w: f64, max_h: f64) -> gtk::Widge
                 fitted.picture.set_tooltip_text(Some(description));
             }
             let original = media.width.zip(media.height);
-            images.set_sized(&fitted.picture, &media.url, fitted.size, original, false);
+            images.set_sized(&fitted.picture, &media.url, fitted.size, original);
             fitted.frame.upcast()
         }
     };

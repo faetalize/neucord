@@ -152,6 +152,19 @@ impl MediaSettings {
         set(&mut self.animate_emoji, patch.animate_emoji);
         self.animate_stickers = patch.animate_stickers.unwrap_or(self.animate_stickers);
     }
+
+    /// What the settings come to while the system asks for less motion: the
+    /// client overrides these three the moment it learns of the preference
+    /// (`ACCESSIBILITY_SET_PREFERS_REDUCED_MOTION`), whatever the account
+    /// chose.
+    pub fn reduced_motion(self) -> Self {
+        MediaSettings {
+            gif_auto_play: false,
+            animate_emoji: false,
+            animate_stickers: StickerAnimation::OnInteraction,
+            ..self
+        }
+    }
 }
 
 /// Whose reactions to our messages notify us.
@@ -637,6 +650,8 @@ pub struct Settings {
     pub message_display_compact: bool,
     pub notifications: Notifications,
     pub privacy: Privacy,
+    /// The account's status, read from the protobuf as the client does
+    /// (`SelfPresenceStore` takes it from that setting, 894768).
     pub status: StatusSettings,
     /// The language the account is set to (`localization.locale`); `None`
     /// until someone picks one.
@@ -700,6 +715,18 @@ impl Settings {
         if let Some(tone) = patch.skin_tone {
             self.skin_tone = tone;
         }
+    }
+
+    /// Take `patch` as all of the settings, as a replacing protobuf is: what
+    /// it leaves out is back to its default.
+    pub fn replace(&mut self, patch: SettingsPatch) {
+        *self = Settings::default();
+        self.apply(patch);
+    }
+
+    /// Our status is Do Not Disturb, which silences every notification.
+    pub fn do_not_disturb(&self) -> bool {
+        self.status.status == UserStatus::DoNotDisturb
     }
 }
 
@@ -939,6 +966,15 @@ mod tests {
     }
 
     #[test]
+    fn reduced_motion_overrides_whatever_the_account_chose() {
+        let chose = MediaSettings { animate_stickers: StickerAnimation::Never, ..MediaSettings::default() };
+        let reduced = chose.reduced_motion();
+        assert!(!reduced.gif_auto_play && !reduced.animate_emoji);
+        assert_eq!(reduced.animate_stickers, StickerAnimation::OnInteraction, "the client sets it, even from Never");
+        assert!(reduced.render_embeds, "nothing else changes");
+    }
+
+    #[test]
     fn json_patch_holds_what_is_mentioned() {
         let patch = SettingsPatch::from_json(&json!({"developer_mode": true, "theme": "dark"}));
         assert_eq!(patch, SettingsPatch { developer_mode: Some(true), ..SettingsPatch::default() });
@@ -948,6 +984,31 @@ mod tests {
         assert_eq!(patch.message_display_compact, Some(false));
         assert_eq!(patch.media.gif_auto_play, Some(false));
         assert!(SettingsPatch::from_json(&json!({"theme": "dark"})).is_empty());
+    }
+
+    #[test]
+    fn do_not_disturb_is_the_status_the_protobuf_carries() {
+        let status = |status| StatusSettings { status, ..StatusSettings::default() };
+        let mut settings = Settings::default();
+        assert!(!settings.do_not_disturb());
+        settings.apply(SettingsPatch { status: Some(status(UserStatus::DoNotDisturb)), ..SettingsPatch::default() });
+        assert!(settings.do_not_disturb());
+        settings.apply(SettingsPatch { status: Some(status(UserStatus::Idle)), ..SettingsPatch::default() });
+        assert!(!settings.do_not_disturb());
+        let json = SettingsPatch::from_json(&json!({"status": "dnd"}));
+        assert!(json.is_empty(), "the JSON status is not read: the client takes it from the protobuf");
+    }
+
+    #[test]
+    fn a_replacing_patch_takes_all_of_the_settings() {
+        let dnd = StatusSettings { status: UserStatus::DoNotDisturb, ..StatusSettings::default() };
+        let mut settings = Settings { status: dnd.clone(), developer_mode: true, ..Settings::default() };
+        settings.replace(SettingsPatch { message_display_compact: Some(true), ..SettingsPatch::default() });
+        assert!(settings.message_display_compact, "what it says");
+        assert!(!settings.developer_mode, "what it leaves out is back to its default");
+        assert!(!settings.do_not_disturb(), "no status in it is no status set: Online");
+        settings.replace(SettingsPatch { status: Some(dnd), ..SettingsPatch::default() });
+        assert!(settings.do_not_disturb());
     }
 
     #[test]

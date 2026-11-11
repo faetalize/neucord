@@ -68,10 +68,31 @@ impl Guild {
     }
 }
 
+/// What a server says of one of its members that shows in the chat: their
+/// roles colour their name, and their nickname and picture replace their own.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Known {
+    pub roles: Vec<Snowflake>,
+    pub nick: Option<String>,
+    pub avatar: Option<String>,
+}
+
+impl Known {
+    /// From a member object, with or without its user.
+    pub fn from_value(value: &serde_json::Value) -> Known {
+        let text = |v: &serde_json::Value| v.as_str().filter(|s| !s.is_empty()).map(str::to_owned);
+        Known {
+            roles: crate::model::Member::from_value(value).roles,
+            nick: text(&value["nick"]),
+            avatar: text(&value["avatar"]),
+        }
+    }
+}
+
 /// What we know of other members, and what we asked the gateway for.
 #[derive(Debug, Default)]
 pub struct Members {
-    roles: HashMap<(Snowflake, Snowflake), Vec<Snowflake>>,
+    known: HashMap<(Snowflake, Snowflake), Known>,
     requests: HashMap<Snowflake, Requests>,
 }
 
@@ -88,26 +109,39 @@ struct Requests {
 impl Members {
     /// `user`'s roles in `guild`, if we know their member.
     pub fn roles(&self, guild: Snowflake, user: Snowflake) -> Option<&[Snowflake]> {
-        self.roles.get(&(guild, user)).map(Vec::as_slice)
+        self.known.get(&(guild, user)).map(|k| k.roles.as_slice())
+    }
+
+    /// What `user` is called in `guild`, if they set a nickname there.
+    pub fn nick(&self, guild: Snowflake, user: Snowflake) -> Option<&str> {
+        self.known.get(&(guild, user))?.nick.as_deref()
+    }
+
+    /// Their picture in `guild`, if they set one there.
+    pub fn avatar(&self, guild: Snowflake, user: Snowflake) -> Option<&str> {
+        self.known.get(&(guild, user))?.avatar.as_deref()
+    }
+
+    /// Everyone's nickname in `guild`.
+    pub fn nicks(&self, guild: Snowflake) -> impl Iterator<Item = (Snowflake, &str)> {
+        self.known
+            .iter()
+            .filter(move |((g, _), _)| *g == guild)
+            .filter_map(|((_, u), k)| Some((*u, k.nick.as_deref()?)))
     }
 
     /// Members Discord sent, asked for or not, and the users it says aren't
     /// members: both answer a request. Whether any member's roles are new
-    /// to us, which is how a name's colour can change.
-    pub fn add(
-        &mut self,
-        guild: Snowflake,
-        members: Vec<(Snowflake, Vec<Snowflake>)>,
-        not_found: &[Snowflake],
-    ) -> bool {
+    /// to us, or what shows of them: how a name's colour or text can change.
+    pub fn add(&mut self, guild: Snowflake, members: Vec<(Snowflake, Known)>, not_found: &[Snowflake]) -> bool {
         let requests = self.requests.entry(guild).or_default();
         for user in members.iter().map(|(user, _)| user).chain(not_found) {
             requests.unanswered.remove(user);
             requests.pending.remove(user);
         }
         let mut changed = false;
-        for (user, roles) in members {
-            changed |= self.roles.insert((guild, user), roles.clone()).as_ref() != Some(&roles);
+        for (user, known) in members {
+            changed |= self.known.insert((guild, user), known.clone()).as_ref() != Some(&known);
         }
         changed
     }
@@ -125,7 +159,7 @@ impl Members {
     /// Ask for `user`'s member in `guild`, unless we know it or asked
     /// (`requestMember`).
     pub fn request(&mut self, guild: Snowflake, user: Snowflake) {
-        if self.roles.contains_key(&(guild, user)) {
+        if self.known.contains_key(&(guild, user)) {
             return;
         }
         let requests = self.requests.entry(guild).or_default();
@@ -140,7 +174,7 @@ impl Members {
         let mut out = Vec::new();
         for (&guild, requests) in &mut self.requests {
             let mut users: Vec<Snowflake> =
-                requests.pending.drain().filter(|&user| !self.roles.contains_key(&(guild, user))).collect();
+                requests.pending.drain().filter(|&user| !self.known.contains_key(&(guild, user))).collect();
             users.sort();
             requests.sent.extend(&users);
             requests.unanswered.extend(&users);
@@ -154,7 +188,7 @@ impl Members {
     /// [`Members::flush`].
     pub fn resumed(&mut self) {
         for (&guild, requests) in &mut self.requests {
-            requests.unanswered.retain(|&user| !self.roles.contains_key(&(guild, user)));
+            requests.unanswered.retain(|&user| !self.known.contains_key(&(guild, user)));
             requests.pending.extend(&requests.unanswered);
         }
     }
@@ -218,20 +252,35 @@ mod tests {
     #[test]
     fn asks_once_for_what_it_lacks() {
         let mut members = Members::default();
-        members.add(G, vec![(Snowflake(5), vec![])], &[]);
+        members.add(G, vec![(Snowflake(5), Known::default())], &[]);
         members.page_loaded(G, &[message(5, &[6]), message(7, &[6])]);
         assert_eq!(members.flush(), [(G, vec![Snowflake(6), Snowflake(7)])], "not who we know, nor twice");
         members.page_loaded(G, &[message(7, &[])]);
         assert!(members.flush().is_empty(), "asked already");
 
-        assert!(members.add(G, vec![(Snowflake(6), vec![Snowflake(40)])], &[]), "new roles");
-        assert!(!members.add(G, vec![(Snowflake(6), vec![Snowflake(40)])], &[]), "the same");
+        let roles = || Known { roles: vec![Snowflake(40)], ..Known::default() };
+        assert!(members.add(G, vec![(Snowflake(6), roles())], &[]), "new roles");
+        assert!(!members.add(G, vec![(Snowflake(6), roles())], &[]), "the same");
         assert_eq!(members.roles(G, Snowflake(6)), Some(&[Snowflake(40)][..]));
         members.resumed();
         assert_eq!(members.flush(), [(G, vec![Snowflake(7)])], "unanswered, asked again after a resume");
         members.add(G, vec![], &[Snowflake(7)]);
         members.resumed();
         assert!(members.flush().is_empty(), "not a member is an answer too");
+    }
+
+    #[test]
+    fn nicknames_and_pictures_are_per_server() {
+        let mut members = Members::default();
+        let known = Known::from_value(&json!({"roles": ["40"], "nick": "Nick", "avatar": "av"}));
+        assert!(members.add(G, vec![(Snowflake(5), known)], &[]));
+        assert_eq!((members.nick(G, Snowflake(5)), members.avatar(G, Snowflake(5))), (Some("Nick"), Some("av")));
+        assert_eq!(members.nick(Snowflake(2), Snowflake(5)), None, "another server");
+        assert_eq!(members.nicks(G).collect::<Vec<_>>(), [(Snowflake(5), "Nick")]);
+        // A nickname changing is a change, and an emptied one is none.
+        let emptied = Known::from_value(&json!({"roles": ["40"], "nick": "", "avatar": null}));
+        assert!(members.add(G, vec![(Snowflake(5), emptied)], &[]));
+        assert_eq!(members.nick(G, Snowflake(5)), None);
     }
 
     #[test]

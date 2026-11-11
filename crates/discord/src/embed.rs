@@ -162,7 +162,11 @@ pub struct EmbedMedia {
 /// Something to load through the media proxy and show.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Media {
+    /// Through the media proxy.
     pub url: String,
+    /// Where the media is on its site, which links and the viewer's Open in
+    /// Browser point to. Never loaded.
+    pub original: String,
     pub width: u32,
     pub height: u32,
     /// An animated image (a GIF, not a GIF link's video).
@@ -190,7 +194,7 @@ impl EmbedMedia {
         let url = self.proxy_url.clone().filter(|u| !u.is_empty())?;
         let original = self.url.as_deref().filter(|u| !u.is_empty()).unwrap_or(&url);
         let animated = looks_animated(original, self.flags);
-        Some(Media { url, width, height, animated })
+        Some(Media { original: original.to_owned(), url, width, height, animated })
     }
 }
 
@@ -255,11 +259,14 @@ impl Embed {
                 && let Some(file) = &file
             {
                 let still = crate::cdn::with_params(file, &[("format", "png")]);
-                shaped.thumbnail = Some(Media { url: still, width, height, animated: false });
+                shaped.thumbnail = Some(Media { original: still.clone(), url: still, width, height, animated: false });
             }
             let shown = file.is_some() || video.url.as_deref().is_some_and(|u| u.starts_with("https:"));
             if shaped.thumbnail.is_some() && shown {
-                shaped.video = Some(file.map(|url| Media { url, width, height, animated: false }));
+                shaped.video = Some(file.map(|url| {
+                    let original = video.url.clone().filter(|u| !u.is_empty()).unwrap_or_else(|| url.clone());
+                    Media { original, url, width, height, animated: false }
+                }));
             }
         }
         if !self.gallery.is_empty() {
@@ -488,7 +495,12 @@ mod tests {
     }
 
     fn media(url: &str, width: u32, height: u32) -> Media {
-        Media { url: url.into(), width, height, animated: false }
+        Media { url: url.into(), original: url.into(), width, height, animated: false }
+    }
+
+    /// Media proxied from `original`.
+    fn proxied(url: &str, original: &str, width: u32, height: u32) -> Media {
+        Media { original: original.into(), ..media(url, width, height) }
     }
 
     fn tenor() -> Embed {
@@ -507,8 +519,8 @@ mod tests {
         assert_eq!(
             tenor().display(true),
             Display::Bare(Large::Gifv {
-                video: media("https://images-ext-1.discordapp.net/x.mp4", 498, 280),
-                still: media("https://images-ext-1.discordapp.net/x.png", 498, 280),
+                video: proxied("https://images-ext-1.discordapp.net/x.mp4", "https://media.tenor.com/x.mp4", 498, 280),
+                still: proxied("https://images-ext-1.discordapp.net/x.png", "https://media.tenor.com/x.png", 498, 280),
             })
         );
         // Without media it's a card, and there's nothing to stand in for the link.
@@ -533,7 +545,7 @@ mod tests {
                           "width": 1280, "height": 720},
             "video": {"url": "https://www.youtube.com/embed/x", "width": 1280, "height": 720}
         }));
-        let still = media("https://images-ext-1.discordapp.net/y.jpg", 1280, 720);
+        let still = proxied("https://images-ext-1.discordapp.net/y.jpg", "https://i.ytimg.com/x.jpg", 1280, 720);
         assert_eq!(
             youtube.display(true),
             Display::Card { media: Some(Large::Video { video: None, still }), thumbnail: None }
@@ -557,13 +569,13 @@ mod tests {
         }));
         assert_eq!(
             article.display(true),
-            Display::Card { media: Some(Large::Image(media("p", 400, 200))), thumbnail: None }
+            Display::Card { media: Some(Large::Image(proxied("p", "o", 400, 200))), thumbnail: None }
         );
         let link = embed(json!({
             "type": "link", "title": "Site",
             "thumbnail": {"url": "o", "proxy_url": "p", "width": 80, "height": 80}
         }));
-        assert_eq!(link.display(true), Display::Card { media: None, thumbnail: Some(media("p", 80, 80)) });
+        assert_eq!(link.display(true), Display::Card { media: None, thumbnail: Some(proxied("p", "o", 80, 80)) });
     }
 
     #[test]
@@ -575,7 +587,10 @@ mod tests {
         }));
         assert_eq!(
             rich.display(true),
-            Display::Card { media: Some(Large::Image(media("i", 400, 300))), thumbnail: Some(media("t", 80, 80)) }
+            Display::Card {
+                media: Some(Large::Image(proxied("i", "o", 400, 300))),
+                thumbnail: Some(proxied("t", "o", 80, 80))
+            }
         );
         // Untitled, authorless media of other types shows bare.
         let image = embed(
@@ -593,7 +608,7 @@ mod tests {
         let other = embed(json!({"type": "rich", "url": "https://e.com", "title": "Other"}));
         let merged = merge(&[post("a"), other, post("b"), post("c")]);
         assert_eq!(merged.len(), 2);
-        let gallery = ["a", "b", "c"].map(|u| media(u, 4, 3)).to_vec();
+        let gallery = ["a", "b", "c"].map(|u| proxied(u, "o", 4, 3)).to_vec();
         assert_eq!(merged[0].display(true), Display::Card { media: Some(Large::Gallery(gallery)), thumbnail: None });
     }
 

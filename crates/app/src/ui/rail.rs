@@ -4,13 +4,16 @@
 use std::fmt::Write as _;
 use std::rc::Rc;
 
+use discord::animation::Subject;
 use discord::settings::RailEntry;
 use discord::{Guild, Snowflake};
 use gtk::prelude::*;
 
 use super::App;
+use super::menus::{self, At};
+use super::notify_menus::GuildTarget;
 use super::widgets::{initials, set_badge};
-use crate::images::Images;
+use crate::images::{Images, Row};
 
 /// What a rail button stands for, to work out its markers.
 pub(super) enum Mark {
@@ -127,7 +130,7 @@ impl App {
     /// Set every rail button's markers from state: open, unread, mentions.
     fn mark_rail(&self) {
         let state = self.state.borrow();
-        self.drawn.borrow_mut().0 = state.rail_signature();
+        self.drawn.borrow_mut().0 = state.rail_signature().0;
         let badge = |id: &Snowflake| state.guilds.iter().find(|g| g.id == *id).map(|g| state.guild_badge(g));
         for item in self.rail_items.borrow().iter() {
             let (active, unread, mentions) = match &item.mark {
@@ -173,11 +176,17 @@ impl App {
                     .content_fit(gtk::ContentFit::Cover)
                     .overflow(gtk::Overflow::Hidden)
                     .build();
-                self.images.set(
-                    &picture,
-                    &discord::cdn::guild_icon_url(guild.id.0, hash, 64),
-                    discord::cdn::is_animated(hash),
-                );
+                if discord::cdn::is_animated(hash) {
+                    self.images.set_moving(
+                        &picture,
+                        &discord::cdn::guild_icon_still_url(guild.id.0, hash, 64),
+                        &discord::cdn::guild_icon_url(guild.id.0, hash, 64),
+                        Subject::ServerIcon,
+                        Row::None,
+                    );
+                } else {
+                    self.images.set(&picture, &discord::cdn::guild_icon_url(guild.id.0, hash, 64));
+                }
                 button.set_child(Some(&picture));
             }
             None => button.set_label(&initials(&guild.name)),
@@ -188,6 +197,12 @@ impl App {
             if let Some(this) = this.upgrade() {
                 this.select_guild(id);
             }
+        });
+        // The server's menu opens where its icon is right-clicked.
+        let (app, weak) = (Rc::downgrade(self), button.downgrade());
+        menus::on_secondary(&button, move |x, y| {
+            let (Some(app), Some(button)) = (app.upgrade(), weak.upgrade()) else { return };
+            menus::popup(&app, menus::GUILD, GuildTarget(id), &button, At::Point(x, y));
         });
         rail_item(&button, Mark::Guild(id), items)
     }
@@ -294,7 +309,7 @@ pub(super) fn folder_preview(guilds: &[&Guild], images: &Images) -> gtk::Widget 
                     .css_classes(["mini-icon"])
                     .build();
                 // Static frame only: four animations in one button is noise.
-                images.set(&picture, &discord::cdn::guild_icon_still_url(guild.id.0, hash, 32), false);
+                images.set(&picture, &discord::cdn::guild_icon_still_url(guild.id.0, hash, 32));
                 picture.upcast()
             }
             None => gtk::Label::builder()

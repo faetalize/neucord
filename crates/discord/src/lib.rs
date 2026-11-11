@@ -5,10 +5,14 @@
 //! GTK, so the UI can be replaced without touching this crate.
 
 pub mod account;
+pub mod animation;
 pub mod apng;
 pub mod auth;
+pub mod backoff;
+pub mod badge;
 pub mod cdn;
 pub mod channel_icon;
+pub mod commands;
 pub mod component;
 pub mod cooldowns;
 pub mod edits;
@@ -30,14 +34,18 @@ mod invalid;
 pub mod limits;
 pub mod locales;
 pub mod markup;
+pub mod media;
 pub mod member_list;
 pub mod members;
 pub mod model;
 pub mod notes;
+pub mod notice;
+pub mod notification_edit;
 pub mod notifications;
 pub mod permissions;
 pub mod poll;
 pub mod poll_draft;
+pub mod post_creation;
 pub mod presence;
 pub mod profile;
 mod protobuf;
@@ -48,6 +56,7 @@ pub mod relationships;
 pub mod remote_auth;
 pub mod rest;
 pub mod scheduled;
+pub mod search;
 pub mod session;
 pub mod settings;
 mod settings_proto;
@@ -55,6 +64,7 @@ pub mod settings_sync;
 pub mod shape;
 pub mod stickers;
 pub mod subscriptions;
+pub mod switcher;
 pub mod system;
 pub mod thread_creation;
 pub mod threads;
@@ -62,6 +72,7 @@ pub mod typing;
 pub mod uploads;
 pub mod verification;
 pub mod voice;
+pub mod voice_states;
 
 pub use gateway::{Event, Gateway, Ready, Resume};
 pub use model::{
@@ -86,6 +97,12 @@ pub enum Error {
     Protocol(String),
     /// Discord turned a login down, and said why.
     Rejected(String),
+    /// The account is scheduled for deletion. The client asks whether to
+    /// cancel that, and logs in again with `undelete` if so.
+    ScheduledForDeletion,
+    /// Discord suspended the account and gave this token, with which
+    /// [`Rest::suspended_standing`] reads why.
+    Suspended(String),
     /// Key generation or decryption failed, for QR login.
     Crypto(openssl::error::ErrorStack),
     /// The secret service (keyring) failed.
@@ -113,6 +130,8 @@ impl std::fmt::Display for Error {
             Error::Decode(e) => write!(f, "unexpected data from Discord: {e}"),
             Error::Protocol(e) => write!(f, "unexpected data from Discord: {e}"),
             Error::Rejected(why) => f.write_str(why),
+            Error::ScheduledForDeletion => f.write_str("This account is scheduled for deletion."),
+            Error::Suspended(_) => f.write_str("Discord has suspended this account."),
             Error::Crypto(e) => write!(f, "encryption error: {e}"),
             Error::Keyring(e) => write!(f, "keyring error: {e}"),
             Error::Captcha => write!(f, "Discord asked for a captcha, and it wasn't solved"),

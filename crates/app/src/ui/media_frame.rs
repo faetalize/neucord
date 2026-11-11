@@ -17,6 +17,8 @@ mod imp {
     pub struct MediaFrame {
         /// The largest size shown, in logical pixels.
         pub size: Cell<(i32, i32)>,
+        /// Exactly that size in both directions, for where it sits in a scroller.
+        pub exact: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -36,7 +38,10 @@ mod imp {
 
     impl WidgetImpl for MediaFrame {
         fn request_mode(&self) -> gtk::SizeRequestMode {
-            gtk::SizeRequestMode::HeightForWidth
+            match self.exact.get() {
+                true => gtk::SizeRequestMode::ConstantSize,
+                false => gtk::SizeRequestMode::HeightForWidth,
+            }
         }
 
         fn measure(&self, orientation: gtk::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
@@ -48,6 +53,10 @@ mod imp {
                 child = widget.next_sibling();
             }
             let (width, height) = self.size.get();
+            if self.exact.get() {
+                let side = if orientation == gtk::Orientation::Horizontal { width } else { height };
+                return (side, side, -1, -1);
+            }
             match orientation {
                 gtk::Orientation::Horizontal => (0, width, -1, -1),
                 _ => {
@@ -81,5 +90,18 @@ impl MediaFrame {
         frame.imp().size.set((size.0.max(1), size.1.max(1)));
         child.set_parent(&frame);
         frame
+    }
+
+    /// Make it ask for its size alone, however much room there is, as a
+    /// scroller's content does.
+    pub fn set_exact(&self, exact: bool) {
+        self.imp().exact.set(exact);
+        self.queue_resize();
+    }
+
+    /// Resize it, as the room for it changes.
+    pub fn set_size(&self, size: (i32, i32)) {
+        self.imp().size.set((size.0.max(1), size.1.max(1)));
+        self.queue_resize();
     }
 }

@@ -39,8 +39,6 @@ pub struct Context<'a> {
     pub spoilers: Option<Spoilers>,
     /// The text is only emoji, shown large.
     pub jumbo: bool,
-    /// Animated custom emoji move. Otherwise they show their first frame.
-    pub animate_emoji: bool,
     /// Opens a mentioned user's profile, from the text they are in.
     pub on_mention: Option<MentionHandler>,
 }
@@ -49,7 +47,7 @@ pub type MentionHandler = Rc<dyn Fn(u64, &rich_text::RichText)>;
 
 impl<'a> Context<'a> {
     pub fn new(names: &'a Names, images: Option<&'a Images>) -> Self {
-        Context { names, images, spoilers: None, jumbo: false, animate_emoji: true, on_mention: None }
+        Context { names, images, spoilers: None, jumbo: false, on_mention: None }
     }
 }
 
@@ -483,16 +481,18 @@ impl<'a> Inline<'a> {
         if let Some(images) = cx.images {
             let size = if cx.jumbo { JUMBO_EMOJI } else { EMOJI };
             let request = emoji_request(size, images.scale());
-            for (n, emoji) in emoji.into_iter().enumerate() {
-                let weak = text.downgrade();
-                let animated = emoji.animated && cx.animate_emoji;
-                let url = discord::cdn::emoji_url(emoji.id, animated, request);
-                images.load(&url, animated, move |paintable| {
-                    if let Some(text) = weak.upgrade() {
-                        text.set_image(n, paintable);
-                    }
-                });
-            }
+            // An animated one shows its still (the PNG, shared by every
+            // message with it) until the rules let it move.
+            let emoji = emoji
+                .into_iter()
+                .enumerate()
+                .map(|(n, emoji)| {
+                    let still = discord::cdn::emoji_url(emoji.id, false, request);
+                    let moving = emoji.animated.then(|| discord::cdn::emoji_url(emoji.id, true, request));
+                    (n, still, moving)
+                })
+                .collect();
+            images.set_emoji(&text, emoji);
         }
         text.upcast()
     }
