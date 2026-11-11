@@ -370,6 +370,51 @@ pub struct Privacy {
     pub message_requests_restricted: Option<bool>,
     pub message_request_restricted_servers: Vec<Snowflake>,
     pub profile_visibility: ProfileVisibility,
+    /// `default_guilds_activity_restricted_v2`; none until set.
+    pub activity_default: Option<ActivityDefault>,
+    /// Servers the account shares no activity in (`activity_restricted_guild_ids`).
+    pub activity_restricted_servers: Vec<Snowflake>,
+    /// Servers where others may not join its activity
+    /// (`activity_joining_restricted_guild_ids`).
+    pub activity_joining_restricted_servers: Vec<Snowflake>,
+}
+
+/// `GuildActivityStatusRestrictionDefaultV2`: in which servers the account
+/// shares its activity until a server says otherwise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivityDefault {
+    Off,
+    LargeServers,
+    On,
+}
+
+impl ActivityDefault {
+    /// `UNSET` is none: the client then takes what the region says.
+    pub fn from_raw(raw: u64) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Off),
+            2 => Some(Self::LargeServers),
+            3 => Some(Self::On),
+            _ => None,
+        }
+    }
+
+    pub fn raw(self) -> u64 {
+        match self {
+            Self::Off => 1,
+            Self::LargeServers => 2,
+            Self::On => 3,
+        }
+    }
+
+    /// How much is restricted, as the client ranks them (`E`, 365258).
+    pub(crate) fn restraint(self) -> u8 {
+        match self {
+            Self::Off => 2,
+            Self::LargeServers => 1,
+            Self::On => 0,
+        }
+    }
 }
 
 impl Default for Privacy {
@@ -384,6 +429,9 @@ impl Default for Privacy {
             message_requests_restricted: None,
             message_request_restricted_servers: Vec::new(),
             profile_visibility: ProfileVisibility::default(),
+            activity_default: None,
+            activity_restricted_servers: Vec::new(),
+            activity_joining_restricted_servers: Vec::new(),
         }
     }
 }
@@ -393,6 +441,53 @@ impl Privacy {
     /// (`useDefaultRestricted`, 428031).
     pub fn servers_restricted(&self) -> bool {
         self.servers_restricted.unwrap_or(self.servers_restricted_before)
+    }
+
+    /// Where activity is shared by default: what was set, else large servers
+    /// where the region makes it a teen's default (`isSettingTeenByDefault`),
+    /// else nowhere (`253932`).
+    pub fn activity_default(&self, gates: &Gates) -> ActivityDefault {
+        self.activity_default.unwrap_or(if gates.activity_status_by_default {
+            ActivityDefault::LargeServers
+        } else {
+            ActivityDefault::Off
+        })
+    }
+
+    /// "Share my activity": on where the server isn't listed.
+    pub fn activity_status(&self, server: Snowflake) -> Row {
+        Row { on: !self.activity_restricted_servers.contains(&server), disabled: false }
+    }
+
+    /// "Activity joining".
+    pub fn activity_joining(&self, server: Snowflake) -> Row {
+        Row { on: !self.activity_joining_restricted_servers.contains(&server), disabled: false }
+    }
+}
+
+/// What "Direct Messages" says: its title, and under it where it applies
+/// (`vx` and its subtitle in 960111, `b` in 632038). With only server members
+/// allowed to send friend requests the one switch is for both. `server` is
+/// none for the account's defaults, else whether the server is a hub.
+pub fn direct_messages_text(only_server_members: bool, server: Option<bool>) -> (&'static str, &'static str) {
+    let title = if only_server_members { "Direct Messages and Friend Requests" } else { "Direct Messages" };
+    let note = match (server, only_server_members) {
+        (None, true) => "Allow DMs and friend requests from other server members",
+        (None, false) => "Allow DMs from other server members",
+        (Some(true), _) => "Allow DMs from other members in this hub",
+        (Some(false), true) => "Allow DMs and friend requests from other members in this server",
+        (Some(false), false) => "Allow DMs from other members in this server",
+    };
+    (title, note)
+}
+
+/// What is under "Message requests" (`vy` and its subtitle in 960111, `y` in
+/// 632038), for a hub or not.
+pub fn message_requests_note(hub: bool) -> &'static str {
+    if hub {
+        "Filter messages from hub members you may not know."
+    } else {
+        "Filter messages from server members you may not know."
     }
 }
 
@@ -449,6 +544,10 @@ pub struct PrivacyPatch {
     pub message_requests_restricted: Option<bool>,
     pub message_request_restricted_servers: Option<Vec<Snowflake>>,
     pub profile_visibility: Option<ProfileVisibility>,
+    /// Inside, none is `UNSET`.
+    pub activity_default: Option<Option<ActivityDefault>>,
+    pub activity_restricted_servers: Option<Vec<Snowflake>>,
+    pub activity_joining_restricted_servers: Option<Vec<Snowflake>>,
 }
 
 impl Privacy {
@@ -467,6 +566,15 @@ impl Privacy {
             self.message_request_restricted_servers = servers;
         }
         self.profile_visibility = patch.profile_visibility.unwrap_or(self.profile_visibility);
+        if let Some(default) = patch.activity_default {
+            self.activity_default = default;
+        }
+        if let Some(servers) = patch.activity_restricted_servers {
+            self.activity_restricted_servers = servers;
+        }
+        if let Some(servers) = patch.activity_joining_restricted_servers {
+            self.activity_joining_restricted_servers = servers;
+        }
     }
 }
 
@@ -908,6 +1016,43 @@ mod tests {
         assert_eq!(one(7, &privacy), (Row { on: true, disabled: false }, Row { on: true, disabled: false }));
         privacy.message_requests_restricted = Some(true);
         assert!(one(7, &privacy).1.on, "a server's row ignores the default");
+    }
+
+    #[test]
+    fn the_direct_messages_row_says_what_the_client_says() {
+        let text = |only, server| direct_messages_text(only, server);
+        assert_eq!(text(false, None), ("Direct Messages", "Allow DMs from other server members"));
+        assert_eq!(
+            text(true, None),
+            ("Direct Messages and Friend Requests", "Allow DMs and friend requests from other server members")
+        );
+        // A server's row takes the title of the combined switch too.
+        assert_eq!(
+            text(true, Some(false)),
+            ("Direct Messages and Friend Requests", "Allow DMs and friend requests from other members in this server")
+        );
+        assert_eq!(text(false, Some(false)).1, "Allow DMs from other members in this server");
+        assert_eq!(text(true, Some(true)).1, "Allow DMs from other members in this hub", "a hub says so over the rest");
+        assert_eq!(message_requests_note(true), "Filter messages from hub members you may not know.");
+    }
+
+    #[test]
+    fn the_activity_rows_follow_their_lists_and_the_default_follows_the_region() {
+        let privacy = Privacy {
+            activity_restricted_servers: ids(&[5]),
+            activity_joining_restricted_servers: ids(&[6]),
+            ..Privacy::default()
+        };
+        assert_eq!(privacy.activity_status(Snowflake(5)), Row { on: false, disabled: false });
+        assert_eq!(privacy.activity_status(Snowflake(6)), Row { on: true, disabled: false });
+        assert_eq!(privacy.activity_joining(Snowflake(6)), Row { on: false, disabled: false });
+        assert_eq!(privacy.activity_joining(Snowflake(5)), Row { on: true, disabled: false });
+
+        let teen = Gates { activity_status_by_default: true, ..Gates::default() };
+        assert_eq!(privacy.activity_default(&Gates::default()), ActivityDefault::Off);
+        assert_eq!(privacy.activity_default(&teen), ActivityDefault::LargeServers);
+        let chosen = Privacy { activity_default: Some(ActivityDefault::On), ..Privacy::default() };
+        assert_eq!(chosen.activity_default(&teen), ActivityDefault::On, "what was set wins");
     }
 
     #[test]

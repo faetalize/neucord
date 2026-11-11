@@ -17,7 +17,7 @@ use super::App;
 use super::chat::{self, MessageTarget};
 use super::{
     composer, create_thread, edits, emoji, forum, gifs, picker, poll_composer, polls, profile, reactions, reactors,
-    scheduling, sidebar, stickers, threads, uploads, voice,
+    scheduling, server_privacy, sidebar, stickers, threads, uploads, voice,
 };
 
 /// One entry of a menu, for what it was opened on: a `T`. `C` is what
@@ -133,6 +133,11 @@ pub(super) const FORUM_TAG: Table<forum::Tagged> = &[&[forum::COPY_TAG_ID]];
 /// joining and what happens in a call is #12's.
 pub(super) const CHANNEL: Table<sidebar::ChannelTarget> =
     &[&[sidebar::COPY_CHANNEL_LINK], &[sidebar::OPEN_CHAT], &[sidebar::COPY_CHANNEL_ID]];
+
+/// A server icon's menu (871638): Privacy Settings, which the client puts
+/// between Server Settings and Edit Per-server Profile. What else the menu
+/// holds needs what Neucord doesn't have yet.
+pub(super) const GUILD: Table<server_privacy::GuildTarget> = &[&[server_privacy::PRIVACY_SETTINGS]];
 
 /// A person's menu, opened from a message's author, a mention and a member
 /// list row: what Neucord has of the official client's (`user-context`,

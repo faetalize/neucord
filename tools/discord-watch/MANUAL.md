@@ -455,6 +455,16 @@ changed for unrelated reasons only needs a note in the issue.
   `link_status`) says a parent is linked, 116774 and
   953298 the region's teen defaults and age gate (anchors
   `MESSAGE_REQUEST_RESTRICTIONS`, `DM_PRIVACY_SETTINGS`).
+  A server's dialog (`ui/server_privacy.rs`, 632038, anchor
+  `SERVER_PRIVACY_MODAL`) has the same two rows and two more: Share my
+  activity and Activity joining, a server's presence in
+  `activity_restricted_guild_ids` and `activity_joining_restricted_guild_ids`.
+  Unset, the default sharing is large servers where the region's teen
+  defaults say so (253932, anchor `isEligible`), else none. After the Profile
+  Privacy row changes, 365258 (anchor `large_only`) says whether to ask
+  whether sharing follows it (`gS`, with `A` and the rank `E`), for which servers
+  (`p`: 200 members is large, an unknown count counts when restricting)
+  and what yes writes (`gF`); 413201 is the dialog.
 - **When we send our presence** (`presence.rs`). `emitPresenceUpdate`,
   `presenceUpdate` and `SelfPresenceStore` (what the presence is) are
   watched. Not watched: the reporter around `emitPresenceUpdate` in 225123

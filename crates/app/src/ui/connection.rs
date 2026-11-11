@@ -397,6 +397,7 @@ impl App {
             state.session_id = session_id;
             state.gates = gates;
             state.unavailable_guilds = unavailable_guilds;
+            state.member_counts.clear();
             let store = (!state.persisted).then(|| (state.token.clone(), user.username.clone()));
             state.persisted = true;
             state.users.insert(user.id.0, user.display_name().to_string());
@@ -543,6 +544,8 @@ impl App {
                 Some(existing) => *existing = guild,
                 None => state.guilds.push(guild),
             }
+            // Its own count is the news.
+            state.member_counts.remove(&id);
             state.guild == Some(id)
         };
         self.rebuild_rail();

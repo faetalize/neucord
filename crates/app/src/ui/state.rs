@@ -125,6 +125,10 @@ pub(super) struct State {
     pub(super) gates: discord::gates::Gates,
     /// Servers READY could not give; see [`discord::settings::live_servers`].
     pub(super) unavailable_guilds: usize,
+    /// How many members servers last said they have, in their member lists
+    /// (`GuildMemberCountStore`, 498642); a server without one has the count
+    /// READY or its creation gave.
+    pub(super) member_counts: HashMap<Snowflake, u64>,
     /// Saving changes to `settings`.
     pub(super) sync: discord::settings_sync::SettingsSync,
     /// The favourite emoji and the counts of use, once loaded (the first time

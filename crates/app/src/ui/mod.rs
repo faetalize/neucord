@@ -34,6 +34,7 @@ mod reactions;
 mod reactors;
 mod requests;
 mod scheduling;
+mod server_privacy;
 mod settings;
 mod sidebar;
 mod state;
@@ -192,6 +193,8 @@ pub struct App {
     state: RefCell<state::State>,
     /// The settings window, while it's open.
     settings_window: RefCell<Option<settings::Window>>,
+    /// A server's Privacy Settings, while open.
+    server_privacy: RefCell<Option<server_privacy::Dialog>>,
     /// The member list pane, in the right pane of the chat.
     members: members::Pane,
     /// What the rail and sidebar last drew, so badge refreshes can skip
@@ -362,6 +365,7 @@ impl App {
             scroll_loader: RefCell::default(),
             state: RefCell::default(),
             settings_window: RefCell::default(),
+            server_privacy: RefCell::default(),
             members: members::Pane::new(),
             drawn: RefCell::default(),
             rail_items: RefCell::default(),
