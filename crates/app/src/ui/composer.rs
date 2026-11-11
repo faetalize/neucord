@@ -9,6 +9,7 @@ use discord::cooldowns::{Slowmode, bypasses_slowmode, wait_words};
 use discord::emoji::{Item as Emoji, locked_notice};
 use discord::limits::{LengthCount, TooLong, message_length};
 use discord::rest::{Reply, ReplyPing};
+use discord::scheduled;
 use discord::verification::{self, Gate};
 use discord::{Channel, Message, Snowflake};
 use gtk::glib;
@@ -17,7 +18,7 @@ use super::App;
 use super::chat::MessageTarget;
 use super::menus::{self, Entry, Item, Kind};
 use super::state::{now_ms, now_unix};
-use super::uploads::Stopped;
+use super::uploads::{Outgoing, Stopped};
 
 /// Reply to a message from its menu; Shift turns the ping off, as with the
 /// button.
@@ -141,6 +142,7 @@ impl App {
         });
         self.reply_bar.append(&cancel);
         area.append(&self.reply_bar);
+        self.build_schedule_bar(area);
         self.build_edit_bar(area);
         self.build_attach(area);
         self.build_stickers(area);
@@ -232,8 +234,14 @@ impl App {
                     this.set_reply(None);
                     return glib::Propagation::Stop;
                 }
-                // A waiting sticker goes after the reply, as in the client (92960).
+                // The scheduled time goes after the reply, and a waiting sticker after it (92960).
                 let channel = this.state.borrow().channel;
+                if key == Key::Escape
+                    && let Some(channel) = channel.filter(|c| this.scheduled_time(*c).is_some())
+                {
+                    this.clear_schedule(channel);
+                    return glib::Propagation::Stop;
+                }
                 if key == Key::Escape
                     && let Some(channel) = channel.filter(|c| this.waiting.of(*c).is_some())
                 {
@@ -678,6 +686,11 @@ impl App {
         if self.slowmode_left(channel) > 0 {
             return self.update_notice_bar();
         }
+        // The time may have come too close since it was chosen, which Discord would refuse.
+        let scheduled = self.scheduled_time(channel);
+        if let Some(Err(refusal)) = scheduled.map(|at| scheduled::check(at, now_unix(), None)) {
+            return self.show_composer_error(refusal.text());
+        }
         // `+:name:` reacts to the newest message in place of sending, unless
         // files go with it, which send as they are.
         if files.is_empty() && self.react_by_shortcut(channel, &typed, &library) {
@@ -694,11 +707,14 @@ impl App {
             ping: r.fixed_ping.unwrap_or(self.reply_ping.is_active()),
         });
         let ping = self.reply_ping.is_active();
-        self.record_slowmode(channel, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
         // The client shows a message as sent before the request, ending what
         // we were typing, unless files go with it: those it shows on success.
-        if files.is_empty() {
-            self.typing_message_sent(channel);
+        // A scheduled one isn't shown, nor does it start a cooldown.
+        if scheduled.is_none() {
+            self.record_slowmode(channel, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
+            if files.is_empty() {
+                self.typing_message_sent(channel);
+            }
         }
         self.set_composer_text("");
         self.set_reply(None);
@@ -709,15 +725,21 @@ impl App {
             self.show_composer_error(locked_notice(&translated.locked, library.place.external));
         }
         let this = self.clone();
+        let at = scheduled.map(scheduled::iso);
         glib::spawn_future_local(async move {
             // The gateway echoes our own message back, which is what adds it to the list.
-            match this
-                .send_with_uploads(&rest, channel, &text, reply, files, waiting.as_ref().map(|w| w.sticker.id))
-                .await
-            {
-                Ok(_) => this.message_sent(channel),
+            let sticker = waiting.as_ref().map(|w| w.sticker.id);
+            let message = Outgoing { text: &text, reply, sticker, at: at.as_deref() };
+            match this.send_with_uploads(&rest, channel, &message, files).await {
+                Ok(()) => match scheduled {
+                    Some(at) => this.message_scheduled(channel, at),
+                    None => this.message_sent(channel),
+                },
                 Err(stopped) => {
-                    this.message_stopped(channel, &stopped);
+                    match scheduled {
+                        Some(_) => this.scheduling_failed(&stopped),
+                        None => this.message_stopped(channel, &stopped),
+                    }
                     let buffer = this.composer.buffer();
                     if buffer.char_count() == 0 && this.reply.borrow().is_none() {
                         if this.waiting.of(channel).is_none() {

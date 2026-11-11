@@ -138,6 +138,19 @@ pub fn message_length(text: &str) -> usize {
 const MESSAGE: usize = 2000;
 const LONG_MESSAGE: usize = 4000;
 
+/// How many scheduled messages may wait at once, for Nitro and without it.
+const SCHEDULED: usize = 1;
+const SCHEDULED_NITRO: usize = 25;
+
+/// How many scheduled messages may wait (`ZG` in 566908).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScheduledLimit {
+    pub max: usize,
+    /// Nitro would raise it, which the client says with an upsell where
+    /// Neucord only says the limit.
+    pub upgradable: bool,
+}
+
 /// A message over the limit, which the client turns back with an alert
 /// (710272). Without the perk it opens a Nitro upsell instead, which
 /// Neucord doesn't copy.
@@ -285,6 +298,17 @@ impl Limits<'_> {
     /// [`message_length`] counts it (135621).
     pub fn max_message_length(&self) -> usize {
         if self.nitro.has(Perk::IncreasedMessageLength) { LONG_MESSAGE } else { MESSAGE }
+    }
+
+    /// How many scheduled messages may wait. The client doesn't hold a new
+    /// one back by it: Discord refuses the one over, with
+    /// [`crate::scheduled::TOO_MANY`]. Only Nitro (Tier 2) raises it, not
+    /// Basic or Classic, and not the `perks`.
+    pub fn scheduled_messages(&self) -> ScheduledLimit {
+        match self.nitro.premium_type {
+            Some(PremiumType::Tier2) => ScheduledLimit { max: SCHEDULED_NITRO, upgradable: false },
+            _ => ScheduledLimit { max: SCHEDULED, upgradable: true },
+        }
     }
 
     /// Refuses `text` if it's over [`Self::max_message_length`]. A message
@@ -475,6 +499,20 @@ mod tests {
         assert_eq!(limit(&Nitro::default()), 2000);
         assert_eq!(limit(&nitro(json!({"premium_type": 3}))), 2000, "Basic doesn't lengthen messages");
         assert_eq!(limit(&nitro(json!({"premium_type": 2}))), 4000);
+    }
+
+    #[test]
+    fn only_nitro_schedules_more_than_one_message() {
+        let experiments = Experiments::default();
+        let limit = |n: Nitro| Limits { nitro: &n, experiments: &experiments, me: ME }.scheduled_messages();
+        let one = ScheduledLimit { max: 1, upgradable: true };
+        assert_eq!(limit(Nitro::default()), one);
+        assert_eq!(limit(nitro(json!({"premium_type": 3}))), one, "Basic");
+        assert_eq!(limit(nitro(json!({"premium_type": 1}))), one, "Classic");
+        assert_eq!(limit(nitro(json!({"premium_type": 2}))), ScheduledLimit { max: 25, upgradable: false });
+        // The client asks the premium type, not the perks.
+        let perks = json!({"active_perks_bitmask": [u64::MAX], "config_by_perk": {}});
+        assert_eq!(limit(nitro(json!({"premium_type": 3, "perks": perks}))), one);
     }
 
     fn counted(n: &Nitro, length: usize, editing: bool) -> Option<LengthCount> {

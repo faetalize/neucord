@@ -10,7 +10,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use discord::images;
 use discord::uploads::{self, Data, File, Refusal, Sent};
-use discord::{Message, Rest, Snowflake};
+use discord::{Rest, Snowflake};
 use gtk::{gdk, gio, glib};
 
 use super::App;
@@ -211,6 +211,26 @@ pub(super) enum Stopped {
     Send(discord::Error),
 }
 
+/// What a message carries besides its files.
+pub(super) struct Outgoing<'a> {
+    pub(super) text: &'a str,
+    pub(super) reply: Option<discord::rest::Reply>,
+    pub(super) sticker: Option<Snowflake>,
+    /// An ISO 8601 time, for a message Discord posts then, not now.
+    pub(super) at: Option<&'a str>,
+}
+
+/// Post the message with `sent`, uploaded already, or have Discord post it later.
+async fn post(rest: &Rest, channel: Snowflake, message: &Outgoing<'_>, sent: &[Sent<'_>]) -> Result<(), Stopped> {
+    let Outgoing { text, reply, sticker, at } = *message;
+    match at {
+        // The gateway echoes a message back, which is what adds it to the list; a scheduled one isn't posted yet.
+        None => rest.send_message(channel, text, reply, sent, sticker).await.map(drop),
+        Some(at) => rest.schedule_message(channel, at, text, reply, sent, sticker, None).await,
+    }
+    .map_err(Stopped::Send)
+}
+
 impl App {
     /// The open channel, if files may be attached to it now: the message box
     /// shows, no edit has it, and the client would offer attaching there.
@@ -229,7 +249,13 @@ impl App {
         let drafts = &self.drafts;
         let channel = self.attach_channel();
         // The menu holds more than files: it shows wherever anything in it does.
-        drafts.attach.set_visible(channel.is_some() || self.voice_channel().is_some() || self.poll_channel().is_some());
+        drafts.attach.set_visible(
+            channel.is_some()
+                || self.voice_channel().is_some()
+                || self.poll_channel().is_some()
+                || self.schedule_channel().is_some(),
+        );
+        self.refresh_schedule_bar();
         while let Some(child) = drafts.tray.first_child() {
             drafts.tray.remove(&child);
         }
@@ -627,18 +653,16 @@ impl App {
         self: &Rc<Self>,
         rest: &Rest,
         channel: Snowflake,
-        text: &str,
-        reply: Option<discord::rest::Reply>,
+        message: &Outgoing<'_>,
         files: Vec<Rc<Upload>>,
-        sticker: Option<Snowflake>,
-    ) -> Result<Message, Stopped> {
+    ) -> Result<(), Stopped> {
         if files.is_empty() {
-            return rest.send_message(channel, text, reply, &[], sticker).await.map_err(Stopped::Send);
+            return post(rest, channel, message, &[]).await;
         }
         let sending = Rc::new(Sending { files: files.clone(), posting: Cell::new(false) });
         self.drafts.sending.borrow_mut().insert(channel, sending.clone());
         self.refresh_attach();
-        let result = self.upload_and_post(rest, channel, text, reply, sticker, &sending).await;
+        let result = self.upload_and_post(rest, channel, message, &sending).await;
         self.drafts.sending.borrow_mut().remove(&channel);
         if result.is_ok() {
             self.forget(channel, &sending);
@@ -651,11 +675,9 @@ impl App {
         self: &Rc<Self>,
         rest: &Rest,
         channel: Snowflake,
-        text: &str,
-        reply: Option<discord::rest::Reply>,
-        sticker: Option<Snowflake>,
+        message: &Outgoing<'_>,
         sending: &Sending,
-    ) -> Result<Message, Stopped> {
+    ) -> Result<(), Stopped> {
         let files = &sending.files;
         for upload in files {
             let failed = match &*upload.status.borrow() {
@@ -693,7 +715,7 @@ impl App {
                 voice: None,
             })
             .collect();
-        rest.send_message(channel, text, reply, &sent, sticker).await.map_err(Stopped::Send)
+        post(rest, channel, message, &sent).await
     }
 
     /// Cancel a send that is still uploading: the files are taken back, and
@@ -726,6 +748,7 @@ impl App {
         }
         self.drafts.files.borrow_mut().clear();
         self.drafts.sending.borrow_mut().clear();
+        self.scheduling.clear();
         self.drop_voice();
     }
 
