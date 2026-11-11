@@ -296,6 +296,8 @@
     "LoginRequiredActionStore",
     "MessageStore",
     "NoteStore",
+    "NotificationSettingsStore",
+    "NotificationStore",
     "PendingReplyStore",
     "PermissionStore",
     "QuickSwitcherStore",

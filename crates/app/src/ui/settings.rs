@@ -238,9 +238,10 @@ impl App {
             let mut state = self.state.borrow_mut();
             let before = (state.settings.media, state.settings.guild_folders.clone());
             if replace {
-                state.settings = Settings::default();
+                state.settings.replace(patch);
+            } else {
+                state.settings.apply(patch);
             }
-            state.settings.apply(patch);
             (before.0 != state.settings.media, before.1 != state.settings.guild_folders)
         };
         if folders {
