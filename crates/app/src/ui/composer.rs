@@ -8,9 +8,10 @@ use adw::prelude::*;
 use discord::cooldowns::{Slowmode, bypasses_slowmode, wait_words};
 use discord::emoji::{Item as Emoji, locked_notice};
 use discord::limits::{LengthCount, TooLong, message_length};
+use discord::notice::Notice;
 use discord::rest::{Reply, ReplyPing};
 use discord::scheduled;
-use discord::verification::{self, Gate};
+use discord::verification::Gate;
 use discord::{Channel, Message, Snowflake};
 use gtk::glib;
 
@@ -78,6 +79,8 @@ impl LengthIndicator {
 pub(super) enum Completion {
     Mention(u64, String),
     Emoji(Emoji),
+    /// A command to fill in the form of, not text to insert.
+    Command(super::slash::Suggestion),
 }
 
 impl Completion {
@@ -86,6 +89,7 @@ impl Completion {
         match self {
             Completion::Mention(id, _) => format!("<@{id}> "),
             Completion::Emoji(item) => format!("{} ", item.text()),
+            Completion::Command(_) => String::new(),
         }
     }
 
@@ -98,6 +102,23 @@ impl Completion {
                 let line = gtk::Box::builder().spacing(8).build();
                 line.append(&super::emoji::glyph(item, images));
                 line.append(&gtk::Label::builder().label(format!(":{}:", item.name())).xalign(0.0).build());
+                line.upcast()
+            }
+            Completion::Command(suggestion) => {
+                let line = gtk::Box::builder().spacing(12).build();
+                line.append(&gtk::Label::builder().label(&suggestion.name).xalign(0.0).build());
+                line.append(
+                    &gtk::Label::builder()
+                        .label(&suggestion.description)
+                        .xalign(0.0)
+                        .hexpand(true)
+                        .ellipsize(gtk::pango::EllipsizeMode::End)
+                        .width_chars(30)
+                        .max_width_chars(48)
+                        .css_classes(["dim-label"])
+                        .build(),
+                );
+                line.append(&gtk::Label::builder().label(&suggestion.app).css_classes(["dim-label"]).build());
                 line.upcast()
             }
         }
@@ -144,6 +165,7 @@ impl App {
         area.append(&self.reply_bar);
         self.build_schedule_bar(area);
         self.build_edit_bar(area);
+        self.build_slash(area);
         self.build_attach(area);
         self.build_stickers(area);
         self.build_gifs();
@@ -262,8 +284,9 @@ impl App {
     /// What replaces the message box where we can't post: accept and ignore
     /// in a message request, a notice in the system DM, during a timeout,
     /// while a server's verification asks for more, or without Send Messages
-    /// (in a thread, by the thread rule: see `permissions::in_channel`).
-    /// While slowmode makes us wait, the box stays and the wait shows above it.
+    /// (in a thread, by the thread rule: see `permissions::in_channel`). The
+    /// last keeps the attach button for Create Thread (see [`Notice`]). While
+    /// slowmode makes us wait, the box stays and the wait shows above it.
     pub(super) fn update_notice_bar(self: &Rc<Self>) {
         self.watch_timeout_end();
         self.show_notice_bar();
@@ -315,61 +338,69 @@ impl App {
             bar.set_visible(false);
             return;
         }
-        let (system, request, timeout, gate, denied, slowmode) = {
+        let (notice, request, denied_here, slowmode) = {
             let state = self.state.borrow();
             let open = state.channel.and_then(|id| state.find_channel(id));
-            let system = open.is_some_and(|(_, c)| c.is_system_dm());
             let denied_here = match open.map(|(_, c)| c) {
                 Some(c) if c.kind == discord::ChannelKind::MediaThread => "This thread can only be read.",
                 Some(c) if c.is_locked() => "This thread is locked. Only moderators can send messages in it.",
                 _ => "You do not have permission to send messages in this channel.",
             };
-            let guild = open.and_then(|(guild, _)| guild).zip(state.account.as_ref());
-            let timeout = guild.and_then(|(g, a)| g.timeout_left(a, now_unix()));
-            let gate = guild.and_then(|(g, a)| verification::gate(g, a, now_unix()));
-            let denied =
-                (guild.is_some() && !state.channel.is_some_and(|id| state.can_send(id))).then_some(denied_here);
             let slowmode = open.map_or(0, |(_, c)| state.slowmode.remaining_ms(c, now_ms()));
-            (system, state.open_request().map(|c| (c.id, c.spam, c.title())), timeout, gate, denied, slowmode)
+            let request = state.open_request().map(|c| (c.id, c.title()));
+            (state.channel.and_then(|id| state.notice(id)), request, denied_here, slowmode)
         };
         let label = |text: String| gtk::Label::builder().label(text).xalign(0.0).wrap(true).hexpand(true).build();
-        let text = match (&request, timeout) {
-            _ if system => "This chat is reserved for official Discord notifications. \
+        let request = request.as_ref().map(|(id, title)| (*id, title.as_str()));
+        let text = match &notice {
+            Some(Notice::System) => "This chat is reserved for official Discord notifications. \
                 Discord will never ask for your password or token."
                 .to_owned(),
-            (_, Some(left)) => format!(
+            Some(Notice::Timeout(left)) => format!(
                 "You're in timeout in this server for {}. Until then you can read, but not send messages or react.",
-                wait_words(left)
+                wait_words(*left)
             ),
-            (Some((_, true, title)), None) => {
-                format!("Discord filed this message request from {title} as likely spam.")
+            Some(Notice::Request { spam: true }) => {
+                format!("Discord filed this message request from {} as likely spam.", request.map_or("", |r| r.1))
             }
-            (Some((_, false, title)), None) => format!("{title} wants to message you. Accept to reply."),
-            (None, None) => match (&gate, denied) {
-                (Some(gate), _) => gate_notice(gate, now_unix()),
-                (None, Some(denied)) => denied.to_owned(),
-                (None, None) => {
-                    self.show_composer(true);
-                    bar.set_visible(slowmode > 0);
-                    if slowmode > 0 {
-                        let seconds = (slowmode + 999) / 1000;
-                        bar.append(&label(format!(
-                            "Slowmode is enabled. You can send another message in this channel in {}.",
-                            wait_words(seconds)
-                        )));
-                        self.tick_notice_bar();
-                    }
-                    return;
+            Some(Notice::Request { spam: false }) => {
+                format!("{} wants to message you. Accept to reply.", request.map_or("", |r| r.1))
+            }
+            Some(Notice::Gate(gate)) => gate_notice(gate, now_unix()),
+            Some(Notice::Denied) => denied_here.to_owned(),
+            None => {
+                self.show_composer(true);
+                bar.set_visible(slowmode > 0);
+                if slowmode > 0 {
+                    let seconds = (slowmode + 999) / 1000;
+                    bar.append(&label(format!(
+                        "Slowmode is enabled. You can send another message in this channel in {}.",
+                        wait_words(seconds)
+                    )));
+                    self.tick_notice_bar();
                 }
-            },
+                return;
+            }
         };
         self.show_composer(false);
         bar.set_visible(true);
+        let thread = {
+            let state = self.state.borrow();
+            state.channel.is_some_and(|id| state.offers_thread_in_attach_menu(id))
+        };
+        if thread && notice.as_ref().is_some_and(Notice::keeps_attach_button) {
+            bar.append(&self.drafts.notice_attach);
+        }
         bar.append(&label(text));
-        if timeout.is_some() || gate.as_ref().and_then(Gate::until).is_some() {
+        let counting = match &notice {
+            Some(Notice::Timeout(_)) => true,
+            Some(Notice::Gate(gate)) => gate.until().is_some(),
+            _ => false,
+        };
+        if counting {
             self.tick_notice_bar();
         }
-        if let Some((id, ..)) = request.filter(|_| !system) {
+        if let (Some(Notice::Request { .. }), Some((id, _))) = (&notice, request) {
             for button in self.request_actions(id) {
                 bar.append(&button);
             }
@@ -431,7 +462,7 @@ impl App {
             channel: message.channel_id,
             guild,
             to: message.id,
-            author: message.author.display_name().to_owned(),
+            author: self.state.borrow().name_in(message.channel_id, &message.author),
             fixed_ping,
         }));
         self.composer.grab_focus();
@@ -487,15 +518,27 @@ impl App {
     /// Show or hide the autocomplete popup for the `@word` or `:word` at the
     /// cursor.
     pub(super) fn update_mention_popup(self: &Rc<Self>) {
+        // A `/` at the start asks for a command instead.
+        if self.update_slash_popup() {
+            return;
+        }
         let buffer = self.composer.buffer();
         let found = match mention_token(&buffer) {
             Some((start, prefix)) => Some((start, self.mention_candidates(&prefix))),
             None => emoji_token(&buffer).map(|(start, query)| (start, self.emoji_candidates(&query))),
         };
-        let Some((start, candidates)) = found.filter(|(_, candidates)| !candidates.is_empty()) else {
+        match found {
+            Some((start, candidates)) => self.show_completions(start, candidates),
+            None => self.mention_popover.popdown(),
+        }
+    }
+
+    /// Show `candidates` in the popup, for the token starting at `start`.
+    pub(super) fn show_completions(self: &Rc<Self>, start: i32, candidates: Vec<Completion>) {
+        if candidates.is_empty() {
             self.mention_popover.popdown();
             return;
-        };
+        }
 
         while let Some(child) = self.mention_list.first_child() {
             self.mention_list.remove(&child);
@@ -576,6 +619,13 @@ impl App {
     }
 
     pub(super) fn accept_mention(self: &Rc<Self>, index: i32) {
+        let command = match self.mention.borrow().candidates.get(index.max(0) as usize) {
+            Some(Completion::Command(suggestion)) => Some(suggestion.id.clone()),
+            _ => None,
+        };
+        if let Some(id) = command {
+            return self.start_command(&id);
+        }
         let (start, text) = {
             let ctx = self.mention.borrow();
             match ctx.candidates.get(index.max(0) as usize) {
@@ -772,21 +822,32 @@ impl App {
     /// What follows a message that didn't: slowmode as Discord says it is,
     /// and the reason.
     pub(super) fn message_stopped(self: &Rc<Self>, channel: Snowflake, stopped: &Stopped) {
+        if let Some(why) = self.record_stopped(channel, stopped) {
+            self.show_composer_error(&why);
+        }
+    }
+
+    /// Slowmode as a message that didn't go out leaves it, and what to tell
+    /// of it, unless the user took it back.
+    pub(super) fn record_stopped(self: &Rc<Self>, channel: Snowflake, stopped: &Stopped) -> Option<String> {
         match stopped {
             Stopped::Send(e) if e.slowmode_wait().is_some() => {
                 let wait = e.slowmode_wait().unwrap_or_default();
                 self.record_slowmode(channel, |slowmode, c, _| slowmode.refused(c, wait, now_ms()));
-                self.show_composer_error("Not sent: slowmode is enabled in this channel.");
+                Some("Not sent: slowmode is enabled in this channel.".to_owned())
             }
             Stopped::Send(e) => {
                 self.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c));
-                self.show_composer_error(&format!("Not sent: {e}"));
+                Some(format!("Not sent: {e}"))
             }
             Stopped::Upload(why) => {
                 self.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c));
-                self.show_composer_error(&format!("Not sent: {why}"));
+                Some(format!("Not sent: {why}"))
             }
-            Stopped::Canceled => self.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c)),
+            Stopped::Canceled => {
+                self.record_slowmode(channel, |slowmode, c, _| slowmode.failed(c));
+                None
+            }
         }
     }
 }
