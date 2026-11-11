@@ -209,6 +209,12 @@ pub struct App {
     rail_shape: RefCell<u64>,
     /// Per-folder colours, regenerated with the rail.
     folder_css: gtk::CssProvider,
+    /// The desktop's notification server and launcher, once connected; `None`
+    /// without a session bus.
+    desktop: std::cell::OnceCell<Option<crate::desktop::Desktop>>,
+    /// The count in front of the window's title, and the title it goes before.
+    unread_count: Cell<i64>,
+    content_title: RefCell<String>,
 }
 
 impl App {
@@ -385,6 +391,9 @@ impl App {
             rail_items: RefCell::default(),
             rail_shape: RefCell::new(0),
             folder_css: gtk::CssProvider::new(),
+            desktop: std::cell::OnceCell::new(),
+            unread_count: Cell::new(0),
+            content_title: RefCell::new("Neucord".to_owned()),
         });
         gtk::style_context_add_provider_for_display(
             &WidgetExt::display(&this.window),
@@ -493,35 +502,6 @@ impl App {
             app.set_accels_for_action("win.search", &["<Control>f"]);
             // The client binds both (`mod+k`, `mod+t`).
             app.set_accels_for_action("win.quick-switcher", &["<Control>k", "<Control>t"]);
-            // Notification clicks arrive as an app action, with the channel id.
-            let open = gio::ActionEntry::builder("open-channel")
-                .parameter_type(Some(glib::VariantTy::STRING))
-                .activate({
-                    let this = Rc::downgrade(self);
-                    move |_: &gtk::Application, _, parameter| {
-                        let id = parameter.and_then(|p| p.str()).and_then(|s| s.parse().ok());
-                        if let (Some(this), Some(id)) = (this.upgrade(), id) {
-                            this.open_channel(Snowflake(id));
-                        }
-                    }
-                })
-                .build();
-            // Friend request notifications open the friends page.
-            let friends = gio::ActionEntry::builder("open-friends")
-                .activate({
-                    let this = Rc::downgrade(self);
-                    move |_: &gtk::Application, _, _| {
-                        if let Some(this) = this.upgrade() {
-                            this.window.present();
-                            this.state.borrow_mut().friends_tab =
-                                friends::Tab::List(discord::relationships::List::Pending);
-                            this.show_friends();
-                            this.show_content();
-                        }
-                    }
-                })
-                .build();
-            app.add_action_entries([open, friends]);
         }
 
         // Coming back to the open channel reads it.
@@ -710,7 +690,14 @@ impl App {
 
     /// Title the window after what the content shows.
     pub(super) fn set_content_title(&self, title: &str) {
-        self.window.set_title(Some(title));
+        *self.content_title.borrow_mut() = title.to_owned();
+        self.apply_title();
+    }
+
+    /// The window's title: the content's, behind the unread count.
+    fn apply_title(&self) {
+        let prefix = discord::badge::title_prefix(self.unread_count.get());
+        self.window.set_title(Some(&format!("{prefix}{}", self.content_title.borrow())));
     }
 }
 
