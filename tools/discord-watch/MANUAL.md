@@ -119,6 +119,14 @@ changed for unrelated reasons only needs a note in the issue.
   to pick sends when chosen, several when the list closes with a change); and
   what turns components off, `v` in 911408 (anchor
   `getInteractionComponentState`) with `O` and the menu limits in 257249.
+- **`ansi` code blocks** (`markup::ansi`, `render::ansi_markup`). Which codes
+  read, and how: the parser in 626551 (anchor `brightMagenta`): the style
+  codes it takes, in what order a sequence's resets and sets apply, that every
+  escape sequence is dropped and that `ESC[m` does nothing. What is drawn is
+  `OT` in 768947 (anchor `textDecorationLine`): colours, bold, italic,
+  underline, strikethrough and overline, and no dim, reverse or hidden. The
+  block is `ansi` when 768947's `py` (lowercased) says so. The colours are
+  Neucord's own, from libadwaita's palette, not the client's theme.
 - **Forum and media channels take no message** (the forum page in
   `select_channel`, `permissions::can_send`, `update_notice_bar`). Neucord
   shows no box there, loads nothing and refuses to send, whatever Send
