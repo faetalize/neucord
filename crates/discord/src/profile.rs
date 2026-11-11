@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::experiments::Experiments;
 use crate::model::{Channel, ChannelKind, Overwrite, Role};
 use crate::permissions::Permissions;
 use crate::{Snowflake, User};
@@ -19,15 +20,36 @@ use crate::{Snowflake, User};
 /// holds is this old (`fetchEndedAt` in 917445).
 const FRESH_MS: u64 = 60_000;
 
-/// A profile a popout asked for, as the client puts it: the query and what
-/// goes in it (`342296`).
+/// Where a profile is shown, which the request says (`type`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Surface {
+    Popout,
+    /// The panel beside a DM.
+    Sidebar,
+}
+
+/// The experiment that redesigns the panel beside a DM, and with it what
+/// the panel asks for: the variant that enables it is 1 (`rD` in 289287).
+const SIDEBAR_REDESIGN: &str = "2026-06-user-profile-sidebar-redesign";
+
+/// Whether Discord gave the account the redesigned panel.
+pub fn sidebar_redesign(experiments: &Experiments, me: Snowflake) -> bool {
+    experiments.apex_user(me, SIDEBAR_REDESIGN).is_some_and(|a| a.variant == 1)
+}
+
+/// A profile asked for, as the client puts it: the query and what goes in it
+/// (`342296` for a popout, `ok` in 289287 for the panel).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Request {
+    pub surface: Surface,
     pub user: Snowflake,
     /// The server the popout was opened in; none in DMs.
     pub guild: Option<Snowflake>,
     pub mutual_guilds: bool,
     pub mutual_friends: bool,
+    /// Only how many friends we share, not who: what the panel asks for
+    /// unless the redesign asks for them.
+    pub mutual_friend_count: bool,
     /// The role of theirs that links an account of another service, which
     /// the server's linked roles are told apart by (see [`connections_role`]).
     pub connections_role: Option<Snowflake>,
@@ -38,16 +60,42 @@ impl Request {
     /// their mutual friends but not a bot's.
     pub fn popout(user: &User, me: Snowflake, guild: Option<Snowflake>, connections_role: Option<Snowflake>) -> Self {
         let other = user.id != me;
-        Request { user: user.id, guild, mutual_guilds: other, mutual_friends: other && !user.bot, connections_role }
+        Request {
+            surface: Surface::Popout,
+            user: user.id,
+            guild,
+            mutual_guilds: other,
+            mutual_friends: other && !user.bot,
+            mutual_friend_count: false,
+            connections_role,
+        }
+    }
+
+    /// For the panel beside a DM with `user`: their mutual servers, and for
+    /// anyone but a bot their mutual friends, or just how many unless the
+    /// account has the redesign (`redesign`).
+    pub fn sidebar(user: &User, redesign: bool) -> Self {
+        Request {
+            surface: Surface::Sidebar,
+            user: user.id,
+            guild: None,
+            mutual_guilds: true,
+            mutual_friends: !user.bot && redesign,
+            mutual_friend_count: !user.bot && !redesign,
+            connections_role: None,
+        }
     }
 
     /// The query, in the order the client's fields come: `undefined` ones
-    /// are left out, `false` ones are sent. `with_mutual_friends_count` is
-    /// there for a request that wants the count alone, which a popout doesn't.
+    /// are left out, `false` ones are sent.
     pub fn query(&self) -> String {
+        let kind = match self.surface {
+            Surface::Popout => "popout",
+            Surface::Sidebar => "sidebar",
+        };
         let mut query = format!(
-            "type=popout&with_mutual_guilds={}&with_mutual_friends={}&with_mutual_friends_count=false",
-            self.mutual_guilds, self.mutual_friends
+            "type={kind}&with_mutual_guilds={}&with_mutual_friends={}&with_mutual_friends_count={}",
+            self.mutual_guilds, self.mutual_friends, self.mutual_friend_count
         );
         if let Some(guild) = self.guild {
             query.push_str(&format!("&guild_id={guild}"));
@@ -109,6 +157,45 @@ pub struct Member {
     pub roles: Vec<Snowflake>,
     /// Their picture in this server.
     pub avatar: Option<String>,
+    /// When they joined it, in seconds since 1970.
+    pub joined_at: Option<i64>,
+}
+
+/// An avatar decoration: the image drawn around a picture
+/// (`avatar_decoration_data`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Decoration {
+    /// Its product in the collectibles shop, which has it as an image.
+    pub sku: Option<String>,
+    /// Its name among the older presets, which have it too.
+    pub asset: Option<String>,
+    /// When it lapses, in seconds since 1970.
+    pub expires_at: Option<i64>,
+}
+
+impl Decoration {
+    fn from_value(value: &Value) -> Option<Decoration> {
+        let text = |v: &Value| v.as_str().filter(|s| !s.is_empty()).map(str::to_owned);
+        let (sku, asset) = (text(&value["sku_id"]), text(&value["asset"]));
+        (sku.is_some() || asset.is_some()).then(|| Decoration {
+            sku,
+            asset,
+            expires_at: crate::model::unix_rounded_up(&value["expires_at"]),
+        })
+    }
+
+    /// Where its still image is, at `now` (seconds since 1970): the shop's,
+    /// else the preset's, and none once it has lapsed (`D` in 486020).
+    pub fn url(&self, now: i64, size: u16) -> Option<String> {
+        if self.expires_at.is_some_and(|at| at <= now) {
+            return None;
+        }
+        match (&self.sku, &self.asset) {
+            (Some(sku), _) => Some(crate::cdn::decoration_url(sku)),
+            (None, Some(asset)) => Some(crate::cdn::decoration_preset_url(asset, size)),
+            (None, None) => None,
+        }
+    }
 }
 
 /// A server we share with them, and what they are called there.
@@ -131,6 +218,7 @@ pub struct ServerProfile {
 pub struct Profile {
     pub user: User,
     pub badges: Vec<Badge>,
+    pub decoration: Option<Decoration>,
     pub bio: String,
     pub pronouns: String,
     pub banner: Option<String>,
@@ -169,6 +257,7 @@ impl Profile {
                 nick: text(&m["nick"]),
                 roles: m["roles"].as_array().into_iter().flatten().filter_map(id).collect(),
                 avatar: text(&m["avatar"]),
+                joined_at: crate::model::unix_rounded_up(&m["joined_at"]),
             }
         });
         let server = id(&value["guild_member_profile"]["guild_id"]).map(|guild| {
@@ -189,6 +278,7 @@ impl Profile {
         Some(Profile {
             user,
             badges: badges(&value["badges"]),
+            decoration: Decoration::from_value(&value["user"]["avatar_decoration_data"]),
             bio: value["user_profile"]["bio"].as_str().unwrap_or_default().to_owned(),
             pronouns: value["user_profile"]["pronouns"].as_str().unwrap_or_default().to_owned(),
             banner: text(&value["user_profile"]["banner"]),
@@ -268,10 +358,14 @@ pub enum Fetch {
 pub struct Profiles {
     users: HashMap<Snowflake, Held<Profile>>,
     servers: HashMap<(Snowflake, Snowflake), Held<ServerProfile>>,
+    /// What a server says of a member, which only its own popouts show.
+    members: HashMap<(Snowflake, Snowflake), (Option<Member>, Vec<Badge>)>,
     asking: HashSet<(Snowflake, Option<Snowflake>)>,
     mutual_guilds: HashMap<Snowflake, Vec<MutualGuild>>,
     mutual_friends: HashMap<Snowflake, Vec<User>>,
     mutual_friend_counts: HashMap<Snowflake, u32>,
+    /// Whose mutual friends are on their way, with a profile or alone.
+    asking_friends: HashSet<Snowflake>,
 }
 
 impl Profiles {
@@ -294,19 +388,24 @@ impl Profiles {
         let user = request.user;
         let again = stale
             || missing(request.mutual_guilds, self.mutual_guilds.contains_key(&user))
-            || missing(request.mutual_friends, self.mutual_friends.contains_key(&user));
+            || missing(request.mutual_friends, self.mutual_friends.contains_key(&user))
+            || missing(request.mutual_friend_count, self.mutual_friend_counts.contains_key(&user));
         if again { Fetch::Behind } else { Fetch::No }
     }
 
     /// `request` is on its way.
     pub fn asked(&mut self, request: &Request) {
         self.asking.insert((request.user, request.guild));
+        if request.mutual_friends {
+            self.asking_friends.insert(request.user);
+        }
     }
 
     /// Discord answered.
     pub fn answered(&mut self, request: &Request, profile: Profile, now: u64) {
         let user = profile.user.id;
         self.asking.remove(&(request.user, request.guild));
+        self.asking_friends.remove(&request.user);
         if let Some(guilds) = &profile.mutual_guilds {
             self.mutual_guilds.insert(user, guilds.clone());
         }
@@ -321,6 +420,9 @@ impl Profiles {
             friends.sort_by_key(|f| f.username.to_lowercase());
             self.mutual_friends.insert(user, friends);
         }
+        if let Some(guild) = request.guild {
+            self.members.insert((user, guild), (profile.member.clone(), profile.server_badges.clone()));
+        }
         if let Some((guild, server)) = &profile.server {
             self.servers.insert((user, *guild), Held { data: Some(server.clone()), ended: now, failed: None });
         }
@@ -332,6 +434,7 @@ impl Profiles {
     pub fn refused(&mut self, request: &Request, status: Option<u32>, now: u64) {
         let user = request.user;
         self.asking.remove(&(user, request.guild));
+        self.asking_friends.remove(&user);
         let held = self.users.entry(user).or_insert(Held { data: None, ended: 0, failed: None });
         (held.ended, held.failed) = (now, Some(status.unwrap_or(0)));
         if let Some(server) = request.guild.and_then(|g| self.servers.get_mut(&(user, g))) {
@@ -347,6 +450,23 @@ impl Profiles {
     /// What we hold of `user`.
     pub fn get(&self, user: Snowflake) -> Option<&Profile> {
         self.users.get(&user)?.data.as_ref()
+    }
+
+    /// What we hold of `user`, as shown in `guild` (none: outside any
+    /// server): what a server says of them is there only for its own.
+    pub fn get_in(&self, user: Snowflake, guild: Option<Snowflake>) -> Option<Profile> {
+        let mut profile = self.get(user)?.clone();
+        profile.member = None;
+        profile.server = None;
+        profile.server_badges = Vec::new();
+        if let Some(guild) = guild {
+            profile.server = self.servers.get(&(user, guild)).and_then(|h| Some((guild, h.data.clone()?)));
+            if let Some((member, badges)) = self.members.get(&(user, guild)) {
+                profile.member = member.clone();
+                profile.server_badges = badges.clone();
+            }
+        }
+        Some(profile)
     }
 
     /// Whether the last request for `user` failed.
@@ -365,6 +485,42 @@ impl Profiles {
 
     pub fn mutual_friends(&self, user: Snowflake) -> Option<&[User]> {
         self.mutual_friends.get(&user).map(Vec::as_slice)
+    }
+
+    /// How many friends we share, if Discord said or the list did.
+    pub fn mutual_friend_count(&self, user: Snowflake) -> Option<u32> {
+        self.mutual_friend_counts.get(&user).copied()
+    }
+
+    /// Whether to ask for the list of `user`'s mutual friends, as the panel's
+    /// section does when it opens (229187): not while it is on its way, nor
+    /// for none, and when the list isn't here or isn't as long as the count.
+    pub fn wants_friend_list(&self, user: Snowflake) -> bool {
+        if self.asking_friends.contains(&user) {
+            return false;
+        }
+        match (self.mutual_friend_count(user), self.mutual_friends.get(&user)) {
+            (Some(0), _) => false,
+            (Some(count), Some(list)) => list.len() != count as usize,
+            _ => true,
+        }
+    }
+
+    /// The list of mutual friends is on its way.
+    pub fn asked_friend_list(&mut self, user: Snowflake) {
+        self.asking_friends.insert(user);
+    }
+
+    /// The list of mutual friends arrived (`MUTUAL_FRIENDS_FETCH_SUCCESS`).
+    pub fn friend_list_arrived(&mut self, user: Snowflake, mut friends: Vec<User>) {
+        self.asking_friends.remove(&user);
+        friends.sort_by_key(|f| f.username.to_lowercase());
+        self.mutual_friend_counts.insert(user, friends.len() as u32);
+        self.mutual_friends.insert(user, friends);
+    }
+
+    pub fn friend_list_failed(&mut self, user: Snowflake) {
+        self.asking_friends.remove(&user);
     }
 
     /// What a profile held of `user` is worth is in doubt: their account, a
@@ -386,6 +542,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::experiments::murmur3;
 
     const NOW: u64 = 1_000_000;
 
@@ -428,6 +585,140 @@ mod tests {
             request.query(),
             "type=popout&with_mutual_guilds=true&with_mutual_friends=true&with_mutual_friends_count=false"
         );
+    }
+
+    #[test]
+    fn the_panel_asks_for_a_count_or_the_friends_by_the_experiment() {
+        let person = user(2, false);
+        let plain = Request::sidebar(&person, false);
+        assert_eq!(
+            plain.query(),
+            "type=sidebar&with_mutual_guilds=true&with_mutual_friends=false&with_mutual_friends_count=true"
+        );
+        let redesigned = Request::sidebar(&person, true);
+        assert_eq!(
+            redesigned.query(),
+            "type=sidebar&with_mutual_guilds=true&with_mutual_friends=true&with_mutual_friends_count=false"
+        );
+        // A bot has no friends to share, whichever it is.
+        let bot = Request::sidebar(&user(3, true), true);
+        assert_eq!(
+            bot.query(),
+            "type=sidebar&with_mutual_guilds=true&with_mutual_friends=false&with_mutual_friends_count=false"
+        );
+    }
+
+    #[test]
+    fn the_redesign_is_variant_one_of_its_experiment() {
+        let assigned = |variant: i64| {
+            Experiments::from_ready(&json!({
+                "apex_experiments": { "assignments": { "1": { "10": { "assignments": [
+                    [murmur3(SIDEBAR_REDESIGN), variant, 0, 1]
+                ] } } } }
+            }))
+        };
+        assert!(sidebar_redesign(&assigned(1), Snowflake(10)));
+        assert!(!sidebar_redesign(&assigned(0), Snowflake(10)));
+        assert!(!sidebar_redesign(&Experiments::default(), Snowflake(10)), "none assigned");
+    }
+
+    #[test]
+    fn a_count_asked_for_and_not_held_asks_again() {
+        let mut profiles = Profiles::default();
+        let asked = Request::sidebar(&user(2, false), false);
+        profiles.answered(&asked, Profile::from_value(&answer(2)).unwrap(), NOW);
+        // Their count came with the answer.
+        assert_eq!(profiles.plan(&asked, NOW + 1), Fetch::No);
+        let mut value = answer(4);
+        value["mutual_friends_count"] = Value::Null;
+        profiles.answered(&Request::sidebar(&user(4, false), false), Profile::from_value(&value).unwrap(), NOW);
+        assert_eq!(profiles.plan(&Request::sidebar(&user(4, false), false), NOW + 1), Fetch::Behind);
+    }
+
+    #[test]
+    fn the_friend_list_is_asked_for_until_it_is_as_long_as_the_count() {
+        let mut profiles = Profiles::default();
+        let them = Snowflake(2);
+        assert!(profiles.wants_friend_list(them), "nothing is known");
+        profiles.answered(&Request::sidebar(&user(2, false), false), Profile::from_value(&answer(2)).unwrap(), NOW);
+        assert_eq!(profiles.mutual_friend_count(them), Some(2));
+        assert!(profiles.wants_friend_list(them), "a count and no list");
+        profiles.asked_friend_list(them);
+        assert!(!profiles.wants_friend_list(them), "on its way");
+        profiles.friend_list_failed(them);
+        assert!(profiles.wants_friend_list(them), "a failure asks again");
+        profiles.friend_list_arrived(them, vec![user(9, false), user(8, false)]);
+        assert!(!profiles.wants_friend_list(them), "as long as the count");
+        let names: Vec<u64> = profiles.mutual_friends(them).unwrap().iter().map(|u| u.id.0).collect();
+        assert_eq!(names, [8, 9], "by name");
+        // A count of none needs no list.
+        profiles.answered(
+            &request(5),
+            Profile::from_value(&json!({"user": {"id": "5", "username": "x"}, "mutual_friends_count": 0})).unwrap(),
+            NOW,
+        );
+        assert!(!profiles.wants_friend_list(Snowflake(5)));
+    }
+
+    #[test]
+    fn a_profile_while_its_friends_are_asked_with_it_waits_for_them() {
+        let mut profiles = Profiles::default();
+        let asked = Request::popout(&user(2, false), Snowflake(1), None, None);
+        profiles.asked(&asked);
+        assert!(!profiles.wants_friend_list(Snowflake(2)), "they come with the profile");
+        profiles.refused(&asked, Some(500), NOW);
+        assert!(profiles.wants_friend_list(Snowflake(2)));
+    }
+
+    #[test]
+    fn decorations_have_a_still_image_until_they_lapse() {
+        let shop = Decoration::from_value(&json!({"asset": "a_x", "sku_id": "77", "expires_at": null})).unwrap();
+        assert_eq!(
+            shop.url(0, 128).as_deref(),
+            Some("https://cdn.discordapp.com/media/v1/collectibles-shop/77/static")
+        );
+        let preset = Decoration::from_value(&json!({"asset": "a_x"})).unwrap();
+        assert!(preset.url(0, 128).unwrap().contains("/avatar-decoration-presets/a_x.png?size=128"));
+        assert_eq!(Decoration::from_value(&json!(null)), None);
+        let lapsing =
+            Decoration::from_value(&json!({"sku_id": "7", "expires_at": "2020-01-01T00:00:00+00:00"})).unwrap();
+        assert!(lapsing.url(1_500_000_000, 128).is_some(), "before");
+        assert_eq!(lapsing.url(1_700_000_000, 128), None, "after");
+    }
+
+    #[test]
+    fn what_a_server_says_of_a_member_stays_in_that_server() {
+        let mut profiles = Profiles::default();
+        let (user, here, there) = (Snowflake(3), Snowflake(10), Snowflake(11));
+        let mut asked = request(3);
+        asked.guild = Some(here);
+        profiles.answered(&asked, Profile::from_value(&answer(3)).unwrap(), NOW);
+        let shown = profiles.get_in(user, Some(here)).unwrap();
+        assert_eq!(shown.member.as_ref().unwrap().nick.as_deref(), Some("server nick"));
+        assert_eq!(shown.shown().bio, "server bio");
+        for elsewhere in [Some(there), None] {
+            let shown = profiles.get_in(user, elsewhere).unwrap();
+            assert!(shown.member.is_none() && shown.server.is_none());
+            assert_eq!(shown.shown().bio, "hello", "their own");
+        }
+        // An answer for no server leaves what we held of that server alone.
+        profiles.answered(&request(3), Profile::from_value(&answer_without_server(3)).unwrap(), NOW);
+        assert!(profiles.get_in(user, Some(here)).unwrap().member.is_some());
+    }
+
+    fn answer_without_server(user: u64) -> Value {
+        let mut value = answer(user);
+        value.as_object_mut().unwrap().remove("guild_member");
+        value.as_object_mut().unwrap().remove("guild_member_profile");
+        value
+    }
+
+    #[test]
+    fn when_they_joined_a_server_is_read() {
+        let mut value = answer(3);
+        value["guild_member"]["joined_at"] = json!("2023-01-01T00:00:00+00:00");
+        let joined = Profile::from_value(&value).unwrap().member.unwrap().joined_at;
+        assert_eq!(joined, Some(1_672_531_200));
     }
 
     #[test]

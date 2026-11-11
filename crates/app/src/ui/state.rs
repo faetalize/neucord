@@ -8,11 +8,14 @@ use discord::channel_icon;
 use discord::cooldowns::Slowmode;
 use discord::experiments::Experiments;
 use discord::gifs::Tiles;
+use discord::interaction::Failure;
 use discord::limits::{Limits, Nitro};
 use discord::member_list::{self, MemberLists};
 use discord::members::{Members, RoleColour};
+use discord::notice::Notice;
 use discord::notifications::{NotificationSettings, Place};
 use discord::permissions;
+use discord::post_creation;
 use discord::read_state::ReadStates;
 use discord::relationships::Relationships;
 use discord::settings::{RailEntry, Settings};
@@ -21,11 +24,20 @@ use discord::subscriptions::Subscriptions;
 use discord::thread_creation;
 use discord::threads;
 use discord::typing::Typing;
+use discord::verification;
 use discord::verification::Account;
 use discord::{Channel, ChannelKind, Gateway, Guild, Message, Rest, Resume, Snowflake, User};
 use gtk::glib;
 
 use super::friends::Tab;
+
+/// A press of ours on a message's component, until it is answered.
+pub(super) struct Pending {
+    pub(super) channel: Snowflake,
+    pub(super) message: Snowflake,
+    /// The app whose message it is.
+    pub(super) application: Snowflake,
+}
 
 /// What Home shows in place of a channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,6 +54,8 @@ pub(super) enum Target {
     Server { guild: Snowflake, channel: Snowflake, list: String },
     /// A group DM's, which its channel holds.
     Group(Snowflake),
+    /// The profile of the person a DM is with, which has no list.
+    Dm(Snowflake),
 }
 
 /// Where the unread messages of a channel started when it was opened, for
@@ -101,9 +115,12 @@ pub(super) struct State {
     pub(super) revealed_spoilers: HashMap<Snowflake, HashSet<usize>>,
     /// This session's id, which interactions name.
     pub(super) session_id: String,
-    /// Where each interaction of ours that Discord hasn't answered belongs:
-    /// its channel and message, by nonce.
-    pub(super) interactions: HashMap<Snowflake, (Snowflake, Snowflake)>,
+    /// The component presses of ours that Discord hasn't answered, by nonce.
+    pub(super) interactions: HashMap<Snowflake, Pending>,
+    /// The apps and commands fetched for slash commands.
+    pub(super) commands: discord::commands::CommandIndex,
+    /// Commands we ran that their app hasn't answered, by nonce.
+    pub(super) running: HashMap<Snowflake, super::slash::Running>,
     /// Display names by user id, accumulated from every user we see plus lazy
     /// `GET /users/{id}` lookups, so mentions resolve even for people no longer
     /// in the server.
@@ -144,6 +161,10 @@ pub(super) struct State {
     /// The user closed the member list pane beside the chat, which is open
     /// until they do.
     pub(super) members_closed: bool,
+    /// What each message search holds, by where it looks.
+    pub(super) searches: HashMap<discord::search::Context, super::search::Saved>,
+    /// Channels opened this session, newest first, for the quick switcher.
+    pub(super) quick_history: Vec<Snowflake>,
 }
 
 impl State {
@@ -198,6 +219,32 @@ impl State {
         self.me.as_ref().map(|u| u.id)
     }
 
+    /// Where commands would run if `channel` is open, for what they may be.
+    pub(super) fn command_place(&self, channel: Snowflake) -> Option<discord::commands::Place> {
+        let (guild, channel) = self.find_channel(channel)?;
+        Some(discord::commands::Place::of(guild, channel, self.account.as_ref()?, now_unix()))
+    }
+
+    /// A press of ours is over, answered or refused by the request itself
+    /// (`failure`). A refusal that says the app's command is out of date
+    /// makes the indexes with it stale, as it does for a command we ran
+    /// (`T` in 964363 dispatches the same for a press).
+    pub(super) fn end_press(&mut self, nonce: Snowflake, failure: Option<&Failure>) -> Option<Pending> {
+        let press = self.interactions.remove(&nonce)?;
+        if failure.is_some_and(|f| f.stale_command) {
+            self.commands_out_of_date(press.application, press.channel);
+        }
+        Some(press)
+    }
+
+    /// Discord refused something of `application`'s in `channel` as out of
+    /// date (`APPLICATION_COMMAND_EXECUTE_BAD_VERSION`): the server's index,
+    /// or the DM's, and the account's, are fetched again if they hold the app.
+    pub(super) fn commands_out_of_date(&mut self, application: Snowflake, channel: Snowflake) {
+        let context = self.find_channel(channel).map_or(channel, |(guild, c)| guild.map_or(c.id, |g| g.id));
+        self.commands.out_of_date(application, context);
+    }
+
     /// The guild a channel or thread belongs to and the channel itself;
     /// `None` guild for DMs.
     pub(super) fn find_channel(&self, id: Snowflake) -> Option<(Option<&Guild>, &Channel)> {
@@ -236,11 +283,59 @@ impl State {
         }
     }
 
+    /// What stands where the message box would in a channel, so nothing we
+    /// may post to has one (#51). Slowmode isn't one: the box stays, and the
+    /// wait shows above it.
+    pub(super) fn notice(&self, id: Snowflake) -> Option<Notice> {
+        let (guild, channel) = self.find_channel(id)?;
+        let guild = guild.zip(self.account.as_ref());
+        Notice::of(
+            channel.is_system_dm(),
+            channel.is_request().then_some(channel.spam),
+            guild.and_then(|(g, a)| g.timeout_left(a, now_unix())),
+            guild.and_then(|(g, a)| verification::gate(g, a, now_unix())),
+            guild.is_some() && !self.can_send(id),
+        )
+    }
+
+    /// Whether the message box is withheld from the channel: its page of
+    /// posts stands in for a forum's, and a notice for the rest.
+    pub(super) fn box_blocked(&self, id: Snowflake) -> bool {
+        self.find_channel(id).is_some_and(|(_, c)| c.kind.is_forum_like()) || self.notice(id).is_some()
+    }
+
     /// Whether files may be attached in the channel (see [`permissions::can_attach`]).
     pub(super) fn can_attach(&self, id: Snowflake) -> bool {
         match (self.find_channel(id), &self.account) {
             (Some((guild, channel)), Some(me)) => permissions::can_attach(guild, channel, me, now_unix()),
             _ => false,
+        }
+    }
+
+    /// Whether the post form shows in the forum or media channel (see
+    /// [`post_creation::can_post`]).
+    pub(super) fn can_post(&self, forum: Snowflake) -> bool {
+        match (self.find_channel(forum), &self.account) {
+            (Some((Some(guild), channel)), Some(me)) => post_creation::can_post(guild, channel, me, now_unix()),
+            _ => false,
+        }
+    }
+
+    /// Whether the post form takes files (see [`post_creation::can_attach`]).
+    pub(super) fn can_attach_to_post(&self, forum: Snowflake) -> bool {
+        match (self.find_channel(forum), &self.account) {
+            (Some((Some(guild), channel)), Some(me)) => post_creation::can_attach(guild, channel, me, now_unix()),
+            _ => false,
+        }
+    }
+
+    /// The tags the post form offers in the forum (see [`post_creation::tag_choices`]).
+    pub(super) fn post_tags(&self, forum: Snowflake) -> Vec<discord::model::Tag> {
+        match (self.find_channel(forum), &self.account) {
+            (Some((Some(guild), channel)), Some(me)) => {
+                post_creation::tag_choices(guild, channel, me, now_unix()).into_iter().cloned().collect()
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -347,6 +442,28 @@ impl State {
         }
     }
 
+    /// What `user` is called in `channel` (`getName`, 562153): their
+    /// nickname in a server, our name for a friend in a DM, else the name
+    /// they go by.
+    pub(super) fn name_in(&self, channel: Snowflake, user: &User) -> String {
+        self.nick_in(channel, user.id).unwrap_or_else(|| user.display_name().to_owned())
+    }
+
+    /// The name given to someone in `channel`, if one was.
+    pub(super) fn nick_in(&self, channel: Snowflake, user: Snowflake) -> Option<String> {
+        match self.find_channel(channel)? {
+            (Some(guild), _) => self.members.nick(guild.id, user).map(str::to_owned),
+            (None, _) => self.relationships.get(user).and_then(|r| r.nickname.clone()),
+        }
+    }
+
+    /// The picture `user` set for the server `channel` is in, with the
+    /// server: what shows instead of their own.
+    pub(super) fn avatar_in(&self, channel: Snowflake, user: Snowflake) -> Option<(Snowflake, &str)> {
+        let guild = self.find_channel(channel)?.0?.id;
+        Some((guild, self.members.avatar(guild, user)?))
+    }
+
     /// The colour of `user`'s name in `channel`: their highest coloured role,
     /// in a server.
     pub(super) fn name_colour(&self, channel: Snowflake, user: Snowflake) -> Option<RoleColour> {
@@ -381,7 +498,14 @@ impl State {
         let id = self.channel.filter(|_| self.page.is_none())?;
         let (guild, channel) = self.find_channel(id)?;
         let Some(guild) = guild else {
-            return (channel.kind == discord::ChannelKind::GroupDm).then_some(Target::Group(id));
+            return match channel.kind {
+                discord::ChannelKind::GroupDm => Some(Target::Group(id)),
+                // A system account's DM has no profile to show.
+                discord::ChannelKind::Dm => {
+                    (!channel.is_system_dm() && !channel.recipients.is_empty()).then_some(Target::Dm(id))
+                }
+                _ => None,
+            };
         };
         let channel = match channel.kind {
             discord::ChannelKind::AnnouncementThread => guild.channel(channel.parent_id?)?,
@@ -525,13 +649,22 @@ impl State {
         hasher.finish()
     }
 
-    pub(super) fn rail_signature(&self) -> Vec<u64> {
-        let mut sig = vec![self.guild.map_or(0, |g| g.0), self.home_badge() as u64];
+    /// The rail's signature, and the count on the app icon and in the title
+    /// (see [`discord::badge`]), from the one pass over every server. A
+    /// server's dot counts, but not a DM's, as in the client (`hasAnyUnread`
+    /// in 458294 holds servers only).
+    pub(super) fn rail_signature(&self) -> (Vec<u64>, i64) {
+        let home = self.home_badge();
+        let mut sig = vec![self.guild.map_or(0, |g| g.0), home as u64];
+        let (mut mentions, mut any_unread) = (home, false);
         for guild in &self.guilds {
-            let (unread, mentions) = self.guild_badge(guild);
-            sig.extend([guild.id.0, unread as u64, mentions as u64]);
+            let (unread, guild_mentions) = self.guild_badge(guild);
+            sig.extend([guild.id.0, unread as u64, guild_mentions as u64]);
+            mentions += guild_mentions;
+            any_unread |= unread;
         }
-        sig
+        // The client's "disable unread badge" setting is #86's.
+        (sig, discord::badge::count(mentions, any_unread, false))
     }
 
     /// The same for the sidebar: the open place, selection, order and markers.
@@ -640,6 +773,64 @@ mod tests {
     }
 
     #[test]
+    fn a_press_refused_as_out_of_date_marks_its_apps_commands_stale() {
+        use discord::commands::Target;
+        use std::time::Instant;
+        let mut state = open_server(None, json!({}));
+        let index = json!({
+            "version": "7",
+            "applications": [{"id": "200", "name": "Dicey", "description": "", "bot_id": "300"}],
+            "application_commands": [{"id": "400", "application_id": "200", "version": "5", "type": 1,
+                "name": "roll", "description": "Roll"}],
+        });
+        let guild = Target::Guild(Snowflake(1));
+        state.commands.loaded(guild, &index, Snowflake(5));
+        let press = |application| Pending { channel: Snowflake(9), message: Snowflake(70), application };
+        let refused = Failure { stale_command: true, ..Failure::default() };
+
+        // Another app's press, or one that failed for another reason, changes nothing.
+        state.interactions.insert(Snowflake(1), press(Snowflake(999)));
+        state.interactions.insert(Snowflake(2), press(Snowflake(200)));
+        assert!(state.end_press(Snowflake(1), Some(&refused)).is_some());
+        assert!(state.end_press(Snowflake(2), Some(&Failure::default())).is_some());
+        assert!(!state.commands.wants(guild, Instant::now()), "still current");
+
+        state.interactions.insert(Snowflake(3), press(Snowflake(200)));
+        assert!(state.end_press(Snowflake(3), Some(&refused)).is_some());
+        assert!(state.commands.wants(guild, Instant::now()), "fetched again");
+        assert!(state.end_press(Snowflake(3), None).is_none(), "a press ends once");
+    }
+
+    #[test]
+    fn people_are_called_what_they_chose_where_they_are() {
+        use discord::members::Known;
+        let mut state = open_server(None, json!({}));
+        state.private_channels = vec![
+            serde_json::from_value(json!({"id": "30", "type": 1, "recipients": [{"id": "6", "username": "six"}]}))
+                .unwrap(),
+        ];
+        let user = |id: u64| -> User {
+            serde_json::from_value(json!({"id": id.to_string(), "username": "u", "global_name": "Global"})).unwrap()
+        };
+        let (server, dm) = (Snowflake(9), Snowflake(30));
+        assert_eq!(state.name_in(server, &user(6)), "Global", "no nickname known");
+        let known = Known { nick: Some("Nick".into()), avatar: Some("av".into()), ..Known::default() };
+        state.members.add(Snowflake(1), vec![(Snowflake(6), known)], &[]);
+        assert_eq!(state.name_in(server, &user(6)), "Nick");
+        assert_eq!(state.avatar_in(server, Snowflake(6)), Some((Snowflake(1), "av")));
+        assert_eq!(state.name_in(server, &user(7)), "Global", "someone else's");
+        // A DM has no server nicknames, but our name for a friend counts.
+        assert_eq!(state.name_in(dm, &user(6)), "Global");
+        assert_eq!(state.avatar_in(dm, Snowflake(6)), None);
+        let friend = json!({"id": "6", "type": 1, "nickname": "Pal", "user": {"id": "6", "username": "u"}});
+        state
+            .relationships
+            .add(discord::relationships::Relationship::from_value(&friend, &Default::default()).unwrap());
+        assert_eq!(state.name_in(dm, &user(6)), "Pal");
+        assert_eq!(state.name_in(server, &user(6)), "Nick", "a server's choice isn't ours to rename");
+    }
+
+    #[test]
     fn which_channels_have_a_member_list() {
         let mut state = open_server(None, json!({}));
         let guild: Snowflake = Snowflake(1);
@@ -676,9 +867,19 @@ mod tests {
         state.private_channels = vec![
             serde_json::from_value(json!({"id": "30", "type": 1})).unwrap(),
             serde_json::from_value(json!({"id": "31", "type": 3})).unwrap(),
+            serde_json::from_value(json!({"id": "32", "type": 1, "recipients": [{"id": "5", "username": "u"}]}))
+                .unwrap(),
+            serde_json::from_value(
+                json!({"id": "33", "type": 1, "recipients": [{"id": "6", "username": "u", "system": true}]}),
+            )
+            .unwrap(),
         ];
         state.channel = Some(Snowflake(30));
-        assert_eq!(state.member_target(), None, "a DM shows a profile, not a list");
+        assert_eq!(state.member_target(), None, "a DM with no one has no profile");
+        state.channel = Some(Snowflake(32));
+        assert_eq!(state.member_target(), Some(Target::Dm(Snowflake(32))), "a DM shows a profile, not a list");
+        state.channel = Some(Snowflake(33));
+        assert_eq!(state.member_target(), None, "Discord's own account has none");
         state.channel = Some(Snowflake(31));
         assert_eq!(state.member_target(), Some(Target::Group(Snowflake(31))));
     }
@@ -718,6 +919,38 @@ mod tests {
         state.guilds[0].set_role(everyone("66560"));
         assert!(state.can_read_history(Snowflake(9)));
         assert!(!state.can_read_history(Snowflake(77)), "not a channel we know");
+    }
+
+    #[test]
+    fn the_message_box_is_blocked_where_the_notice_bar_would_replace_it() {
+        let mut state = open_server(None, json!({}));
+        let id = Snowflake(9);
+        let everyone =
+            |permissions: &str| serde_json::from_value(json!({"id": "1", "permissions": permissions})).unwrap();
+        state.guilds[0].set_role(everyone("1024"));
+        assert_eq!(state.notice(id), Some(Notice::Denied));
+        assert!(state.box_blocked(id));
+        state.guilds[0].set_role(everyone("3072"));
+        assert!(!state.box_blocked(id), "with Send Messages");
+        assert!(!state.box_blocked(Snowflake(77)), "a channel we don't know");
+
+        state.guilds[0].channels[0].kind = ChannelKind::Forum;
+        assert!(state.box_blocked(id), "a forum has its page of posts in its place");
+
+        let dm = |extra: serde_json::Value| -> Channel {
+            let mut dm = json!({"id": "50", "type": 1, "recipients": [{"id": "6", "username": "x"}]});
+            dm.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(dm).unwrap()
+        };
+        state.private_channels = vec![dm(json!({}))];
+        assert!(!state.box_blocked(Snowflake(50)), "an ordinary DM");
+        state.private_channels = vec![dm(json!({"is_message_request": true}))];
+        assert_eq!(state.notice(Snowflake(50)), Some(Notice::Request { spam: false }));
+        state.private_channels = vec![dm(json!({"is_spam": true}))];
+        assert_eq!(state.notice(Snowflake(50)), Some(Notice::Request { spam: true }));
+        state.private_channels =
+            vec![dm(json!({"recipients": [{"id": "643945264868098049", "username": "Discord", "system": true}]}))];
+        assert_eq!(state.notice(Snowflake(50)), Some(Notice::System));
     }
 
     #[test]
