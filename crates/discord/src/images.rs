@@ -552,26 +552,12 @@ mod tests {
         assert!(Header::parse(&late).is_none());
     }
 
-    /// `cargo test` runs where gdk-pixbuf may have no loaders to run (a
-    /// sandbox that forbids them); what needs them then proves nothing, so
-    /// it says so and stops.
-    fn loaders() -> bool {
-        let works = load(&png(2, &[1, 2, 3], &[])).is_some();
-        if !works {
-            eprintln!("gdk-pixbuf can't load a PNG here; skipping");
-        }
-        works
-    }
-
     fn srgb() -> Vec<u8> {
         profile(&[(b"desc", desc("sRGB IEC61966-2.1"))])
     }
 
     #[test]
     fn a_plain_png_becomes_the_same_pixels_in_webp() {
-        if !loaders() {
-            return;
-        }
         let source = png(2, &[10, 20, 30], &[]);
         let webp = convert_png(&source).expect("converts");
         assert_eq!(&webp[8..12], b"WEBP");
@@ -581,9 +567,6 @@ mod tests {
 
     #[test]
     fn a_webp_larger_than_the_png_isnt_sent() {
-        if !loaders() {
-            return;
-        }
         // WebP's own overhead outweighs 2×2 pixels the PNG holds in a few bytes.
         let tiny = sized_png(2, 2, &[10, 20, 30], &[]);
         assert_eq!(convert_png(&tiny).unwrap_err(), Skip::Larger);
@@ -591,9 +574,6 @@ mod tests {
 
     #[test]
     fn what_the_client_leaves_alone_stays_a_png() {
-        if !loaders() {
-            return;
-        }
         let skip = |bytes: &[u8]| convert_png(bytes).unwrap_err();
         assert_eq!(skip(b"RIFF....WEBP"), Skip::Corrupted);
         assert_eq!(skip(&png(2, &[1, 2, 3], &[chunk(b"acTL", &[0; 8])])), Skip::Animated);
@@ -612,9 +592,6 @@ mod tests {
 
     #[test]
     fn a_png_in_srgb_or_with_opaque_alpha_is_converted() {
-        if !loaders() {
-            return;
-        }
         assert!(convert_png(&png(2, &[10, 20, 30], &[iccp(0, &srgb())])).is_ok());
         // Alpha that is 255 everywhere is no transparency.
         assert!(convert_png(&png(6, &[10, 20, 30, 255], &[])).is_ok());
@@ -622,9 +599,6 @@ mod tests {
 
     #[test]
     fn jpeg_is_made_at_the_given_quality() {
-        if !loaders() {
-            return;
-        }
         let source = png(2, &[10, 20, 30], &[]);
         let jpeg = to_jpeg(&source, 80).expect("encodes");
         assert_eq!(&jpeg[..3], b"\xff\xd8\xff");
@@ -651,9 +625,7 @@ mod tests {
 
     #[test]
     fn a_heic_file_becomes_a_jpeg_with_its_originals_hash() {
-        if load(&heic()).is_none() {
-            return eprintln!("gdk-pixbuf can't load a HEIC here; skipping");
-        }
+        assert!(load(&heic()).is_some(), "gdk-pixbuf has no HEIC loader (glycin's heif)");
         let original = heic();
         let hash = md5(&original);
         let converted = run(prepare(memory("IMG_0001.HEIC", "", original)));
@@ -687,9 +659,6 @@ mod tests {
 
     #[test]
     fn a_small_png_becomes_a_webp_under_its_own_name() {
-        if !loaders() {
-            return;
-        }
         let source = png(2, &[10, 20, 30], &[]);
         let file = memory("shot.png", "image/png", source.clone());
         let webp = run(optimize(&file, 512 * 1024)).expect("converted");
