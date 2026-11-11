@@ -15,7 +15,7 @@ use gtk::{gdk, gio, glib};
 
 use super::App;
 use super::chat::{self, MessageTarget};
-use super::{composer, edits, emoji, picker, stickers, uploads};
+use super::{composer, edits, emoji, picker, stickers, uploads, voice};
 
 /// One entry of a menu, for what it was opened on: a `T`. `C` is what
 /// entries read and act through: the app, or a stand-in in tests.
@@ -110,10 +110,10 @@ pub(super) fn message(regulated: bool) -> Table<MessageTarget> {
 
 /// The attach button's menu, opened from the button: the official client's
 /// (`channel-attach`, 316576) with what Neucord has of it. Upload a File and
-/// Upload Text as File show where files may be attached. Record Voice
-/// Message needs the desktop app's recorder, and the rest are other
-/// features'.
-pub(super) const ATTACH: Table<()> = &[&[uploads::UPLOAD_FILE, uploads::UPLOAD_TEXT]];
+/// Upload Text as File show where files may be attached, Record Voice Message
+/// where the experiment and Send Voice Messages allow it (`canRecordVoiceMessage`),
+/// and the rest are other features'.
+pub(super) const ATTACH: Table<()> = &[&[uploads::UPLOAD_FILE, uploads::UPLOAD_TEXT, voice::RECORD_VOICE]];
 
 /// Added below the message box's own menu (GTK's cut, copy, paste and
 /// emoji). The official client's (194400) also has spellcheck and more.

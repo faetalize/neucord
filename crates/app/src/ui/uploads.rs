@@ -190,7 +190,7 @@ impl Drafts {
         }
     }
 
-    fn of(&self, channel: Snowflake) -> Vec<Rc<Upload>> {
+    pub(super) fn of(&self, channel: Snowflake) -> Vec<Rc<Upload>> {
         self.files.borrow().get(&channel).cloned().unwrap_or_default()
     }
 
@@ -216,8 +216,10 @@ impl App {
     /// shows, no edit has it, and the client would offer attaching there.
     pub(super) fn attach_channel(&self) -> Option<Snowflake> {
         let channel = self.state.borrow().channel?;
-        let allowed =
-            self.composer_box.is_visible() && self.editing().is_none() && self.state.borrow().can_attach(channel);
+        let allowed = self.composer_box.is_visible()
+            && self.editing().is_none()
+            && !self.has_voice_draft(channel)
+            && self.state.borrow().can_attach(channel);
         allowed.then_some(channel)
     }
 
@@ -226,7 +228,8 @@ impl App {
     pub(super) fn refresh_attach(self: &Rc<Self>) {
         let drafts = &self.drafts;
         let channel = self.attach_channel();
-        drafts.attach.set_visible(channel.is_some());
+        // The menu holds more than files: it shows wherever anything in it does.
+        drafts.attach.set_visible(channel.is_some() || self.voice_channel().is_some());
         while let Some(child) = drafts.tray.first_child() {
             drafts.tray.remove(&child);
         }
@@ -242,6 +245,7 @@ impl App {
         }
         drafts.tray.set_visible(!files.is_empty());
         self.refresh_stickers();
+        self.refresh_voice();
     }
 
     pub(super) fn build_attach(self: &Rc<Self>, area: &gtk::Box) {
@@ -686,6 +690,7 @@ impl App {
                 description: descriptions[i].as_deref(),
                 spoiler: u.spoiler.get(),
                 content_type: &types[i],
+                voice: None,
             })
             .collect();
         rest.send_message(channel, text, reply, &sent, sticker).await.map_err(Stopped::Send)
@@ -721,6 +726,7 @@ impl App {
         }
         self.drafts.files.borrow_mut().clear();
         self.drafts.sending.borrow_mut().clear();
+        self.drop_voice();
     }
 
     /// What a message sent now from `channel` takes along: nothing where the

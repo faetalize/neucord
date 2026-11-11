@@ -57,7 +57,7 @@ impl LengthIndicator {
         Self { root, icon, number }
     }
 
-    fn show(&self, count: Option<LengthCount>) {
+    pub(super) fn show(&self, count: Option<LengthCount>) {
         self.root.set_visible(count.is_some());
         let Some(count) = count else { return };
         self.icon.set_visible(count.powered);
@@ -156,6 +156,7 @@ impl App {
                 this.open_emoji_picker(channel, button, |app, item| app.insert_emoji(item));
             }
         });
+        self.build_voice();
         area.append(&self.composer_box);
         area.append(&self.typing_line);
 

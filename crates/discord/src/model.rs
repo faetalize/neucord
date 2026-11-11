@@ -840,7 +840,7 @@ impl Message {
     const CROSSPOSTED: u64 = 1 << 0;
     const SUPPRESS_EMBEDS: u64 = 1 << 2;
     const EPHEMERAL: u64 = 1 << 6;
-    const IS_VOICE_MESSAGE: u64 = 1 << 13;
+    pub const IS_VOICE_MESSAGE: u64 = 1 << 13;
     const IS_COMPONENTS_V2: u64 = 1 << 15;
 
     /// Built from components alone: its attachments are what they show.

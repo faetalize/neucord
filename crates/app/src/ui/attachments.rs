@@ -18,9 +18,9 @@ const MAX_W: f64 = 550.0;
 const MAX_H: f64 = 350.0;
 /// A voice message's waveform: bars this wide, this far apart, in a strip
 /// this tall (the official client's sizes).
-const BAR: f64 = 2.0;
-const BAR_PITCH: f64 = 6.0;
-const WAVE_HEIGHT: i32 = 32;
+pub(super) const BAR: f64 = 2.0;
+pub(super) const BAR_PITCH: f64 = 6.0;
+pub(super) const WAVE_HEIGHT: i32 = 32;
 
 /// How an attachment shows, when not as a link.
 #[derive(Clone, Copy)]
@@ -242,7 +242,7 @@ fn play_button(tooltip: &str) -> gtk::Button {
 }
 
 /// `m:ss`.
-fn clock(seconds: f64) -> String {
+pub(super) fn clock(seconds: f64) -> String {
     let seconds = seconds.max(0.0).round() as u64;
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
