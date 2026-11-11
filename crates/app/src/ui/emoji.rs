@@ -105,7 +105,18 @@ impl App {
         parent: &impl IsA<gtk::Widget>,
         picked: impl Fn(&Rc<App>, &Item) + 'static,
     ) {
-        let library = Rc::new(self.emoji_library(channel));
+        let library = self.emoji_library(channel);
+        self.open_library_picker(library, parent, picked);
+    }
+
+    /// The picker over `library`, wherever its emoji are for.
+    pub(super) fn open_library_picker(
+        self: &Rc<Self>,
+        library: Library,
+        parent: &impl IsA<gtk::Widget>,
+        picked: impl Fn(&Rc<App>, &Item) + 'static,
+    ) {
+        let library = Rc::new(library);
         let spec = Spec {
             placeholder: "Search emoji",
             columns: COLUMNS,
@@ -118,6 +129,14 @@ impl App {
             best: Rc::new(move |query| library.search(query, 1).unlocked.first().cloned()),
         };
         picker::open(self, parent, spec, picked);
+    }
+
+    /// The emoji a status may carry: every server's, as in a DM, where the
+    /// client applies the same Nitro rules (`getEmojiUnavailableReason`,
+    /// 690521, with the status intention and no channel).
+    pub(super) fn status_emoji_library(&self) -> Library {
+        let state = self.state.borrow();
+        Library::new(state.guilds_in_picker_order(None), &state.limits(), &Place { guild: None, external: true })
     }
 }
 

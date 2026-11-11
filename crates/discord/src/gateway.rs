@@ -29,7 +29,7 @@ use crate::notifications::{GuildSettings, NotificationSettings};
 use crate::reactions::{self, Kind};
 use crate::read_state::ReadStates;
 use crate::relationships::{Presence, Relationship, Relationships};
-use crate::settings::{Settings, SettingsPatch};
+use crate::settings::{Settings, SettingsPatch, UserStatus};
 use crate::settings_proto;
 use crate::stickers::Listed;
 use crate::verification::Account;
@@ -482,6 +482,15 @@ impl Gateway {
         }
     }
 
+    /// Tell Discord what we show as, as the client does (`presenceUpdate`,
+    /// 868): op 3, see [`crate::presence`]. Like the client, nothing is sent
+    /// before the session is established.
+    pub fn update_presence(&self, status: UserStatus) {
+        if self.state.established.get() {
+            send_text(&self.conn, &request_text(3, &PresenceUpdate::new(status)));
+        }
+    }
+
     /// Ask for how many messages of a forum's posts we haven't read, as the
     /// client does when it lists them (`requestForumUnreads`, 868): op 28,
     /// answered with [`Event::ForumUnreads`]. `request` is
@@ -516,6 +525,22 @@ struct MemberRequest<'a> {
 impl<'a> MemberRequest<'a> {
     fn new(guild: Snowflake, users: &'a [Snowflake]) -> Self {
         MemberRequest { guild_id: [guild], user_ids: users, presences: false }
+    }
+}
+
+/// Op 3's payload, in the client's field order. Neucord reports no
+/// activities, never goes idle on its own and is never away.
+#[derive(serde::Serialize)]
+struct PresenceUpdate {
+    status: &'static str,
+    since: u64,
+    activities: [(); 0],
+    afk: bool,
+}
+
+impl PresenceUpdate {
+    fn new(status: UserStatus) -> Self {
+        PresenceUpdate { status: status.wire(), since: 0, activities: [], afk: false }
     }
 }
 
@@ -1582,6 +1607,14 @@ mod tests {
     fn member_request_as_the_client_sends_it() {
         let d = MemberRequest::new(Snowflake(1), &[Snowflake(6), Snowflake(7)]);
         assert_eq!(request_text(8, &d), r#"{"op":8,"d":{"guild_id":["1"],"user_ids":["6","7"],"presences":false}}"#);
+    }
+
+    #[test]
+    fn presence_update_as_the_client_sends_it() {
+        assert_eq!(
+            request_text(3, &PresenceUpdate::new(UserStatus::DoNotDisturb)),
+            r#"{"op":3,"d":{"status":"dnd","since":0,"activities":[],"afk":false}}"#
+        );
     }
 
     #[test]

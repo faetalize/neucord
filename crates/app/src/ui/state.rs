@@ -142,6 +142,12 @@ pub(super) struct State {
     pub(super) settings: Settings,
     /// Saving changes to `settings`.
     pub(super) sync: discord::settings_sync::SettingsSync,
+    /// What the gateway was last told we show as.
+    pub(super) presence: discord::presence::PresenceReporter,
+    /// Which presence update is waiting for its turn; a newer one replaces it.
+    pub(super) presence_timer: u64,
+    /// Which wait for a status to end is current; a newer one replaces it.
+    pub(super) expiry_timer: u64,
     /// The message menu's last groups come in the order the client uses
     /// where the media takedown regulation is TIDA.
     pub(super) media_takedown_regulated: bool,

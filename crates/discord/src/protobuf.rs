@@ -64,11 +64,13 @@ fn push_field(out: &mut Vec<u8>, number: u32, wire: Wire) {
     }
 }
 
-/// A value to write into a message: a varint (booleans, enums, integers) or
-/// a length-delimited payload (strings, nested messages, wrappers).
+/// A value to write into a message: a varint (booleans, enums, integers), a
+/// `fixed64` (ids and timestamps) or a length-delimited payload (strings,
+/// nested messages, wrappers).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Value {
     Varint(u64),
+    Fixed64(u64),
     Bytes(Vec<u8>),
 }
 
@@ -89,6 +91,30 @@ pub fn uint_value(value: u32) -> Value {
     })
 }
 
+/// A `UInt64Value`, empty for 0.
+pub fn uint64_value(value: u64) -> Value {
+    Value::Bytes(match value {
+        0 => Vec::new(),
+        v => {
+            let mut inner = vec![0x08];
+            push_varint(&mut inner, v);
+            inner
+        }
+    })
+}
+
+/// A `StringValue`, empty for the empty string.
+pub fn string_value(value: &str) -> Value {
+    Value::Bytes(match value {
+        "" => Vec::new(),
+        v => {
+            let mut inner = Vec::new();
+            push_field(&mut inner, 1, Wire::Bytes(v.as_bytes()));
+            inner
+        }
+    })
+}
+
 fn take<'a>(buf: &mut &'a [u8], len: usize) -> Option<&'a [u8]> {
     let (head, rest) = buf.split_at_checked(len)?;
     *buf = rest;
@@ -98,6 +124,7 @@ fn take<'a>(buf: &mut &'a [u8], len: usize) -> Option<&'a [u8]> {
 fn push_value(out: &mut Vec<u8>, number: u32, value: &Value) {
     match value {
         Value::Varint(v) => push_field(out, number, Wire::Varint(*v)),
+        Value::Fixed64(v) => push_field(out, number, Wire::Fixed64(*v)),
         Value::Bytes(bytes) => push_field(out, number, Wire::Bytes(bytes)),
     }
 }
@@ -182,6 +209,14 @@ impl<'a> Message<'a> {
     pub fn varint(&self, number: u32) -> Option<u64> {
         match self.last(number)? {
             Wire::Varint(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// A `fixed64` field (ids, timestamps).
+    pub fn fixed64(&self, number: u32) -> Option<u64> {
+        match self.last(number)? {
+            Wire::Fixed64(v) => Some(v),
             _ => None,
         }
     }
@@ -351,6 +386,23 @@ pub(crate) mod tests {
         assert_eq!(message.int_value(2), Some(300));
         assert_eq!(message.bool_value(3), Some(false), "present, though empty");
         assert_eq!(message.nested().len(), 3);
+    }
+
+    #[test]
+    fn strings_and_big_numbers_are_wrapped_like_the_client_does() {
+        assert_eq!(string_value(""), Value::Bytes(vec![]));
+        assert_eq!(uint64_value(0), Value::Bytes(vec![]));
+        let buf = [
+            Message::parse(&[]).unwrap().with(1, Some(string_value("dnd"))),
+            Message::parse(&[]).unwrap().with(2, Some(uint64_value(1_700_000_000_000))),
+            Message::parse(&[]).unwrap().with(3, Some(Value::Fixed64(42))),
+        ]
+        .concat();
+        let message = Message::parse(&buf).unwrap();
+        assert_eq!(message.string_value(1), Some("dnd"));
+        assert_eq!(message.int_value(2), Some(1_700_000_000_000));
+        assert_eq!(message.fixed64(3), Some(42));
+        assert_eq!(message.fixed64(1), None, "wrong wire type");
     }
 
     #[test]

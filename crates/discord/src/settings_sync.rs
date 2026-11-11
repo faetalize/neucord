@@ -314,6 +314,18 @@ mod tests {
     }
 
     #[test]
+    fn a_status_saves_its_message_and_shows_at_once() {
+        use crate::settings::UserStatus;
+        let mut sync = loaded();
+        let setting = Setting::Status { status: UserStatus::DoNotDisturb, expires_at_ms: 0, now_ms: 3 };
+        let edited = sync.edit(setting).unwrap();
+        assert_eq!(edited.patch.status.as_ref().map(|s| s.status), Some(UserStatus::DoNotDisturb));
+        let save = sync.save(edited.schedule.unwrap().generation).unwrap();
+        let status = [bytes_field(1, &bytes_field(1, b"dnd")), bytes_field(5, &varint_field(1, 3))].concat();
+        assert_eq!(sent(&save), bytes_field(11, &status));
+    }
+
+    #[test]
     fn changes_before_the_timer_go_together() {
         let mut sync = loaded();
         let first = sync.edit(Setting::GifAutoPlay(false)).unwrap().schedule.unwrap();
