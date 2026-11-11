@@ -35,7 +35,7 @@
     "ApplicationCommandType": ["CHAT", "USER", "MESSAGE", "PRIMARY_ENTRY_POINT"],
     "ApplicationIntegrationType": ["GUILD_INSTALL", "USER_INSTALL"],
     "ButtonStyle": ["PRIMARY", "SECONDARY", "SUCCESS", "DESTRUCTIVE", "LINK", "PREMIUM"],
-    "ChannelFlags": ["IS_SCHEDULED_FOR_DELETION", "PINNED", "REQUIRE_TAG", "IS_MODERATOR_REPORT_CHANNEL"],
+    "ChannelFlags": ["IS_SCHEDULED_FOR_DELETION", "PINNED", "REQUIRE_TAG", "HIDE_MEDIA_DOWNLOAD_OPTIONS", "IS_MODERATOR_REPORT_CHANNEL"],
     "ChannelType": [
       "DM",
       "GROUP_DM",
@@ -149,7 +149,9 @@
     "allowNoMessages",
     "buildHeadersForMd5",
     "buildOriginalMd5Headers",
+    "canCopyImage",
     "canDeleteOwnMessage",
+    "canSaveImage",
     "canRetry",
     "canStreamQuality",
     "canTrackUnreads",
