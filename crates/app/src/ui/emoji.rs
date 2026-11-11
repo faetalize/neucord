@@ -342,7 +342,7 @@ pub(super) fn glyph(item: &Item, images: &Images) -> gtk::Widget {
             let size = ((SIZE * images.scale()) as u32).next_power_of_two().clamp(16, 4096) as u16;
             // A still, even for an animated emoji: a screenful of them
             // moving would be a lot of drawing.
-            images.set(&picture, &discord::cdn::emoji_url(named.emoji.id.0, false, size), false);
+            images.set(&picture, &discord::cdn::emoji_url(named.emoji.id.0, false, size));
             picture.upcast()
         }
     }

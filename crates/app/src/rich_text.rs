@@ -40,6 +40,8 @@ mod imp {
     pub struct RichText {
         pub label: OnceCell<gtk::Label>,
         pub images: RefCell<Vec<Image>>,
+        /// What redraws the text as the animation of each image advances.
+        pub redraws: RefCell<std::collections::HashMap<usize, (gdk::Paintable, glib::SignalHandlerId)>>,
         /// Byte ranges of the spoilers, and whether each is revealed.
         pub spoilers: RefCell<Vec<(Range<u32>, bool)>>,
         /// Byte ranges of the links, and where each goes.
@@ -121,6 +123,10 @@ mod imp {
         }
 
         fn dispose(&self) {
+            // Animations are shared by every text that shows them.
+            for (paintable, handler) in self.redraws.take().into_values() {
+                paintable.disconnect(handler);
+            }
             if let Some(label) = self.label.get() {
                 label.unparent();
             }
@@ -216,15 +222,20 @@ impl RichText {
     /// Show the `n`th image, once it has loaded. Animated images redraw the
     /// text as they play.
     pub fn set_image(&self, n: usize, paintable: gdk::Paintable) {
+        let imp = self.imp();
+        if let Some((old, handler)) = imp.redraws.borrow_mut().remove(&n) {
+            old.disconnect(handler);
+        }
         if !paintable.flags().contains(gdk::PaintableFlags::STATIC_CONTENTS) {
             let weak = self.downgrade();
-            paintable.connect_invalidate_contents(move |_| {
+            let handler = paintable.connect_invalidate_contents(move |_| {
                 if let Some(this) = weak.upgrade() {
                     this.queue_draw();
                 }
             });
+            imp.redraws.borrow_mut().insert(n, (paintable.clone(), handler));
         }
-        if let Some(image) = self.imp().images.borrow_mut().get_mut(n) {
+        if let Some(image) = imp.images.borrow_mut().get_mut(n) {
             image.paintable = Some(paintable);
         }
         self.queue_draw();

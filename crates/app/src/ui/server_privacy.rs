@@ -14,11 +14,9 @@ use discord::settings::{Row, Settings, direct_messages_text, message_requests_no
 
 use super::App;
 use super::menus::{Entry, Item, Kind};
+use super::notify_menus::GuildTarget;
 use super::privacy::show_row;
 use super::settings::Show;
-
-/// The server whose menu opened.
-pub(super) struct GuildTarget(pub(super) Snowflake);
 
 /// Privacy Settings is in every server's menu, between Server Settings and
 /// Edit Per-server Profile.

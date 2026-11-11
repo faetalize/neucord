@@ -3,6 +3,7 @@
 
 mod account;
 mod attachments;
+mod background;
 mod captcha;
 mod chat;
 mod components;
@@ -14,6 +15,7 @@ mod embeds;
 mod emoji;
 mod favorites;
 mod forum;
+mod forum_post;
 mod friends;
 mod gifs;
 mod login;
@@ -22,6 +24,7 @@ mod members;
 mod menus;
 mod message_row;
 mod notify;
+mod notify_menus;
 mod own_status;
 mod panes;
 mod picker;
@@ -34,17 +37,22 @@ mod reactions;
 mod reactors;
 mod requests;
 mod scheduling;
+mod search;
 mod server_privacy;
 mod settings;
 mod sidebar;
+mod slash;
 mod state;
 mod stickers;
+mod switcher;
 mod thread_line;
 mod threads;
 mod typing;
 mod unread;
 mod uploads;
 mod usage;
+mod video;
+mod viewer;
 mod voice;
 mod widgets;
 
@@ -53,11 +61,14 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use discord::{Snowflake, session};
-use gtk::{gio, glib, pango};
+use gtk::{gdk, gio, glib, pango};
 
+use crate::config::{self, Store};
 use crate::images::Images;
 use crate::render;
+use crate::theme::Theme;
 use crate::timelines::Timelines;
+use crate::tray::Tray;
 
 /// The server rail's width.
 const RAIL: f64 = 72.0;
@@ -130,10 +141,14 @@ pub struct App {
     timeout_end: RefCell<Option<glib::SourceId>>,
     /// Fires when a thread the sidebar lists would drop out of it.
     thread_expiry: RefCell<Option<glib::SourceId>>,
+    /// Saves the folds no request carried, fifteen seconds after the last.
+    fold_save: RefCell<Option<glib::SourceId>>,
     /// Threads we started and are waiting for the gateway to bring.
     thread_waiters: RefCell<Vec<(Snowflake, async_channel::Sender<()>)>>,
     /// The post list a forum or media channel shows.
     forum: forum::Page,
+    /// The form that starts a post, while it is open.
+    post_form: RefCell<Option<Rc<forum_post::PostForm>>>,
     composer_error: gtk::Label,
     images: Images,
     /// Autocomplete for mentions and emoji, anchored to the composer.
@@ -154,8 +169,12 @@ pub struct App {
     scheduling: scheduling::Scheduling,
     /// Says how a request went, for the ones with nothing else to show it.
     toasts: adw::ToastOverlay,
+    /// Shows the pictures and videos of messages over the window.
+    viewer: viewer::Viewer,
     /// The voice message being recorded, or waiting to be sent.
     voice: voice::Voice,
+    /// The command being filled in, and the suggestions for it.
+    slash: slash::Slash,
     /// "Editing message" above the composer.
     edit_bar: gtk::Box,
     /// The message the composer is editing, if any.
@@ -180,8 +199,16 @@ pub struct App {
     reactors_view: RefCell<Option<Rc<reactors::View>>>,
     /// The thread browser, while it's open.
     threads_view: RefCell<Option<Rc<threads::View>>>,
+    /// The profiles on screen: the popout and the panel beside a DM.
+    profile_views: RefCell<profile::Views>,
     /// Opens the thread browser, from the chat's header.
     threads_button: gtk::Button,
+    /// Opens the message search, from the chat's header.
+    search_button: gtk::Button,
+    /// The message search box, while it's open.
+    search_view: RefCell<Option<Rc<search::View>>>,
+    /// The quick switcher, while it's open.
+    switcher: RefCell<Option<Rc<switcher::View>>>,
     /// The content of messages whose rows have moved on to others, for when
     /// they come back (see [`chat::KeptContent`]).
     kept_content: RefCell<crate::kept::Kept<Snowflake, chat::KeptContent>>,
@@ -191,10 +218,20 @@ pub struct App {
     /// When scrolling loads another page.
     scroll_loader: RefCell<discord::history::ScrollLoader>,
     state: RefCell<state::State>,
+    /// Neucord's own options, which the settings window sets.
+    config: Store,
+    /// The stylesheets, one of whose options the settings window sets.
+    theme: Theme,
+    /// What Neucord remembers between runs.
+    remembered: Store,
     /// The settings window, while it's open.
     settings_window: RefCell<Option<settings::Window>>,
     /// A server's Privacy Settings, while open.
     server_privacy: RefCell<Option<server_privacy::Dialog>>,
+    /// The icon in the panel, which is also what lets the window hide.
+    tray: Tray,
+    /// The Background portal turned down running with no window.
+    background_refused: Cell<bool>,
     /// The member list pane, in the right pane of the chat.
     members: members::Pane,
     /// What the rail and sidebar last drew, so badge refreshes can skip
@@ -205,10 +242,20 @@ pub struct App {
     rail_shape: RefCell<u64>,
     /// Per-folder colours, regenerated with the rail.
     folder_css: gtk::CssProvider,
+    /// The desktop's notification server and launcher, once connected; `None`
+    /// without a session bus.
+    desktop: std::cell::OnceCell<Option<crate::desktop::Desktop>>,
+    /// The count in front of the window's title, and the title it goes before.
+    unread_count: Cell<i64>,
+    content_title: RefCell<String>,
 }
 
 impl App {
     pub fn new(app: &adw::Application) -> Rc<Self> {
+        // GTK 4 doesn't speak xdg-decoration (it never asks a compositor to
+        // draw the frame), so the window is always drawn client-side, and the
+        // title bar is the header bar every page carries, with the window
+        // controls in the order the desktop's button layout gives.
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("Neucord")
@@ -234,6 +281,7 @@ impl App {
 
         let blank = gio::ListStore::new::<glib::BoxedAnyObject>();
         let selection = gtk::NoSelection::new(Some(blank.clone()));
+        let config = Store::open(config::config_path());
         let this = Rc::new(App {
             window,
             medium,
@@ -311,8 +359,10 @@ impl App {
             notice_tick: RefCell::default(),
             timeout_end: RefCell::default(),
             thread_expiry: RefCell::default(),
+            fold_save: RefCell::default(),
             thread_waiters: RefCell::default(),
             forum: forum::Page::new(),
+            post_form: RefCell::default(),
             composer_error: gtk::Label::builder()
                 .xalign(0.0)
                 .wrap(true)
@@ -339,7 +389,9 @@ impl App {
             drafts: uploads::Drafts::new(),
             scheduling: scheduling::Scheduling::new(),
             toasts: adw::ToastOverlay::new(),
+            viewer: viewer::Viewer::new(),
             voice: voice::Voice::new(),
+            slash: slash::Slash::new(),
             // Styled as the reply bar, which takes its place while editing.
             edit_bar: gtk::Box::builder().spacing(8).visible(false).css_classes(["reply-bar"]).build(),
             editing: RefCell::default(),
@@ -355,28 +407,45 @@ impl App {
             row_epoch: Cell::default(),
             reactors_view: RefCell::default(),
             threads_view: RefCell::default(),
+            profile_views: RefCell::default(),
             threads_button: gtk::Button::builder()
                 .icon_name("chat-message-new-symbolic")
                 .tooltip_text("Threads")
                 .visible(false)
                 .build(),
+            search_button: gtk::Button::builder()
+                .icon_name("system-search-symbolic")
+                .tooltip_text("Search")
+                .visible(false)
+                .build(),
+            search_view: RefCell::default(),
+            switcher: RefCell::default(),
             kept_content: RefCell::new(crate::kept::Kept::new(chat::KEPT_CONTENT)),
             rows: RefCell::default(),
             scroll_loader: RefCell::default(),
             state: RefCell::default(),
+            theme: Theme::install(&config),
+            config,
+            remembered: Store::open(config::state_path()),
             settings_window: RefCell::default(),
             server_privacy: RefCell::default(),
+            tray: Tray::new(),
+            background_refused: Cell::new(false),
             members: members::Pane::new(),
             drawn: RefCell::default(),
             rail_items: RefCell::default(),
             rail_shape: RefCell::new(0),
             folder_css: gtk::CssProvider::new(),
+            desktop: std::cell::OnceCell::new(),
+            unread_count: Cell::new(0),
+            content_title: RefCell::new("Neucord".to_owned()),
         });
         gtk::style_context_add_provider_for_display(
             &WidgetExt::display(&this.window),
             &this.folder_css,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+        *this.state.borrow_mut() = this.fresh_state();
         this.build();
 
         // Images from the media proxy are requested at the pixels shown.
@@ -390,7 +459,11 @@ impl App {
         // the window is open. Released on close, which breaks the cycle.
         let keep_alive = RefCell::new(Some(this.clone()));
         let popover = this.mention_popover.clone();
-        this.window.connect_close_request(move |_| {
+        this.window.connect_close_request(move |window| {
+            if keep_alive.borrow().as_ref().is_some_and(|app| app.keeps_running()) {
+                window.set_visible(false);
+                return glib::Propagation::Stop;
+            }
             // A manually-parented popover must be unparented before teardown.
             popover.unparent();
             keep_alive.take();
@@ -399,8 +472,13 @@ impl App {
         this
     }
 
-    pub fn start(self: &Rc<Self>) {
-        self.window.present();
+    /// `hidden`: started with the session, so the window waits behind the
+    /// tray icon (see [`App::start_background`]).
+    pub fn start(self: &Rc<Self>, hidden: bool) {
+        self.start_background(hidden);
+        if !hidden {
+            self.window.present();
+        }
         self.show_loading("Checking keyring…");
         let this = self.clone();
         glib::spawn_future_local(async move {
@@ -412,12 +490,55 @@ impl App {
         });
     }
 
+    /// Tell the animations when the window loses focus, is hidden or is
+    /// covered, and when the system asks for less motion. Focus is the
+    /// compositor's say (the toplevel's `FOCUSED`), which a tooltip or popup
+    /// taking the keyboard doesn't change as `is-active` can.
+    fn track_motion(&self) {
+        let motion = self.images.motion().clone();
+        let sync = {
+            let (motion, window) = (motion.clone(), self.window.downgrade());
+            move || {
+                let Some(window) = window.upgrade() else { return };
+                let state = window.surface().and_downcast::<gdk::Toplevel>().map(|t| t.state());
+                let focused = state.map_or_else(|| window.is_active(), |s| s.contains(gdk::ToplevelState::FOCUSED));
+                let covered =
+                    state.is_some_and(|s| s.intersects(gdk::ToplevelState::MINIMIZED | gdk::ToplevelState::SUSPENDED));
+                motion.set_focused(focused && window.is_visible() && !covered);
+            }
+        };
+        self.window.connect_visible_notify({
+            let sync = sync.clone();
+            move |_| sync()
+        });
+        self.window.connect_realize({
+            let sync = sync.clone();
+            move |window| {
+                if let Some(toplevel) = window.surface().and_downcast::<gdk::Toplevel>() {
+                    let sync = sync.clone();
+                    toplevel.connect_state_notify(move |_| sync());
+                }
+                sync();
+            }
+        });
+        sync();
+
+        let settings = gtk::Settings::for_display(&WidgetExt::display(&self.window));
+        motion.set_reduced(!settings.is_gtk_enable_animations());
+        settings.connect_gtk_enable_animations_notify(move |settings| {
+            motion.set_reduced(!settings.is_gtk_enable_animations());
+        });
+    }
+
     fn build(self: &Rc<Self>) {
         self.stack.add_named(&self.build_loading(), Some("loading"));
         self.stack.add_named(&self.build_login(), Some("login"));
         self.stack.add_named(&self.build_main(), Some("main"));
         self.stack.add_named(&self.build_blocked(), Some("blocked"));
-        self.toasts.set_child(Some(&self.stack));
+        // The viewer covers everything but the toasts, which say how it went.
+        let layers = gtk::Overlay::builder().child(&self.stack).build();
+        layers.add_overlay(self.viewer.widget());
+        self.toasts.set_child(Some(&layers));
         self.window.set_content(Some(&self.toasts));
 
         let logout = gio::ActionEntry::builder("logout")
@@ -450,6 +571,26 @@ impl App {
                 }
             })
             .build();
+        let find = gio::ActionEntry::builder("search")
+            .activate({
+                let this = Rc::downgrade(self);
+                move |_: &adw::ApplicationWindow, _, _| {
+                    if let Some(this) = this.upgrade() {
+                        this.toggle_search();
+                    }
+                }
+            })
+            .build();
+        let switch = gio::ActionEntry::builder("quick-switcher")
+            .activate({
+                let this = Rc::downgrade(self);
+                move |_: &adw::ApplicationWindow, _, _| {
+                    if let Some(this) = this.upgrade() {
+                        this.toggle_switcher();
+                    }
+                }
+            })
+            .build();
         let settings = gio::ActionEntry::builder("settings")
             .activate({
                 let this = Rc::downgrade(self);
@@ -460,40 +601,16 @@ impl App {
                 }
             })
             .build();
-        self.window.add_action_entries([logout, standing, scheduled, settings]);
+        self.window.add_action_entries([logout, standing, scheduled, find, switch, settings]);
         self.window.add_action_entries(self.status_actions());
         if let Some(app) = self.window.application() {
             app.set_accels_for_action("win.logout", &["<Control><Shift>l"]);
-            // Notification clicks arrive as an app action, with the channel id.
-            let open = gio::ActionEntry::builder("open-channel")
-                .parameter_type(Some(glib::VariantTy::STRING))
-                .activate({
-                    let this = Rc::downgrade(self);
-                    move |_: &gtk::Application, _, parameter| {
-                        let id = parameter.and_then(|p| p.str()).and_then(|s| s.parse().ok());
-                        if let (Some(this), Some(id)) = (this.upgrade(), id) {
-                            this.open_channel(Snowflake(id));
-                        }
-                    }
-                })
-                .build();
-            // Friend request notifications open the friends page.
-            let friends = gio::ActionEntry::builder("open-friends")
-                .activate({
-                    let this = Rc::downgrade(self);
-                    move |_: &gtk::Application, _, _| {
-                        if let Some(this) = this.upgrade() {
-                            this.window.present();
-                            this.state.borrow_mut().friends_tab =
-                                friends::Tab::List(discord::relationships::List::Pending);
-                            this.show_friends();
-                            this.show_content();
-                        }
-                    }
-                })
-                .build();
-            app.add_action_entries([open, friends]);
+            app.set_accels_for_action("win.search", &["<Control>f"]);
+            // The client binds both (`mod+k`, `mod+t`).
+            app.set_accels_for_action("win.quick-switcher", &["<Control>k", "<Control>t"]);
         }
+
+        self.track_motion();
 
         // Coming back to the open channel reads it.
         let read_open = {
@@ -682,7 +799,14 @@ impl App {
 
     /// Title the window after what the content shows.
     pub(super) fn set_content_title(&self, title: &str) {
-        self.window.set_title(Some(title));
+        *self.content_title.borrow_mut() = title.to_owned();
+        self.apply_title();
+    }
+
+    /// The window's title: the content's, behind the unread count.
+    fn apply_title(&self) {
+        let prefix = discord::badge::title_prefix(self.unread_count.get());
+        self.window.set_title(Some(&format!("{prefix}{}", self.content_title.borrow())));
     }
 }
 

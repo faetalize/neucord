@@ -1,6 +1,10 @@
 //! Embed widgets: cards, bare images, galleries, GIF links and videos. What
 //! to show is decided in [`discord::embed`]; this only builds it.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
+use discord::animation::Subject;
 use discord::embed::{Display, Embed, Large, Media, field_rows};
 use discord::settings::MediaSettings;
 use gtk::prelude::*;
@@ -8,7 +12,9 @@ use gtk::{glib, pango};
 
 use super::favorites::Stars;
 use super::media_frame::MediaFrame;
-use crate::images::Images;
+use super::video::{Options, Player};
+use super::viewer::MediaCx;
+use crate::images::{Images, Row, Update};
 use crate::render::{self, Context, Names};
 
 /// Largest box embed media is scaled into, and its thumbnails (the official
@@ -21,42 +27,49 @@ const FIELD_COLUMNS: i32 = 12;
 /// The bar of embeds that set no colour.
 const DEFAULT_COLOUR: u32 = 0x1E1F22;
 
-/// One embed. `images` is `None` where nothing may load. With the viewer's
-/// `inline_embed_media` off, author and footer icons still show, as in the
-/// official client.
+/// The embed at place `n` among the message's. `images` is `None` where
+/// nothing may load. With the viewer's `inline_embed_media` off, author and
+/// footer icons still show, as in the official client.
 pub(super) fn embed_widget(
     embed: &Embed,
+    n: usize,
     names: &Names,
     images: Option<&Images>,
     settings: &MediaSettings,
     stars: &Stars,
+    view: &MediaCx,
 ) -> gtk::Widget {
     let show_media = settings.inline_embed_media && images.is_some();
-    let autoplay = settings.gif_auto_play;
     match (embed.display(show_media), images) {
-        (Display::Bare(media), Some(images)) => large(&media, embed, images, autoplay, stars),
-        (Display::Card { media, thumbnail }, images) => card(embed, names, images, autoplay, media, thumbnail, stars),
+        (Display::Bare(media), Some(images)) => large(&media, embed, n, images, stars, view),
+        (Display::Card { media, thumbnail }, images) => card(embed, n, names, images, media, thumbnail, stars, view),
         // `display` only offers media when told it may show it.
-        (Display::Bare(_), None) => card(embed, names, None, autoplay, None, None, stars),
+        (Display::Bare(_), None) => card(embed, n, names, None, None, None, stars, view),
     }
 }
 
-/// Large media, bare or inside a card. A GIF that animates has a star.
-fn large(media: &Large, embed: &Embed, images: &Images, autoplay: bool, stars: &Stars) -> gtk::Widget {
+/// Large media, bare or inside a card, of the embed at place `n`. A GIF that
+/// animates has a star.
+fn large(media: &Large, embed: &Embed, n: usize, images: &Images, stars: &Stars, view: &MediaCx) -> gtk::Widget {
     match media {
-        Large::Image(media) => stars.over(&image(media, images, autoplay, MAX_W, MAX_H), media.star.as_ref()),
-        Large::Gallery(media) => gallery(media, images, autoplay, stars),
-        Large::Gifv { video, still } => stars.over(&gifv(video, still, images, autoplay), video.star.as_ref()),
-        Large::Video { video: Some(video), still } => self::video(video, still, images),
+        Large::Image(media) => {
+            let frame = image(media, images, MAX_W, MAX_H);
+            view.link(&frame, view.embedded(n, 0));
+            stars.over(&frame, media.star.as_ref())
+        }
+        Large::Gallery(media) => gallery(media, n, images, stars, view),
+        Large::Gifv { video, still } => stars.over(&gifv(video, still, images), video.star.as_ref()),
+        Large::Video { video: Some(video), still } => self::video(video, still, images, view.embedded(n, 0), view),
         Large::Video { video: None, still } => page_video(still, embed.url.as_deref(), images),
     }
 }
 
 /// Images gathered from embeds sharing a URL, two to a row.
-fn gallery(media: &[Media], images: &Images, autoplay: bool, stars: &Stars) -> gtk::Widget {
+fn gallery(media: &[Media], n: usize, images: &Images, stars: &Stars, view: &MediaCx) -> gtk::Widget {
     let grid = gtk::Grid::builder().column_spacing(4).row_spacing(4).halign(gtk::Align::Start).build();
     for (i, media) in media.iter().enumerate() {
-        let picture = image(media, images, autoplay, MAX_W / 2.0 - 2.0, MAX_H / 2.0 - 2.0);
+        let picture = image(media, images, MAX_W / 2.0 - 2.0, MAX_H / 2.0 - 2.0);
+        view.link(&picture, view.embedded(n, i));
         grid.attach(&stars.over(&picture, media.star.as_ref()), i as i32 % 2, i as i32 / 2, 1, 1);
     }
     grid.upcast()
@@ -94,10 +107,14 @@ fn shrinking_picture() -> gtk::Picture {
         .build()
 }
 
-fn image(media: &Media, images: &Images, autoplay: bool, max_w: f64, max_h: f64) -> MediaFrame {
+fn image(media: &Media, images: &Images, max_w: f64, max_h: f64) -> MediaFrame {
     let fitted = fitted_picture(Some(media.width), Some(media.height), max_w, max_h);
-    let animated = autoplay && media.animated;
-    images.set_sized(&fitted.picture, &media.url, fitted.size, Some((media.width, media.height)), animated);
+    let original = Some((media.width, media.height));
+    if media.animated {
+        images.set_sized_moving(&fitted.picture, &media.url, fitted.size, original, Subject::Gif, Row::None);
+    } else {
+        images.set_sized(&fitted.picture, &media.url, fitted.size, original);
+    }
     fitted.frame
 }
 
@@ -105,7 +122,7 @@ fn image(media: &Media, images: &Images, autoplay: bool, max_w: f64, max_h: f64)
 /// whose players Neucord doesn't embed).
 fn page_video(still: &Media, page: Option<&str>, images: &Images) -> gtk::Widget {
     let frame = gtk::Overlay::builder().halign(gtk::Align::Start).build();
-    frame.set_child(Some(&image(still, images, false, MAX_W, MAX_H)));
+    frame.set_child(Some(&image(still, images, MAX_W, MAX_H)));
     if let Some(page) = page.filter(|u| u.starts_with("https://")) {
         let play = gtk::Button::builder()
             .icon_name("media-playback-start-symbolic")
@@ -124,61 +141,64 @@ fn page_video(still: &Media, page: Option<&str>, images: &Images) -> gtk::Widget
     frame.upcast()
 }
 
-/// A GIF link: a muted looping video over its still. Without autoplay it
-/// plays while hovered, and isn't downloaded until then.
-fn gifv(video: &Media, still: &Media, images: &Images, autoplay: bool) -> gtk::Widget {
+/// A GIF link: a muted looping video over its still. It isn't downloaded
+/// until the rules for GIFs let it move, and plays only while they say so.
+fn gifv(video: &Media, still: &Media, images: &Images) -> gtk::Widget {
     let frame = gtk::Overlay::builder().halign(gtk::Align::Start).build();
-    frame.set_child(Some(&image(still, images, false, MAX_W, MAX_H)));
+    frame.set_child(Some(&image(still, images, MAX_W, MAX_H)));
     let player = shrinking_picture();
     frame.add_overlay(&player);
 
-    if autoplay {
-        load_gifv(&player, images, &video.url, None);
-    } else {
-        let hover = gtk::EventControllerMotion::new();
-        hover.connect_enter({
-            let (player, images, url) = (player.clone(), images.clone(), video.url.clone());
-            move |hover, _, _| match player.paintable().and_downcast::<gtk::MediaStream>() {
-                Some(stream) => stream.play(),
-                None => load_gifv(&player, &images, &url, Some(hover.clone())),
-            }
-        });
-        hover.connect_leave({
-            let player = player.clone();
-            move |_| {
-                if let Some(stream) = player.paintable().and_downcast::<gtk::MediaStream>() {
-                    stream.pause();
+    let (latest, loading) = (Rc::new(Cell::new(None::<Update>)), Rc::new(Cell::new(false)));
+    images.watch(&frame, Subject::Gif, Row::None, {
+        let (player, images, url) = (player.downgrade(), images.clone(), video.url.clone());
+        move |update| {
+            latest.set(Some(update));
+            let Some(player) = player.upgrade() else { return };
+            match player.paintable().and_downcast::<gtk::MediaStream>() {
+                Some(stream) => settle(&stream, update),
+                None if update.moving && !loading.replace(true) => {
+                    let (player, images, url) = (player.downgrade(), images.clone(), url.clone());
+                    let (latest, loading) = (latest.clone(), loading.clone());
+                    glib::spawn_future_local(async move {
+                        let path = images.file(&url).await;
+                        loading.set(false);
+                        let (Some(player), Some(path)) = (player.upgrade(), path) else { return };
+                        let stream = gtk::MediaFile::for_filename(&path);
+                        stream.set_loop(true);
+                        stream.set_muted(true);
+                        player.set_paintable(Some(&stream));
+                        if let Some(update) = latest.get() {
+                            settle(stream.upcast_ref(), update);
+                        }
+                    });
                 }
+                None => {}
             }
-        });
-        frame.add_controller(hover);
-    }
+        }
+    });
     frame.upcast()
 }
 
-/// Load a GIF link's video into `player` and play it, or with `hover`, only
-/// if the pointer is still there once it has loaded.
-fn load_gifv(player: &gtk::Picture, images: &Images, url: &str, hover: Option<gtk::EventControllerMotion>) {
-    let player = player.downgrade();
-    let (images, url) = (images.clone(), url.to_owned());
-    glib::spawn_future_local(async move {
-        let Some(path) = images.file(&url).await else { return };
-        let Some(player) = player.upgrade() else { return };
-        let stream = gtk::MediaFile::for_filename(&path);
-        stream.set_loop(true);
-        stream.set_muted(true);
-        if hover.is_none_or(|hover| hover.contains_pointer()) {
-            stream.play();
+/// Play `stream` if it should now, else keep it paused, back at its first
+/// frame when it isn't to move at all.
+fn settle(stream: &gtk::MediaStream, update: Update) {
+    if update.plays {
+        stream.play();
+    } else {
+        stream.pause();
+        if !update.moving {
+            stream.seek(0);
         }
-        player.set_paintable(Some(&stream));
-    });
+    }
 }
 
 /// A video with sound: its still and a play button, fetched only on click.
-fn video(video: &Media, still: &Media, images: &Images) -> gtk::Widget {
+/// It plays where it is, and its fullscreen button opens the viewer on it.
+fn video(video: &Media, still: &Media, images: &Images, index: Option<usize>, view: &MediaCx) -> gtk::Widget {
     let frame = gtk::Overlay::builder().halign(gtk::Align::Start).build();
     let poster = fitted_picture(Some(video.width), Some(video.height), MAX_W, MAX_H);
-    images.set_sized(&poster.picture, &still.url, poster.size, Some((still.width, still.height)), false);
+    images.set_sized(&poster.picture, &still.url, poster.size, Some((still.width, still.height)));
     frame.set_child(Some(&poster.frame));
     let play = gtk::Button::builder()
         .icon_name("media-playback-start-symbolic")
@@ -188,21 +208,31 @@ fn video(video: &Media, still: &Media, images: &Images) -> gtk::Widget {
         .css_classes(["osd", "circular", "embed-play"])
         .build();
     frame.add_overlay(&play);
+    view.name(&frame, index);
     play.connect_clicked({
         let frame = frame.downgrade();
-        let (images, url) = (images.clone(), video.url.clone());
+        let (images, url, view) = (images.clone(), video.url.clone(), view.clone());
         move |button| {
             button.set_sensitive(false);
-            let (frame, button, images, url) = (frame.clone(), button.downgrade(), images.clone(), url.clone());
+            let (frame, button, images, url, view) =
+                (frame.clone(), button.downgrade(), images.clone(), url.clone(), view.clone());
             glib::spawn_future_local(async move {
                 let path = images.file(&url).await;
                 let (Some(frame), Some(button)) = (frame.upgrade(), button.upgrade()) else { return };
                 let Some(path) = path else { return button.set_sensitive(true) };
                 // Over the poster, which keeps the frame's size.
                 frame.remove_overlay(&button);
-                let player = gtk::Video::builder().autoplay(true).css_classes(["embed-media"]).build();
-                player.set_filename(Some(&path));
-                frame.add_overlay(&player);
+                let options =
+                    Options { autoplay: true, start: 0.0, fullscreen: index.is_some(), classes: &["embed-media"] };
+                let player = Player::new(&path, &options);
+                if let Some(index) = index {
+                    let control = player.control();
+                    player.fullscreen_button().connect_clicked(move |_| {
+                        control.pause();
+                        view.open(index, control.position());
+                    });
+                }
+                frame.add_overlay(player.widget());
             });
         }
     });
@@ -230,14 +260,16 @@ pub(super) fn behind_spoiler(reveal: impl Fn() -> gtk::Widget + 'static) -> gtk:
 
 /// A card: colour bar, then provider, author, title, description, fields,
 /// media and footer, with the thumbnail to the right of the text.
+#[expect(clippy::too_many_arguments, reason = "what the media of the embed's place needs, the star's and the viewer's")]
 fn card(
     embed: &Embed,
+    n: usize,
     names: &Names,
     images: Option<&Images>,
-    autoplay: bool,
     media: Option<Large>,
     thumbnail: Option<Media>,
     stars: &Stars,
+    view: &MediaCx,
 ) -> gtk::Widget {
     let card =
         gtk::Box::builder().halign(gtk::Align::Start).overflow(gtk::Overflow::Hidden).css_classes(["embed"]).build();
@@ -275,12 +307,12 @@ fn card(
     }
     top.append(&text);
     if let (Some(images), Some(thumbnail)) = (images, thumbnail) {
-        top.append(&image(&thumbnail, images, autoplay, THUMBNAIL, THUMBNAIL));
+        top.append(&image(&thumbnail, images, THUMBNAIL, THUMBNAIL));
     }
     body.append(&top);
 
     if let (Some(media), Some(images)) = (media, images) {
-        body.append(&large(&media, embed, images, autoplay, stars));
+        body.append(&large(&media, embed, n, images, stars, view));
     }
 
     let footer_text = embed.footer.as_ref().map(|f| f.text.as_str()).filter(|t| !t.is_empty());
@@ -333,7 +365,7 @@ fn icon_picture(images: &Images, url: &str, size: i32, class: &str) -> gtk::Pict
         .overflow(gtk::Overflow::Hidden)
         .css_classes([class])
         .build();
-    images.set_sized(&picture, url, (size, size), None, false);
+    images.set_sized(&picture, url, (size, size), None);
     picture
 }
 
