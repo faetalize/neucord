@@ -36,6 +36,20 @@ pub const SEND_TYPING: Key = Key { group: "Chat", name: "send-typing", default: 
 /// blurred (`--neucord-bar-opacity` and `--neucord-blur` in `style.css`).
 pub const TRANSLUCENT: Key = Key { group: "Appearance", name: "translucent", default: true };
 
+/// Closing the window leaves Neucord running behind its tray icon, as the
+/// client's "Minimize Discord to System Tray" does (on, like there).
+pub const MINIMIZE_TO_TRAY: Key = Key { group: "Background", name: "minimize-to-tray", default: true };
+
+/// Neucord starts with the user's session. The client defaults this on,
+/// because its installer sets it up; Neucord has none yet (#26), and an
+/// autostart entry written on the first run would point at wherever the
+/// binary happened to be, such as a `cargo run` build.
+pub const OPEN_ON_STARTUP: Key = Key { group: "Background", name: "open-on-startup", default: false };
+
+/// The tray icon shows unread messages (the client's "Enable Unread Message
+/// Badge", on by default).
+pub const UNREAD_BADGE: Key = Key { group: "Background", name: "unread-badge", default: true };
+
 /// The member pane, docked beside the chat, was closed by the user.
 pub const MEMBERS_CLOSED: Key = Key { group: "Window", name: "members-closed", default: false };
 
@@ -140,6 +154,9 @@ mod tests {
         assert!(store.get(&SEND_TYPING));
         assert!(store.get(&TRANSLUCENT));
         assert!(!store.get(&MEMBERS_CLOSED));
+        assert!(store.get(&MINIMIZE_TO_TRAY), "as the client has it");
+        assert!(store.get(&UNREAD_BADGE), "as the client has it");
+        assert!(!store.get(&OPEN_ON_STARTUP), "nothing is written to the session until asked");
         assert!(!dir.file().exists(), "reading creates nothing");
     }
 

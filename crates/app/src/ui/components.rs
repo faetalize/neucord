@@ -519,7 +519,7 @@ fn picture(media: &Media, images: &Images, max_w: f64, max_h: f64) -> gtk::Widge
                 fitted.picture.set_tooltip_text(Some(description));
             }
             let original = media.width.zip(media.height);
-            images.set_sized(&fitted.picture, &media.url, fitted.size, original, false);
+            images.set_sized(&fitted.picture, &media.url, fitted.size, original);
             fitted.frame.upcast()
         }
     };

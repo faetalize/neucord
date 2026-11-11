@@ -17,6 +17,7 @@ use super::chat::MessageTarget;
 use super::menus::{self, At};
 use super::state::State;
 use super::widgets::avatar_widget;
+use crate::images::Row;
 
 /// What a search remembers while its box is closed.
 #[derive(Default)]
@@ -709,7 +710,7 @@ impl App {
             column.append(&gtk::Label::builder().label(place).xalign(0.0).css_classes(["caption", "dimmed"]).build());
         }
         let line = gtk::Box::builder().spacing(8).build();
-        line.append(&avatar_widget(&message.author, 24, Some(&self.images)));
+        line.append(&avatar_widget(&message.author, 24, Some(&self.images), Row::Parent));
         let name = self
             .state
             .borrow()

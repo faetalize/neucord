@@ -14,6 +14,7 @@ use gtk::glib;
 use qrcodegen::{QrCode, QrCodeEcc};
 
 use super::{App, bare_page, widgets};
+use crate::images::Row;
 
 pub(super) struct Page {
     /// "password" or "mfa".
@@ -249,6 +250,9 @@ impl App {
     }
 
     pub(super) fn show_login(self: &Rc<Self>, error: Option<&str>) {
+        // A login nobody can see, in a window hidden behind the tray, waits forever.
+        self.window.present();
+        self.refresh_tray();
         self.set_content_title("Neucord");
         self.login.clear();
         self.login.set_error(error);
@@ -527,7 +531,7 @@ impl App {
         while let Some(child) = scanned.first_child() {
             scanned.remove(&child);
         }
-        let avatar = widgets::avatar_widget(user, 40, Some(&self.images));
+        let avatar = widgets::avatar_widget(user, 40, Some(&self.images), Row::None);
         avatar.set_halign(gtk::Align::Center);
         scanned.append(&avatar);
         scanned.append(

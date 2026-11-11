@@ -3,6 +3,7 @@
 
 mod account;
 mod attachments;
+mod background;
 mod captcha;
 mod chat;
 mod components;
@@ -56,13 +57,14 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use discord::{Snowflake, session};
-use gtk::{gio, glib, pango};
+use gtk::{gdk, gio, glib, pango};
 
 use crate::config::{self, Store};
 use crate::images::Images;
 use crate::render;
 use crate::theme::Theme;
 use crate::timelines::Timelines;
+use crate::tray::Tray;
 
 /// The server rail's width.
 const RAIL: f64 = 72.0;
@@ -218,6 +220,10 @@ pub struct App {
     remembered: Store,
     /// The settings window, while it's open.
     settings_window: RefCell<Option<settings::Window>>,
+    /// The icon in the panel, which is also what lets the window hide.
+    tray: Tray,
+    /// The Background portal turned down running with no window.
+    background_refused: Cell<bool>,
     /// The member list pane, in the right pane of the chat.
     members: members::Pane,
     /// What the rail and sidebar last drew, so badge refreshes can skip
@@ -413,6 +419,8 @@ impl App {
             config,
             remembered: Store::open(config::state_path()),
             settings_window: RefCell::default(),
+            tray: Tray::new(),
+            background_refused: Cell::new(false),
             members: members::Pane::new(),
             drawn: RefCell::default(),
             rail_items: RefCell::default(),
@@ -441,7 +449,11 @@ impl App {
         // the window is open. Released on close, which breaks the cycle.
         let keep_alive = RefCell::new(Some(this.clone()));
         let popover = this.mention_popover.clone();
-        this.window.connect_close_request(move |_| {
+        this.window.connect_close_request(move |window| {
+            if keep_alive.borrow().as_ref().is_some_and(|app| app.keeps_running()) {
+                window.set_visible(false);
+                return glib::Propagation::Stop;
+            }
             // A manually-parented popover must be unparented before teardown.
             popover.unparent();
             keep_alive.take();
@@ -450,8 +462,13 @@ impl App {
         this
     }
 
-    pub fn start(self: &Rc<Self>) {
-        self.window.present();
+    /// `hidden`: started with the session, so the window waits behind the
+    /// tray icon (see [`App::start_background`]).
+    pub fn start(self: &Rc<Self>, hidden: bool) {
+        self.start_background(hidden);
+        if !hidden {
+            self.window.present();
+        }
         self.show_loading("Checking keyring…");
         let this = self.clone();
         glib::spawn_future_local(async move {
@@ -460,6 +477,46 @@ impl App {
                 Ok(None) => this.show_login(None),
                 Err(e) => this.show_login(Some(&e.to_string())),
             }
+        });
+    }
+
+    /// Tell the animations when the window loses focus, is hidden or is
+    /// covered, and when the system asks for less motion. Focus is the
+    /// compositor's say (the toplevel's `FOCUSED`), which a tooltip or popup
+    /// taking the keyboard doesn't change as `is-active` can.
+    fn track_motion(&self) {
+        let motion = self.images.motion().clone();
+        let sync = {
+            let (motion, window) = (motion.clone(), self.window.downgrade());
+            move || {
+                let Some(window) = window.upgrade() else { return };
+                let state = window.surface().and_downcast::<gdk::Toplevel>().map(|t| t.state());
+                let focused = state.map_or_else(|| window.is_active(), |s| s.contains(gdk::ToplevelState::FOCUSED));
+                let covered =
+                    state.is_some_and(|s| s.intersects(gdk::ToplevelState::MINIMIZED | gdk::ToplevelState::SUSPENDED));
+                motion.set_focused(focused && window.is_visible() && !covered);
+            }
+        };
+        self.window.connect_visible_notify({
+            let sync = sync.clone();
+            move |_| sync()
+        });
+        self.window.connect_realize({
+            let sync = sync.clone();
+            move |window| {
+                if let Some(toplevel) = window.surface().and_downcast::<gdk::Toplevel>() {
+                    let sync = sync.clone();
+                    toplevel.connect_state_notify(move |_| sync());
+                }
+                sync();
+            }
+        });
+        sync();
+
+        let settings = gtk::Settings::for_display(&WidgetExt::display(&self.window));
+        motion.set_reduced(!settings.is_gtk_enable_animations());
+        settings.connect_gtk_enable_animations_notify(move |settings| {
+            motion.set_reduced(!settings.is_gtk_enable_animations());
         });
     }
 
@@ -542,6 +599,8 @@ impl App {
             // The client binds both (`mod+k`, `mod+t`).
             app.set_accels_for_action("win.quick-switcher", &["<Control>k", "<Control>t"]);
         }
+
+        self.track_motion();
 
         // Coming back to the open channel reads it.
         let read_open = {

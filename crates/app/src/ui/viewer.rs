@@ -18,7 +18,7 @@ use super::App;
 use super::media_frame::MediaFrame;
 use super::menus::{self, At, Entry};
 use super::video::{self, Control, Player};
-use crate::images::Images;
+use crate::images::{Images, Lease};
 
 /// How much the zoom enlarges a picture (the client's `setZoomed`).
 const ZOOM: f64 = 2.5;
@@ -89,6 +89,8 @@ struct Open {
     /// What is shown now, as loaded: what a menu on it copies.
     src: String,
     picture: Option<gtk::Picture>,
+    /// Keeps an animation's frames advancing while it is shown.
+    lease: Option<Lease>,
     /// What holds the picture or player at the size it is shown at.
     frame: Option<MediaFrame>,
     player: Option<Player>,
@@ -297,6 +299,7 @@ impl Viewer {
                 loaded: (0, 0),
                 src: String::new(),
                 picture: None,
+                lease: None,
                 frame: None,
                 player: None,
                 tick: None,
@@ -575,10 +578,13 @@ impl Viewer {
         }
         let viewer = self.clone();
         // The viewer is dark, as the client's modal is.
-        app.images.load(&url, item.animated, move |paintable| {
+        app.images.load_playing(&url, item.animated, move |paintable, lease| {
             let current = viewer.0.state.borrow().open.as_ref().is_some_and(|open| open.generation == generation);
             if current {
                 picture.set_paintable(Some(&paintable));
+                if let Some(open) = viewer.0.state.borrow_mut().open.as_mut() {
+                    open.lease = lease;
+                }
                 if let Some(spinner) = spinner {
                     spinner.set_visible(false);
                 }
@@ -679,7 +685,7 @@ impl Viewer {
             let Some(app) = self.app() else { return };
             let url = item.zoom_url().to_owned();
             let (viewer, picture) = (self.clone(), picture.clone());
-            app.images.load(&url, item.animated, move |paintable| {
+            app.images.load_playing(&url, item.animated, move |paintable, lease| {
                 let current = viewer
                     .0
                     .state
@@ -689,6 +695,9 @@ impl Viewer {
                     .is_some_and(|open| open.generation == generation && open.zoomed);
                 if current {
                     picture.set_paintable(Some(&paintable));
+                    if let Some(open) = viewer.0.state.borrow_mut().open.as_mut() {
+                        open.lease = lease;
+                    }
                 }
             });
             if let Some(open) = inner.state.borrow_mut().open.as_mut() {
@@ -720,7 +729,7 @@ impl Viewer {
             }
             let fitted = media::viewer_box(window, true, item.size);
             let url = self.src_for(&app.images, item, fitted);
-            app.images.load(&url, false, |_| {});
+            app.images.load(&url, |_| {});
         }
     }
 
@@ -752,7 +761,7 @@ impl Viewer {
                 Kind::Image => item.file_url().to_owned(),
                 Kind::Video => discord::cdn::with_params(item.file_url(), &[("format", "png")]),
             };
-            app.images.set_sized(&picture, &url, (THUMB, THUMB), item.size, false);
+            app.images.set_sized(&picture, &url, (THUMB, THUMB), item.size);
             let button = gtk::Button::builder()
                 .child(&thumb)
                 .tooltip_text(format!("{} of {}", n + 1, items.len()))

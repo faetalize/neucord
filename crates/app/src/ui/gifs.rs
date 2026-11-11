@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use adw::prelude::*;
 use discord::Snowflake;
+use discord::animation::Subject;
 use discord::gifs::{Gif, Kind, Picker, Request, Screen, Tile, Typed};
 use gtk::glib;
 
@@ -250,7 +251,8 @@ impl Session {
             .height_request(GIF.1)
             .content_fit(gtk::ContentFit::Cover)
             .build();
-        app.images.set(&picture, &found.preview(), true);
+        let preview = found.preview();
+        app.images.set_moving(&picture, &preview, &preview, Subject::Gif, crate::images::Row::None);
         let button = gtk::Button::builder().child(&picture).css_classes(["flat"]).build();
         button.connect_clicked({
             let (this, found) = (self.clone(), found.clone());
@@ -282,7 +284,7 @@ impl Session {
             .content_fit(gtk::ContentFit::Cover)
             .build();
         if let Some(preview) = tile.preview() {
-            app.images.set(&picture, &preview, true);
+            app.images.set_moving(&picture, &preview, &preview, Subject::Gif, crate::images::Row::None);
         }
         overlay.set_child(Some(&picture));
         overlay.add_overlay(

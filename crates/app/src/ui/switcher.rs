@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use adw::prelude::*;
+use discord::animation::Subject;
 use discord::channel_icon::{self, Glyph};
 use discord::notifications::{Level, Place};
 use discord::switcher::{self, Hit, Home, Kind, Row, Sources};
@@ -17,6 +18,7 @@ use gtk::{gdk, glib, pango};
 use super::App;
 use super::state::{State, now_unix};
 use super::widgets::{avatar_widget, round_picture};
+use crate::images::Row as Mover;
 
 /// The box, open over the window.
 pub(super) struct View {
@@ -342,7 +344,7 @@ impl App {
                         if user.username != hit.comparator {
                             context = user.username.clone();
                         }
-                        avatar_widget(&user, 32, Some(&self.images))
+                        avatar_widget(&user, 32, Some(&self.images), Mover::Parent)
                     }
                     None => adw::Avatar::new(32, Some(&hit.comparator), true).upcast(),
                 }
@@ -358,7 +360,12 @@ impl App {
                     Some(hash) => {
                         let picture = round_picture(32);
                         let url = discord::cdn::guild_icon_url(hit.id.0, hash, 64);
-                        self.images.set(&picture, &url, discord::cdn::is_animated(hash));
+                        if discord::cdn::is_animated(hash) {
+                            let still = discord::cdn::guild_icon_still_url(hit.id.0, hash, 64);
+                            self.images.set_moving(&picture, &still, &url, Subject::ServerIcon, Mover::None);
+                        } else {
+                            self.images.set(&picture, &url);
+                        }
                         picture.upcast()
                     }
                     None => adw::Avatar::new(32, Some(&hit.comparator), true).upcast(),
