@@ -1015,6 +1015,14 @@ impl Message {
         self.flags & Self::IS_VOICE_MESSAGE != 0
     }
 
+    /// The audio Save File saves from a voice message, or from the one this
+    /// forwards: its first attachment, as the client takes it (761304).
+    pub fn voice_audio(&self) -> Option<Attachment> {
+        let forwarded = self.forwarded();
+        let message = forwarded.as_ref().unwrap_or(self);
+        message.is_voice_message().then(|| message.attachments.first().cloned()).flatten()
+    }
+
     /// Published from an announcement channel to the servers following it,
     /// where editing or deleting it changes every copy.
     pub fn is_crossposted(&self) -> bool {
@@ -1916,5 +1924,27 @@ mod tests {
         MessageEdit { components: Some(update.clone()), ..Default::default() }.apply(&mut m);
         assert_eq!(m.components, update);
         assert!(!m.local.can_queue(), "what is on its way stays until Discord answers");
+    }
+
+    #[test]
+    fn a_voice_messages_audio_is_its_first_attachment() {
+        let attachments = serde_json::json!([
+            {"id": "1", "filename": "voice-message.ogg", "url": "https://cdn.example/a"},
+            {"id": "2", "filename": "other.ogg", "url": "https://cdn.example/b"}
+        ]);
+        let audio = |flags: u64| ours(serde_json::json!({"flags": flags, "attachments": attachments})).voice_audio();
+        assert_eq!(audio(Message::IS_VOICE_MESSAGE).map(|a| a.id), Some(Snowflake(1)));
+        assert_eq!(audio(0).map(|a| a.id), None, "an ordinary upload is no voice message");
+        assert!(
+            ours(serde_json::json!({"flags": Message::IS_VOICE_MESSAGE})).voice_audio().is_none(),
+            "nothing to save"
+        );
+
+        let forward = ours(serde_json::json!({
+            "message_reference": {"type": 1, "message_id": "7", "channel_id": "9"},
+            "message_snapshots": [{"message": {"type": 0, "content": "", "timestamp": "", "flags": Message::IS_VOICE_MESSAGE,
+                                               "attachments": attachments}}]
+        }));
+        assert_eq!(forward.voice_audio().map(|a| a.id), Some(Snowflake(1)), "a forward saves what it forwards");
     }
 }
