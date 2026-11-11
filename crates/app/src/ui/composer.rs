@@ -8,6 +8,7 @@ use adw::prelude::*;
 use discord::cooldowns::{Slowmode, bypasses_slowmode, wait_words};
 use discord::emoji::{Item as Emoji, locked_notice};
 use discord::limits::{LengthCount, TooLong, message_length};
+use discord::notice::Notice;
 use discord::rest::{Reply, ReplyPing};
 use discord::scheduled;
 use discord::verification::{self, Gate};
@@ -262,8 +263,9 @@ impl App {
     /// What replaces the message box where we can't post: accept and ignore
     /// in a message request, a notice in the system DM, during a timeout,
     /// while a server's verification asks for more, or without Send Messages
-    /// (in a thread, by the thread rule: see `permissions::in_channel`).
-    /// While slowmode makes us wait, the box stays and the wait shows above it.
+    /// (in a thread, by the thread rule: see `permissions::in_channel`). The
+    /// last keeps the attach button for Create Thread (see [`Notice`]). While
+    /// slowmode makes us wait, the box stays and the wait shows above it.
     pub(super) fn update_notice_bar(self: &Rc<Self>) {
         self.watch_timeout_end();
         self.show_notice_bar();
@@ -315,7 +317,7 @@ impl App {
             bar.set_visible(false);
             return;
         }
-        let (system, request, timeout, gate, denied, slowmode) = {
+        let (notice, request, denied_here, slowmode) = {
             let state = self.state.borrow();
             let open = state.channel.and_then(|id| state.find_channel(id));
             let system = open.is_some_and(|(_, c)| c.is_system_dm());
@@ -327,49 +329,63 @@ impl App {
             let guild = open.and_then(|(guild, _)| guild).zip(state.account.as_ref());
             let timeout = guild.and_then(|(g, a)| g.timeout_left(a, now_unix()));
             let gate = guild.and_then(|(g, a)| verification::gate(g, a, now_unix()));
-            let denied =
-                (guild.is_some() && !state.channel.is_some_and(|id| state.can_send(id))).then_some(denied_here);
+            let denied = guild.is_some() && !state.channel.is_some_and(|id| state.can_send(id));
             let slowmode = open.map_or(0, |(_, c)| state.slowmode.remaining_ms(c, now_ms()));
-            (system, state.open_request().map(|c| (c.id, c.spam, c.title())), timeout, gate, denied, slowmode)
+            let request = state.open_request().map(|c| (c.id, c.spam, c.title()));
+            let notice = Notice::of(system, request.as_ref().map(|r| r.1), timeout, gate, denied);
+            (notice, request, denied_here, slowmode)
         };
         let label = |text: String| gtk::Label::builder().label(text).xalign(0.0).wrap(true).hexpand(true).build();
-        let text = match (&request, timeout) {
-            _ if system => "This chat is reserved for official Discord notifications. \
+        let request = request.as_ref().map(|(id, _, title)| (*id, title.as_str()));
+        let text = match &notice {
+            Some(Notice::System) => "This chat is reserved for official Discord notifications. \
                 Discord will never ask for your password or token."
                 .to_owned(),
-            (_, Some(left)) => format!(
+            Some(Notice::Timeout(left)) => format!(
                 "You're in timeout in this server for {}. Until then you can read, but not send messages or react.",
-                wait_words(left)
+                wait_words(*left)
             ),
-            (Some((_, true, title)), None) => {
-                format!("Discord filed this message request from {title} as likely spam.")
+            Some(Notice::Request { spam: true }) => {
+                format!("Discord filed this message request from {} as likely spam.", request.map_or("", |r| r.1))
             }
-            (Some((_, false, title)), None) => format!("{title} wants to message you. Accept to reply."),
-            (None, None) => match (&gate, denied) {
-                (Some(gate), _) => gate_notice(gate, now_unix()),
-                (None, Some(denied)) => denied.to_owned(),
-                (None, None) => {
-                    self.show_composer(true);
-                    bar.set_visible(slowmode > 0);
-                    if slowmode > 0 {
-                        let seconds = (slowmode + 999) / 1000;
-                        bar.append(&label(format!(
-                            "Slowmode is enabled. You can send another message in this channel in {}.",
-                            wait_words(seconds)
-                        )));
-                        self.tick_notice_bar();
-                    }
-                    return;
+            Some(Notice::Request { spam: false }) => {
+                format!("{} wants to message you. Accept to reply.", request.map_or("", |r| r.1))
+            }
+            Some(Notice::Gate(gate)) => gate_notice(gate, now_unix()),
+            Some(Notice::Denied) => denied_here.to_owned(),
+            None => {
+                self.show_composer(true);
+                bar.set_visible(slowmode > 0);
+                if slowmode > 0 {
+                    let seconds = (slowmode + 999) / 1000;
+                    bar.append(&label(format!(
+                        "Slowmode is enabled. You can send another message in this channel in {}.",
+                        wait_words(seconds)
+                    )));
+                    self.tick_notice_bar();
                 }
-            },
+                return;
+            }
         };
         self.show_composer(false);
         bar.set_visible(true);
+        let thread = {
+            let state = self.state.borrow();
+            state.channel.is_some_and(|id| state.offers_thread_in_attach_menu(id))
+        };
+        if thread && notice.as_ref().is_some_and(Notice::keeps_attach_button) {
+            bar.append(&self.drafts.notice_attach);
+        }
         bar.append(&label(text));
-        if timeout.is_some() || gate.as_ref().and_then(Gate::until).is_some() {
+        let counting = match &notice {
+            Some(Notice::Timeout(_)) => true,
+            Some(Notice::Gate(gate)) => gate.until().is_some(),
+            _ => false,
+        };
+        if counting {
             self.tick_notice_bar();
         }
-        if let Some((id, ..)) = request.filter(|_| !system) {
+        if let (Some(Notice::Request { .. }), Some((id, _))) = (&notice, request) {
             for button in self.request_actions(id) {
                 bar.append(&button);
             }
