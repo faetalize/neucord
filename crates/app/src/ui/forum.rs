@@ -343,7 +343,7 @@ impl App {
     }
 
     /// Show the new posts, as the client's button does (`RESORT_THREADS`).
-    fn forum_resort(self: &Rc<Self>) {
+    pub(super) fn forum_resort(self: &Rc<Self>) {
         let Some(id) = self.forum_shown() else { return };
         {
             let state = self.state.borrow();
@@ -1276,7 +1276,7 @@ struct Card {
 }
 
 /// A tag's emoji, if it has one.
-fn tag_emoji(tag: &Tag) -> Option<Emoji> {
+pub(super) fn tag_emoji(tag: &Tag) -> Option<Emoji> {
     (tag.emoji_id.is_some() || tag.emoji_name.is_some()).then(|| Emoji {
         id: tag.emoji_id,
         name: tag.emoji_name.clone(),

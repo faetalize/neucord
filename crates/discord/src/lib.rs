@@ -36,6 +36,7 @@ pub mod notifications;
 pub mod permissions;
 pub mod poll;
 pub mod poll_draft;
+pub mod post_creation;
 pub mod profile;
 pub mod reactions;
 pub mod read_state;
