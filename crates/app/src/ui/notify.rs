@@ -174,7 +174,7 @@ impl App {
         let text = self.emoji_library(channel).translate(&typed).text;
         let refusal = {
             let state = self.state.borrow();
-            if state.blocked(channel).is_some() || !state.can_send(channel) {
+            if state.box_blocked(channel) || !state.can_send(channel) {
                 Some("You can't send messages in this channel.".to_owned())
             } else if let Err(too_long) = state.limits().check_length(&text) {
                 Some(too_long.heading().to_owned())

@@ -11,6 +11,7 @@ use discord::gifs::Tiles;
 use discord::limits::{Limits, Nitro};
 use discord::member_list::{self, MemberLists};
 use discord::members::{Members, RoleColour};
+use discord::notice::Notice;
 use discord::notifications::{NotificationSettings, Place};
 use discord::permissions;
 use discord::post_creation;
@@ -22,8 +23,8 @@ use discord::subscriptions::Subscriptions;
 use discord::thread_creation;
 use discord::threads;
 use discord::typing::Typing;
+use discord::verification;
 use discord::verification::Account;
-use discord::verification::{self, Gate};
 use discord::{Channel, ChannelKind, Gateway, Guild, Message, Rest, Resume, Snowflake, User};
 use gtk::glib;
 
@@ -34,23 +35,6 @@ use super::friends::Tab;
 pub(super) enum Page {
     Friends,
     MessageRequests,
-}
-
-/// Why the message box isn't offered in a channel.
-#[derive(Debug, PartialEq)]
-pub(super) enum Blocked {
-    /// A forum or media channel, which has a page of posts in its place.
-    Forum,
-    /// The system DM, which only Discord posts in.
-    System,
-    /// We're in timeout in the server, for this many more seconds.
-    Timeout(i64),
-    /// A message request: `spam` says Discord filed it so.
-    Request { spam: bool, title: String },
-    /// The server's verification asks for more.
-    Gate(Gate),
-    /// We lack Send Messages, with the words for it.
-    Denied(&'static str),
 }
 
 /// Whose list the member list pane shows.
@@ -262,34 +246,25 @@ impl State {
         }
     }
 
-    /// What keeps the message box from a channel, in the order the notice
-    /// bar says it: nothing we may post to is blocked (#51). Slowmode isn't
-    /// one: the box stays, and the wait shows above it.
-    pub(super) fn blocked(&self, id: Snowflake) -> Option<Blocked> {
+    /// What stands where the message box would in a channel, so nothing we
+    /// may post to has one (#51). Slowmode isn't one: the box stays, and the
+    /// wait shows above it.
+    pub(super) fn notice(&self, id: Snowflake) -> Option<Notice> {
         let (guild, channel) = self.find_channel(id)?;
-        if channel.kind.is_forum_like() {
-            return Some(Blocked::Forum);
-        }
-        if channel.is_system_dm() {
-            return Some(Blocked::System);
-        }
         let guild = guild.zip(self.account.as_ref());
-        if let Some(left) = guild.and_then(|(g, a)| g.timeout_left(a, now_unix())) {
-            return Some(Blocked::Timeout(left));
-        }
-        if channel.is_request() {
-            return Some(Blocked::Request { spam: channel.spam, title: channel.title() });
-        }
-        if let Some(gate) = guild.and_then(|(g, a)| verification::gate(g, a, now_unix())) {
-            return Some(Blocked::Gate(gate));
-        }
-        (guild.is_some() && !self.can_send(id)).then(|| {
-            Blocked::Denied(match channel {
-                c if c.kind == ChannelKind::MediaThread => "This thread can only be read.",
-                c if c.is_locked() => "This thread is locked. Only moderators can send messages in it.",
-                _ => "You do not have permission to send messages in this channel.",
-            })
-        })
+        Notice::of(
+            channel.is_system_dm(),
+            channel.is_request().then_some(channel.spam),
+            guild.and_then(|(g, a)| g.timeout_left(a, now_unix())),
+            guild.and_then(|(g, a)| verification::gate(g, a, now_unix())),
+            guild.is_some() && !self.can_send(id),
+        )
+    }
+
+    /// Whether the message box is withheld from the channel: its page of
+    /// posts stands in for a forum's, and a notice for the rest.
+    pub(super) fn box_blocked(&self, id: Snowflake) -> bool {
+        self.find_channel(id).is_some_and(|(_, c)| c.kind.is_forum_like()) || self.notice(id).is_some()
     }
 
     /// Whether files may be attached in the channel (see [`permissions::can_attach`]).
@@ -819,16 +794,14 @@ mod tests {
         let everyone =
             |permissions: &str| serde_json::from_value(json!({"id": "1", "permissions": permissions})).unwrap();
         state.guilds[0].set_role(everyone("1024"));
-        assert_eq!(
-            state.blocked(id),
-            Some(Blocked::Denied("You do not have permission to send messages in this channel."))
-        );
+        assert_eq!(state.notice(id), Some(Notice::Denied));
+        assert!(state.box_blocked(id));
         state.guilds[0].set_role(everyone("3072"));
-        assert_eq!(state.blocked(id), None, "with Send Messages");
-        assert_eq!(state.blocked(Snowflake(77)), None, "a channel we don't know");
+        assert!(!state.box_blocked(id), "with Send Messages");
+        assert!(!state.box_blocked(Snowflake(77)), "a channel we don't know");
 
         state.guilds[0].channels[0].kind = ChannelKind::Forum;
-        assert_eq!(state.blocked(id), Some(Blocked::Forum));
+        assert!(state.box_blocked(id), "a forum has its page of posts in its place");
 
         let dm = |extra: serde_json::Value| -> Channel {
             let mut dm = json!({"id": "50", "type": 1, "recipients": [{"id": "6", "username": "x"}]});
@@ -836,14 +809,14 @@ mod tests {
             serde_json::from_value(dm).unwrap()
         };
         state.private_channels = vec![dm(json!({}))];
-        assert_eq!(state.blocked(Snowflake(50)), None, "an ordinary DM");
+        assert!(!state.box_blocked(Snowflake(50)), "an ordinary DM");
         state.private_channels = vec![dm(json!({"is_message_request": true}))];
-        assert_eq!(state.blocked(Snowflake(50)), Some(Blocked::Request { spam: false, title: "x".into() }));
+        assert_eq!(state.notice(Snowflake(50)), Some(Notice::Request { spam: false }));
         state.private_channels = vec![dm(json!({"is_spam": true}))];
-        assert!(matches!(state.blocked(Snowflake(50)), Some(Blocked::Request { spam: true, .. })));
+        assert_eq!(state.notice(Snowflake(50)), Some(Notice::Request { spam: true }));
         state.private_channels =
             vec![dm(json!({"recipients": [{"id": "643945264868098049", "username": "Discord", "system": true}]}))];
-        assert_eq!(state.blocked(Snowflake(50)), Some(Blocked::System));
+        assert_eq!(state.notice(Snowflake(50)), Some(Notice::System));
     }
 
     #[test]
