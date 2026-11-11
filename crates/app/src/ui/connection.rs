@@ -232,8 +232,11 @@ impl App {
                 Event::EmojiReactionsCleared { channel_id, message_id, emoji } => {
                     self.on_reactions_cleared(channel_id, message_id, Some(&emoji))
                 }
-                Event::MessageAck { channel_id, message_id } => {
-                    self.state.borrow_mut().read.ack(channel_id, message_id);
+                Event::MessageAck { channel_id, message_id, manual } => {
+                    match manual {
+                        Some(mentions) => self.state.borrow_mut().read.mark_unread(channel_id, message_id, mentions),
+                        None => self.state.borrow_mut().read.ack(channel_id, message_id),
+                    }
                     self.forum_read(channel_id);
                     self.withdraw_notification(channel_id);
                     self.refresh_badges();

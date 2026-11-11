@@ -13,6 +13,7 @@ use discord::limits::{Limits, Nitro};
 use discord::member_list::{self, MemberLists};
 use discord::members::{Members, RoleColour};
 use discord::notice::Notice;
+use discord::notification_edit::BulkAck;
 use discord::notifications::{NotificationSettings, Place};
 use discord::permissions;
 use discord::post_creation;
@@ -604,6 +605,43 @@ impl State {
             .filter(move |c| kind(c.kind) && self.account.as_ref().is_some_and(|me| guild.can_view(c, me, now)))
     }
 
+    /// Whether `channel` has anything unread or a mention waiting.
+    pub(super) fn has_news(&self, channel: &Channel) -> bool {
+        self.is_unread(channel) || self.read.mentions(channel.id) > 0
+    }
+
+    /// What "Mark As Read" on a channel or a category acks, each with its
+    /// newest message (`hS` in 334738): a category's channels and the active
+    /// threads we joined in them, read or not; a channel just itself. A forum
+    /// has no newest message to ack here, and is left.
+    pub(super) fn ack_targets(&self, id: Snowflake) -> Vec<(Snowflake, Snowflake)> {
+        let Some((guild, channel)) = self.find_channel(id) else { return Vec::new() };
+        let newest = |c: &Channel| Some((c.id, c.last_message_id?));
+        if channel.kind != ChannelKind::Category {
+            return if channel.kind.is_forum_like() { Vec::new() } else { newest(channel).into_iter().collect() };
+        }
+        let Some(guild) = guild else { return Vec::new() };
+        let children: Vec<&Channel> =
+            self.visible(guild, |k| k.is_text() || k.is_vocal()).filter(|c| c.parent_id == Some(id)).collect();
+        let threads = threads::joined_active(guild).filter(|t| children.iter().any(|c| Some(c.id) == t.parent_id));
+        children.iter().copied().chain(threads).filter_map(newest).collect()
+    }
+
+    /// What "Mark As Read" on a server acks (`567035`): its channels and
+    /// calls we can see, and the threads we joined in them, where something is
+    /// unread or mentions us, each with its newest message.
+    pub(super) fn guild_acks(&self, guild: &Guild) -> Vec<BulkAck> {
+        let channels: Vec<&Channel> = self.visible(guild, |k| k.is_text() || k.is_vocal()).collect();
+        let threads = threads::joined_active(guild).filter(|t| channels.iter().any(|c| Some(c.id) == t.parent_id));
+        channels
+            .iter()
+            .copied()
+            .chain(threads)
+            .filter(|c| self.has_news(c))
+            .filter_map(|c| Some(BulkAck { channel: c.id, message: c.last_message_id? }))
+            .collect()
+    }
+
     pub(super) fn place(&self, id: Snowflake) -> Option<Place> {
         let (guild, channel) = self.find_channel(id)?;
         Some(Place {
@@ -946,6 +984,47 @@ mod tests {
         state.guilds[0].set_role(everyone("66560"));
         assert!(state.can_read_history(Snowflake(9)));
         assert!(!state.can_read_history(Snowflake(77)), "not a channel we know");
+    }
+
+    #[test]
+    fn mark_as_read_acks_what_the_client_acks() {
+        let mut state = open_server(None, json!({"last_message_id": "100"}));
+        state.guilds[0].set_role(serde_json::from_value(json!({"id": "1", "permissions": "1049600"})).unwrap());
+        let add = |state: &mut State, json: serde_json::Value| {
+            state.guilds[0].channels.push(serde_json::from_value(json).unwrap());
+        };
+        add(&mut state, json!({"id": "8", "type": 4, "name": "Cat"}));
+        add(&mut state, json!({"id": "20", "type": 0, "parent_id": "8", "last_message_id": "300"}));
+        add(&mut state, json!({"id": "21", "type": 2, "parent_id": "8", "last_message_id": "310"}));
+        add(&mut state, json!({"id": "22", "type": 0, "parent_id": "8"}));
+        add(&mut state, json!({"id": "23", "type": 15, "parent_id": "8", "last_message_id": "320"}));
+        state.guilds[0].threads = vec![
+            serde_json::from_value(
+                json!({"id": "40", "type": 11, "parent_id": "20", "last_message_id": "1570000000000000000",
+                "member": {"flags": 0, "join_timestamp": "2026-10-28T00:00:00Z"}}),
+            )
+            .unwrap(),
+            serde_json::from_value(json!({"id": "41", "type": 11, "parent_id": "20", "last_message_id": "340"}))
+                .unwrap(),
+        ];
+        state.read = ReadStates::from_ready(&json!([
+            {"id": "9", "last_message_id": "100", "mention_count": 0},
+            {"id": "20", "last_message_id": "300", "mention_count": 0},
+            {"id": "21", "last_message_id": "300", "mention_count": 1},
+            {"id": "40", "last_message_id": "1", "mention_count": 2},
+        ]));
+        let ids = |targets: Vec<(Snowflake, Snowflake)>| targets.iter().map(|(c, m)| (c.0, m.0)).collect::<Vec<_>>();
+        // A category acks its channels, read or not, and the threads we joined in them: not a forum, nor a
+        // channel with nothing in it, nor a thread we haven't joined.
+        assert_eq!(ids(state.ack_targets(Snowflake(8))), [(20, 300), (21, 310), (40, 1_570_000_000_000_000_000)]);
+        assert_eq!(ids(state.ack_targets(Snowflake(20))), [(20, 300)]);
+        assert!(state.ack_targets(Snowflake(23)).is_empty(), "a forum");
+        assert!(state.ack_targets(Snowflake(22)).is_empty(), "no message yet");
+
+        // A server acks only what is unread or mentions us.
+        let acks: Vec<(u64, u64)> =
+            state.guild_acks(&state.guilds[0]).iter().map(|a| (a.channel.0, a.message.0)).collect();
+        assert_eq!(acks, [(21, 310), (40, 1_570_000_000_000_000_000)]);
     }
 
     #[test]
