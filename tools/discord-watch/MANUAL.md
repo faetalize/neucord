@@ -97,6 +97,17 @@ changed for unrelated reasons only needs a note in the issue.
   `defaultAutoArchiveDuration`) and the `location`s, "Plus Button" in 747926
   and "Message" in 519222. The first message goes into the thread once the
   gateway has brought it (`Y` in 971389).
+- **Starting a post** (`post_creation.rs`, `ui/forum_post.rs`). `REQUIRE_TAG`
+  and the error codes are watched, and `POST CHANNEL_THREADS` is, but the
+  snapshot holds only a plain thread's fields: the client builds a post's
+  request with a joined URL, so its query `use_nested_fields=true` and body
+  (`name`, `auto_archive_duration`, `applied_tags`, `message`) are `W` in
+  971389 (anchor `applied_tags`). Also not watched: who sees the form, `AI`
+  in 406704 (Send Messages in the forum, never in a channel of moderator
+  reports); and the form in 745431 (anchor `FOCUS_COMPOSER_TITLE`): a title
+  of up to 100, something to say or a file, at most five tags (`iT`), the
+  tags only Manage Threads may apply left out (`OT` in 691060, anchor
+  `moderated`), and the slowmode that starts when the request answers (`Y`).
 - **Editing and deleting** (`permissions::can_edit`, `can_delete`;
   `ui/edits.rs`, `edits::decide`). The requests are watched (`editMessage`, `deleteMessage`,
   `unarchiveThreadIfNecessary`), as are `canDeleteOwnMessage` and
@@ -424,6 +435,15 @@ changed for unrelated reasons only needs a note in the issue.
   `renderHeaderToolbar` (289287, anchor `"browser"`): text and announcement
   channels, and threads outside forums. A box under a message shows only for
   a known thread of a message with `HAS_THREAD` (`r8` in 679636).
+
+- **The quick switcher** (`switcher.rs`, `ui/switcher.rs`). The empty
+  state (`QuickSwitcherStore`), the channel, server and group DM queries,
+  the single-kind refetch and the unread, mention and speaker lists are
+  watched by name. Not watched: the prefixes and what each result opens (`k`
+  and `H` in 793322, anchor `USER_GLOBAL`), `mod+k` and `mod+t` (161388,
+  anchor `QUICKSWITCHER_SHOW`), the scoring (`eT` and `eC` in 997625, anchor
+  `isFullMatch`, with `ep`'s boosters), and how people rank (the worker,
+  787578, anchor `USER_RESULTS`).
 
 - **Channels we can't view** (`Guild::sidebar`, `permissions::access`).
   Neucord lists, counts unread, opens and posts only where it has a

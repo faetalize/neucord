@@ -13,6 +13,7 @@ use discord::member_list::{self, MemberLists};
 use discord::members::{Members, RoleColour};
 use discord::notifications::{NotificationSettings, Place};
 use discord::permissions;
+use discord::post_creation;
 use discord::read_state::ReadStates;
 use discord::relationships::Relationships;
 use discord::settings::{GuildFolder, MediaSettings, RailEntry};
@@ -147,6 +148,8 @@ pub(super) struct State {
     /// The user closed the member list pane beside the chat, which is open
     /// until they do.
     pub(super) members_closed: bool,
+    /// Channels opened this session, newest first, for the quick switcher.
+    pub(super) quick_history: Vec<Snowflake>,
 }
 
 impl State {
@@ -244,6 +247,33 @@ impl State {
         match (self.find_channel(id), &self.account) {
             (Some((guild, channel)), Some(me)) => permissions::can_attach(guild, channel, me, now_unix()),
             _ => false,
+        }
+    }
+
+    /// Whether the post form shows in the forum or media channel (see
+    /// [`post_creation::can_post`]).
+    pub(super) fn can_post(&self, forum: Snowflake) -> bool {
+        match (self.find_channel(forum), &self.account) {
+            (Some((Some(guild), channel)), Some(me)) => post_creation::can_post(guild, channel, me, now_unix()),
+            _ => false,
+        }
+    }
+
+    /// Whether the post form takes files (see [`post_creation::can_attach`]).
+    pub(super) fn can_attach_to_post(&self, forum: Snowflake) -> bool {
+        match (self.find_channel(forum), &self.account) {
+            (Some((Some(guild), channel)), Some(me)) => post_creation::can_attach(guild, channel, me, now_unix()),
+            _ => false,
+        }
+    }
+
+    /// The tags the post form offers in the forum (see [`post_creation::tag_choices`]).
+    pub(super) fn post_tags(&self, forum: Snowflake) -> Vec<discord::model::Tag> {
+        match (self.find_channel(forum), &self.account) {
+            (Some((Some(guild), channel)), Some(me)) => {
+                post_creation::tag_choices(guild, channel, me, now_unix()).into_iter().cloned().collect()
+            }
+            _ => Vec::new(),
         }
     }
 
