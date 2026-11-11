@@ -66,8 +66,9 @@ impl App {
     }
 
     /// Redraw rail and sidebar if their unread dots, badges, mutes or DM
-    /// order changed. Called on every message, so it skips no-op rebuilds.
+    /// order changed, and the tray icon with them. Called on every message, so it skips no-op rebuilds.
     pub(super) fn refresh_badges(self: &Rc<Self>) {
+        self.refresh_tray();
         let (rail, sidebar) = {
             let state = self.state.borrow();
             (state.rail_signature(), state.sidebar_signature())

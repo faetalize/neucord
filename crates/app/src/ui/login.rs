@@ -242,6 +242,9 @@ impl App {
     }
 
     pub(super) fn show_login(self: &Rc<Self>, error: Option<&str>) {
+        // A login nobody can see, in a window hidden behind the tray, waits forever.
+        self.window.present();
+        self.refresh_tray();
         self.set_content_title("Neucord");
         self.login.clear();
         self.login.set_error(error);
