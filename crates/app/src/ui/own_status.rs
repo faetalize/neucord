@@ -221,7 +221,7 @@ impl App {
                     .margin_end(4)
                     .build();
                 let size = ((EMOJI_SIZE * self.images.scale()) as u32).next_power_of_two().clamp(16, 4096) as u16;
-                self.images.set(&picture, &discord::cdn::emoji_url(id.0, false, size), false);
+                self.images.set(&picture, &discord::cdn::emoji_url(id.0, false, size));
                 Some(picture.upcast())
             }
             (None, "") => None,

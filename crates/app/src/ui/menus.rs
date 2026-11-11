@@ -8,6 +8,7 @@
 //! Menus open as GTK's own do: right-click and long-press where they land,
 //! Menu and Shift+F10 from the keyboard.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use gtk::prelude::*;
@@ -16,9 +17,36 @@ use gtk::{gdk, gio, glib};
 use super::App;
 use super::chat::{self, MessageTarget};
 use super::{
-    composer, create_thread, edits, emoji, forum, gifs, picker, poll_composer, polls, profile, reactions, reactors,
-    scheduling, sidebar, stickers, threads, uploads, voice,
+    attachments, composer, create_thread, edits, emoji, forum, gifs, notify_menus, picker, poll_composer, polls,
+    profile, reactions, reactors, scheduling, sidebar, slash, stickers, threads, uploads, viewer, voice,
 };
+
+/// An item that copies or opens a link, shown when the link `$link` finds in
+/// a `$T` is of `$kind` (777933 names a link by what it points to, so the
+/// table lists one item for each name and only the one that fits shows),
+/// and `$hidden` doesn't hide the media options.
+macro_rules! link_item {
+    ($T:ty, $name:literal, $label:literal, $kind:expr, $act:path, $link:expr, $hidden:expr) => {
+        $crate::ui::menus::Entry::<$T>::Item($crate::ui::menus::Item {
+            name: $name,
+            label: $label,
+            shows: |app, target| match ($link)(target) {
+                Some(url) => {
+                    discord::media::link_kind(url) == $kind
+                        && discord::media::link_allowed(url)
+                        && !($hidden)(app, target)
+                }
+                None => false,
+            },
+            kind: $crate::ui::menus::Kind::Action(|app, target| {
+                if let Some(url) = ($link)(target) {
+                    $act(app, url)
+                }
+            }),
+        })
+    };
+}
+pub(super) use link_item;
 
 /// One entry of a menu, for what it was opened on: a `T`. `C` is what
 /// entries read and act through: the app, or a stand-in in tests.
@@ -40,13 +68,32 @@ pub(super) struct Item<T: 'static, C: 'static = App> {
 pub(super) enum Kind<T: 'static, C: 'static = App> {
     /// Runs when chosen.
     Action(fn(&Rc<C>, &T)),
+    /// An action the official client shows greyed out while `enabled` says no
+    /// (Mark As Read with nothing to read), rather than leave out.
+    Gated { enabled: fn(&C, &T) -> bool, run: fn(&Rc<C>, &T) },
     /// A checkbox, ticked as `checked` says; `set` gets its new state.
-    #[cfg_attr(not(test), expect(dead_code, reason = "for the entries #10 and #13 bring"))]
     Check { checked: fn(&C, &T) -> bool, set: fn(&Rc<C>, &T, bool) },
     /// More sections, opened from this item. It shows only with something
     /// in them.
     Submenu(Table<T, C>),
+    /// A submenu its feature fills as the menu opens and keeps up to date
+    /// while it is open, such as the commands of the Apps item. It shows
+    /// whenever the item does, empty or not.
+    Live(fn(&Rc<C>, &Rc<T>, Live)),
 }
+
+/// What a [`Kind::Live`] submenu is made of: its entries change through
+/// `menu`, their actions are added to and removed from `actions`, and
+/// `widgets` are placed where an item of `menu` has the `custom` attribute
+/// with their id (a search box, say).
+pub(super) struct Live {
+    pub(super) menu: gio::Menu,
+    pub(super) actions: gio::SimpleActionGroup,
+    pub(super) widgets: Widgets,
+}
+
+/// Widgets for the menu's `custom` items, by id.
+pub(super) type Widgets = Rc<RefCell<Vec<(&'static str, gtk::Widget)>>>;
 
 /// Items made when the menu opens, one per choice: roles, server folders,
 /// recent emoji, mute durations.
@@ -67,7 +114,6 @@ pub(super) struct Choice {
     pub(super) ticked: bool,
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "for the entries #10 and #13 bring"))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Style {
     Plain,
@@ -82,27 +128,58 @@ pub(super) type Table<T, C = App> = &'static [&'static [Entry<T, C>]];
 
 /// A message's menu: what Neucord has of the official client's (761304),
 /// in its order. Create Thread follows Forward, which Neucord has no entry for.
+/// The media group (Copy Image, Save Image, Save File) comes before the link
+/// group, which names a link by what it points to.
+/// Apps follows Copy Text and what Neucord has no entry for (Translate, Pin,
+/// Remind Me), and precedes Copy Message Link.
 const MESSAGE: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
     &[reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
     &[edits::EDIT, composer::REPLY, create_thread::MESSAGE_MENU],
-    &[chat::COPY_TEXT, chat::COPY_MESSAGE_LINK, polls::END_POLL],
+    &[chat::COPY_TEXT, slash::MESSAGE_APPS, notify_menus::MARK_UNREAD, chat::COPY_MESSAGE_LINK, polls::END_POLL],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
-    &[chat::COPY_LINK, chat::OPEN_LINK],
+    &[chat::COPY_IMAGE, chat::SAVE_IMAGE, attachments::SAVE_FILE],
+    &LINKS,
     &[chat::COPY_MESSAGE_ID, stickers::MESSAGE_DETAILS],
 ];
 
 /// [`MESSAGE`] where the media takedown regulation is TIDA: the client (761304)
-/// puts the Copy ID group (50268) before the link group (777933). The group
-/// between them holds nothing Neucord has.
+/// puts the Copy ID group (50268) before the media group and the link group
+/// (777933).
 const MESSAGE_REGULATED: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
     &[reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
     &[edits::EDIT, composer::REPLY, create_thread::MESSAGE_MENU],
-    &[chat::COPY_TEXT, chat::COPY_MESSAGE_LINK, polls::END_POLL],
+    &[chat::COPY_TEXT, slash::MESSAGE_APPS, notify_menus::MARK_UNREAD, chat::COPY_MESSAGE_LINK, polls::END_POLL],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
     &[chat::COPY_MESSAGE_ID, stickers::MESSAGE_DETAILS],
-    &[chat::COPY_LINK, chat::OPEN_LINK],
+    &[chat::COPY_IMAGE, chat::SAVE_IMAGE, attachments::SAVE_FILE],
+    &LINKS,
+];
+
+/// The link group: Copy and Open, under the name the link's type gives each
+/// (only one of the three shows).
+const LINKS: [Entry<MessageTarget>; 6] = [
+    chat::COPY_LINK,
+    chat::COPY_IMAGE_LINK,
+    chat::COPY_MEDIA_LINK,
+    chat::OPEN_LINK,
+    chat::OPEN_IMAGE_LINK,
+    chat::OPEN_MEDIA_LINK,
+];
+
+/// The picture or video in the media viewer (`image-context`, 177079):
+/// Copy Image and Save Image, then the link of what is shown.
+pub(super) const VIEWER_MEDIA: Table<viewer::Target> = &[
+    &[viewer::COPY_IMAGE, viewer::SAVE_IMAGE],
+    &[
+        viewer::COPY_LINK,
+        viewer::COPY_IMAGE_LINK,
+        viewer::COPY_MEDIA_LINK,
+        viewer::OPEN_LINK,
+        viewer::OPEN_IMAGE_LINK,
+        viewer::OPEN_MEDIA_LINK,
+    ],
 ];
 
 /// The message menu for an account: `regulated` is READY's media takedown
@@ -111,15 +188,41 @@ pub(super) fn message(regulated: bool) -> Table<MessageTarget> {
     if regulated { MESSAGE_REGULATED } else { MESSAGE }
 }
 
+/// What a search result's menu offers of the official client's (847342), in
+/// its order. Copy and Search with Google (a selection), Pin Message and Mark
+/// Unread aren't here: a result's text can't be selected, and Neucord has
+/// neither of the others yet. There is no reply, reaction or edit.
+pub(super) const SEARCH_RESULT: Table<MessageTarget> = &[
+    &[chat::COPY_MESSAGE_LINK, edits::DELETE],
+    &[chat::COPY_LINK, chat::OPEN_LINK],
+    &[chat::COPY_MESSAGE_ID, chat::COPY_AUTHOR_ID],
+];
+
 /// A thread's menu, from its row in the sidebar or the browser and the box
 /// under the message that started it: what Neucord has of the client's
-/// (949488), and from a forum post's card. Join Thread and Edit Tags are in
-/// the group of the thread's actions, Pin Post and Unpin Post in the
+/// (949488), and from a forum post's card. Mark As Read comes first, Join
+/// Thread and Edit Tags are in the group of the thread's actions, the mute
+/// and Notification Settings follow it, Pin Post and Unpin Post are in the
 /// moderators', Leave Thread after. Edit Tags and the pins show on forum
-/// posts only. Remove From Thread is on a thread's members (202643), whose
-/// list Neucord doesn't show yet.
-pub(super) const THREAD: Table<threads::ThreadTarget> =
-    &[&[threads::JOIN_THREAD, forum::EDIT_TAGS], &[forum::PIN_POST, forum::UNPIN_POST], &[threads::LEAVE_THREAD]];
+/// posts only, and the mute and settings greyed on a thread we haven't
+/// joined. Remove From Thread is on a thread's members (202643), whose list
+/// Neucord doesn't show yet.
+pub(super) const THREAD: Table<threads::ThreadTarget> = &[
+    &[notify_menus::MARK_THREAD_READ, notify_menus::MARK_THREAD_UNREAD],
+    &[threads::JOIN_THREAD, forum::EDIT_TAGS],
+    &[
+        notify_menus::MUTE_THREAD,
+        notify_menus::UNMUTE_THREAD,
+        notify_menus::MUTE_THREAD_OFF,
+        notify_menus::MUTE_POST,
+        notify_menus::UNMUTE_POST,
+        notify_menus::MUTE_POST_OFF,
+        notify_menus::THREAD_NOTIFICATIONS,
+        notify_menus::THREAD_NOTIFICATIONS_OFF,
+    ],
+    &[forum::PIN_POST, forum::UNPIN_POST],
+    &[threads::LEAVE_THREAD],
+];
 
 /// A forum's tag, on its filter (`forum-tag`, 960015): Copy Tag ID, in
 /// Developer Mode like every copy of an id.
@@ -128,20 +231,63 @@ pub(super) const FORUM_TAG: Table<forum::Tagged> = &[&[forum::COPY_TAG_ID]];
 /// A channel's menu, from its row in the sidebar: what Neucord has of the
 /// client's (428631 for voice and stage channels, 823255 for the others), in
 /// its order. Copy Link is among the channel's actions, Open Chat among the
-/// voice ones, and Copy Channel ID is last. The rest needs what Neucord
-/// doesn't have yet: Mark As Read, Mute and Notification Settings are #13's,
-/// joining and what happens in a call is #12's.
-pub(super) const CHANNEL: Table<sidebar::ChannelTarget> =
-    &[&[sidebar::COPY_CHANNEL_LINK], &[sidebar::OPEN_CHAT], &[sidebar::COPY_CHANNEL_ID]];
+/// voice ones, and Copy Channel ID is last. Mark As Read comes first, in the
+/// place of Mark Unread where the experiment gives it (`2026-08-mark-channel-unread`),
+/// and Mute and Notification Settings follow the channel's actions. The rest
+/// needs what Neucord doesn't have yet: joining and what happens in a call is
+/// #12's.
+pub(super) const CHANNEL: Table<sidebar::ChannelTarget> = &[
+    &[notify_menus::MARK_CHANNEL_READ, notify_menus::MARK_CHANNEL_UNREAD],
+    &[sidebar::COPY_CHANNEL_LINK],
+    &[sidebar::OPEN_CHAT],
+    &[notify_menus::MUTE_CHANNEL, notify_menus::UNMUTE_CHANNEL, notify_menus::CHANNEL_NOTIFICATIONS],
+    &[sidebar::COPY_CHANNEL_ID],
+];
+
+/// A category's menu, from its heading in the sidebar: Mark As Read, Mute
+/// Category and Notification Settings, as the client has them among items
+/// Neucord has no use for yet (editing). Muting folds the category, and
+/// clicking its heading does too.
+pub(super) const CATEGORY: Table<sidebar::ChannelTarget> = &[
+    &[notify_menus::MARK_CHANNEL_READ],
+    &[notify_menus::MUTE_CATEGORY, notify_menus::UNMUTE_CATEGORY, notify_menus::CHANNEL_NOTIFICATIONS],
+];
+
+/// A server icon's menu (871638): Mark As Read, then Mute Server,
+/// Notification Settings and Hide Muted Channels, which the client groups
+/// together. What else the menu holds needs what Neucord doesn't have yet.
+pub(super) const GUILD: Table<notify_menus::GuildTarget> = &[
+    &[notify_menus::MARK_GUILD_READ],
+    &[
+        notify_menus::MUTE_GUILD,
+        notify_menus::UNMUTE_GUILD,
+        notify_menus::GUILD_NOTIFICATIONS,
+        notify_menus::HIDE_MUTED_CHANNELS,
+    ],
+];
+
+/// A server folder's menu, from its button in the rail (865815): Mark Folder
+/// As Read. Moving it, its settings and collapsing all folders need the
+/// folder arrangement Neucord only reads.
+pub(super) const FOLDER: Table<notify_menus::FolderTarget> = &[&[notify_menus::MARK_FOLDER_READ]];
+
+/// A DM's or group DM's menu (385913, 4027): Mark As Read first, and Mute
+/// Conversation in a group of its own.
+pub(super) const DIRECT_MESSAGE: Table<sidebar::ChannelTarget> = &[
+    &[notify_menus::MARK_CHANNEL_READ, notify_menus::MARK_CHANNEL_UNREAD],
+    &[notify_menus::MUTE_CONVERSATION, notify_menus::UNMUTE_CONVERSATION],
+];
 
 /// A person's menu, opened from a message's author, a mention and a member
 /// list row: what Neucord has of the official client's (`user-context`,
 /// 841549, the server variant's groups). The client's also has call, voice,
 /// role and moderation items, which Neucord has no surface for, and Add
-/// Friend, Block and Ignore, whose requests Neucord has never sent.
+/// Friend, Block and Ignore, whose requests Neucord has never sent. Apps is
+/// in the group of Invite to Server and Remove Friend, and shows in the
+/// channel the menu was opened in.
 pub(super) const USER: Table<profile::UserTarget> = &[
     &[profile::PROFILE, profile::MENTION, profile::MESSAGE, profile::NOTE],
-    &[profile::REMOVE_FRIEND],
+    &[slash::USER_APPS, profile::REMOVE_FRIEND],
     &[profile::COPY_USER_ID],
 ];
 
@@ -150,13 +296,15 @@ pub(super) const USER: Table<profile::UserTarget> = &[
 /// Upload Text as File show where files may be attached, Record Voice Message
 /// where the experiment and Send Voice Messages allow it (`canRecordVoiceMessage`),
 /// Create Thread where threads may be started (`canStartThreads`), Create Poll
-/// where polls may be posted (`canPostPolls`), Schedule Message where we may
+/// where polls may be posted (`canPostPolls`), Use Apps where nothing is being
+/// replied to (`canUseApplicationCommands`), Schedule Message where we may
 /// post (`vK` in 566908), and the rest are other features'.
 pub(super) const ATTACH: Table<()> = &[&[
     uploads::UPLOAD_FILE,
     uploads::UPLOAD_TEXT,
     create_thread::ATTACH_MENU,
     poll_composer::CREATE_POLL,
+    slash::USE_APPS,
     scheduling::SCHEDULE_MESSAGE,
     voice::RECORD_VOICE,
 ]];
@@ -187,12 +335,16 @@ pub(super) const GIF_PICKER: Table<picker::Target> = &[&[gifs::COPY_LINK]];
 /// Where menu items find their actions.
 const PREFIX: &str = "menu";
 
-/// `table`'s menu for `target`, with the entries that show, and their
-/// actions, to insert as [`PREFIX`].
-fn build<T: 'static, C: 'static>(cx: &Rc<C>, table: Table<T, C>, target: T) -> (gio::Menu, gio::SimpleActionGroup) {
-    let (menu, actions) = (gio::Menu::new(), gio::SimpleActionGroup::new());
-    fill(cx, table, &Rc::new(target), &menu, &actions);
-    (menu, actions)
+/// `table`'s menu for `target`, with the entries that show, their actions,
+/// to insert as [`PREFIX`], and the widgets for its custom items.
+fn build<T: 'static, C: 'static>(
+    cx: &Rc<C>,
+    table: Table<T, C>,
+    target: T,
+) -> (gio::Menu, gio::SimpleActionGroup, Widgets) {
+    let (menu, actions, widgets) = (gio::Menu::new(), gio::SimpleActionGroup::new(), Widgets::default());
+    fill(cx, table, &Rc::new(target), &menu, &actions, &widgets);
+    (menu, actions, widgets)
 }
 
 fn fill<T: 'static, C: 'static>(
@@ -201,6 +353,7 @@ fn fill<T: 'static, C: 'static>(
     target: &Rc<T>,
     menu: &gio::Menu,
     actions: &gio::SimpleActionGroup,
+    widgets: &Widgets,
 ) {
     let detailed = |name: &str| format!("{PREFIX}.{name}");
     for entries in table {
@@ -209,8 +362,11 @@ fn fill<T: 'static, C: 'static>(
             match entry {
                 Entry::Item(item) if !(item.shows)(cx, target) => {}
                 Entry::Item(item) => match &item.kind {
-                    Kind::Action(activate) => {
+                    Kind::Action(activate) | Kind::Gated { run: activate, .. } => {
                         let action = gio::SimpleAction::new(item.name, None);
+                        if let Kind::Gated { enabled, .. } = &item.kind {
+                            action.set_enabled(enabled(cx, target));
+                        }
                         let (cx, target, activate) = (Rc::downgrade(cx), target.clone(), *activate);
                         action.connect_activate(move |_, _| {
                             if let Some(cx) = cx.upgrade() {
@@ -227,10 +383,19 @@ fn fill<T: 'static, C: 'static>(
                     }
                     Kind::Submenu(table) => {
                         let submenu = gio::Menu::new();
-                        fill(cx, table, target, &submenu, actions);
+                        fill(cx, table, target, &submenu, actions, widgets);
                         if submenu.n_items() > 0 {
                             section.append_submenu(Some(item.label), &submenu);
                         }
+                    }
+                    Kind::Live(make) => {
+                        let submenu = gio::Menu::new();
+                        make(
+                            cx,
+                            target,
+                            Live { menu: submenu.clone(), actions: actions.clone(), widgets: widgets.clone() },
+                        );
+                        section.append_submenu(Some(item.label), &submenu);
                     }
                 },
                 Entry::Choices(choices) => {
@@ -325,7 +490,7 @@ pub(super) enum At {
 
 /// Open `table`'s menu for `target` over `parent`.
 pub(super) fn popup<T: 'static>(app: &Rc<App>, table: Table<T>, target: T, parent: &impl IsA<gtk::Widget>, at: At) {
-    let (menu, actions) = build(app, table, target);
+    let (menu, actions, widgets) = build(app, table, target);
     if menu.n_items() == 0 {
         return;
     }
@@ -336,6 +501,9 @@ pub(super) fn popup<T: 'static>(app: &Rc<App>, table: Table<T>, target: T, paren
     let popover =
         gtk::PopoverMenu::builder().menu_model(&menu).has_arrow(false).halign(halign).pointing_to(&rect).build();
     popover.insert_action_group(PREFIX, Some(&actions));
+    for (id, widget) in widgets.take() {
+        popover.add_child(&widget, id);
+    }
     popover.set_parent(parent);
     popover.connect_closed(|popover| {
         // Once the chosen item has run, which may come after closing.
@@ -403,7 +571,7 @@ pub(super) fn extend<T: 'static>(
             let (Some(app), Some(view)) = (app.upgrade(), view.upgrade()) else { return };
             let actions = gio::SimpleActionGroup::new();
             extra.remove_all();
-            fill(&app, table, &Rc::new(target()), &extra, &actions);
+            fill(&app, table, &Rc::new(target()), &extra, &actions, &Widgets::default());
             view.insert_action_group(PREFIX, Some(&actions));
         }
     });
@@ -469,6 +637,15 @@ mod tests {
         shows: |_, _| true,
         kind: Kind::Action(|cx, target| log(cx, format!("shown {target}"))),
     });
+    const GREYED: Entry<Target, Cx> = Entry::Item(Item {
+        name: "greyed",
+        label: "Greyed",
+        shows: |_, _| true,
+        kind: Kind::Gated {
+            enabled: |_, target| *target == "on",
+            run: |cx, target| log(cx, format!("greyed {target}")),
+        },
+    });
     const HIDDEN: Entry<Target, Cx> =
         Entry::Item(Item { name: "hidden", label: "Hidden", shows: |_, _| false, kind: Kind::Action(|_, _| {}) });
     const MUTED: Entry<Target, Cx> = Entry::Item(Item {
@@ -502,6 +679,7 @@ mod tests {
     const EMPTY: Entry<Target, Cx> =
         Entry::Item(Item { name: "empty", label: "Empty", shows: |_, _| true, kind: Kind::Submenu(&[&[HIDDEN]]) });
     const TABLE: Table<Target, Cx> = &[&[SHOWN, HIDDEN], &[HIDDEN, EMPTY], &[MUTED, SETTINGS], &[ROLES, MUTE_FOR]];
+    const GATED: Table<Target, Cx> = &[&[GREYED, SHOWN]];
 
     fn label(menu: &gio::MenuModel, n: i32) -> Option<String> {
         menu.item_attribute_value(n, "label", Some(glib::VariantTy::STRING))?.get()
@@ -514,7 +692,7 @@ mod tests {
     #[test]
     fn shows_what_shows_in_sections() {
         let cx = Rc::new(Cx::default());
-        let (menu, _) = build(&cx, TABLE, "m");
+        let (menu, _, _) = build(&cx, TABLE, "m");
         // The section of hidden items, and the submenu of them, are gone.
         assert_eq!(menu.n_items(), 3);
         let first = section(menu.upcast_ref(), 0);
@@ -527,6 +705,22 @@ mod tests {
         assert_eq!(label(&section(menu.upcast_ref(), 2), 0).as_deref(), Some("mod__team"));
     }
 
+    #[test]
+    fn a_gated_item_shows_greyed_until_it_may_run() {
+        let cx = Rc::new(Cx::default());
+        for (target, enabled) in [("off", false), ("on", true)] {
+            let (menu, actions, _) = build(&cx, GATED, target);
+            let section = section(menu.upcast_ref(), 0);
+            assert_eq!(section.n_items(), 2, "shown either way");
+            assert_eq!(actions.lookup_action("greyed").map(|a| a.is_enabled()), Some(enabled));
+            // A greyed action is not run, as GTK's menus see to; an enabled one is.
+            actions.activate_action("greyed", None);
+            let ran = cx.log.borrow().iter().filter(|l| l.starts_with("greyed")).count();
+            assert_eq!(ran, usize::from(enabled));
+            cx.log.borrow_mut().clear();
+        }
+    }
+
     /// The names of a table's entries, section by section.
     fn names(table: Table<MessageTarget>) -> Vec<Vec<&'static str>> {
         let name = |entry: &Entry<MessageTarget>| match entry {
@@ -537,19 +731,22 @@ mod tests {
     }
 
     #[test]
-    fn message_menu_puts_the_id_before_the_links_where_media_takedown_is_regulated() {
+    fn message_menu_puts_the_id_before_the_media_and_links_where_media_takedown_is_regulated() {
         let ends = |regulated| {
             let names = names(message(regulated));
-            names[names.len() - 2..].to_vec()
+            names[names.len() - 3..].to_vec()
         };
         let id = || vec!["copy-message-id", "message-details"];
-        assert_eq!(ends(false), [vec!["copy-link", "open-link"], id()]);
-        assert_eq!(ends(true), [id(), vec!["copy-link", "open-link"]]);
-        // The two groups swap and nothing else moves.
-        let mut swapped = names(message(false));
-        let n = swapped.len();
-        swapped.swap(n - 2, n - 1);
-        assert_eq!(names(message(true)), swapped);
+        let media = || vec!["copy-image", "save-image", "save-file"];
+        let links = || {
+            ["copy-link", "copy-image-link", "copy-media-link", "open-link", "open-image-link", "open-media-link"]
+                .to_vec()
+        };
+        assert_eq!(ends(false), [media(), links(), id()]);
+        assert_eq!(ends(true), [id(), media(), links()]);
+        // The three groups move and nothing else does.
+        let n = names(message(false)).len();
+        assert_eq!(names(message(true))[..n - 3], names(message(false))[..n - 3]);
     }
 
     #[test]
@@ -579,9 +776,43 @@ mod tests {
     }
 
     #[test]
+    fn a_live_submenu_is_made_by_its_feature_and_shows_even_when_empty() {
+        const FILLED: Entry<Target, Cx> = Entry::Item(Item {
+            name: "filled",
+            label: "Filled",
+            shows: |_, _| true,
+            kind: Kind::Live(|cx, target, live| {
+                let action = gio::SimpleAction::new("inner", None);
+                let (cx, target) = (Rc::downgrade(cx), *target.as_ref());
+                action.connect_activate(move |_, _| {
+                    if let Some(cx) = cx.upgrade() {
+                        log(&cx, format!("inner {target}"));
+                    }
+                });
+                live.actions.add_action(&action);
+                live.menu.append(Some("Inner"), Some("menu.inner"));
+            }),
+        });
+        const EMPTY_LIVE: Entry<Target, Cx> =
+            Entry::Item(Item { name: "bare", label: "Bare", shows: |_, _| true, kind: Kind::Live(|_, _, _| {}) });
+        const NOT_SHOWN: Entry<Target, Cx> =
+            Entry::Item(Item { name: "no", label: "No", shows: |_, _| false, kind: Kind::Live(|_, _, _| panic!()) });
+        const LIVE: Table<Target, Cx> = &[&[FILLED, EMPTY_LIVE, NOT_SHOWN]];
+        let cx = Rc::new(Cx::default());
+        let (menu, actions, _) = build(&cx, LIVE, "m");
+        let section = section(menu.upcast_ref(), 0);
+        assert_eq!(section.n_items(), 2, "both show, the one that doesn't isn't made");
+        let filled = section.item_link(0, "submenu").expect("a submenu");
+        assert_eq!(label(&filled, 0).as_deref(), Some("Inner"));
+        assert_eq!(section.item_link(1, "submenu").expect("a submenu").n_items(), 0);
+        actions.activate_action("inner", None);
+        assert_eq!(*cx.log.borrow(), ["inner m"]);
+    }
+
+    #[test]
     fn entries_act_and_keep_their_state() {
         let cx = Rc::new(Cx::default());
-        let (_, actions) = build(&cx, TABLE, "m");
+        let (_, actions, _) = build(&cx, TABLE, "m");
         let state = |name: &str| actions.action_state(name);
         assert_eq!(state("muted").and_then(|s| s.get::<bool>()), Some(true));
         assert_eq!(state("level").and_then(|s| s.get::<String>()).as_deref(), Some("all"));

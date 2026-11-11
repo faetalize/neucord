@@ -4,6 +4,7 @@
 //! does, then kept.
 
 use std::cell::{Cell, OnceCell, RefCell};
+use std::rc::Rc;
 
 use discord::{Message, Snowflake};
 use gtk::glib;
@@ -54,6 +55,9 @@ pub(super) struct Parts {
     /// The line above a reply.
     pub(super) reply: RefCell<Option<gtk::Widget>>,
     pub(super) gutter: gtk::Box,
+    /// The id of the first message of the group the row's message is in, for
+    /// the avatar to move when any message of it is under the pointer.
+    pub(super) group: Rc<Cell<u64>>,
     /// The avatar, and whose (id and picture) it is.
     avatar: RefCell<Option<(Snowflake, Option<String>, gtk::Widget)>>,
     /// A system message's icon, in the avatar's place.
@@ -146,6 +150,7 @@ impl MessageRow {
             row,
             reply: RefCell::new(None),
             gutter,
+            group: Rc::default(),
             avatar: RefCell::new(None),
             icon: OnceCell::new(),
             header,
@@ -193,17 +198,18 @@ impl Parts {
         parts.new.set_visible(new);
     }
 
-    /// Show `user`'s avatar in the gutter, making it if it's someone else's.
-    pub(super) fn show_avatar(&self, user: &discord::User, make: impl FnOnce() -> gtk::Widget) {
+    /// Show `user`'s avatar, with the picture `hash` names, in the gutter,
+    /// making it if it's someone else's or another picture.
+    pub(super) fn show_avatar(&self, user: Snowflake, hash: Option<&str>, make: impl FnOnce() -> gtk::Widget) {
         let mut avatar = self.avatar.borrow_mut();
-        let current = avatar.as_ref().filter(|(id, hash, _)| *id == user.id && *hash == user.avatar);
+        let current = avatar.as_ref().filter(|(id, shown, _)| *id == user && shown.as_deref() == hash);
         if current.is_none() {
             if let Some((_, _, old)) = avatar.take() {
                 self.gutter.remove(&old);
             }
             let widget = make();
             self.gutter.append(&widget);
-            *avatar = Some((user.id, user.avatar.clone(), widget));
+            *avatar = Some((user, hash.map(str::to_owned), widget));
         }
         if let Some((_, _, widget)) = avatar.as_ref() {
             widget.set_visible(true);

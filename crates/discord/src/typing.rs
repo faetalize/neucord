@@ -86,6 +86,9 @@ pub struct Typing {
     channels: HashMap<Snowflake, Vec<(Snowflake, i64)>>,
     local: Option<Local>,
     tokens: u64,
+    /// The user turned sending off (Neucord's own option: the client always
+    /// sends). Showing who else is typing is unaffected.
+    silent: bool,
 }
 
 impl Typing {
@@ -147,9 +150,22 @@ impl Typing {
         self.stop(channel, author);
     }
 
+    /// Whether our typing goes out at all. Turning it off withdraws a send
+    /// that is waiting, so the notice the user just opted out of doesn't
+    /// follow them.
+    pub fn set_sending(&mut self, sending: bool) {
+        self.silent = !sending;
+        if self.silent {
+            self.local = None;
+        }
+    }
+
     /// The user typed in `channel` (`TYPING_START_LOCAL`). Returns when a send
     /// is to be made, `None` while one is waiting or went out lately.
     pub fn typed(&mut self, channel: Snowflake, me: Snowflake, now_ms: i64) -> Option<Scheduled> {
+        if self.silent {
+            return None;
+        }
         if self.local.is_some_and(|l| l.channel != channel) {
             self.local = None;
         }
@@ -289,6 +305,34 @@ mod tests {
         assert_eq!(typing.next_lapse(ROOM, 0), Some(15_000));
         typing.prune(15_000);
         assert_eq!(typing.next_lapse(ROOM, 0), None);
+    }
+
+    #[test]
+    fn typing_with_sending_off_schedules_nothing_and_shows_no_entry_of_ours() {
+        let mut typing = Typing::default();
+        typing.set_sending(false);
+        assert_eq!(typing.typed(ROOM, ME, 0), None);
+        assert!(typing.typers(ROOM, 0).is_empty());
+        typing.start(ROOM, Snowflake(7), 0);
+        assert_eq!(typers(&typing, 1), [7], "other people's typing still shows");
+    }
+
+    #[test]
+    fn turning_sending_off_withdraws_the_send_that_is_waiting() {
+        let mut typing = Typing::default();
+        let waiting = typing.typed(ROOM, ME, 0).unwrap();
+        typing.set_sending(false);
+        assert_eq!(typing.send_due(waiting.token, 1_500), None);
+    }
+
+    #[test]
+    fn turning_sending_back_on_sends_with_the_next_keystroke() {
+        let mut typing = Typing::default();
+        typing.set_sending(false);
+        typing.typed(ROOM, ME, 0);
+        typing.set_sending(true);
+        let first = typing.typed(ROOM, ME, 100).expect("scheduled");
+        assert_eq!(typing.send_due(first.token, 1_600), Some(ROOM));
     }
 
     #[test]
