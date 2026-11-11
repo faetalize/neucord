@@ -214,6 +214,7 @@ fn button_widget(button: &Button, component: &Component, images: Option<&Images>
                 if live.local.visual(component) == Visual::Loading {
                     // The label stays to keep the button's size, under the spinner.
                     content.set_opacity(0.0);
+                    widget.set_child(gtk::Widget::NONE);
                     let overlay = gtk::Overlay::new();
                     overlay.set_child(Some(&content));
                     overlay.add_overlay(&gtk::Spinner::builder().spinning(true).halign(gtk::Align::Center).build());
@@ -245,14 +246,24 @@ struct Menu<'a> {
     max: usize,
 }
 
-impl Menu<'_> {
-    /// What it shows: the options picked, or what to do.
+/// What a menu's face says, which outlives the component it came from.
+struct MenuText {
+    placeholder: Option<String>,
+    options: Vec<SelectOption>,
+}
+
+impl MenuText {
+    fn of(menu: &Menu) -> Self {
+        MenuText { placeholder: menu.placeholder.map(str::to_owned), options: menu.options.to_vec() }
+    }
+
+    /// The options picked, or what to do.
     fn label(&self, picked: &[String]) -> String {
         let names: Vec<&str> =
             self.options.iter().filter(|o| picked.contains(&o.value)).map(|o| o.label.as_str()).collect();
-        match (names.is_empty(), self.placeholder) {
+        match (names.is_empty(), &self.placeholder) {
             (false, _) => names.join(", "),
-            (true, Some(placeholder)) => placeholder.to_owned(),
+            (true, Some(placeholder)) => placeholder.clone(),
             (true, None) => "Make a selection".to_owned(),
         }
     }
@@ -269,7 +280,10 @@ fn menu_widget(menu: &Menu, component: &Component, images: Option<&Images>, live
     let picked = Rc::new(RefCell::new(held.unwrap_or(defaults)));
     let loading = live.is_some_and(|l| l.local.visual(component) == Visual::Loading);
 
-    let label = gtk::Label::builder().label(menu.label(&picked.borrow())).ellipsize(pango::EllipsizeMode::End).build();
+    let label = gtk::Label::builder()
+        .label(MenuText::of(menu).label(&picked.borrow()))
+        .ellipsize(pango::EllipsizeMode::End)
+        .build();
     let face = gtk::Box::builder().spacing(6).build();
     face.append(&label);
     if loading {
@@ -339,11 +353,10 @@ fn menu_widget(menu: &Menu, component: &Component, images: Option<&Images>, live
                 row.append(&gtk::Image::from_icon_name("object-select-symbolic"));
             }
             let choice = gtk::Button::builder().child(&row).css_classes(["flat"]).build();
-            let (picked, popover, commit) = (picked.clone(), popover.clone(), commit.clone());
+            let (picked, popover) = (picked.clone(), popover.clone());
             choice.connect_clicked(move |_| {
                 *picked.borrow_mut() = vec![value.clone()];
                 popover.popdown();
-                commit();
             });
             list.append(&choice);
         } else {
@@ -372,19 +385,15 @@ fn menu_widget(menu: &Menu, component: &Component, images: Option<&Images>, live
         for (v, check) in checks.borrow().iter() {
             check.set_sensitive(!full || picked.borrow().contains(v));
         }
-        let (menu_label, labels) = (label.clone(), menu.options.to_vec());
-        let (picked, placeholder) = (picked.clone(), menu.placeholder.map(str::to_owned));
-        popover.connect_closed(move |_| {
-            let names: Vec<&str> =
-                labels.iter().filter(|o| picked.borrow().contains(&o.value)).map(|o| o.label.as_str()).collect();
-            menu_label.set_label(&match (names.is_empty(), &placeholder) {
-                (false, _) => names.join(", "),
-                (true, Some(p)) => p.clone(),
-                (true, None) => "Make a selection".to_owned(),
-            });
-            commit();
-        });
     }
+    // What was picked goes when the list has closed: for one option that
+    // is when it is chosen, for several when it is dismissed. Sending then
+    // leaves the popover whole when the row is drawn again.
+    let (face_label, menu_copy) = (label.clone(), MenuText::of(menu));
+    popover.connect_closed(move |_| {
+        face_label.set_label(&menu_copy.label(&picked.borrow()));
+        commit();
+    });
     button.upcast()
 }
 
