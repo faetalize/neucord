@@ -27,7 +27,12 @@ impl System {
         self.parts
             .iter()
             .map(|part| match part {
-                Part::Text(t) | Part::Name(t) | Part::Strong(t) | Part::Jump { label: t, .. } => t.as_str(),
+                Part::Text(t)
+                | Part::Name(t)
+                | Part::Strong(t)
+                | Part::Jump { label: t, .. }
+                | Part::Thread { label: t, .. } => t.as_str(),
+                Part::Threads => "threads",
             })
             .collect()
     }
@@ -63,6 +68,13 @@ pub enum Part {
         label: String,
         to: Snowflake,
     },
+    /// A thread's name, which opens the thread.
+    Thread {
+        label: String,
+        id: Snowflake,
+    },
+    /// "threads", which opens the browser of the message's channel.
+    Threads,
 }
 
 /// The message types people write; everything else is a system message.
@@ -240,10 +252,20 @@ fn kind_with(message: &Message, place: &Place, show_unknown: bool) -> Kind {
              week, it will be removed from Discovery."
             ))],
         ),
-        18 => (
-            Icon::Thread,
-            vec![author(), text(" started a thread: "), Part::Strong(message.content.clone()), text(".")],
-        ),
+        // Its name links to the thread, which the message references; the
+        // client shows the thread's name as it is now, and this one is as it
+        // was named then.
+        18 => {
+            let name = message.content.clone();
+            let thread = match message.created_thread() {
+                Some(id) => Part::Thread { label: name, id },
+                None => Part::Strong(name),
+            };
+            (
+                Icon::Thread,
+                vec![author(), text(" started a thread: "), thread, text(". See all "), Part::Threads, text(".")],
+            )
+        }
         // A thread's first message: the one it was started from, as written.
         21 if message.thread_starter().is_some() => return Kind::Normal,
         21 => (Icon::Thread, vec![text("Sorry, we couldn't load the first message in this thread")]),
@@ -412,6 +434,18 @@ mod tests {
         let deleted = message(r#""type":21,"message_reference":{"message_id":"90"},"referenced_message":null"#);
         assert_eq!(line(kind(&deleted, &DM)), "Sorry, we couldn't load the first message in this thread");
         assert!(message(r#""type":0,"referenced_message":null"#).thread_starter().is_none());
+    }
+
+    #[test]
+    fn started_threads_link_to_the_thread_and_to_all() {
+        let created = message(r#""type":18,"content":"plans","message_reference":{"channel_id":"20"}"#);
+        let Kind::System(system) = kind(&created, &DM) else { panic!("a system message") };
+        assert_eq!(system.text(), "alice started a thread: plans. See all threads.");
+        assert!(system.parts.contains(&Part::Thread { label: "plans".into(), id: Snowflake(20) }));
+        assert!(system.parts.contains(&Part::Threads));
+        let lost = message(r#""type":18,"content":"plans""#);
+        let Kind::System(system) = kind(&lost, &DM) else { panic!("a system message") };
+        assert!(system.parts.contains(&Part::Strong("plans".into())), "no thread to open");
     }
 
     #[test]

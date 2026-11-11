@@ -508,6 +508,8 @@ pub fn system_markup(parts: &[Part], time: &str) -> String {
             Part::Text(text) => escape(text),
             Part::Name(text) | Part::Strong(text) => format!("<b>{}</b>", escape(text)),
             Part::Jump { label, to } => format!("<a href=\"{JUMP}{to}\">{}</a>", escape(label)),
+            Part::Thread { label, id } => format!("<b><a href=\"{THREAD}{id}\">{}</a></b>", escape(label)),
+            Part::Threads => format!("<a href=\"{THREADS}\">threads</a>"),
         };
     }
     out + &format!("  <span fgalpha=\"55%\" size=\"small\">{}</span>", escape(time))
@@ -537,12 +539,30 @@ fn hex(colour: u32) -> String {
     format!("#{:06x}", colour & 0xff_ffff)
 }
 
-/// Links to a message in the same channel.
+/// Links to a message in the same channel, to a thread, and to the thread
+/// browser.
 const JUMP: &str = "neucord:message/";
+const THREAD: &str = "neucord:thread/";
+const THREADS: &str = "neucord:threads";
 
-/// The message a link made by [`system_markup`] jumps to.
-pub fn jump_target(uri: &str) -> Option<discord::Snowflake> {
-    uri.strip_prefix(JUMP)?.parse().ok().map(discord::Snowflake)
+/// Where a link made by [`system_markup`] goes.
+#[derive(Debug, PartialEq)]
+pub enum SystemLink {
+    Jump(discord::Snowflake),
+    Thread(discord::Snowflake),
+    Threads,
+}
+
+pub fn system_link(uri: &str) -> Option<SystemLink> {
+    let id = |rest: &str| rest.parse().ok().map(discord::Snowflake);
+    match uri {
+        THREADS => Some(SystemLink::Threads),
+        _ => match (uri.strip_prefix(JUMP), uri.strip_prefix(THREAD)) {
+            (Some(rest), _) => id(rest).map(SystemLink::Jump),
+            (_, Some(rest)) => id(rest).map(SystemLink::Thread),
+            _ => None,
+        },
+    }
 }
 
 /// What an entity reads as: `@name`, `#channel`, `:emoji:`, a date.
@@ -735,8 +755,10 @@ mod tests {
         ];
         let markup = system_markup(&parts, "12:00");
         assert!(markup.starts_with("<b>a&amp;b</b> pinned <a href=\"neucord:message/9\">a message</a>"));
-        assert_eq!(jump_target("neucord:message/9"), Some(discord::Snowflake(9)));
-        assert_eq!(jump_target("https://e.com"), None);
+        assert_eq!(system_link("neucord:message/9"), Some(SystemLink::Jump(discord::Snowflake(9))));
+        assert_eq!(system_link("neucord:thread/9"), Some(SystemLink::Thread(discord::Snowflake(9))));
+        assert_eq!(system_link("neucord:threads"), Some(SystemLink::Threads));
+        assert_eq!(system_link("https://e.com"), None);
     }
 
     #[test]

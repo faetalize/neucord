@@ -33,6 +33,7 @@ mod sidebar;
 mod state;
 mod stickers;
 mod thread_line;
+mod threads;
 mod typing;
 mod unread;
 mod uploads;
@@ -164,6 +165,10 @@ pub struct App {
     row_epoch: Cell<u64>,
     /// The list of who reacted, while it is open.
     reactors_view: RefCell<Option<Rc<reactors::View>>>,
+    /// The thread browser, while it's open.
+    threads_view: RefCell<Option<Rc<threads::View>>>,
+    /// Opens the thread browser, from the chat's header.
+    threads_button: gtk::Button,
     /// The content of messages whose rows have moved on to others, for when
     /// they come back (see [`chat::KeptContent`]).
     kept_content: RefCell<crate::kept::Kept<Snowflake, chat::KeptContent>>,
@@ -334,6 +339,12 @@ impl App {
             highlight: Cell::default(),
             row_epoch: Cell::default(),
             reactors_view: RefCell::default(),
+            threads_view: RefCell::default(),
+            threads_button: gtk::Button::builder()
+                .icon_name("chat-message-new-symbolic")
+                .tooltip_text("Threads")
+                .visible(false)
+                .build(),
             kept_content: RefCell::new(crate::kept::Kept::new(chat::KEPT_CONTENT)),
             rows: RefCell::default(),
             scroll_loader: RefCell::default(),

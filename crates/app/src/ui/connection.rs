@@ -345,6 +345,9 @@ impl App {
             state.ready_seen = true;
             state.reconnect_attempts = 0;
             state.guilds = guilds;
+            // What a session loaded of threads goes with it.
+            state.archives.clear();
+            state.fetched_threads.clear();
             // A new session: what we asked for before is forgotten, as in the client.
             state.members = members;
             state.private_channels = private_channels;
@@ -528,7 +531,7 @@ impl App {
     /// Threads in a server changed, as `change` makes them: created,
     /// renamed, archived, locked, joined or left. Whether we may post in one,
     /// or still see it, may have changed with them.
-    fn on_threads(self: &Rc<Self>, guild_id: Snowflake, change: impl FnOnce(&mut Guild)) {
+    pub(super) fn on_threads(self: &Rc<Self>, guild_id: Snowflake, change: impl FnOnce(&mut Guild)) {
         let open = {
             let mut state = self.state.borrow_mut();
             let Some(guild) = state.guilds.iter_mut().find(|g| g.id == guild_id) else { return };
@@ -537,7 +540,10 @@ impl App {
         };
         if open {
             self.rebuild_sidebar();
+            self.refresh_thread_boxes();
+            self.sync_threads_button();
         }
+        self.refresh_threads_view();
         self.permissions_changed(Some(guild_id));
         self.thread_arrivals();
     }

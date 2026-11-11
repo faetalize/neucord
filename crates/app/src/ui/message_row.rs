@@ -63,6 +63,10 @@ pub(super) struct Parts {
     pub(super) time: gtk::Label,
     /// What the message says and shows.
     pub(super) content: gtk::Box,
+    /// The box for the thread the message started, below the content, and
+    /// what it holds.
+    pub(super) thread_slot: gtk::Box,
+    pub(super) thread: RefCell<Option<gtk::Widget>>,
     pub(super) edit_button: gtk::Button,
     pub(super) reply_button: gtk::Button,
     pub(super) more: gtk::Button,
@@ -101,6 +105,8 @@ impl MessageRow {
         body.append(&header);
         let content = gtk::Box::new(gtk::Orientation::Vertical, 2);
         body.append(&content);
+        let thread_slot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        body.append(&thread_slot);
         main.append(&body);
 
         // Over the row, not in it: as part of the layout they would make
@@ -146,6 +152,8 @@ impl MessageRow {
             name,
             time,
             content,
+            thread_slot,
+            thread: RefCell::new(None),
             edit_button,
             reply_button,
             more,

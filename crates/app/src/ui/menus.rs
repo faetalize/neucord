@@ -17,7 +17,7 @@ use super::App;
 use super::chat::{self, MessageTarget};
 use super::{
     composer, create_thread, edits, emoji, gifs, picker, poll_composer, polls, reactions, reactors, scheduling,
-    stickers, uploads, voice,
+    stickers, threads, uploads, voice,
 };
 
 /// One entry of a menu, for what it was opened on: a `T`. `C` is what
@@ -110,6 +110,13 @@ const MESSAGE_REGULATED: Table<MessageTarget> = &[
 pub(super) fn message(regulated: bool) -> Table<MessageTarget> {
     if regulated { MESSAGE_REGULATED } else { MESSAGE }
 }
+
+/// A thread's menu, from its row in the sidebar or the browser and the box
+/// under the message that started it: what Neucord has of the client's
+/// (949488). Join Thread is in the group of the thread's actions, Leave
+/// Thread after the moderators'. Remove From Thread is on a thread's members
+/// (202643), whose list Neucord doesn't show yet.
+pub(super) const THREAD: Table<threads::ThreadTarget> = &[&[threads::JOIN_THREAD], &[threads::LEAVE_THREAD]];
 
 /// The attach button's menu, opened from the button: the official client's
 /// (`channel-attach`, 316576) with what Neucord has of it. Upload a File and
