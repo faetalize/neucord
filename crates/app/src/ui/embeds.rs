@@ -7,6 +7,8 @@ use gtk::prelude::*;
 use gtk::{glib, pango};
 
 use super::media_frame::MediaFrame;
+use super::video::{Options, Player};
+use super::viewer::MediaCx;
 use crate::images::Images;
 use crate::render::{self, Context, Names};
 
@@ -20,41 +22,48 @@ const FIELD_COLUMNS: i32 = 12;
 /// The bar of embeds that set no colour.
 const DEFAULT_COLOUR: u32 = 0x1E1F22;
 
-/// One embed. `images` is `None` where nothing may load. With the viewer's
-/// `inline_embed_media` off, author and footer icons still show, as in the
-/// official client.
+/// The embed at place `n` among the message's. `images` is `None` where
+/// nothing may load. With the viewer's `inline_embed_media` off, author and
+/// footer icons still show, as in the official client.
 pub(super) fn embed_widget(
     embed: &Embed,
+    n: usize,
     names: &Names,
     images: Option<&Images>,
     settings: &MediaSettings,
+    view: &MediaCx,
 ) -> gtk::Widget {
     let show_media = settings.inline_embed_media && images.is_some();
     let autoplay = settings.gif_auto_play;
     match (embed.display(show_media), images) {
-        (Display::Bare(media), Some(images)) => large(&media, embed, images, autoplay),
-        (Display::Card { media, thumbnail }, images) => card(embed, names, images, autoplay, media, thumbnail),
+        (Display::Bare(media), Some(images)) => large(&media, embed, n, images, autoplay, view),
+        (Display::Card { media, thumbnail }, images) => card(embed, n, names, images, autoplay, media, thumbnail, view),
         // `display` only offers media when told it may show it.
-        (Display::Bare(_), None) => card(embed, names, None, autoplay, None, None),
+        (Display::Bare(_), None) => card(embed, n, names, None, autoplay, None, None, view),
     }
 }
 
-/// Large media, bare or inside a card.
-fn large(media: &Large, embed: &Embed, images: &Images, autoplay: bool) -> gtk::Widget {
+/// Large media, bare or inside a card, of the embed at place `n`.
+fn large(media: &Large, embed: &Embed, n: usize, images: &Images, autoplay: bool, view: &MediaCx) -> gtk::Widget {
     match media {
-        Large::Image(media) => image(media, images, autoplay, MAX_W, MAX_H).upcast(),
-        Large::Gallery(media) => gallery(media, images, autoplay),
+        Large::Image(media) => {
+            let frame = image(media, images, autoplay, MAX_W, MAX_H);
+            view.link(&frame, view.embedded(n, 0));
+            frame.upcast()
+        }
+        Large::Gallery(media) => gallery(media, n, images, autoplay, view),
         Large::Gifv { video, still } => gifv(video, still, images, autoplay),
-        Large::Video { video: Some(video), still } => self::video(video, still, images),
+        Large::Video { video: Some(video), still } => self::video(video, still, images, view.embedded(n, 0), view),
         Large::Video { video: None, still } => page_video(still, embed.url.as_deref(), images),
     }
 }
 
 /// Images gathered from embeds sharing a URL, two to a row.
-fn gallery(media: &[Media], images: &Images, autoplay: bool) -> gtk::Widget {
+fn gallery(media: &[Media], n: usize, images: &Images, autoplay: bool, view: &MediaCx) -> gtk::Widget {
     let grid = gtk::Grid::builder().column_spacing(4).row_spacing(4).halign(gtk::Align::Start).build();
     for (i, media) in media.iter().enumerate() {
         let picture = image(media, images, autoplay, MAX_W / 2.0 - 2.0, MAX_H / 2.0 - 2.0);
+        view.link(&picture, view.embedded(n, i));
         grid.attach(&picture, i as i32 % 2, i as i32 / 2, 1, 1);
     }
     grid.upcast()
@@ -173,7 +182,8 @@ fn load_gifv(player: &gtk::Picture, images: &Images, url: &str, hover: Option<gt
 }
 
 /// A video with sound: its still and a play button, fetched only on click.
-fn video(video: &Media, still: &Media, images: &Images) -> gtk::Widget {
+/// It plays where it is, and its fullscreen button opens the viewer on it.
+fn video(video: &Media, still: &Media, images: &Images, index: Option<usize>, view: &MediaCx) -> gtk::Widget {
     let frame = gtk::Overlay::builder().halign(gtk::Align::Start).build();
     let poster = fitted_picture(Some(video.width), Some(video.height), MAX_W, MAX_H);
     images.set_sized(&poster.picture, &still.url, poster.size, Some((still.width, still.height)), false);
@@ -186,21 +196,31 @@ fn video(video: &Media, still: &Media, images: &Images) -> gtk::Widget {
         .css_classes(["osd", "circular", "embed-play"])
         .build();
     frame.add_overlay(&play);
+    view.name(&frame, index);
     play.connect_clicked({
         let frame = frame.downgrade();
-        let (images, url) = (images.clone(), video.url.clone());
+        let (images, url, view) = (images.clone(), video.url.clone(), view.clone());
         move |button| {
             button.set_sensitive(false);
-            let (frame, button, images, url) = (frame.clone(), button.downgrade(), images.clone(), url.clone());
+            let (frame, button, images, url, view) =
+                (frame.clone(), button.downgrade(), images.clone(), url.clone(), view.clone());
             glib::spawn_future_local(async move {
                 let path = images.file(&url).await;
                 let (Some(frame), Some(button)) = (frame.upgrade(), button.upgrade()) else { return };
                 let Some(path) = path else { return button.set_sensitive(true) };
                 // Over the poster, which keeps the frame's size.
                 frame.remove_overlay(&button);
-                let player = gtk::Video::builder().autoplay(true).css_classes(["embed-media"]).build();
-                player.set_filename(Some(&path));
-                frame.add_overlay(&player);
+                let options =
+                    Options { autoplay: true, start: 0.0, fullscreen: index.is_some(), classes: &["embed-media"] };
+                let player = Player::new(&path, &options);
+                if let Some(index) = index {
+                    let control = player.control();
+                    player.fullscreen_button().connect_clicked(move |_| {
+                        control.pause();
+                        view.open(index, control.position());
+                    });
+                }
+                frame.add_overlay(player.widget());
             });
         }
     });
@@ -228,13 +248,16 @@ pub(super) fn behind_spoiler(reveal: impl Fn() -> gtk::Widget + 'static) -> gtk:
 
 /// A card: colour bar, then provider, author, title, description, fields,
 /// media and footer, with the thumbnail to the right of the text.
+#[expect(clippy::too_many_arguments, reason = "a card is made of all of these")]
 fn card(
     embed: &Embed,
+    n: usize,
     names: &Names,
     images: Option<&Images>,
     autoplay: bool,
     media: Option<Large>,
     thumbnail: Option<Media>,
+    view: &MediaCx,
 ) -> gtk::Widget {
     let card =
         gtk::Box::builder().halign(gtk::Align::Start).overflow(gtk::Overflow::Hidden).css_classes(["embed"]).build();
@@ -277,7 +300,7 @@ fn card(
     body.append(&top);
 
     if let (Some(media), Some(images)) = (media, images) {
-        body.append(&large(&media, embed, images, autoplay));
+        body.append(&large(&media, embed, n, images, autoplay, view));
     }
 
     let footer_text = embed.footer.as_ref().map(|f| f.text.as_str()).filter(|t| !t.is_empty());

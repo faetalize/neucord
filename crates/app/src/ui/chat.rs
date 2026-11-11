@@ -20,8 +20,9 @@ use super::embeds::{behind_spoiler, embed_widget};
 use super::menus::{self, At, Entry, Item};
 use super::message_row::{MessageRow, Parts};
 use super::state::{Unread, now_ms, now_unix};
+use super::viewer::MediaCx;
 use super::widgets::avatar_widget_in;
-use super::{attachments, components, polls};
+use super::{attachments, components, polls, viewer};
 use crate::kept::Made;
 use crate::render::{Context, Names, Spoilers};
 use crate::rich_text::RichText;
@@ -46,6 +47,8 @@ pub(super) struct MessageTarget {
     pub(super) link: Option<String>,
     /// The sticker the menu was opened on.
     pub(super) sticker: Option<Snowflake>,
+    /// The picture or video of the message the menu was opened on.
+    pub(super) media: Option<discord::media::Item>,
 }
 
 impl MessageTarget {
@@ -89,24 +92,67 @@ pub(super) const COPY_MESSAGE_LINK: Entry<MessageTarget> = Entry::Item(Item {
     }),
 });
 
-/// The link the menu was opened on (777933).
-pub(super) const COPY_LINK: Entry<MessageTarget> = Entry::Item(Item {
-    name: "copy-link",
-    label: "Copy Lin_k",
-    shows: |_, target| target.link.is_some(),
-    kind: menus::Kind::Action(|app, target| app.copy(target.link.as_deref().unwrap_or_default())),
-});
-
-pub(super) const OPEN_LINK: Entry<MessageTarget> = Entry::Item(Item {
-    name: "open-link",
-    label: "_Open Link",
-    shows: |_, target| target.link.is_some(),
+/// Copy Image and Save Image, on the picture of a message where the file
+/// can be copied and saved (115184), unless its forum hides the options.
+pub(super) const COPY_IMAGE: Entry<MessageTarget> = Entry::Item(Item {
+    name: "copy-image",
+    label: "Copy _Image",
+    shows: |app, target| {
+        target.media.as_ref().is_some_and(|media| media.can_copy())
+            && !app.media_options_hidden(target.message.channel_id)
+    },
     kind: menus::Kind::Action(|app, target| {
-        if let Some(link) = &target.link {
-            gtk::UriLauncher::new(link).launch(Some(&app.window), gio::Cancellable::NONE, |_| {});
+        if let Some(media) = &target.media {
+            viewer::copy_image(app, media);
         }
     }),
 });
+
+pub(super) const SAVE_IMAGE: Entry<MessageTarget> = Entry::Item(Item {
+    name: "save-image",
+    label: "_Save Image",
+    shows: |app, target| {
+        target.media.as_ref().is_some_and(|media| media.can_save())
+            && !app.media_options_hidden(target.message.channel_id)
+    },
+    kind: menus::Kind::Action(|app, target| {
+        if let Some(media) = &target.media {
+            viewer::save(app, media);
+        }
+    }),
+});
+
+/// The link the menu was opened on (777933), copied or opened under the name
+/// its type gives the item: Link, Image Link or Media Link. Its media's own
+/// link, where it is on media (not what a text link in a message holds).
+/// A forum can hide them like the other media options.
+macro_rules! message_link {
+    ($name:literal, $label:literal, $kind:expr, $act:path) => {
+        menus::link_item!(MessageTarget, $name, $label, $kind, $act, link_of, media_hidden)
+    };
+}
+use discord::media::LinkKind;
+
+fn link_of(target: &MessageTarget) -> Option<&str> {
+    target.link.as_deref()
+}
+
+fn media_hidden(app: &App, target: &MessageTarget) -> bool {
+    app.media_options_hidden(target.message.channel_id)
+}
+
+pub(super) const COPY_LINK: Entry<MessageTarget> =
+    message_link!("copy-link", "Copy Lin_k", LinkKind::Other, viewer::copy_link);
+pub(super) const COPY_IMAGE_LINK: Entry<MessageTarget> =
+    message_link!("copy-image-link", "Copy _Image Link", LinkKind::Image, viewer::copy_link);
+pub(super) const COPY_MEDIA_LINK: Entry<MessageTarget> =
+    message_link!("copy-media-link", "Copy _Media Link", LinkKind::Media, viewer::copy_link);
+pub(super) const OPEN_LINK: Entry<MessageTarget> =
+    message_link!("open-link", "_Open Link", LinkKind::Other, viewer::open_link);
+pub(super) const OPEN_IMAGE_LINK: Entry<MessageTarget> =
+    message_link!("open-image-link", "_Open Image Link", LinkKind::Image, viewer::open_link);
+pub(super) const OPEN_MEDIA_LINK: Entry<MessageTarget> =
+    message_link!("open-media-link", "_Open Media Link", LinkKind::Media, viewer::open_link);
 
 /// Only in Developer Mode (50268), and where no sticker was clicked: the
 /// client puts it in that sticker's Message Details then. Shift adds the
@@ -1528,14 +1574,14 @@ fn attach_message_menu(this: &std::rc::Weak<App>, item: &gtk::ListItem, cell: &M
     let row = &cell.parts().row;
     let open = Rc::new({
         let (this, item, row) = (this.clone(), item.downgrade(), row.downgrade());
-        move |at: At, link: Option<String>, sticker: Option<Snowflake>| {
+        move |at: At, link: Option<String>, sticker: Option<Snowflake>, media: Option<usize>| {
             let (Some(this), Some(item), Some(row)) = (this.upgrade(), item.upgrade(), row.upgrade()) else { return };
             // Hidden rows: collapsed blocked messages, and those that show nothing.
             let Some(message) = item.item().and_downcast::<glib::BoxedAnyObject>().filter(|_| row.is_visible()) else {
                 return;
             };
             let message = message.borrow::<Message>().clone();
-            this.message_menu(&row, message, at, link, sticker);
+            this.message_menu(&row, message, at, link, sticker, media);
         }
     });
     menus::on_secondary(row, {
@@ -1561,11 +1607,12 @@ fn attach_message_menu(this: &std::rc::Weak<App>, item: &gtk::ListItem, cell: &M
             }
             let link = row.as_ref().and_then(|row| link_at(row.upcast_ref(), x, y));
             let sticker = row.as_ref().and_then(|row| sticker_at(row.upcast_ref(), x, y));
-            open(At::Point(x, y), link, sticker);
+            let media = row.as_ref().and_then(|row| media_at(row.upcast_ref(), x, y));
+            open(At::Point(x, y), link, sticker, media);
         }
     });
     let action = gio::SimpleAction::new("menu", None);
-    action.connect_activate(move |_, _| open(At::Point(0.0, 0.0), None, None));
+    action.connect_activate(move |_, _| open(At::Point(0.0, 0.0), None, None, None));
     let actions = gio::SimpleActionGroup::new();
     actions.add_action(&action);
     cell.insert_action_group("message", Some(&actions));
@@ -1645,7 +1692,7 @@ fn attach_message_actions(this: &std::rc::Weak<App>, cell: &MessageRow) {
             let row = &cell.parts().row;
             let Some(b) = button.compute_bounds(row) else { return };
             let rect = gdk::Rectangle::new(b.x() as i32, b.y() as i32, b.width() as i32, b.height() as i32);
-            this.message_menu(row, message, At::Below(rect), None, None);
+            this.message_menu(row, message, At::Below(rect), None, None, None);
         }
     });
 }
@@ -1703,6 +1750,19 @@ fn sticker_at(row: &gtk::Widget, x: f64, y: f64) -> Option<Snowflake> {
     while let Some(w) = widget.filter(|w| w != row) {
         if let Some(id) = attachments::sticker_id(&w) {
             return Some(id);
+        }
+        widget = w.parent();
+    }
+    None
+}
+
+/// The place among a message's media of the picture or video at `(x, y)` in
+/// `row`, named by [`viewer::MediaCx`].
+fn media_at(row: &gtk::Widget, x: f64, y: f64) -> Option<usize> {
+    let mut widget = row.pick(x, y, gtk::PickFlags::DEFAULT);
+    while let Some(w) = widget.filter(|w| w != row) {
+        if let Some(index) = viewer::media_index(&w) {
+            return Some(index);
         }
         widget = w.parent();
     }
@@ -1957,11 +2017,21 @@ impl App {
         at: At,
         link: Option<String>,
         sticker: Option<Snowflake>,
+        media: Option<usize>,
     ) {
+        let settings = self.state.borrow().media;
+        let media = media.and_then(|n| {
+            let shown = message.thread_starter().unwrap_or(&message);
+            discord::media::items(shown, &settings).into_iter().nth(n)
+        });
+        // On media, its link is the one the menu offers, as the client's does
+        // for what it passes its menu.
+        let link = link.or_else(|| media.as_ref().filter(|m| m.can_link()).map(|m| m.url.clone()));
         let target = MessageTarget {
             selection: selection_in(row.upcast_ref()),
             link,
             sticker,
+            media,
             message,
             row: row.clone().upcast(),
         };
@@ -2020,25 +2090,30 @@ impl App {
             body.append(&polls::poll(self, message, poll));
         }
         let voice = message.is_voice_message();
+        // What opens in the viewer. A forward's media opens nothing.
+        let view = match live {
+            true => MediaCx::new(self, message, discord::media::items(message, &media)),
+            false => MediaCx::none(),
+        };
         // A poll's attachments are its answers' images, which the official
         // client shows with them, not under it.
         // Nor do messages built from components show theirs: the components do.
         let shown = message.poll.is_none() && !message.is_components_v2();
         let attached = message.attachments.iter().filter(|a| !a.is_hidden() && shown);
         for attachment in attached {
-            body.append(&attachments::attachment(attachment, voice, &self.images, &media));
+            body.append(&attachments::attachment(attachment, voice, &self.images, &media, &view));
         }
         for sticker in &message.sticker_items {
             body.append(&attachments::sticker(sticker, &self.images, media.gif_auto_play));
         }
         // A link in a spoiler covers all the message's embeds, as in Discord.
         let spoilered = discord::embed::has_spoilered_link(&message.content);
-        for embed in embeds {
+        for (n, embed) in embeds.into_iter().enumerate() {
             if spoilered {
-                let (names, images) = (names.clone(), self.images.clone());
-                body.append(&behind_spoiler(move || embed_widget(&embed, &names, Some(&images), &media)));
+                let (names, images, view) = (names.clone(), self.images.clone(), view.clone());
+                body.append(&behind_spoiler(move || embed_widget(&embed, n, &names, Some(&images), &media, &view)));
             } else {
-                body.append(&embed_widget(&embed, names, Some(&self.images), &media));
+                body.append(&embed_widget(&embed, n, names, Some(&self.images), &media, &view));
             }
         }
         if !message.components.is_empty() {
