@@ -60,13 +60,12 @@ impl App {
     }
 
     /// Another client changed the favourites.
-    pub(super) fn frecency_updated(&self, proto: &[u8], partial: bool) {
+    pub(super) fn frecency_updated(&self, patch: FrecencyPatch, proto: &[u8], partial: bool) {
         let mut state = self.state.borrow_mut();
         if !state.frecency_sync.is_loaded() {
             return;
         }
         state.frecency_sync.received(proto, partial);
-        let patch = FrecencyPatch::from_proto_bytes(proto).unwrap_or_default();
         match partial {
             true => state.frecency.apply(patch, now_ms() as u64),
             false => state.frecency.load(patch, now_ms() as u64),
