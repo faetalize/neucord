@@ -17,7 +17,7 @@
     ],
     "ApplicationIntegrationType": ["GUILD_INSTALL", "USER_INSTALL"],
     "ButtonStyle": ["PRIMARY", "SECONDARY", "SUCCESS", "DESTRUCTIVE", "LINK", "PREMIUM"],
-    "ChannelFlags": ["IS_SCHEDULED_FOR_DELETION", "PINNED", "IS_MODERATOR_REPORT_CHANNEL"],
+    "ChannelFlags": ["IS_SCHEDULED_FOR_DELETION", "PINNED", "REQUIRE_TAG", "IS_MODERATOR_REPORT_CHANNEL"],
     "ChannelType": [
       "DM",
       "GROUP_DM",

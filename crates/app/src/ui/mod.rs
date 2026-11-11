@@ -13,6 +13,7 @@ mod edits;
 mod embeds;
 mod emoji;
 mod forum;
+mod forum_post;
 mod friends;
 mod gifs;
 mod login;
@@ -123,6 +124,8 @@ pub struct App {
     thread_waiters: RefCell<Vec<(Snowflake, async_channel::Sender<()>)>>,
     /// The post list a forum or media channel shows.
     forum: forum::Page,
+    /// The form that starts a post, while it is open.
+    post_form: RefCell<Option<Rc<forum_post::PostForm>>>,
     composer_error: gtk::Label,
     images: Images,
     /// Autocomplete for mentions and emoji, anchored to the composer.
@@ -297,6 +300,7 @@ impl App {
             thread_expiry: RefCell::default(),
             thread_waiters: RefCell::default(),
             forum: forum::Page::new(),
+            post_form: RefCell::default(),
             composer_error: gtk::Label::builder()
                 .xalign(0.0)
                 .wrap(true)
