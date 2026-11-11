@@ -97,6 +97,17 @@ changed for unrelated reasons only needs a note in the issue.
   `defaultAutoArchiveDuration`) and the `location`s, "Plus Button" in 747926
   and "Message" in 519222. The first message goes into the thread once the
   gateway has brought it (`Y` in 971389).
+- **Starting a post** (`post_creation.rs`, `ui/forum_post.rs`). `REQUIRE_TAG`
+  and the error codes are watched, and `POST CHANNEL_THREADS` is, but the
+  snapshot holds only a plain thread's fields: the client builds a post's
+  request with a joined URL, so its query `use_nested_fields=true` and body
+  (`name`, `auto_archive_duration`, `applied_tags`, `message`) are `W` in
+  971389 (anchor `applied_tags`). Also not watched: who sees the form, `AI`
+  in 406704 (Send Messages in the forum, never in a channel of moderator
+  reports); and the form in 745431 (anchor `FOCUS_COMPOSER_TITLE`): a title
+  of up to 100, something to say or a file, at most five tags (`iT`), the
+  tags only Manage Threads may apply left out (`OT` in 691060, anchor
+  `moderated`), and the slowmode that starts when the request answers (`Y`).
 - **Editing and deleting** (`permissions::can_edit`, `can_delete`;
   `ui/edits.rs`, `edits::decide`). The requests are watched (`editMessage`, `deleteMessage`,
   `unarchiveThreadIfNecessary`), as are `canDeleteOwnMessage` and
@@ -225,7 +236,7 @@ changed for unrelated reasons only needs a note in the issue.
 - **Captchas** (`Captcha` in `rest.rs`, `ui/captcha.rs`). The retry is
   watched (`interceptResponse`). The fields read are in 295562, and the
   services in 319400 (hCaptcha, reCAPTCHA, reCAPTCHA Enterprise, Turnstile).
-- **QR login retries** (`on_qr`, `qr_failed` in `ui/login.rs`;
+- **QR login retries** (`on_qr`, `retry_qr` in `ui/login.rs`;
   `remote_auth.rs`). How often Neucord reconnects to the remote auth
   gateway. Client: 785161 (logger `useAuthWebsocket`), with the backoff in
   158390.
@@ -436,6 +447,16 @@ changed for unrelated reasons only needs a note in the issue.
   `handleVisible` and `potentiallyAnimateNewNode`. Stickers: `Qn` in 378058.
   The reduced-motion overrides are in 955572 (anchor
   `REDUCED_MOTION_STICKERS`).
+
+- **The quick switcher** (`switcher.rs`, `ui/switcher.rs`). The empty
+  state (`QuickSwitcherStore`), the channel, server and group DM queries,
+  the single-kind refetch and the unread, mention and speaker lists are
+  watched by name. Not watched: the prefixes and what each result opens (`k`
+  and `H` in 793322, anchor `USER_GLOBAL`), `mod+k` and `mod+t` (161388,
+  anchor `QUICKSWITCHER_SHOW`), the scoring (`eT` and `eC` in 997625, anchor
+  `isFullMatch`, with `ep`'s boosters), and how people rank (the worker,
+  787578, anchor `USER_RESULTS`).
+
 - **Channels we can't view** (`Guild::sidebar`, `permissions::access`).
   Neucord lists, counts unread, opens and posts only where it has a
   channel's `accessPermissions`: View Channel, and Connect too in voice and
@@ -471,6 +492,8 @@ changed for unrelated reasons only needs a note in the issue.
   `CHANNEL` in 901123. Copy Message ID is 50268, only in Developer Mode
   (`developer_mode` in the JSON user settings). Copy for the selection
   (373963) and Copy Link and Open Link (777933) are desktop-only there.
+  Save File (`save-voice-message-audio` in 761304) is for a voice message
+  that has an attachment, and takes the first.
   Neucord leaves out the analytics these send (`MESSAGE_LINK_COPIED`,
   `CONTEXT_MENU_LINK_COPIED`).
 - **The user menu and who has a profile** (`USER` in `ui/menus.rs`,
