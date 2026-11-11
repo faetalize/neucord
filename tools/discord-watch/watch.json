@@ -16,7 +16,8 @@
       "TOO_MANY_ANNOUNCEMENT_THREADS",
       "UNKNOWN_INTEGRATION",
       "AUTOMOD_MESSAGE_BLOCKED",
-      "AUTOMOD_TITLE_BLOCKED"
+      "AUTOMOD_TITLE_BLOCKED",
+      "INVALID_USER_SETTINGS_DATA"
     ],
     "ApplicationCommandContext": ["GUILD", "BOT_DM", "PRIVATE_CHANNEL"],
     "ApplicationCommandOptionType": [
@@ -119,6 +120,7 @@
       "INCREASED_MESSAGE_LENGTH"
     ],
     "ReactionType": ["NORMAL", "BURST", "VOTE"],
+    "ReactionNotifications": ["NOTIFICATIONS_ENABLED", "ONLY_DMS", "NOTIFICATIONS_DISABLED"],
     "RelationshipType": ["FRIEND", "BLOCKED", "PENDING_INCOMING", "PENDING_OUTGOING"],
     "RequiredAction": [
       "AGREEMENTS",
@@ -137,9 +139,12 @@
     ],
     "StatusType": ["ONLINE", "IDLE", "DND", "INVISIBLE", "OFFLINE"],
     "StickerFormat": ["PNG", "APNG", "LOTTIE", "GIF"],
+    "StickerAnimation": ["ALWAYS_ANIMATE", "ANIMATE_ON_INTERACTION", "NEVER_ANIMATE"],
     "StickerSendability": ["SENDABLE", "SENDABLE_WITH_PREMIUM", "NONSENDABLE", "SENDABLE_WITH_BOOSTED_GUILD"],
     "ThreadSortOrder": ["LATEST_ACTIVITY", "CREATION_DATE"],
     "ThreadMemberFlags": ["HAS_INTERACTED", "ALL_MESSAGES", "ONLY_MENTIONS", "NO_MESSAGES"],
+    "UserSettingsDelay": ["INFREQUENT_USER_ACTION", "FREQUENT_USER_ACTION", "SLOW_USER_ACTION", "AUTOMATED", "DAILY"],
+    "UserSettingsType": ["PRELOADED_USER_SETTINGS", "FRECENCY_AND_FAVORITES_SETTINGS", "TEST_SETTINGS"],
     "VerificationLevel": ["NONE", "LOW", "MEDIUM", "HIGH", "VERY_HIGH"]
   },
   "methods": [
@@ -225,10 +230,13 @@
     "leaveThread",
     "loadArchivedThreads",
     "loadComplete",
+    "loadIfNecessary",
     "loadThread",
     "login",
     "loginMFAv2",
+    "markDirty",
     "parseRangeHeader",
+    "persistChanges",
     "queryChannels",
     "queryGroupDMs",
     "queryGuilds",
@@ -245,6 +253,7 @@
     "resolvedMessageNotifications",
     "resolveUnreadSetting",
     "retryOpts",
+    "scheduleSaveFromOfflineEdit",
     "sendPollMessage",
     "startOrResumeUpload",
     "translateInlineEmojiToSurrogates",
@@ -252,6 +261,7 @@
     "tryConvertToJpeg",
     "tryConvertToWebP",
     "unarchiveThreadIfNecessary",
+    "updateAsync",
     "updateFlags",
     "updateForumPostTags",
     "updateGuildSubscriptions",
@@ -304,6 +314,7 @@
     "TypingStore",
     "UploadAttachmentStore",
     "UserProfileStore",
+    "UserSettingsProtoStore",
     "VoiceStateStore"
   ],
   "constants": ["ACCOUNT_AGE", "FONT_SIZES", "MEMBER_AGE", "POLLS", "REPLYABLE", "UNDELETABLE", "USER_MESSAGE", "bannerHeight", "bannerWidth"],
@@ -311,11 +322,15 @@
     "discord_protos.discord_users.v1.AppearanceSettings",
     "discord_protos.discord_users.v1.GuildFolder",
     "discord_protos.discord_users.v1.GuildFolders",
+    "discord_protos.discord_users.v1.NotificationSettings",
     "discord_protos.discord_users.v1.PreloadedUserSettings",
+    "discord_protos.discord_users.v1.PrivacySettings",
     "discord_protos.discord_users.v1.TextAndImagesSettings",
+    "discord_protos.discord_users.v1.Versions",
     "google.protobuf.BoolValue",
     "google.protobuf.Int64Value",
     "google.protobuf.StringValue",
+    "google.protobuf.UInt32Value",
     "google.protobuf.UInt64Value"
   ]
 }
