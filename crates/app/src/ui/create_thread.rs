@@ -422,9 +422,9 @@ impl App {
             Refused::Slowmode(seconds) => {
                 alert(CANNOT, &format!("Slowmode is on in this channel. Try again in {seconds} seconds."))
             }
-            Refused::AutoMod(Some(reason)) => form.show_errors(Some(reason), None),
+            Refused::AutoMod { reason: Some(reason), .. } => form.show_errors(Some(reason), None),
             Refused::Name => form.show_errors(Some("Thread Name is required"), None),
-            Refused::AutoMod(None) | Refused::Other => match error {
+            Refused::AutoMod { reason: None, .. } | Refused::Other => match error {
                 discord::Error::Http { .. } => alert("Error", "An error occurred, please try again."),
                 other => alert("Error", &other.to_string()),
             },
@@ -434,7 +434,7 @@ impl App {
     /// Wait for the gateway to bring thread `id`, where we can see it: a
     /// private one only once our membership has arrived. Gives up after a
     /// while, which the client never does.
-    async fn thread_arrived(self: &Rc<Self>, id: Snowflake) -> bool {
+    pub(super) async fn thread_arrived(self: &Rc<Self>, id: Snowflake) -> bool {
         let (sender, receiver) = async_channel::bounded(1);
         self.thread_waiters.borrow_mut().push((id, sender));
         self.thread_arrivals();

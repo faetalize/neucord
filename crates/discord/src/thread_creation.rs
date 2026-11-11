@@ -28,7 +28,7 @@ const NAME_FALLBACK: &str = "Thread";
 
 /// Minutes before a thread archives itself, where the channel says nothing
 /// (`Gl` in 268761).
-const AUTO_ARCHIVE_FALLBACK: u32 = 4320;
+pub(crate) const AUTO_ARCHIVE_FALLBACK: u32 = 4320;
 
 const ANNOUNCEMENT_THREAD: u8 = 10;
 const PUBLIC_THREAD: u8 = 11;
@@ -210,8 +210,12 @@ pub enum Refused {
     Slowmode(u64),
     /// Any other rate limit.
     RateLimited,
-    /// AutoMod blocked the name or the message; its reason, if it gave one.
-    AutoMod(Option<String>),
+    /// AutoMod blocked the name (`title`) or the message; its reason, if it
+    /// gave one.
+    AutoMod {
+        title: bool,
+        reason: Option<String>,
+    },
     /// The name was refused.
     Name,
     Other,
@@ -235,9 +239,10 @@ impl Refused {
                 Self::Slowmode(body["retry_after"].as_f64().unwrap_or(0.0).ceil() as u64)
             }
             _ if *status == 429 => Self::RateLimited,
-            Some(AUTOMOD_MESSAGE_BLOCKED | AUTOMOD_TITLE_BLOCKED) => {
-                Self::AutoMod(body["message"].as_str().map(str::to_owned))
-            }
+            Some(code @ (AUTOMOD_MESSAGE_BLOCKED | AUTOMOD_TITLE_BLOCKED)) => Self::AutoMod {
+                title: code == AUTOMOD_TITLE_BLOCKED,
+                reason: body["message"].as_str().map(str::to_owned),
+            },
             Some(INVALID_FORM_BODY) if !body["errors"]["name"].is_null() => Self::Name,
             _ => Self::Other,
         }
@@ -384,8 +389,9 @@ mod tests {
         assert_eq!(refused(400, r#"{"code": 160007}"#), Refused::TooManyAnnouncementThreads);
         assert_eq!(refused(429, r#"{"code": 20016, "retry_after": 4.2}"#), Refused::Slowmode(5));
         assert_eq!(refused(429, r#"{"retry_after": 1.0}"#), Refused::RateLimited);
-        assert_eq!(refused(400, r#"{"code": 200001, "message": "Blocked"}"#), Refused::AutoMod(Some("Blocked".into())));
-        assert_eq!(refused(400, r#"{"code": 200000}"#), Refused::AutoMod(None));
+        let blocked = |title, reason: Option<&str>| Refused::AutoMod { title, reason: reason.map(Into::into) };
+        assert_eq!(refused(400, r#"{"code": 200001, "message": "Blocked"}"#), blocked(true, Some("Blocked")));
+        assert_eq!(refused(400, r#"{"code": 200000}"#), blocked(false, None));
         assert_eq!(refused(400, r#"{"code": 50035, "errors": {"name": {}}}"#), Refused::Name);
         assert_eq!(refused(400, r#"{"code": 50035, "errors": {"auto_archive_duration": {}}}"#), Refused::Other);
         assert_eq!(refused(500, "oops"), Refused::Other);

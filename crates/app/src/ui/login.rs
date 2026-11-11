@@ -6,7 +6,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use adw::prelude::*;
-use discord::auth::{Login, Mfa, MfaMethod};
+use discord::auth::{Login, Mfa, MfaMethod, Recovery};
+use discord::backoff::Backoff;
 use discord::remote_auth::{Event, RemoteAuth};
 use discord::{Error, Rest, User};
 use gtk::glib;
@@ -34,8 +35,8 @@ pub(super) struct Page {
     remote: RefCell<Option<RemoteAuth>>,
     /// Counts QR sessions, so events from a replaced one are dropped.
     session: Cell<u64>,
-    /// QR sessions that failed in a row, for backing off.
-    failures: Cell<u32>,
+    /// Spaces out the QR sessions that end without a token.
+    backoff: RefCell<Backoff>,
     mfa: RefCell<Option<(Mfa, MfaMethod)>>,
 }
 
@@ -76,7 +77,7 @@ impl Page {
                 .build(),
             remote: RefCell::default(),
             session: Cell::new(0),
-            failures: Cell::new(0),
+            backoff: RefCell::new(Backoff::new(Duration::from_millis(1500), Duration::from_secs(30))),
             mfa: RefCell::default(),
         }
     }
@@ -113,6 +114,8 @@ impl App {
 
         let password_form = gtk::Box::new(gtk::Orientation::Vertical, 18);
         password_form.append(&boxed_list(&[page.email.upcast_ref(), page.password.upcast_ref()]));
+        let forgot = link_button("Forgot your password?");
+        password_form.append(&forgot);
         let log_in = gtk::Button::builder()
             .label("_Log In")
             .use_underline(true)
@@ -233,6 +236,10 @@ impl App {
             move |_| f()
         });
         verify.connect_clicked(move |_| verify_mfa());
+        forgot.connect_clicked({
+            let f = on(App::forgot_password);
+            move |_| f()
+        });
         let token_login = on(App::token_login);
         page.token.connect_entry_activated(move |_| token_login());
         let start_qr = on(App::start_qr);
@@ -268,9 +275,15 @@ impl App {
         self.connect(token, false);
     }
 
-    fn login_failed(&self, error: &Error) {
+    fn login_failed(self: &Rc<Self>, error: &Error) {
         self.login.form.set_sensitive(true);
         self.login.set_error(Some(&error.to_string()));
+        // The client opens the account's standing for a suspended login.
+        if let Error::Suspended(token) = error {
+            let (this, rest) = (self.clone(), self.anonymous_rest());
+            let token = token.clone();
+            glib::spawn_future_local(async move { this.present_standing(rest.suspended_standing(&token).await) });
+        }
     }
 
     /// For the login endpoints, before there is a token.
@@ -287,15 +300,19 @@ impl App {
     }
 
     fn password_login(self: &Rc<Self>) {
-        let (login, password) = (self.login.email.text().trim().to_owned(), self.login.password.text());
+        let (login, password) = (self.login.email.text().trim().to_owned(), self.login.password.text().to_string());
         if login.is_empty() || password.is_empty() || !self.login.form.is_sensitive() {
             return;
         }
+        self.send_login(login, password, false);
+    }
+
+    fn send_login(self: &Rc<Self>, login: String, password: String, undelete: bool) {
         self.login.form.set_sensitive(false);
         self.login.set_error(None);
         let (this, rest) = (self.clone(), self.anonymous_rest());
         glib::spawn_future_local(async move {
-            let result = rest.login(&login, &password).await;
+            let result = rest.login(&login, &password, undelete).await;
             if !this.on_login_page() {
                 return;
             }
@@ -309,6 +326,65 @@ impl App {
                             .into(),
                     )),
                 },
+                Err(Error::ScheduledForDeletion) => this.offer_undelete(login, password),
+                Err(e) => this.login_failed(&e),
+            }
+        });
+    }
+
+    /// Discord refuses a login to an account on its way to deletion unless
+    /// the login says to cancel that, so the client asks first.
+    fn offer_undelete(self: &Rc<Self>, login: String, password: String) {
+        self.login.form.set_sensitive(true);
+        let dialog = adw::AlertDialog::new(
+            Some("Account Scheduled for Deletion"),
+            Some("Discord is going to delete this account. Logging in cancels that."),
+        );
+        dialog.add_response("back", "_Back");
+        dialog.add_response("undelete", "_Cancel Deletion and Log In");
+        dialog.set_response_appearance("undelete", adw::ResponseAppearance::Suggested);
+        let this = self.clone();
+        dialog.connect_response(None, move |_, response| {
+            if response == "undelete" && this.on_login_page() {
+                this.send_login(login.clone(), password.clone(), true);
+            }
+        });
+        dialog.present(Some(&self.window));
+    }
+
+    fn forgot_password(self: &Rc<Self>) {
+        if !self.login.form.is_sensitive() {
+            return;
+        }
+        let login = self.login.email.text().trim().to_owned();
+        if login.is_empty() {
+            self.login.set_error(Some("Enter your email or phone number first."));
+            self.login.email.grab_focus();
+            return;
+        }
+        self.login.form.set_sensitive(false);
+        self.login.set_error(None);
+        let (this, rest) = (self.clone(), self.anonymous_rest());
+        glib::spawn_future_local(async move {
+            let result = rest.forgot_password(&login).await;
+            if !this.on_login_page() {
+                return;
+            }
+            match result {
+                Ok(recovery) => {
+                    this.login.form.set_sensitive(true);
+                    let body = match recovery {
+                        Recovery::PasswordReset => {
+                            format!("Discord sent a link for a new password to the email address of {login}.")
+                        }
+                        Recovery::OneTimeLogin => {
+                            format!("Discord sent a link that logs in once to the email address of {login}.")
+                        }
+                    };
+                    let dialog = adw::AlertDialog::new(Some("Check Your Email"), Some(&body));
+                    dialog.add_response("ok", "_OK");
+                    dialog.present(Some(&this.window));
+                }
                 Err(e) => this.login_failed(&e),
             }
         });
@@ -413,7 +489,7 @@ impl App {
                     app.login.remote.replace(Some(remote));
                     events
                 }
-                Err(e) => return app.qr_failed(&e),
+                Err(e) => return app.retry_qr(Some(&e)),
             };
             drop(app);
             while let Ok(event) = events.recv().await {
@@ -427,7 +503,7 @@ impl App {
         let page = &self.login;
         match event {
             Event::Code(url) => {
-                page.failures.set(0);
+                page.backoff.borrow_mut().succeed();
                 page.qr_code.replace(QrCode::encode_text(&url, QrCodeEcc::Medium).ok());
                 page.qr_area.queue_draw();
                 page.qr.set_visible_child_name("code");
@@ -438,8 +514,11 @@ impl App {
             }
             Event::Token(token) => self.logged_in(token),
             // Discord's own client just shows a new code.
-            Event::Cancelled | Event::Expired => self.start_qr(),
-            Event::Failed(e) => self.qr_failed(&e),
+            Event::Cancelled => self.start_qr(),
+            // A session that ran out counts as a failure to the client,
+            // which waits before the next one without saying why.
+            Event::Expired => self.retry_qr(None),
+            Event::Failed(e) => self.retry_qr(Some(&e)),
         }
     }
 
@@ -470,16 +549,21 @@ impl App {
         scanned.append(&other);
     }
 
-    /// Show why, and try again by itself after a while, as Discord's client
-    /// does: 1.5 s, doubling up to 30 s.
-    fn qr_failed(self: &Rc<Self>, error: &Error) {
+    /// Try again by itself after a while, as Discord's client does, saying
+    /// why if there is a reason to give.
+    fn retry_qr(self: &Rc<Self>, error: Option<&Error>) {
         self.login.stop_qr();
         let session = self.login.session.get();
-        let failures = self.login.failures.get() + 1;
-        self.login.failures.set(failures);
-        let delay = (Duration::from_millis(1500) * 2u32.pow(failures.min(6) - 1)).min(Duration::from_secs(30));
-        self.login.qr_error.set_label(&format!("QR login failed: {error}. Trying again in {}s.", delay.as_secs_f64()));
-        self.login.qr.set_visible_child_name("failed");
+        let delay = self.login.backoff.borrow_mut().fail(glib::random_double());
+        match error {
+            Some(error) => {
+                self.login
+                    .qr_error
+                    .set_label(&format!("QR login failed: {error}. Trying again in {}s.", delay.as_secs_f64().ceil()));
+                self.login.qr.set_visible_child_name("failed");
+            }
+            None => self.login.qr.set_visible_child_name("waiting"),
+        }
         let this = Rc::downgrade(self);
         glib::timeout_add_local_once(delay, move || {
             if let Some(this) =

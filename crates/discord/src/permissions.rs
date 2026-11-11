@@ -279,7 +279,7 @@ const AUTOMOD_QUARANTINED: u64 = (1 << 7) | (1 << 8) | (1 << 10);
 /// anything there.
 const IS_SCHEDULED_FOR_DELETION: u64 = 1 << 9;
 /// Channel flag: where members' reports reach a server's moderators.
-const IS_MODERATOR_REPORT_CHANNEL: u64 = 1 << 19;
+pub(crate) const IS_MODERATOR_REPORT_CHANNEL: u64 = 1 << 19;
 
 /// Ours in `guild` as a whole, at `now` (seconds since 1970).
 pub fn in_guild(guild: &Guild, me: &Account, now: i64) -> Permissions {

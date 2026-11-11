@@ -16,8 +16,8 @@ use gtk::{gdk, gio, glib};
 use super::App;
 use super::chat::{self, MessageTarget};
 use super::{
-    composer, create_thread, edits, emoji, forum, gifs, picker, poll_composer, polls, profile, reactions, reactors,
-    scheduling, sidebar, stickers, threads, uploads, viewer, voice,
+    attachments, composer, create_thread, edits, emoji, forum, gifs, picker, poll_composer, polls, profile, reactions,
+    reactors, scheduling, sidebar, stickers, threads, uploads, viewer, voice,
 };
 
 /// An item that copies or opens a link, shown when the link `$link` finds in
@@ -109,15 +109,15 @@ pub(super) type Table<T, C = App> = &'static [&'static [Entry<T, C>]];
 
 /// A message's menu: what Neucord has of the official client's (761304),
 /// in its order. Create Thread follows Forward, which Neucord has no entry for.
-/// The media group (Copy Image, Save Image) comes before the link group,
-/// which names a link by what it points to.
+/// The media group (Copy Image, Save Image, Save File) comes before the link
+/// group, which names a link by what it points to.
 const MESSAGE: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
     &[reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
     &[edits::EDIT, composer::REPLY, create_thread::MESSAGE_MENU],
     &[chat::COPY_TEXT, chat::COPY_MESSAGE_LINK, polls::END_POLL],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
-    &[chat::COPY_IMAGE, chat::SAVE_IMAGE],
+    &[chat::COPY_IMAGE, chat::SAVE_IMAGE, attachments::SAVE_FILE],
     &LINKS,
     &[chat::COPY_MESSAGE_ID, stickers::MESSAGE_DETAILS],
 ];
@@ -132,7 +132,7 @@ const MESSAGE_REGULATED: Table<MessageTarget> = &[
     &[chat::COPY_TEXT, chat::COPY_MESSAGE_LINK, polls::END_POLL],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
     &[chat::COPY_MESSAGE_ID, stickers::MESSAGE_DETAILS],
-    &[chat::COPY_IMAGE, chat::SAVE_IMAGE],
+    &[chat::COPY_IMAGE, chat::SAVE_IMAGE, attachments::SAVE_FILE],
     &LINKS,
 ];
 
@@ -597,7 +597,7 @@ mod tests {
             names[names.len() - 3..].to_vec()
         };
         let id = || vec!["copy-message-id", "message-details"];
-        let media = || vec!["copy-image", "save-image"];
+        let media = || vec!["copy-image", "save-image", "save-file"];
         let links = || {
             ["copy-link", "copy-image-link", "copy-media-link", "open-link", "open-image-link", "open-media-link"]
                 .to_vec()
