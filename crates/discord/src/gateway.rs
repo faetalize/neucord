@@ -903,6 +903,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 edited: !data["edited_timestamp"].is_null(),
                 embeds: data.get("embeds").and_then(|e| Vec::<Embed>::deserialize(e).ok()),
                 flags: data["flags"].as_u64(),
+                poll: data.get("poll").and_then(|p| crate::poll::Poll::deserialize(p).ok()),
             })
         }
         "MESSAGE_DELETE" => {
@@ -1380,6 +1381,19 @@ mod tests {
         assert_eq!((ids, channel_id), (vec![Snowflake(7), Snowflake(9)], Snowflake(3)));
         dispatch(&state, "MESSAGE_DELETE_BULK", json!({"ids": ["7"]}));
         assert!(rx.try_recv().is_err(), "no channel, nothing to remove from");
+    }
+
+    #[test]
+    fn an_update_carries_the_poll_it_ended() {
+        let (state, rx) = fresh_state();
+        let poll = json!({"question": {"text": "?"}, "answers": [], "expiry": "2026-01-01T00:00:00+00:00",
+                          "results": {"is_finalized": true, "answer_counts": []}});
+        dispatch(&state, "MESSAGE_UPDATE", json!({"id": "9", "channel_id": "3", "poll": poll}));
+        let Ok(Event::MessageUpdate(edit)) = rx.try_recv() else { panic!("no update") };
+        assert!(edit.poll.is_some_and(|p| p.results.is_some_and(|r| r.is_finalized)));
+        dispatch(&state, "MESSAGE_UPDATE", json!({"id": "9", "channel_id": "3", "content": "x"}));
+        let Ok(Event::MessageUpdate(edit)) = rx.try_recv() else { panic!("no update") };
+        assert!(edit.poll.is_none());
     }
 
     #[test]

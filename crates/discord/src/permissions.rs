@@ -427,6 +427,16 @@ pub fn can_send(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64
     }
 }
 
+/// Whether a quarantine or a timeout keeps us from voting in `guild`, as
+/// `canSubmitVote` in 951727 reads them: the quarantine flags of 229527 and
+/// `communicationDisabledUntil` (316031), whatever our permissions are, so
+/// administrators included.
+pub fn vote_held_back(guild: Option<&Guild>, now: i64) -> bool {
+    guild.is_some_and(|g| {
+        g.member_flags & AUTOMOD_QUARANTINED != 0 || g.timed_out_until.is_some_and(|until| until > now)
+    })
+}
+
 /// Whether the client offers attaching files in `channel` (the attach menu
 /// in 316576, whose `canAttachFiles` is any private channel, else Attach
 /// Files with Send Messages), where [`can_send`] also holds.
@@ -679,6 +689,19 @@ mod tests {
         assert_eq!(in_guild(&quarantined, &me(), 0), VIEW | HISTORY);
         quarantined.roles[0].permissions = VIEW | Permissions::CHANGE_NICKNAME | SEND;
         assert_eq!(in_guild(&quarantined, &me(), 0), VIEW | Permissions::CHANGE_NICKNAME);
+    }
+
+    #[test]
+    fn a_timeout_or_quarantine_holds_back_a_vote_for_everyone() {
+        let mut guild = guild();
+        assert!(!vote_held_back(Some(&guild), 0) && !vote_held_back(None, 0), "a DM has neither");
+        guild.timed_out_until = Some(100);
+        guild.roles[2].permissions = Permissions::ADMINISTRATOR;
+        assert!(vote_held_back(Some(&guild), 99), "administrators included");
+        assert!(!vote_held_back(Some(&guild), 100));
+        guild.timed_out_until = None;
+        guild.member_flags = 1 << 10;
+        assert!(vote_held_back(Some(&guild), 0));
     }
 
     #[test]

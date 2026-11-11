@@ -1164,6 +1164,8 @@ pub struct MessageEdit {
     pub edited: bool,
     pub embeds: Option<Vec<Embed>>,
     pub flags: Option<u64>,
+    /// A poll that changed, such as one ended early.
+    pub poll: Option<crate::poll::Poll>,
 }
 
 impl MessageEdit {
@@ -1179,6 +1181,14 @@ impl MessageEdit {
         }
         if let Some(flags) = self.flags {
             message.flags = flags;
+        }
+        // When it ends and whether it has; the counts stay as the votes we
+        // saw made them, since the client builds them from those.
+        if let (Some(update), Some(poll)) = (self.poll, &mut message.poll) {
+            poll.expiry = update.expiry;
+            if update.results.is_some_and(|r| r.is_finalized) {
+                poll.results.get_or_insert_with(Default::default).is_finalized = true;
+            }
         }
     }
 }
@@ -1590,5 +1600,29 @@ mod tests {
         assert_eq!((m.embeds.len(), m.content.as_str(), m.edited_timestamp.is_some()), (1, "https://e.com", false));
         MessageEdit { flags: Some(4), ..Default::default() }.apply(&mut m);
         assert!(m.embeds_suppressed());
+    }
+
+    #[test]
+    fn a_poll_ended_early_arrives_as_an_update() {
+        let poll = |expiry: &str, finalized: bool, count: u32| -> crate::poll::Poll {
+            serde_json::from_value(serde_json::json!({
+                "question": {"text": "Lunch?"}, "expiry": expiry,
+                "answers": [{"answer_id": 1, "poll_media": {"text": "Soup"}}],
+                "results": {"is_finalized": finalized, "answer_counts": [{"id": 1, "count": count, "me_voted": false}]}
+            }))
+            .unwrap()
+        };
+        let mut m: Message = serde_json::from_str(
+            r#"{"id":"100","channel_id":"11","author":{"id":"5","username":"a"},"timestamp":"t"}"#,
+        )
+        .unwrap();
+        m.poll = Some(poll("2099-01-01T00:00:00+00:00", false, 2));
+        m.poll.as_mut().unwrap().vote(1, true, false);
+        // The update's counts aren't ours to take: the client builds them from the votes it saw.
+        MessageEdit { poll: Some(poll("2026-01-01T00:00:00+00:00", true, 0)), ..Default::default() }.apply(&mut m);
+        let poll = m.poll.unwrap();
+        assert_eq!(poll.expiry.as_deref(), Some("2026-01-01T00:00:00+00:00"));
+        assert!(poll.results.as_ref().is_some_and(|r| r.is_finalized));
+        assert_eq!((poll.votes(1), poll.me_voted(1)), (3, true));
     }
 }

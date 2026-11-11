@@ -362,6 +362,21 @@ impl Rest {
         Ok(())
     }
 
+    /// Cast our vote on a poll: `answers`, or none to take it back. It
+    /// replaces any vote we had, and the ids go out as strings
+    /// (`handlePollSubmitVote` in 180662, which sends `answer_ids` through
+    /// module 335759's `PUT`).
+    pub async fn vote(&self, channel: Snowflake, message: Snowflake, answers: &[u32]) -> Result<(), Error> {
+        let _: serde_json::Value = self.request(call!(VOTE, channel, message), Some(vote_body(answers))).await?;
+        Ok(())
+    }
+
+    /// End our own poll now (`endPollEarly`, and 335759's `POST`): no body.
+    pub async fn end_poll(&self, channel: Snowflake, message: Snowflake) -> Result<(), Error> {
+        let _: serde_json::Value = self.request(call!(END_POLL, channel, message), None).await?;
+        Ok(())
+    }
+
     /// Mark everything in `channel` up to `message` as read, for all our clients.
     pub async fn ack(&self, channel: Snowflake, message: Snowflake) -> Result<(), Error> {
         let body = json!({ "token": null });
@@ -636,6 +651,11 @@ fn reactors_call(channel: Snowflake, message: Snowflake, emoji: &Emoji, limit: u
     call!(REACTORS, channel, message, emoji).query(&format!("limit={limit}{after}&type=0"))
 }
 
+/// What a vote sends: the picked answers' ids, as strings in the order picked.
+fn vote_body(answers: &[u32]) -> Value {
+    json!({ "answer_ids": answers.iter().map(u32::to_string).collect::<Vec<_>>() })
+}
+
 /// What sending a message sends, as `_sendMessage` in 138399 builds it.
 fn message_body(
     channel: Snowflake,
@@ -732,7 +752,7 @@ mod tests {
 
     use super::{
         Captcha, Page, Reply, ReplyPing, add_reaction_call, base_headers, edit_body, is_md5, message_body, poll_body,
-        rate_limit_wait, reactors_call, remove_reaction_call,
+        rate_limit_wait, reactors_call, remove_reaction_call, vote_body,
     };
     use crate::model::Emoji;
     use crate::reactions::Location;
@@ -804,6 +824,13 @@ mod tests {
         assert!(!is_md5("D41D8CD98F00B204E9800998ECF8427E"), "uppercase fails the client's regex");
         assert!(!is_md5("d41d8cd98f00b204e9800998ecf8427") && !is_md5("d41d8cd98f00b204e9800998ecf8427ef"));
         assert!(!is_md5("g41d8cd98f00b204e9800998ecf8427e") && !is_md5(""));
+    }
+
+    #[test]
+    fn a_vote_sends_string_ids_and_nothing_else() {
+        // `answer_ids` are the answers' ids as the client keeps them: strings.
+        assert_eq!(vote_body(&[3, 1]).to_string(), r#"{"answer_ids":["3","1"]}"#);
+        assert_eq!(vote_body(&[]).to_string(), r#"{"answer_ids":[]}"#, "taking a vote back");
     }
 
     #[test]

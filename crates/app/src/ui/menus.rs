@@ -15,7 +15,9 @@ use gtk::{gdk, gio, glib};
 
 use super::App;
 use super::chat::{self, MessageTarget};
-use super::{composer, edits, emoji, gifs, picker, poll_composer, reactions, reactors, stickers, uploads, voice};
+use super::{
+    composer, edits, emoji, gifs, picker, poll_composer, polls, reactions, reactors, stickers, uploads, voice,
+};
 
 /// One entry of a menu, for what it was opened on: a `T`. `C` is what
 /// entries read and act through: the app, or a stand-in in tests.
@@ -83,7 +85,7 @@ const MESSAGE: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
     &[reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
     &[edits::EDIT, composer::REPLY],
-    &[chat::COPY_TEXT, chat::COPY_MESSAGE_LINK],
+    &[chat::COPY_TEXT, chat::COPY_MESSAGE_LINK, polls::END_POLL],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
     &[chat::COPY_LINK, chat::OPEN_LINK],
     &[chat::COPY_MESSAGE_ID],
@@ -96,7 +98,7 @@ const MESSAGE_REGULATED: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
     &[reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
     &[edits::EDIT, composer::REPLY],
-    &[chat::COPY_TEXT, chat::COPY_MESSAGE_LINK],
+    &[chat::COPY_TEXT, chat::COPY_MESSAGE_LINK, polls::END_POLL],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
     &[chat::COPY_MESSAGE_ID],
     &[chat::COPY_LINK, chat::OPEN_LINK],
