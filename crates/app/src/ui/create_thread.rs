@@ -22,8 +22,8 @@ use super::uploads::Stopped;
 use crate::render;
 
 /// Create Thread in the attach menu, where the client offers it
-/// (`canStartThreads` in 316576), as it does everything in the menu: in a
-/// channel with a message box.
+/// (`canStartThreads` in 316576): in a channel with a message box, or whose
+/// notice keeps the button, as the client keeps it for Create Thread alone.
 pub(super) const ATTACH_MENU: Entry<()> = Entry::Item(Item {
     name: "create-thread",
     label: "Create T_hread",
@@ -83,12 +83,13 @@ impl Form {
 }
 
 impl App {
-    /// The open channel, if the attach menu offers Create Thread there now.
+    /// The open channel, if the attach menu offers Create Thread there now:
+    /// with the message box, or on the notice that replaces it where only
+    /// Send Messages is missing (see [`discord::notice::Notice`]).
     pub(super) fn thread_channel(&self) -> Option<Snowflake> {
         let channel = self.state.borrow().channel?;
-        let offered = self.composer_box.is_visible()
-            && self.editing().is_none()
-            && self.state.borrow().offers_thread_in_attach_menu(channel);
+        let button = self.composer_box.is_visible() || self.drafts.notice_attach.parent().is_some();
+        let offered = button && self.editing().is_none() && self.state.borrow().offers_thread_in_attach_menu(channel);
         offered.then_some(channel)
     }
 

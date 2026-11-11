@@ -196,7 +196,11 @@ impl App {
                 Event::TypingStart { channel_id, user_id, user } => self.on_typing(channel_id, user_id, user.as_ref()),
                 Event::MessageCreate(message) => self.on_message(*message),
                 Event::MessageUpdate(edit) => self.on_message_update(edit),
-                Event::Interaction { nonce, outcome } => self.on_interaction(nonce, outcome),
+                Event::Interaction { nonce, outcome, reason } => self.on_interaction(nonce, outcome, reason),
+                Event::InteractionCreated { nonce } => self.command_created(nonce),
+                Event::Autocomplete { nonce, choices } => self.on_autocomplete(nonce, &choices),
+                Event::CommandIndexChanged { guild, version } => self.command_index_changed(guild, version),
+                Event::UserApplicationChanged => self.state.borrow_mut().commands.user_changed(),
                 Event::MessageDelete { id, channel_id } => self.on_message_delete(id, channel_id),
                 Event::MessageDeleteBulk { ids, channel_id } => self.on_message_delete_bulk(ids, channel_id),
                 Event::PollVote { channel_id, message_id, votes, added, many } => {
@@ -389,6 +393,9 @@ impl App {
             state.nitro = nitro;
             state.experiments = experiments;
             state.session_id = session_id;
+            // A new session: every index is out of date, and no command is waiting on this one.
+            state.commands.session_started();
+            state.running.clear();
             let store = (!state.persisted).then(|| (state.token.clone(), user.username.clone()));
             state.persisted = true;
             state.users.insert(user.id.0, user.display_name().to_string());

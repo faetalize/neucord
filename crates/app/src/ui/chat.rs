@@ -291,7 +291,7 @@ impl App {
     pub(super) fn on_message(self: &Rc<Self>, message: Message) {
         // An app's response to a press carries the press's nonce.
         if let Some(nonce) = message.nonce.as_deref().and_then(|n| n.parse().ok()) {
-            self.on_interaction(Snowflake(nonce), discord::gateway::Outcome::Success);
+            self.on_interaction(Snowflake(nonce), discord::gateway::Outcome::Success, None);
         }
         let original = match &message.referenced_message {
             Referenced::Message(original) => Some(&original.author),
@@ -2018,6 +2018,9 @@ impl App {
         } else if edited {
             body.append(&render::render(&[], &cx, edited));
         }
+        if message.is_loading() {
+            body.append(&Self::thinking(message));
+        }
         if let Some(poll) = &message.poll {
             body.append(&polls::poll(self, message, poll));
         }
@@ -2050,6 +2053,47 @@ impl App {
         if let Some(original) = message.forwarded() {
             body.append(&self.forward(message, &original, names));
         }
+        if message.is_ephemeral() && live {
+            body.append(&self.ephemeral_footer(message));
+        }
+    }
+
+    /// What an app's deferred answer says until it follows up
+    /// (`ApplicationCommandMessageContent`'s CREATED and TIMED_OUT, 594808).
+    fn thinking(message: &Message) -> gtk::Widget {
+        let timed_out = message.is_timed_out(now_ms());
+        let text = if timed_out {
+            "The application did not respond".to_owned()
+        } else {
+            format!("{} is thinking…", message.author.username)
+        };
+        let class = if timed_out { "error" } else { "dim-label" };
+        gtk::Label::builder().label(text).xalign(0.0).css_classes([class]).build().upcast()
+    }
+
+    /// Under an answer only we can see, with a way to dismiss it, which
+    /// removes it here and nowhere else (`dismiss` is a local delete,
+    /// `deleteMessage` in 138399).
+    fn ephemeral_footer(self: &Rc<Self>, message: &Message) -> gtk::Widget {
+        let line = gtk::Box::builder().spacing(6).css_classes(["caption", "dimmed"]).build();
+        line.append(&gtk::Image::from_icon_name("view-reveal-symbolic"));
+        let label = gtk::Label::builder()
+            .use_markup(true)
+            .label("Only you can see this • <a href=\"dismiss\">Dismiss message</a>")
+            .xalign(0.0)
+            .build();
+        label.connect_activate_link({
+            let this = Rc::downgrade(self);
+            let (id, channel) = (message.id, message.channel_id);
+            move |_, _| {
+                if let Some(this) = this.upgrade() {
+                    this.on_message_delete(id, channel);
+                }
+                glib::Propagation::Stop
+            }
+        });
+        line.append(&label);
+        line.upcast()
     }
 
     /// A forwarded message, under a bar as quotes are: what it said, and

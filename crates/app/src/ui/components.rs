@@ -469,8 +469,17 @@ impl App {
     }
 
     /// Discord answered the interaction of ours sent as `nonce`.
-    pub(super) fn on_interaction(self: &Rc<Self>, nonce: Snowflake, outcome: discord::gateway::Outcome) {
+    pub(super) fn on_interaction(
+        self: &Rc<Self>,
+        nonce: Snowflake,
+        outcome: discord::gateway::Outcome,
+        reason: Option<u64>,
+    ) {
         use discord::gateway::Outcome;
+        // A command of ours, or an app's choices for one, is not a message's.
+        if self.command_answered(nonce, outcome, reason) {
+            return;
+        }
         self.interaction_ended(nonce, outcome != Outcome::Failure, None);
         if outcome == Outcome::Form {
             // The client opens it.

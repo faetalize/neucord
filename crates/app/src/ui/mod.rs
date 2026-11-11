@@ -33,6 +33,7 @@ mod reactors;
 mod requests;
 mod scheduling;
 mod sidebar;
+mod slash;
 mod state;
 mod stickers;
 mod switcher;
@@ -148,6 +149,8 @@ pub struct App {
     toasts: adw::ToastOverlay,
     /// The voice message being recorded, or waiting to be sent.
     voice: voice::Voice,
+    /// The command being filled in, and the suggestions for it.
+    slash: slash::Slash,
     /// "Editing message" above the composer.
     edit_bar: gtk::Box,
     /// The message the composer is editing, if any.
@@ -332,6 +335,7 @@ impl App {
             scheduling: scheduling::Scheduling::new(),
             toasts: adw::ToastOverlay::new(),
             voice: voice::Voice::new(),
+            slash: slash::Slash::new(),
             // Styled as the reply bar, which takes its place while editing.
             edit_bar: gtk::Box::builder().spacing(8).visible(false).css_classes(["reply-bar"]).build(),
             editing: RefCell::default(),

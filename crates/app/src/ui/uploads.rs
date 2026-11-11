@@ -164,6 +164,9 @@ pub(super) struct Drafts {
     sending: RefCell<HashMap<Snowflake, Rc<Sending>>>,
     tray: gtk::Box,
     attach: gtk::Button,
+    /// The same button on the notice that takes the message box's place,
+    /// where only Create Thread is left in its menu.
+    pub(super) notice_attach: gtk::Button,
     /// The tray's top row while sending.
     sending_bar: gtk::Box,
     cancel: gtk::Button,
@@ -175,16 +178,20 @@ impl Drafts {
         sending_bar.append(&gtk::Label::builder().label("Sending…").xalign(0.0).hexpand(true).build());
         let cancel = gtk::Button::builder().label("Cancel").css_classes(["flat"]).build();
         sending_bar.append(&cancel);
-        Drafts {
-            files: RefCell::default(),
-            sending: RefCell::default(),
-            tray: gtk::Box::builder().orientation(gtk::Orientation::Vertical).visible(false).build(),
-            attach: gtk::Button::builder()
+        let attach_button = || {
+            gtk::Button::builder()
                 .icon_name("list-add-symbolic")
                 .tooltip_text("Attach")
                 .valign(gtk::Align::Center)
                 .css_classes(["flat", "circular"])
-                .build(),
+                .build()
+        };
+        Drafts {
+            files: RefCell::default(),
+            sending: RefCell::default(),
+            tray: gtk::Box::builder().orientation(gtk::Orientation::Vertical).visible(false).build(),
+            attach: attach_button(),
+            notice_attach: attach_button(),
             sending_bar,
             cancel,
         }
@@ -344,20 +351,22 @@ impl App {
         let drafts = &self.drafts;
         area.append(&drafts.tray);
         self.composer_box.append(&drafts.attach);
-        drafts.attach.connect_clicked({
-            let this = Rc::downgrade(self);
-            move |button| {
-                let Some(this) = this.upgrade() else { return };
-                let Some(bounds) = button.compute_bounds(&this.composer_box) else { return };
-                let rect = gdk::Rectangle::new(
-                    bounds.x() as i32,
-                    bounds.y() as i32,
-                    bounds.width() as i32,
-                    bounds.height() as i32,
-                );
-                super::menus::popup(&this, super::menus::ATTACH, (), &this.composer_box, super::menus::At::Below(rect));
-            }
-        });
+        for (button, parent) in [(&drafts.attach, &self.composer_box), (&drafts.notice_attach, &self.notice_bar)] {
+            button.connect_clicked({
+                let (this, parent) = (Rc::downgrade(self), parent.downgrade());
+                move |button| {
+                    let (Some(this), Some(parent)) = (this.upgrade(), parent.upgrade()) else { return };
+                    let Some(bounds) = button.compute_bounds(&parent) else { return };
+                    let rect = gdk::Rectangle::new(
+                        bounds.x() as i32,
+                        bounds.y() as i32,
+                        bounds.width() as i32,
+                        bounds.height() as i32,
+                    );
+                    super::menus::popup(&this, super::menus::ATTACH, (), &parent, super::menus::At::Below(rect));
+                }
+            });
+        }
         drafts.cancel.connect_clicked({
             let this = Rc::downgrade(self);
             move |_| {
