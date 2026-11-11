@@ -111,7 +111,7 @@ pub(super) const REMOVE_FRIEND: Entry<UserTarget> = Entry::Item(Item {
 pub(super) const COPY_USER_ID: Entry<UserTarget> = Entry::Item(Item {
     name: "copy-user-id",
     label: "Copy User _ID",
-    shows: |app, _| app.state.borrow().developer_mode,
+    shows: |app, _| app.state.borrow().settings.developer_mode,
     kind: Kind::Action(|app, target| app.copy(&target.user.id.to_string())),
 });
 

@@ -29,7 +29,7 @@ use crate::notifications::{GuildSettings, NotificationSettings};
 use crate::reactions::{self, Kind};
 use crate::read_state::ReadStates;
 use crate::relationships::{Presence, Relationship, Relationships};
-use crate::settings::{self, GuildFolder, MediaPatch, MediaSettings};
+use crate::settings::{Settings, SettingsPatch};
 use crate::stickers::Listed;
 use crate::verification::Account;
 use crate::{Channel, Error, Guild, Member, Message, MessageEdit, Role, Snowflake, ThreadMember, User, identity};
@@ -68,13 +68,9 @@ pub struct Ready {
     pub relationships: Relationships,
     pub read_states: ReadStates,
     pub notification_settings: NotificationSettings,
-    /// Server folders and order; empty if the user never arranged servers.
-    pub guild_folders: Vec<GuildFolder>,
-    pub media_settings: MediaSettings,
-    pub developer_mode: bool,
+    pub settings: Settings,
     /// See [`crate::regional::media_takedown_regulated`].
     pub media_takedown_regulated: bool,
-    pub message_display_compact: bool,
     /// A step Discord requires before the account can be used, if any
     /// (see [`crate::account`]).
     pub required_action: Option<String>,
@@ -280,12 +276,12 @@ pub enum Event {
     MemberList(Box<MemberListUpdate>),
     /// Our notification settings for one server (or DMs) changed.
     NotificationSettingsUpdate(GuildSettings),
-    /// The user rearranged servers or folders (on any client).
-    GuildFoldersUpdate(Vec<GuildFolder>),
-    /// The user changed how embeds and media show.
-    MediaSettingsUpdate(MediaPatch),
-    DeveloperModeUpdate(bool),
-    MessageDisplayCompactUpdate(bool),
+    /// The user changed settings (on any client). With `replace`, the patch
+    /// is all of them and what it leaves out is back to its default.
+    SettingsUpdate {
+        patch: SettingsPatch,
+        replace: bool,
+    },
     /// Discord started or stopped requiring a step (see [`crate::account`]).
     RequiredActionUpdate(Option<String>),
     /// A resume succeeded; everything missed has been replayed before this.
@@ -708,15 +704,17 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 relationships: Relationships::from_ready(&data),
                 read_states: ReadStates::from_ready(&data["read_state"]),
                 notification_settings: NotificationSettings::from_ready(&data["user_guild_settings"]),
-                guild_folders: settings::guild_folders(&data["user_settings"]).unwrap_or_default(),
-                media_settings: {
-                    let mut media = MediaSettings::default();
-                    media.apply(MediaPatch::from_settings(&data["user_settings"]));
-                    media
+                settings: {
+                    // The protobuf is what the official client reads, so it
+                    // wins where both say something.
+                    let mut settings = Settings::default();
+                    settings.apply(SettingsPatch::from_json(&data["user_settings"]));
+                    if let Some(proto) = data["user_settings_proto"].as_str().and_then(SettingsPatch::from_proto) {
+                        settings.apply(proto);
+                    }
+                    settings
                 },
-                developer_mode: settings::developer_mode(&data["user_settings"]).unwrap_or(false),
                 media_takedown_regulated: crate::regional::media_takedown_regulated(&data["regional_feature_config"]),
-                message_display_compact: settings::message_display_compact(&data["user_settings"]).unwrap_or(false),
                 required_action: data["required_action"].as_str().map(str::to_owned),
                 experiments,
                 session_id: data["session_id"].as_str().unwrap_or_default().to_owned(),
@@ -753,20 +751,22 @@ fn dispatch(state: &State, name: &str, data: Value) {
         }
         // Partial: only the settings that changed.
         "USER_SETTINGS_UPDATE" => {
-            let media = MediaPatch::from_settings(&data);
-            if !media.is_empty() {
-                let _ = state.events.try_send(Event::MediaSettingsUpdate(media));
+            let patch = SettingsPatch::from_json(&data);
+            if patch.is_empty() {
+                return;
             }
-            if let Some(on) = settings::developer_mode(&data) {
-                let _ = state.events.try_send(Event::DeveloperModeUpdate(on));
+            Event::SettingsUpdate { patch, replace: false }
+        }
+        // `type` 1 is the account's settings; 2 (frecency and favourites) is
+        // not read yet.
+        "USER_SETTINGS_PROTO_UPDATE" => {
+            if data["settings"]["type"].as_u64() != Some(1) {
+                return;
             }
-            if let Some(on) = settings::message_display_compact(&data) {
-                let _ = state.events.try_send(Event::MessageDisplayCompactUpdate(on));
-            }
-            match settings::guild_folders(&data) {
-                Some(folders) => Event::GuildFoldersUpdate(folders),
-                None => return,
-            }
+            let Some(patch) = data["settings"]["proto"].as_str().and_then(SettingsPatch::from_proto) else {
+                return eprintln!("gateway: bad USER_SETTINGS_PROTO_UPDATE");
+            };
+            Event::SettingsUpdate { patch, replace: data["partial"].as_bool() != Some(true) }
         }
         "USER_GUILD_SETTINGS_UPDATE" => match GuildSettings::deserialize(&data) {
             Ok(settings) => Event::NotificationSettingsUpdate(settings),

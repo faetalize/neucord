@@ -114,7 +114,7 @@ pub(super) const OPEN_LINK: Entry<MessageTarget> = Entry::Item(Item {
 pub(super) const COPY_MESSAGE_ID: Entry<MessageTarget> = Entry::Item(Item {
     name: "copy-message-id",
     label: "Copy Message _ID",
-    shows: |app, target| app.state.borrow().developer_mode && target.sticker().is_none(),
+    shows: |app, target| app.state.borrow().settings.developer_mode && target.sticker().is_none(),
     kind: menus::Kind::Action(copy_message_id),
 });
 
@@ -934,7 +934,7 @@ impl App {
         Viewport {
             height: self.window.height(),
             text_scale: if dpi > 0 { f64::from(dpi) / (96.0 * 1024.0) } else { 1.0 },
-            compact: self.state.borrow().message_display_compact,
+            compact: self.state.borrow().settings.message_display_compact,
         }
     }
 
@@ -1945,7 +1945,7 @@ impl App {
     /// What a message says, and shows: its text, attachments and embeds. Its
     /// buttons and menus work if `live`: not in a forward.
     fn message_content(self: &Rc<Self>, body: &gtk::Box, message: &Message, names: &Names, live: bool) {
-        let media = self.state.borrow().media;
+        let media = self.state.borrow().settings.media;
         let edited = message.edited_timestamp.is_some();
         let embeds = discord::embed::visible(message, &media);
         let spans = message.markup();

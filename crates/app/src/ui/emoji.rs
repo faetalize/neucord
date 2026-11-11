@@ -29,7 +29,7 @@ pub(super) const AUTOCOMPLETE: usize = 50;
 
 /// Only in Developer Mode, like the rest of the picker's menu (233503).
 fn developer(app: &App) -> bool {
-    app.state.borrow().developer_mode
+    app.state.borrow().settings.developer_mode
 }
 
 /// The emoji a menu was opened on.
