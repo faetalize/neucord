@@ -410,7 +410,11 @@ changed for unrelated reasons only needs a note in the issue.
   once its section opens and the held one isn't as long as the count (229187,
   anchor `isFetchingFriends`). A decoration's image is the shop's by `sku_id`
   or else the preset's by `asset`, none once it lapses (`D` in 486020, with
-  `getCollectiblesItemAssetUrl` in 746002).
+  `getCollectiblesItemAssetUrl` in 746002). A banner's `size` is the smallest
+  of the list `kr` picks from (776231, anchor `3072, 4096`; `cdn::SIZES`)
+  that holds its width times the screen's scale: the popout's `bannerWidth`
+  (watched), the panel's, or the popout's in the redesign (`specOverrides` in
+  289287).
 
 ## Notifications and unread state
 
