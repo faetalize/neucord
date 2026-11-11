@@ -33,9 +33,13 @@ pub(super) struct UserTarget {
     pub(super) anchor: gtk::Widget,
 }
 
-/// The popout's width, and the panel's smaller sizes: the widest the popout is (`UserPopout` is 340px in 348434's styles).
-const WIDTH: i32 = 340;
-const BANNER_HEIGHT: i32 = 100;
+/// A banner's width and height as the client draws it: the popout's
+/// (`bannerWidth` and `bannerHeight` of `POPOUT` in 207634), which the panel
+/// takes in the redesign (`specOverrides` in 289287), and the panel's own
+/// (`SIDEBAR`). The popout is as wide as its banner.
+const POPOUT_BANNER: (i32, i32) = (300, 105);
+const PANEL_BANNER: (i32, i32) = (340, 120);
+const WIDTH: i32 = POPOUT_BANNER.0;
 const AVATAR: i32 = 80;
 const BADGE: i32 = 20;
 
@@ -131,6 +135,8 @@ pub(super) struct View {
     host: Host,
     target: UserTarget,
     request: Request,
+    /// The width and height of its banner.
+    banner: (i32, i32),
     /// The note box takes the focus once it shows.
     note: bool,
     /// The sections the reader opened, which a rebuild leaves open.
@@ -142,7 +148,7 @@ pub(super) struct View {
 /// The profiles on screen: the popout, if one is open, and the panel.
 #[derive(Default)]
 pub(super) struct Views {
-    popout: Option<std::rc::Weak<View>>,
+    popout: Option<Rc<View>>,
     panel: Option<Rc<View>>,
 }
 
@@ -179,22 +185,33 @@ impl App {
                 bounds.height() as i32,
             )));
         }
-        popover.connect_closed(|popover| {
-            let popover = popover.clone();
-            glib::idle_add_local_once(move || popover.unparent());
-        });
         let view = Rc::new(View {
             app: Rc::downgrade(self),
             host: Host::Popout(popover.clone()),
             target: target.copy(),
             request,
+            banner: POPOUT_BANNER,
             note,
             open: RefCell::default(),
             editing: std::cell::Cell::default(),
         });
+        // The app holds it while it is open: nothing else does once its
+        // requests are answered, and it still has to follow what changes.
+        popover.connect_closed({
+            let (app, view) = (Rc::downgrade(self), Rc::downgrade(&view));
+            move |popover| {
+                let (Some(app), Some(view)) = (app.upgrade(), view.upgrade()) else { return };
+                let mut views = app.profile_views.borrow_mut();
+                let gone = views.popout.take_if(|open| Rc::ptr_eq(open, &view));
+                drop(views);
+                drop(gone);
+                let popover = popover.clone();
+                glib::idle_add_local_once(move || popover.unparent());
+            }
+        });
         // One at a time: an open one would take this click to dismiss itself.
-        let old = self.profile_views.borrow_mut().popout.replace(Rc::downgrade(&view));
-        if let Some(Host::Popout(old)) = old.and_then(|v| v.upgrade()).as_ref().map(|v| &v.host) {
+        let old = self.profile_views.borrow_mut().popout.replace(view.clone());
+        if let Some(Host::Popout(old)) = old.as_deref().map(|v| &v.host) {
             old.popdown();
         }
         self.begin_profile(&view);
@@ -220,6 +237,7 @@ impl App {
             app: Rc::downgrade(self),
             host: Host::Panel(host.clone()),
             request: Request::sidebar(&user, redesign),
+            banner: if redesign { POPOUT_BANNER } else { PANEL_BANNER },
             target: UserTarget {
                 user,
                 guild: None,
@@ -283,7 +301,7 @@ impl App {
     pub(super) fn refresh_profile_views(self: &Rc<Self>) {
         let (popout, panel) = {
             let views = self.profile_views.borrow();
-            (views.popout.as_ref().and_then(std::rc::Weak::upgrade), views.panel.clone())
+            (views.popout.clone(), views.panel.clone())
         };
         for view in popout.into_iter().chain(panel) {
             view.fill(self, false);
@@ -395,6 +413,9 @@ impl View {
             // the window can show.
             Host::Popout(popover) => {
                 let height = (app.window.height() - 120).clamp(200, 700);
+                // Its minimum height stays small however much it holds: GTK
+                // hides a popover the compositor sized below its minimum,
+                // which a profile that replaces the spinner would be.
                 let scroller = gtk::ScrolledWindow::builder()
                     .child(&body)
                     .hscrollbar_policy(gtk::PolicyType::Never)
@@ -402,6 +423,10 @@ impl View {
                     .max_content_height(height)
                     .build();
                 popover.set_child(Some(&scroller));
+                // Or the focus goes to the first thing that takes it, the
+                // bio, which shows selected.
+                scroller.grab_focus();
+                self.resized();
             }
             Host::Panel(panel) => {
                 while let Some(old) = panel.first_child() {
@@ -409,6 +434,19 @@ impl View {
                 }
                 panel.append(&body);
             }
+        }
+    }
+
+    /// What the popout holds changed its size. GTK sizes a popover as it
+    /// opens and keeps that size, so a profile that replaced the spinner
+    /// would show through a window the spinner's size. It lays out again at
+    /// the size it has unless a resize is pending.
+    fn resized(&self) {
+        if let Host::Popout(popover) = &self.host
+            && popover.is_mapped()
+        {
+            popover.queue_resize();
+            popover.present();
         }
     }
 
@@ -425,20 +463,24 @@ impl View {
 
         let shown = held.as_ref().map(Profile::shown);
         if let Some(banner) = shown.as_ref().and_then(|s| s.banner) {
+            let (width, height) = self.banner;
+            // The size the client asks the CDN for at this width on this screen.
+            let size = discord::cdn::asset_size(width as u32 * app.images.scale() as u32);
             let url = match banner {
-                Banner::User(hash) => discord::cdn::banner_url(user.id.0, hash, 600),
-                Banner::Server { guild, hash } => discord::cdn::member_banner_url(guild.0, user.id.0, hash, 600),
+                Banner::User(hash) => discord::cdn::banner_url(user.id.0, hash, size),
+                Banner::Server { guild, hash } => discord::cdn::member_banner_url(guild.0, user.id.0, hash, size),
             };
             // Shown once it has loaded: until then, or if it never does, it
             // would be an empty box.
-            let (frame, picture) = fixed_picture(-1, BANNER_HEIGHT, gtk::ContentFit::Cover);
+            let (frame, picture) = fixed_picture(-1, height, gtk::ContentFit::Cover);
             frame.set_visible(false);
             app.images.load(&url, false, {
-                let frame = frame.downgrade();
+                let (frame, view) = (frame.downgrade(), Rc::downgrade(self));
                 move |paintable| {
                     picture.set_paintable(Some(&paintable));
-                    if let Some(frame) = frame.upgrade() {
+                    if let (Some(frame), Some(view)) = (frame.upgrade(), view.upgrade()) {
                         frame.set_visible(true);
+                        view.resized();
                     }
                 }
             });
@@ -762,6 +804,8 @@ impl View {
             if let (true, Some(user), Some(app)) = (expander.is_expanded(), asks, app()) {
                 app.ask_friend_list(user);
             }
+            // Once it is laid out with its list.
+            glib::idle_add_local_once(move || view.resized());
         });
         if expander.is_expanded()
             && let Some(user) = asks
