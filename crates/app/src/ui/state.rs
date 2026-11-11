@@ -8,6 +8,7 @@ use discord::channel_icon;
 use discord::cooldowns::Slowmode;
 use discord::experiments::Experiments;
 use discord::gifs::Tiles;
+use discord::interaction::Failure;
 use discord::limits::{Limits, Nitro};
 use discord::member_list::{self, MemberLists};
 use discord::members::{Members, RoleColour};
@@ -25,10 +26,19 @@ use discord::threads;
 use discord::typing::Typing;
 use discord::verification;
 use discord::verification::Account;
+use discord::voice_states::{VoiceState, VoiceStates};
 use discord::{Channel, ChannelKind, Gateway, Guild, Message, Rest, Resume, Snowflake, User};
 use gtk::glib;
 
 use super::friends::Tab;
+
+/// A press of ours on a message's component, until it is answered.
+pub(super) struct Pending {
+    pub(super) channel: Snowflake,
+    pub(super) message: Snowflake,
+    /// The app whose message it is.
+    pub(super) application: Snowflake,
+}
 
 /// What Home shows in place of a channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,9 +116,8 @@ pub(super) struct State {
     pub(super) revealed_spoilers: HashMap<Snowflake, HashSet<usize>>,
     /// This session's id, which interactions name.
     pub(super) session_id: String,
-    /// Where each interaction of ours that Discord hasn't answered belongs:
-    /// its channel and message, by nonce.
-    pub(super) interactions: HashMap<Snowflake, (Snowflake, Snowflake)>,
+    /// The component presses of ours that Discord hasn't answered, by nonce.
+    pub(super) interactions: HashMap<Snowflake, Pending>,
     /// The apps and commands fetched for slash commands.
     pub(super) commands: discord::commands::CommandIndex,
     /// Commands we ran that their app hasn't answered, by nonce.
@@ -153,6 +162,8 @@ pub(super) struct State {
     /// The user closed the member list pane beside the chat, which is open
     /// until they do.
     pub(super) members_closed: bool,
+    /// Who is in each server's voice channels.
+    pub(super) voice: VoiceStates,
     /// What each message search holds, by where it looks.
     pub(super) searches: HashMap<discord::search::Context, super::search::Saved>,
     /// Channels opened this session, newest first, for the quick switcher.
@@ -160,6 +171,16 @@ pub(super) struct State {
 }
 
 impl State {
+    /// What a voice channel's participants are called: their nickname in the
+    /// server, else their display name, which the update or an earlier
+    /// message told us.
+    pub(super) fn voice_name(&self, state: &VoiceState) -> String {
+        let name = state.nick.as_deref().or_else(|| state.user.as_ref().map(|u| u.display_name()));
+        name.map(str::to_owned)
+            .or_else(|| self.users.get(&state.user_id.0).cloned())
+            .unwrap_or_else(|| "...".to_owned())
+    }
+
     pub(super) fn rail_layout(&self) -> Vec<RailEntry> {
         let ids: Vec<Snowflake> = self.guilds.iter().map(|g| g.id).collect();
         discord::settings::rail_layout(&self.settings.guild_folders, &ids)
@@ -215,6 +236,26 @@ impl State {
     pub(super) fn command_place(&self, channel: Snowflake) -> Option<discord::commands::Place> {
         let (guild, channel) = self.find_channel(channel)?;
         Some(discord::commands::Place::of(guild, channel, self.account.as_ref()?, now_unix()))
+    }
+
+    /// A press of ours is over, answered or refused by the request itself
+    /// (`failure`). A refusal that says the app's command is out of date
+    /// makes the indexes with it stale, as it does for a command we ran
+    /// (`T` in 964363 dispatches the same for a press).
+    pub(super) fn end_press(&mut self, nonce: Snowflake, failure: Option<&Failure>) -> Option<Pending> {
+        let press = self.interactions.remove(&nonce)?;
+        if failure.is_some_and(|f| f.stale_command) {
+            self.commands_out_of_date(press.application, press.channel);
+        }
+        Some(press)
+    }
+
+    /// Discord refused something of `application`'s in `channel` as out of
+    /// date (`APPLICATION_COMMAND_EXECUTE_BAD_VERSION`): the server's index,
+    /// or the DM's, and the account's, are fetched again if they hold the app.
+    pub(super) fn commands_out_of_date(&mut self, application: Snowflake, channel: Snowflake) {
+        let context = self.find_channel(channel).map_or(channel, |(guild, c)| guild.map_or(c.id, |g| g.id));
+        self.commands.out_of_date(application, context);
     }
 
     /// The guild a channel or thread belongs to and the channel itself;
@@ -655,6 +696,14 @@ impl State {
                         let mut icon = std::collections::hash_map::DefaultHasher::new();
                         channel_icon::of(guild, c).hash(&mut icon);
                         sig.push(icon.finish());
+                        if c.kind == ChannelKind::Voice {
+                            for v in self.voice.in_channel(guild.id, c.id, |v| self.voice_name(v)) {
+                                let mut hash = std::collections::hash_map::DefaultHasher::new();
+                                (v.user_id, v.muted(), v.deafened(), v.self_video, v.self_stream, self.voice_name(v))
+                                    .hash(&mut hash);
+                                sig.push(hash.finish());
+                            }
+                        }
                         for t in self.sidebar_threads(guild, c) {
                             // A muted thread shows as muted; its place stands for that.
                             sig.extend([t.id.0, Self::thread_muted(t) as u64]);
@@ -742,6 +791,35 @@ mod tests {
             guilds: vec![guild],
             ..State::default()
         }
+    }
+
+    #[test]
+    fn a_press_refused_as_out_of_date_marks_its_apps_commands_stale() {
+        use discord::commands::Target;
+        use std::time::Instant;
+        let mut state = open_server(None, json!({}));
+        let index = json!({
+            "version": "7",
+            "applications": [{"id": "200", "name": "Dicey", "description": "", "bot_id": "300"}],
+            "application_commands": [{"id": "400", "application_id": "200", "version": "5", "type": 1,
+                "name": "roll", "description": "Roll"}],
+        });
+        let guild = Target::Guild(Snowflake(1));
+        state.commands.loaded(guild, &index, Snowflake(5));
+        let press = |application| Pending { channel: Snowflake(9), message: Snowflake(70), application };
+        let refused = Failure { stale_command: true, ..Failure::default() };
+
+        // Another app's press, or one that failed for another reason, changes nothing.
+        state.interactions.insert(Snowflake(1), press(Snowflake(999)));
+        state.interactions.insert(Snowflake(2), press(Snowflake(200)));
+        assert!(state.end_press(Snowflake(1), Some(&refused)).is_some());
+        assert!(state.end_press(Snowflake(2), Some(&Failure::default())).is_some());
+        assert!(!state.commands.wants(guild, Instant::now()), "still current");
+
+        state.interactions.insert(Snowflake(3), press(Snowflake(200)));
+        assert!(state.end_press(Snowflake(3), Some(&refused)).is_some());
+        assert!(state.commands.wants(guild, Instant::now()), "fetched again");
+        assert!(state.end_press(Snowflake(3), None).is_none(), "a press ends once");
     }
 
     #[test]

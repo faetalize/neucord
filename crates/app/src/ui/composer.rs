@@ -477,6 +477,8 @@ impl App {
         }
         self.reply_bar.set_visible(reply.is_some());
         let previous = self.reply.replace(reply.clone());
+        // Use Apps in the attach menu shows only where nothing is replied to.
+        self.refresh_attach();
         for id in previous.iter().chain(&reply).map(|r| r.to) {
             self.refresh_message(id);
         }

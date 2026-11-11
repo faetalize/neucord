@@ -8,6 +8,7 @@
 //! Menus open as GTK's own do: right-click and long-press where they land,
 //! Menu and Shift+F10 from the keyboard.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use gtk::prelude::*;
@@ -17,7 +18,7 @@ use super::App;
 use super::chat::{self, MessageTarget};
 use super::{
     attachments, composer, create_thread, edits, emoji, forum, gifs, picker, poll_composer, polls, profile, reactions,
-    reactors, scheduling, sidebar, stickers, threads, uploads, viewer, voice,
+    reactors, scheduling, sidebar, slash, stickers, threads, uploads, viewer, voice,
 };
 
 /// An item that copies or opens a link, shown when the link `$link` finds in
@@ -73,7 +74,24 @@ pub(super) enum Kind<T: 'static, C: 'static = App> {
     /// More sections, opened from this item. It shows only with something
     /// in them.
     Submenu(Table<T, C>),
+    /// A submenu its feature fills as the menu opens and keeps up to date
+    /// while it is open, such as the commands of the Apps item. It shows
+    /// whenever the item does, empty or not.
+    Live(fn(&Rc<C>, &Rc<T>, Live)),
 }
+
+/// What a [`Kind::Live`] submenu is made of: its entries change through
+/// `menu`, their actions are added to and removed from `actions`, and
+/// `widgets` are placed where an item of `menu` has the `custom` attribute
+/// with their id (a search box, say).
+pub(super) struct Live {
+    pub(super) menu: gio::Menu,
+    pub(super) actions: gio::SimpleActionGroup,
+    pub(super) widgets: Widgets,
+}
+
+/// Widgets for the menu's `custom` items, by id.
+pub(super) type Widgets = Rc<RefCell<Vec<(&'static str, gtk::Widget)>>>;
 
 /// Items made when the menu opens, one per choice: roles, server folders,
 /// recent emoji, mute durations.
@@ -111,11 +129,13 @@ pub(super) type Table<T, C = App> = &'static [&'static [Entry<T, C>]];
 /// in its order. Create Thread follows Forward, which Neucord has no entry for.
 /// The media group (Copy Image, Save Image, Save File) comes before the link
 /// group, which names a link by what it points to.
+/// Apps follows Copy Text and what Neucord has no entry for (Translate, Pin,
+/// Remind Me), and precedes Copy Message Link.
 const MESSAGE: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
     &[reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
     &[edits::EDIT, composer::REPLY, create_thread::MESSAGE_MENU],
-    &[chat::COPY_TEXT, chat::COPY_MESSAGE_LINK, polls::END_POLL],
+    &[chat::COPY_TEXT, slash::MESSAGE_APPS, chat::COPY_MESSAGE_LINK, polls::END_POLL],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
     &[chat::COPY_IMAGE, chat::SAVE_IMAGE, attachments::SAVE_FILE],
     &LINKS,
@@ -129,7 +149,7 @@ const MESSAGE_REGULATED: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
     &[reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
     &[edits::EDIT, composer::REPLY, create_thread::MESSAGE_MENU],
-    &[chat::COPY_TEXT, chat::COPY_MESSAGE_LINK, polls::END_POLL],
+    &[chat::COPY_TEXT, slash::MESSAGE_APPS, chat::COPY_MESSAGE_LINK, polls::END_POLL],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
     &[chat::COPY_MESSAGE_ID, stickers::MESSAGE_DETAILS],
     &[chat::COPY_IMAGE, chat::SAVE_IMAGE, attachments::SAVE_FILE],
@@ -204,10 +224,12 @@ pub(super) const CHANNEL: Table<sidebar::ChannelTarget> =
 /// list row: what Neucord has of the official client's (`user-context`,
 /// 841549, the server variant's groups). The client's also has call, voice,
 /// role and moderation items, which Neucord has no surface for, and Add
-/// Friend, Block and Ignore, whose requests Neucord has never sent.
+/// Friend, Block and Ignore, whose requests Neucord has never sent. Apps is
+/// in the group of Invite to Server and Remove Friend, and shows in the
+/// channel the menu was opened in.
 pub(super) const USER: Table<profile::UserTarget> = &[
     &[profile::PROFILE, profile::MENTION, profile::MESSAGE, profile::NOTE],
-    &[profile::REMOVE_FRIEND],
+    &[slash::USER_APPS, profile::REMOVE_FRIEND],
     &[profile::COPY_USER_ID],
 ];
 
@@ -216,13 +238,15 @@ pub(super) const USER: Table<profile::UserTarget> = &[
 /// Upload Text as File show where files may be attached, Record Voice Message
 /// where the experiment and Send Voice Messages allow it (`canRecordVoiceMessage`),
 /// Create Thread where threads may be started (`canStartThreads`), Create Poll
-/// where polls may be posted (`canPostPolls`), Schedule Message where we may
+/// where polls may be posted (`canPostPolls`), Use Apps where nothing is being
+/// replied to (`canUseApplicationCommands`), Schedule Message where we may
 /// post (`vK` in 566908), and the rest are other features'.
 pub(super) const ATTACH: Table<()> = &[&[
     uploads::UPLOAD_FILE,
     uploads::UPLOAD_TEXT,
     create_thread::ATTACH_MENU,
     poll_composer::CREATE_POLL,
+    slash::USE_APPS,
     scheduling::SCHEDULE_MESSAGE,
     voice::RECORD_VOICE,
 ]];
@@ -251,12 +275,16 @@ pub(super) const GIF_PICKER: Table<picker::Target> = &[&[gifs::COPY_LINK]];
 /// Where menu items find their actions.
 const PREFIX: &str = "menu";
 
-/// `table`'s menu for `target`, with the entries that show, and their
-/// actions, to insert as [`PREFIX`].
-fn build<T: 'static, C: 'static>(cx: &Rc<C>, table: Table<T, C>, target: T) -> (gio::Menu, gio::SimpleActionGroup) {
-    let (menu, actions) = (gio::Menu::new(), gio::SimpleActionGroup::new());
-    fill(cx, table, &Rc::new(target), &menu, &actions);
-    (menu, actions)
+/// `table`'s menu for `target`, with the entries that show, their actions,
+/// to insert as [`PREFIX`], and the widgets for its custom items.
+fn build<T: 'static, C: 'static>(
+    cx: &Rc<C>,
+    table: Table<T, C>,
+    target: T,
+) -> (gio::Menu, gio::SimpleActionGroup, Widgets) {
+    let (menu, actions, widgets) = (gio::Menu::new(), gio::SimpleActionGroup::new(), Widgets::default());
+    fill(cx, table, &Rc::new(target), &menu, &actions, &widgets);
+    (menu, actions, widgets)
 }
 
 fn fill<T: 'static, C: 'static>(
@@ -265,6 +293,7 @@ fn fill<T: 'static, C: 'static>(
     target: &Rc<T>,
     menu: &gio::Menu,
     actions: &gio::SimpleActionGroup,
+    widgets: &Widgets,
 ) {
     let detailed = |name: &str| format!("{PREFIX}.{name}");
     for entries in table {
@@ -291,10 +320,19 @@ fn fill<T: 'static, C: 'static>(
                     }
                     Kind::Submenu(table) => {
                         let submenu = gio::Menu::new();
-                        fill(cx, table, target, &submenu, actions);
+                        fill(cx, table, target, &submenu, actions, widgets);
                         if submenu.n_items() > 0 {
                             section.append_submenu(Some(item.label), &submenu);
                         }
+                    }
+                    Kind::Live(make) => {
+                        let submenu = gio::Menu::new();
+                        make(
+                            cx,
+                            target,
+                            Live { menu: submenu.clone(), actions: actions.clone(), widgets: widgets.clone() },
+                        );
+                        section.append_submenu(Some(item.label), &submenu);
                     }
                 },
                 Entry::Choices(choices) => {
@@ -389,7 +427,7 @@ pub(super) enum At {
 
 /// Open `table`'s menu for `target` over `parent`.
 pub(super) fn popup<T: 'static>(app: &Rc<App>, table: Table<T>, target: T, parent: &impl IsA<gtk::Widget>, at: At) {
-    let (menu, actions) = build(app, table, target);
+    let (menu, actions, widgets) = build(app, table, target);
     if menu.n_items() == 0 {
         return;
     }
@@ -400,6 +438,9 @@ pub(super) fn popup<T: 'static>(app: &Rc<App>, table: Table<T>, target: T, paren
     let popover =
         gtk::PopoverMenu::builder().menu_model(&menu).has_arrow(false).halign(halign).pointing_to(&rect).build();
     popover.insert_action_group(PREFIX, Some(&actions));
+    for (id, widget) in widgets.take() {
+        popover.add_child(&widget, id);
+    }
     popover.set_parent(parent);
     popover.connect_closed(|popover| {
         // Once the chosen item has run, which may come after closing.
@@ -467,7 +508,7 @@ pub(super) fn extend<T: 'static>(
             let (Some(app), Some(view)) = (app.upgrade(), view.upgrade()) else { return };
             let actions = gio::SimpleActionGroup::new();
             extra.remove_all();
-            fill(&app, table, &Rc::new(target()), &extra, &actions);
+            fill(&app, table, &Rc::new(target()), &extra, &actions, &Widgets::default());
             view.insert_action_group(PREFIX, Some(&actions));
         }
     });
@@ -578,7 +619,7 @@ mod tests {
     #[test]
     fn shows_what_shows_in_sections() {
         let cx = Rc::new(Cx::default());
-        let (menu, _) = build(&cx, TABLE, "m");
+        let (menu, _, _) = build(&cx, TABLE, "m");
         // The section of hidden items, and the submenu of them, are gone.
         assert_eq!(menu.n_items(), 3);
         let first = section(menu.upcast_ref(), 0);
@@ -646,9 +687,43 @@ mod tests {
     }
 
     #[test]
+    fn a_live_submenu_is_made_by_its_feature_and_shows_even_when_empty() {
+        const FILLED: Entry<Target, Cx> = Entry::Item(Item {
+            name: "filled",
+            label: "Filled",
+            shows: |_, _| true,
+            kind: Kind::Live(|cx, target, live| {
+                let action = gio::SimpleAction::new("inner", None);
+                let (cx, target) = (Rc::downgrade(cx), *target.as_ref());
+                action.connect_activate(move |_, _| {
+                    if let Some(cx) = cx.upgrade() {
+                        log(&cx, format!("inner {target}"));
+                    }
+                });
+                live.actions.add_action(&action);
+                live.menu.append(Some("Inner"), Some("menu.inner"));
+            }),
+        });
+        const EMPTY_LIVE: Entry<Target, Cx> =
+            Entry::Item(Item { name: "bare", label: "Bare", shows: |_, _| true, kind: Kind::Live(|_, _, _| {}) });
+        const NOT_SHOWN: Entry<Target, Cx> =
+            Entry::Item(Item { name: "no", label: "No", shows: |_, _| false, kind: Kind::Live(|_, _, _| panic!()) });
+        const LIVE: Table<Target, Cx> = &[&[FILLED, EMPTY_LIVE, NOT_SHOWN]];
+        let cx = Rc::new(Cx::default());
+        let (menu, actions, _) = build(&cx, LIVE, "m");
+        let section = section(menu.upcast_ref(), 0);
+        assert_eq!(section.n_items(), 2, "both show, the one that doesn't isn't made");
+        let filled = section.item_link(0, "submenu").expect("a submenu");
+        assert_eq!(label(&filled, 0).as_deref(), Some("Inner"));
+        assert_eq!(section.item_link(1, "submenu").expect("a submenu").n_items(), 0);
+        actions.activate_action("inner", None);
+        assert_eq!(*cx.log.borrow(), ["inner m"]);
+    }
+
+    #[test]
     fn entries_act_and_keep_their_state() {
         let cx = Rc::new(Cx::default());
-        let (_, actions) = build(&cx, TABLE, "m");
+        let (_, actions, _) = build(&cx, TABLE, "m");
         let state = |name: &str| actions.action_state(name);
         assert_eq!(state("muted").and_then(|s| s.get::<bool>()), Some(true));
         assert_eq!(state("level").and_then(|s| s.get::<String>()).as_deref(), Some("all"));

@@ -156,7 +156,12 @@ changed for unrelated reasons only needs a note in the issue.
   what a run sends for each option, `A` in 545152 (anchor
   `APPLICATION_COMMAND_USED`), and the checks a value passes, `J` in 300541
   (anchor `allowEmptyValues`); which words the suggestions look up, `Yn` in
-  664929 (anchor `hasSpaceTerminator`).
+  664929 (anchor `hasSpaceTerminator`); where the menus offer commands: the
+  Apps item, 173500 (anchor `command-search`), shows in `TEXTUAL` channels
+  (478437) but not media threads, with the user commands in 107632 and the
+  message commands in 761304; and Use Apps in the attach menu, 316576 (anchor
+  `canUseApplicationCommands`), which a pending reply hides, and which the
+  App Launcher replaces while the Apps button is off.
 - **`ansi` code blocks** (`markup::ansi`, `render::ansi_markup`). Which codes
   read, and how: the parser in 626551 (anchor `brightMagenta`): the style
   codes it takes, in what order a sequence's resets and sets apply, that every
