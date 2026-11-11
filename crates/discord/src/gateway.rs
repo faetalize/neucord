@@ -30,6 +30,7 @@ use crate::reactions::{self, Kind};
 use crate::read_state::ReadStates;
 use crate::relationships::{Presence, Relationship, Relationships};
 use crate::settings::{Settings, SettingsPatch};
+use crate::settings_proto;
 use crate::stickers::Listed;
 use crate::verification::Account;
 use crate::{Channel, Error, Guild, Member, Message, MessageEdit, Role, Snowflake, ThreadMember, User, identity};
@@ -69,6 +70,9 @@ pub struct Ready {
     pub read_states: ReadStates,
     pub notification_settings: NotificationSettings,
     pub settings: Settings,
+    /// The `PreloadedUserSettings` they were read from, whole: what changing
+    /// a setting starts from (see [`crate::settings_sync`]).
+    pub settings_proto: Option<Vec<u8>>,
     /// See [`crate::regional::media_takedown_regulated`].
     pub media_takedown_regulated: bool,
     /// A step Discord requires before the account can be used, if any
@@ -300,10 +304,12 @@ pub enum Event {
     /// Our notification settings for one server (or DMs) changed.
     NotificationSettingsUpdate(GuildSettings),
     /// The user changed settings (on any client). With `replace`, the patch
-    /// is all of them and what it leaves out is back to its default.
+    /// is all of them and what it leaves out is back to its default. From
+    /// the protobuf form, `proto` is what arrived.
     SettingsUpdate {
         patch: SettingsPatch,
         replace: bool,
+        proto: Option<Vec<u8>>,
     },
     /// Discord started or stopped requiring a step (see [`crate::account`]).
     RequiredActionUpdate(Option<String>),
@@ -738,6 +744,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
                     }
                     settings
                 },
+                settings_proto: data["user_settings_proto"].as_str().map(settings_proto::decode),
                 media_takedown_regulated: crate::regional::media_takedown_regulated(&data["regional_feature_config"]),
                 required_action: data["required_action"].as_str().map(str::to_owned),
                 experiments,
@@ -780,7 +787,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
             if patch.is_empty() {
                 return;
             }
-            Event::SettingsUpdate { patch, replace: false }
+            Event::SettingsUpdate { patch, replace: false, proto: None }
         }
         // `type` 1 is the account's settings; 2 (frecency and favourites) is
         // not read yet.
@@ -788,10 +795,13 @@ fn dispatch(state: &State, name: &str, data: Value) {
             if data["settings"]["type"].as_u64() != Some(1) {
                 return;
             }
-            let Some(patch) = data["settings"]["proto"].as_str().and_then(SettingsPatch::from_proto) else {
+            let Some(proto) = data["settings"]["proto"].as_str().map(settings_proto::decode) else {
                 return eprintln!("gateway: bad USER_SETTINGS_PROTO_UPDATE");
             };
-            Event::SettingsUpdate { patch, replace: data["partial"].as_bool() != Some(true) }
+            let Some(patch) = SettingsPatch::from_proto_bytes(&proto) else {
+                return eprintln!("gateway: bad USER_SETTINGS_PROTO_UPDATE");
+            };
+            Event::SettingsUpdate { patch, replace: data["partial"].as_bool() != Some(true), proto: Some(proto) }
         }
         "USER_GUILD_SETTINGS_UPDATE" => match GuildSettings::deserialize(&data) {
             Ok(settings) => Event::NotificationSettingsUpdate(settings),

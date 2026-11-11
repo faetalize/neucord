@@ -75,6 +75,8 @@ pub(crate) const GIFS_TRENDING_GIFS: Endpoint = Endpoint::get("/gifs/trending-gi
 pub(crate) const GIFS_SUGGEST: Endpoint = Endpoint::get("/gifs/suggest");
 pub(crate) const SAFETY_HUB: Endpoint = Endpoint::get("/safety-hub/@me");
 pub(crate) const SAFETY_HUB_SUSPENDED: Endpoint = Endpoint::post("/safety-hub/suspended/@me");
+pub(crate) const SETTINGS_PROTO: Endpoint = Endpoint::get("/users/@me/settings-proto/{kind}");
+pub(crate) const SAVE_SETTINGS_PROTO: Endpoint = Endpoint::patch("/users/@me/settings-proto/{kind}");
 
 /// An HTTP method and a path template.
 #[derive(Clone, Copy, Debug)]

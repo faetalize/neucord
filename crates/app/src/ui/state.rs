@@ -130,6 +130,8 @@ pub(super) struct State {
     /// The account's client settings: server folders (which also order the
     /// rail), how media shows, Developer Mode, compact display.
     pub(super) settings: Settings,
+    /// Saving changes to `settings`.
+    pub(super) sync: discord::settings_sync::SettingsSync,
     /// The message menu's last groups come in the order the client uses
     /// where the media takedown regulation is TIDA.
     pub(super) media_takedown_regulated: bool,

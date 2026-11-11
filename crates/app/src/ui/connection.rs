@@ -4,7 +4,6 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use discord::settings::Settings;
 use discord::{Channel, Event, Gateway, Guild, Member, Ready, Rest, Snowflake, session};
 use gtk::glib;
 use gtk::prelude::*;
@@ -239,22 +238,11 @@ impl App {
                     self.state.borrow_mut().required_action = action;
                     self.apply_required_action();
                 }
-                Event::SettingsUpdate { patch, replace } => {
-                    let (media, folders) = {
-                        let mut state = self.state.borrow_mut();
-                        let before = (state.settings.media, state.settings.guild_folders.clone());
-                        if replace {
-                            state.settings = Settings::default();
-                        }
-                        state.settings.apply(patch);
-                        (before.0 != state.settings.media, before.1 != state.settings.guild_folders)
-                    };
-                    if folders {
-                        self.rebuild_rail();
+                Event::SettingsUpdate { patch, replace, proto } => {
+                    if let Some(update) = proto {
+                        self.state.borrow_mut().sync.received(&update, !replace);
                     }
-                    if media {
-                        self.refresh_rows();
-                    }
+                    self.apply_settings(patch, replace);
                 }
                 Event::RelationshipAdd { relationship, notify } => {
                     self.learn_users(std::iter::once(&relationship.user));
@@ -301,6 +289,7 @@ impl App {
                     self.refresh_badges();
                 }
                 Event::Resumed => {
+                    self.state.borrow_mut().sync.disconnected();
                     self.timelines.borrow_mut().held.resumed();
                     self.state.borrow_mut().members.resumed();
                     self.send_member_requests();
@@ -314,6 +303,7 @@ impl App {
                     // Replayed messages have already updated the open channel.
                 }
                 Event::Closed { code, reason, resume } => {
+                    self.state.borrow_mut().sync.disconnected();
                     self.timelines.borrow_mut().held.closed();
                     {
                         let mut state = self.state.borrow_mut();
@@ -355,6 +345,7 @@ impl App {
             read_states,
             notification_settings,
             settings,
+            settings_proto,
             media_takedown_regulated,
             required_action,
             experiments,
@@ -371,7 +362,7 @@ impl App {
             .flat_map(|list| relationships.list(list))
             .map(|r| &r.user),
         );
-        let (store, was_ready) = {
+        let (store, was_ready, offline_save) = {
             let mut state = self.state.borrow_mut();
             let was_ready = state.ready_seen;
             state.ready_seen = true;
@@ -389,6 +380,7 @@ impl App {
             state.read = read_states;
             state.notifications = notification_settings;
             state.settings = settings;
+            let offline_save = settings_proto.and_then(|proto| state.sync.connected(proto));
             state.media_takedown_regulated = media_takedown_regulated;
             state.required_action = required_action;
             state.account = Some(account);
@@ -402,7 +394,7 @@ impl App {
             state.persisted = true;
             state.users.insert(user.id.0, user.display_name().to_string());
             state.me = Some(user);
-            (store, was_ready)
+            (store, was_ready, offline_save)
         };
         if let Some((Some(token), username)) = store {
             glib::spawn_future_local(async move {
@@ -412,6 +404,10 @@ impl App {
             });
         }
 
+        self.settings_replaced();
+        if let Some(schedule) = offline_save {
+            self.save_settings_after(schedule);
+        }
         let me = self.state.borrow().me.as_ref().map(|u| u.display_name().to_owned()).unwrap_or_default();
         self.me_label.set_label(&me);
         // READY may bring other Nitro, which changes the length limit.

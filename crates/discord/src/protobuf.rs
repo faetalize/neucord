@@ -1,6 +1,6 @@
-//! The part of protobuf's wire format Discord's user settings need, read
-//! without a code generator or a schema: Neucord names the field numbers it
-//! cares about and skips every other.
+//! The part of protobuf's wire format Discord's user settings need, read and
+//! written without a code generator or a schema: Neucord names the field
+//! numbers it cares about, and every other field passes through as it came.
 
 /// One field's payload, by wire type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,10 +30,76 @@ fn varint(buf: &mut &[u8]) -> Option<u64> {
     None
 }
 
+fn push_varint(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        out.push((value & 0x7f) as u8 | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn push_tag(out: &mut Vec<u8>, number: u32, wire_type: u64) {
+    push_varint(out, u64::from(number) << 3 | wire_type);
+}
+
+fn push_field(out: &mut Vec<u8>, number: u32, wire: Wire) {
+    match wire {
+        Wire::Varint(v) => {
+            push_tag(out, number, 0);
+            push_varint(out, v);
+        }
+        Wire::Fixed64(v) => {
+            push_tag(out, number, 1);
+            out.extend(v.to_le_bytes());
+        }
+        Wire::Bytes(bytes) => {
+            push_tag(out, number, 2);
+            push_varint(out, bytes.len() as u64);
+            out.extend(bytes);
+        }
+        Wire::Fixed32(v) => {
+            push_tag(out, number, 5);
+            out.extend(v.to_le_bytes());
+        }
+    }
+}
+
+/// A value to write into a message: a varint (booleans, enums, integers) or
+/// a length-delimited payload (strings, nested messages, wrappers).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Value {
+    Varint(u64),
+    Bytes(Vec<u8>),
+}
+
+/// A `BoolValue`, which is empty for `false`: proto3 leaves out a default.
+pub fn bool_value(value: bool) -> Value {
+    Value::Bytes(if value { vec![0x08, 1] } else { Vec::new() })
+}
+
+/// A `UInt32Value`, empty for 0.
+pub fn uint_value(value: u32) -> Value {
+    Value::Bytes(match value {
+        0 => Vec::new(),
+        v => {
+            let mut inner = vec![0x08];
+            push_varint(&mut inner, u64::from(v));
+            inner
+        }
+    })
+}
+
 fn take<'a>(buf: &mut &'a [u8], len: usize) -> Option<&'a [u8]> {
     let (head, rest) = buf.split_at_checked(len)?;
     *buf = rest;
     Some(head)
+}
+
+fn push_value(out: &mut Vec<u8>, number: u32, value: &Value) {
+    match value {
+        Value::Varint(v) => push_field(out, number, Wire::Varint(*v)),
+        Value::Bytes(bytes) => push_field(out, number, Wire::Bytes(bytes)),
+    }
 }
 
 impl<'a> Message<'a> {
@@ -61,6 +127,48 @@ impl<'a> Message<'a> {
 
     fn last(&self, number: u32) -> Option<Wire<'a>> {
         self.fields.iter().rev().find(|(n, _)| *n == number).map(|(_, w)| *w)
+    }
+
+    /// A length-delimited field's payload (a nested message, a string);
+    /// `None` if the field is absent.
+    pub fn bytes(&self, number: u32) -> Option<&'a [u8]> {
+        match self.last(number)? {
+            Wire::Bytes(bytes) => Some(bytes),
+            _ => None,
+        }
+    }
+
+    /// The top-level fields holding a nested message, by number: what a
+    /// partial update replaces.
+    pub fn nested(&self) -> Vec<(u32, &'a [u8])> {
+        self.fields
+            .iter()
+            .filter_map(|(n, wire)| match wire {
+                Wire::Bytes(bytes) => Some((*n, *bytes)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The message with `number` set to `value` (or removed, for `None`) and
+    /// every other field as it was, unknown ones included. The new field
+    /// goes where its number falls among the others, which is where a
+    /// protobuf library writes it.
+    pub fn with(&self, number: u32, value: Option<Value>) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut value = value;
+        for (n, wire) in self.fields.iter().filter(|(n, _)| *n != number) {
+            if *n > number
+                && let Some(value) = value.take()
+            {
+                push_value(&mut out, number, &value);
+            }
+            push_field(&mut out, *n, *wire);
+        }
+        if let Some(value) = value {
+            push_value(&mut out, number, &value);
+        }
+        out
     }
 
     /// A nested message; `None` if the field is absent or malformed.
@@ -203,6 +311,46 @@ pub(crate) mod tests {
         let loose = [varint_bytes(1 << 3 | 1), 3u64.to_le_bytes().to_vec()].concat();
         let buf = [packed, loose].concat();
         assert_eq!(Message::parse(&buf).unwrap().fixed64s(1), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn setting_a_field_keeps_the_others_in_order() {
+        let fixed = [varint_bytes(9 << 3 | 1), 7u64.to_le_bytes().to_vec()].concat();
+        let buf = [varint_field(1, 1), bytes_field(5, b"x"), fixed.clone(), varint_field(99, 4)].concat();
+        let message = Message::parse(&buf).unwrap();
+
+        let set = message.with(3, Some(Value::Varint(300)));
+        assert_eq!(
+            set,
+            [varint_field(1, 1), varint_field(3, 300), bytes_field(5, b"x"), fixed.clone(), varint_field(99, 4)]
+                .concat()
+        );
+        let replaced = message.with(5, Some(bool_value(true)));
+        assert_eq!(
+            replaced,
+            [varint_field(1, 1), bytes_field(5, &[0x08, 1]), fixed.clone(), varint_field(99, 4)].concat()
+        );
+        let last = message.with(200, Some(Value::Varint(1)));
+        assert_eq!(last, [buf.clone(), varint_field(200, 1)].concat(), "after everything, unknown fields too");
+        assert_eq!(message.with(1, None), [bytes_field(5, b"x"), fixed, varint_field(99, 4)].concat());
+        assert_eq!(Message::parse(&[]).unwrap().with(2, Some(Value::Bytes(vec![]))), bytes_field(2, &[]));
+    }
+
+    #[test]
+    fn wrappers_are_written_the_way_they_are_read() {
+        assert_eq!(bool_value(false), Value::Bytes(vec![]));
+        assert_eq!(uint_value(0), Value::Bytes(vec![]));
+        let buf = [
+            Message::parse(&[]).unwrap().with(1, Some(bool_value(true))),
+            Message::parse(&[]).unwrap().with(2, Some(uint_value(300))),
+            Message::parse(&[]).unwrap().with(3, Some(bool_value(false))),
+        ]
+        .concat();
+        let message = Message::parse(&buf).unwrap();
+        assert_eq!(message.bool_value(1), Some(true));
+        assert_eq!(message.int_value(2), Some(300));
+        assert_eq!(message.bool_value(3), Some(false), "present, though empty");
+        assert_eq!(message.nested().len(), 3);
     }
 
     #[test]
