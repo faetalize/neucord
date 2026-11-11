@@ -5,6 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::embed::Embed;
+use crate::emoji::GuildEmoji;
 use crate::permissions::{self, Permissions};
 use crate::verification::{Account, Rules};
 
@@ -390,6 +391,9 @@ pub struct Guild {
     pub premium_tier: u8,
     /// The channel with the server's rules.
     pub rules_channel_id: Option<Snowflake>,
+    /// The server's custom emoji, every one of them: whether we may use one
+    /// is `emoji::Library`'s to say.
+    pub emojis: Vec<GuildEmoji>,
 }
 
 /// What Neucord uses of our own member in a server, which READY, GUILD_CREATE
@@ -454,6 +458,10 @@ impl Guild {
         self.vanity_url_code = update.vanity_url_code;
         self.premium_tier = update.premium_tier;
         self.rules_channel_id = update.rules_channel_id;
+        // Like roles: an update without any is one that doesn't mention them.
+        if !update.emojis.is_empty() {
+            self.emojis = update.emojis;
+        }
     }
 
     /// One of the server's channels, not counting threads.
@@ -629,6 +637,7 @@ impl<'de> Deserialize<'de> for Guild {
             vanity_url_code: props["vanity_url_code"].as_str().map(String::from),
             premium_tier: props["premium_tier"].as_u64().and_then(|t| u8::try_from(t).ok()).unwrap_or(0),
             rules_channel_id: props["rules_channel_id"].as_str().and_then(|id| id.parse().ok()).map(Snowflake),
+            emojis: GuildEmoji::list(raw.id, &value["emojis"]).unwrap_or_default(),
         })
     }
 }

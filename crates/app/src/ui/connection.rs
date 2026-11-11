@@ -149,6 +149,11 @@ impl App {
                     self.rebuild_rail();
                     self.permissions_changed(Some(id));
                 }
+                Event::GuildEmojisUpdate { guild_id, emojis } => {
+                    if let Some(guild) = self.state.borrow_mut().guilds.iter_mut().find(|g| g.id == guild_id) {
+                        guild.emojis = emojis;
+                    }
+                }
                 Event::RoleUpdate { guild_id, role } => {
                     if let Some(guild) = self.state.borrow_mut().guilds.iter_mut().find(|g| g.id == guild_id) {
                         guild.set_role(role);

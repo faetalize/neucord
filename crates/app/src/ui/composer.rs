@@ -1,11 +1,12 @@
-//! The message box: sending, replying, and `@` mention autocomplete. Editing
-//! happens here too, in `edits`.
+//! The message box: sending, replying, and autocomplete for `@` mentions and
+//! `:emoji:`. Editing happens here too, in `edits`.
 
 use std::rc::Rc;
 use std::time::Duration;
 
 use adw::prelude::*;
 use discord::cooldowns::{Slowmode, bypasses_slowmode, wait_words};
+use discord::emoji::{Item as Emoji, locked_notice};
 use discord::limits::{LengthCount, TooLong, message_length};
 use discord::rest::{Reply, ReplyPing};
 use discord::verification::{self, Gate};
@@ -72,11 +73,41 @@ impl LengthIndicator {
     }
 }
 
+/// What accepting a row of the autocomplete popup writes.
+pub(super) enum Completion {
+    Mention(u64, String),
+    Emoji(Emoji),
+}
+
+impl Completion {
+    /// The text that replaces the token, with the space that follows it.
+    fn text(&self) -> String {
+        match self {
+            Completion::Mention(id, _) => format!("<@{id}> "),
+            Completion::Emoji(item) => format!("{} ", item.text()),
+        }
+    }
+
+    fn row(&self, images: &crate::images::Images) -> gtk::Widget {
+        match self {
+            Completion::Mention(_, name) => {
+                gtk::Label::builder().label(format!("@{name}")).xalign(0.0).build().upcast()
+            }
+            Completion::Emoji(item) => {
+                let line = gtk::Box::builder().spacing(8).build();
+                line.append(&super::emoji::glyph(item, images));
+                line.append(&gtk::Label::builder().label(format!(":{}:", item.name())).xalign(0.0).build());
+                line.upcast()
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct MentionCtx {
-    /// Char offset of the `@` being completed.
+    /// Char offset of the `@` or `:` being completed.
     pub(super) start: i32,
-    pub(super) candidates: Vec<(u64, String)>,
+    pub(super) candidates: Vec<Completion>,
 }
 
 impl App {
@@ -113,12 +144,27 @@ impl App {
         self.build_edit_bar(area);
         self.build_attach(area);
         self.composer_box.append(&self.composer);
+        self.composer_box.append(&self.emoji_button);
         self.composer_box.append(&self.length.root);
+        self.emoji_button.connect_clicked({
+            let this = Rc::downgrade(self);
+            move |button| {
+                let Some(this) = this.upgrade() else { return };
+                let Some(channel) = this.state.borrow().channel else { return };
+                this.open_emoji_picker(channel, button, |app, item| app.insert_emoji(item));
+            }
+        });
         area.append(&self.composer_box);
         area.append(&self.typing_line);
 
-        // Mention autocomplete popup, anchored to the composer.
-        self.mention_popover.set_child(Some(&self.mention_list));
+        // Autocomplete popup, anchored to the composer.
+        let scroller = gtk::ScrolledWindow::builder()
+            .child(&self.mention_list)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_height(true)
+            .max_content_height(320)
+            .build();
+        self.mention_popover.set_child(Some(&scroller));
         self.mention_popover.set_parent(&self.composer);
         self.mention_list.connect_row_activated({
             let this = Rc::downgrade(self);
@@ -417,40 +463,25 @@ impl App {
         });
     }
 
-    /// Show or hide the mention popup based on the `@word` at the cursor.
+    /// Show or hide the autocomplete popup for the `@word` or `:word` at the
+    /// cursor.
     pub(super) fn update_mention_popup(self: &Rc<Self>) {
-        let Some((start, prefix)) = mention_token(&self.composer.buffer()) else {
+        let buffer = self.composer.buffer();
+        let found = match mention_token(&buffer) {
+            Some((start, prefix)) => Some((start, self.mention_candidates(&prefix))),
+            None => emoji_token(&buffer).map(|(start, query)| (start, self.emoji_candidates(&query))),
+        };
+        let Some((start, candidates)) = found.filter(|(_, candidates)| !candidates.is_empty()) else {
             self.mention_popover.popdown();
             return;
         };
-        let prefix = prefix.to_lowercase();
-        let candidates: Vec<(u64, String)> = {
-            let state = self.state.borrow();
-            let mut matches: Vec<(u64, String)> = state
-                .users
-                .iter()
-                .filter(|(_, name)| name.to_lowercase().contains(&prefix))
-                .map(|(id, name)| (*id, name.clone()))
-                .collect();
-            // Prefix matches first, then alphabetical; cap the list.
-            matches.sort_by(|a, b| {
-                let rank = |n: &str| if n.to_lowercase().starts_with(&prefix) { 0 } else { 1 };
-                rank(&a.1).cmp(&rank(&b.1)).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
-            });
-            matches.truncate(8);
-            matches
-        };
-        if candidates.is_empty() {
-            self.mention_popover.popdown();
-            return;
-        }
 
         while let Some(child) = self.mention_list.first_child() {
             self.mention_list.remove(&child);
         }
-        for (_, name) in &candidates {
+        for candidate in &candidates {
             let row = gtk::ListBoxRow::new();
-            row.set_child(Some(&gtk::Label::builder().label(format!("@{name}")).xalign(0.0).build()));
+            row.set_child(Some(&candidate.row(&self.images)));
             self.mention_list.append(&row);
         }
         self.mention_list.select_row(self.mention_list.row_at_index(0).as_ref());
@@ -463,6 +494,42 @@ impl App {
         self.mention_popover.popup();
     }
 
+    fn mention_candidates(&self, prefix: &str) -> Vec<Completion> {
+        let prefix = prefix.to_lowercase();
+        let state = self.state.borrow();
+        let mut matches: Vec<(u64, String)> = state
+            .users
+            .iter()
+            .filter(|(_, name)| name.to_lowercase().contains(&prefix))
+            .map(|(id, name)| (*id, name.clone()))
+            .collect();
+        // Prefix matches first, then alphabetical; cap the list.
+        matches.sort_by(|a, b| {
+            let rank = |n: &str| if n.to_lowercase().starts_with(&prefix) { 0 } else { 1 };
+            rank(&a.1).cmp(&rank(&b.1)).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+        });
+        matches.truncate(8);
+        matches.into_iter().map(|(id, name)| Completion::Mention(id, name)).collect()
+    }
+
+    /// The emoji we may send in the open channel that `query` finds. Locked
+    /// ones aren't offered here, as in the client.
+    fn emoji_candidates(&self, query: &str) -> Vec<Completion> {
+        let Some(channel) = self.state.borrow().channel else { return Vec::new() };
+        let found = self.emoji_library(channel).search(query, super::emoji::AUTOCOMPLETE);
+        found.unlocked.into_iter().map(Completion::Emoji).collect()
+    }
+
+    /// Put `item` in the message box at the cursor, as the picker chooses it.
+    pub(super) fn insert_emoji(&self, item: &Emoji) {
+        self.composer.buffer().insert_at_cursor(&item.text());
+        // The popover hands focus back to the button as it closes.
+        let composer = self.composer.clone();
+        glib::idle_add_local_once(move || {
+            composer.grab_focus();
+        });
+    }
+
     pub(super) fn move_mention_selection(&self, delta: i32) {
         let count = self.mention.borrow().candidates.len() as i32;
         if count == 0 {
@@ -470,14 +537,28 @@ impl App {
         }
         let current = self.mention_list.selected_row().map(|r| r.index()).unwrap_or(0);
         let next = (current + delta).rem_euclid(count);
-        self.mention_list.select_row(self.mention_list.row_at_index(next).as_ref());
+        let row = self.mention_list.row_at_index(next);
+        self.mention_list.select_row(row.as_ref());
+        // The list scrolls, so the selection must stay in view.
+        if let (Some(row), Some(scroller)) =
+            (row, self.mention_list.ancestor(gtk::ScrolledWindow::static_type()).and_downcast::<gtk::ScrolledWindow>())
+            && let Some(bounds) = row.compute_bounds(&self.mention_list)
+        {
+            let adjustment = scroller.vadjustment();
+            let (top, bottom) = (f64::from(bounds.y()), f64::from(bounds.y() + bounds.height()));
+            if top < adjustment.value() {
+                adjustment.set_value(top);
+            } else if bottom > adjustment.value() + adjustment.page_size() {
+                adjustment.set_value(bottom - adjustment.page_size());
+            }
+        }
     }
 
     pub(super) fn accept_mention(self: &Rc<Self>, index: i32) {
-        let (start, id) = {
+        let (start, text) = {
             let ctx = self.mention.borrow();
             match ctx.candidates.get(index.max(0) as usize) {
-                Some((id, _)) => (ctx.start, *id),
+                Some(candidate) => (ctx.start, candidate.text()),
                 None => return,
             }
         };
@@ -487,7 +568,7 @@ impl App {
         let mut to = buffer.iter_at_offset(cursor);
         buffer.delete(&mut from, &mut to);
         let mut at = buffer.iter_at_offset(start);
-        buffer.insert(&mut at, &format!("<@{id}> "));
+        buffer.insert(&mut at, &text);
         self.mention_popover.popdown();
         self.composer.grab_focus();
     }
@@ -535,7 +616,7 @@ impl App {
             return self.save_edit();
         }
         let buffer = self.composer.buffer();
-        let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).trim().to_owned();
+        let typed = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).trim().to_owned();
         let (channel, rest) = {
             let state = self.state.borrow();
             (state.channel, state.rest.clone())
@@ -543,13 +624,18 @@ impl App {
         let (Some(channel), Some(rest)) = (channel, rest) else { return };
         let files = self.files_for_message(channel);
         // A hidden message box is a channel we must never post to (#51).
-        if (text.is_empty() && files.is_empty()) || !self.composer_box.is_visible() {
+        if (typed.is_empty() && files.is_empty()) || !self.composer_box.is_visible() {
             return;
         }
         // The box follows our permissions, but they may have changed since.
         if !self.state.borrow().can_send(channel) {
             return self.update_notice_bar();
         }
+        // `:name:`s go out as emoji. The length is checked on what goes out,
+        // which is longer than what was typed.
+        let library = self.emoji_library(channel);
+        let translated = library.translate(&typed);
+        let text = translated.text;
         // The client checks length before slowmode. The text stays in the box to be shortened.
         let too_long = self.state.borrow().limits().check_length(&text);
         if let Err(too_long) = too_long {
@@ -588,6 +674,10 @@ impl App {
         self.set_composer_text("");
         self.set_reply(None);
         self.mention_popover.popdown();
+        // The client sends the message all the same, and says why an emoji won't show.
+        if !translated.locked.is_empty() {
+            self.show_composer_error(locked_notice(&translated.locked, library.place.external));
+        }
         let this = self.clone();
         glib::spawn_future_local(async move {
             // The gateway echoes our own message back, which is what adds it to the list.
@@ -620,7 +710,7 @@ impl App {
                     }
                     let buffer = this.composer.buffer();
                     if buffer.char_count() == 0 && this.reply.borrow().is_none() {
-                        this.set_composer_text(&text);
+                        this.set_composer_text(&typed);
                         if this.state.borrow().channel == Some(channel) {
                             this.set_reply(replying);
                             this.reply_ping.set_active(ping);
@@ -660,4 +750,18 @@ pub(super) fn mention_token(buffer: &gtk::TextBuffer) -> Option<(i32, String)> {
         return None;
     }
     Some((at as i32, chars[at + 1..].iter().collect()))
+}
+
+/// If the cursor sits just after a `:word` of at least two characters, the
+/// `:`'s char offset and the word without it. The word runs back to the
+/// last whitespace, as the client takes it, and one that has closed its
+/// colons already is no query.
+pub(super) fn emoji_token(buffer: &gtk::TextBuffer) -> Option<(i32, String)> {
+    let cursor = buffer.property::<i32>("cursor-position");
+    let text: String = buffer.text(&buffer.start_iter(), &buffer.iter_at_offset(cursor), false).into();
+    let chars: Vec<char> = text.chars().collect();
+    let start = chars.iter().rposition(|c| c.is_whitespace()).map_or(0, |at| at + 1);
+    let query = &chars[start..];
+    let (colon, query) = query.split_first()?;
+    (*colon == ':' && query.len() >= 2 && !query.contains(&':')).then(|| (start as i32, query.iter().collect()))
 }

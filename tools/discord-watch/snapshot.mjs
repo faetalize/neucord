@@ -9,6 +9,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parse, walk, isFunction, keyName, modulesOf } from "./js.mjs";
+import { emojiData, emojiTable, tableHash } from "./emoji-table.mjs";
 
 const WATCH = JSON.parse(await readFile(new URL("./watch.json", import.meta.url), "utf8"));
 // The modules MANUAL.md has people check by hand, by id.
@@ -482,6 +483,8 @@ export async function snapshot(dir) {
   const copied = new Map();
   let modules = 0;
   let unparsed = 0;
+  // What the client calls each Unicode emoji, hashed as Neucord's table is.
+  let emoji = null;
 
   for (const file of (await readdir(join(dir, "assets"))).sort()) {
     const source = await readFile(join(dir, "assets", file), "utf8");
@@ -492,6 +495,8 @@ export async function snapshot(dir) {
       unparsed++;
       continue;
     }
+    const data = emojiData(source);
+    if (data) emoji = tableHash(emojiTable(data));
     for (const { id, property } of modulesOf(ast)) {
       modules++;
       const body = property.value;
@@ -516,6 +521,10 @@ export async function snapshot(dir) {
       // defined apart: `MAX: () => c` in the export map, `c = 30` below it.
       const declared = new Map();
       const named = [];
+      // A method exported by name from a function declared apart:
+      // `getEmojiUnavailableReason: N` in the export map, `function N(e)` above.
+      const functions = new Map();
+      const aliased = [];
       walk(body, (node) => {
         if (node.type === "VariableDeclarator" && node.id.type === "Identifier" && node.init) {
           declared.set(node.id.name, node.init);
@@ -585,6 +594,10 @@ export async function snapshot(dir) {
             }
           }
         }
+        if (node.type === "FunctionDeclaration" && node.id) functions.set(node.id.name, node);
+        if (node.type === "Property" && node.value.type === "Identifier" && methods.has(keyName(node))) {
+          aliased.push([keyName(node), node.value.name]);
+        }
         // Class methods and object methods alike: `isSystemDM() { … }`.
         if ((node.type === "MethodDefinition" || node.type === "Property") && isFunction(node.value)) {
           const name = !node.computed && node.key.type === "Identifier" ? node.key.name : null;
@@ -623,6 +636,13 @@ export async function snapshot(dir) {
           }
         }
       });
+      for (const [name, id] of aliased) {
+        const target = functions.get(id);
+        if (target) {
+          methods.get(name).add(normalized(source, target));
+          copy(target, name);
+        }
+      }
       for (const [name, value] of named) {
         const target =
           value.type === "ArrowFunctionExpression" && value.body.type === "Identifier"
@@ -675,5 +695,6 @@ export async function snapshot(dir) {
     constants: Object.fromEntries([...constants].map(([k, v]) => [k, [...v].sort().map((s) => JSON.parse(s))])),
     experiments: Object.fromEntries([...experiments].map(([k, v]) => [k, JSON.parse(v)])),
     reached,
+    emoji,
   });
 }

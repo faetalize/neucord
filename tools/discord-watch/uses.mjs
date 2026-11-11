@@ -6,6 +6,7 @@
 
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { tableHash } from "./emoji-table.mjs";
 
 /** `/channels/{channel}/messages?limit={0}` → `/channels/{}/messages`. */
 export function normalizePath(path) {
@@ -44,7 +45,11 @@ export async function neucordUses(repo) {
     for (const m of code.matchAll(/"(20\d\d-\d\d[-_][A-Za-z0-9_-]+)"/g)) experiments.add(m[1]);
   }
 
+  // The emoji names Neucord copied, as `emoji-table.mjs` writes them.
+  const emoji = tableHash(await readFile(join(src, "emoji_names.txt"), "utf8"));
+
   return {
+    emoji,
     rest: rest.sort((a, b) => `${a.path} ${a.method}`.localeCompare(`${b.path} ${b.method}`)),
     events: [...events].sort(),
     experiments: [...experiments].sort(),

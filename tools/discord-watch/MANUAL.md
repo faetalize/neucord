@@ -212,6 +212,15 @@ changed for unrelated reasons only needs a note in the issue.
   (anchor `0x40000000 : 524288e3`). Which stream settings Nitro or boosts
   allow is 676030 (anchor `canStreamWithSettings`), over the presets in
   753070.
+- **Which emoji we offer, and what goes into a message** (`emoji.rs`,
+  `ui/emoji.rs`, `ui/composer.rs`). The reasons an emoji can't be sent
+  (`getEmojiUnavailableReason`) and the roles, names and ranking in
+  `EmojiStore` are watched. The picker in 920134 (anchor `emojiGrid`) hides
+  `DISALLOW_EXTERNAL` and shows the rest locked. `:`
+  autocomplete is `e_` in 496533 (anchor `queryEmojiResults`): two
+  characters at least, only emoji we may send. What a message says for a
+  `:name:` is the `emoji` rule in 451909 (anchor `validNonShortcutEmojis`),
+  and only a `PREMIUM_LOCKED` emoji in it gets the sender told.
 
 ## Notifications and unread state
 
@@ -287,6 +296,8 @@ changed for unrelated reasons only needs a note in the issue.
   (373963) and Copy Link and Open Link (777933) are desktop-only there.
   Neucord leaves out the analytics these send (`MESSAGE_LINK_COPIED`,
   `CONTEXT_MENU_LINK_COPIED`).
+- **The emoji picker's menu** (`EXPRESSION_PICKER` in `ui/menus.rs`).
+  Client: 233503; every item needs Developer Mode, and the id is 50268.
 - **Poll vote counts and shares** (`poll.rs`). Client: 432005 and 969632
   count the votes, and 951727 works out shares, the leader and when counts
   show.

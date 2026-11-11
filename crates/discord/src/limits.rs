@@ -10,6 +10,7 @@
 
 use serde_json::Value;
 
+use crate::emoji::{GuildEmoji, Place};
 use crate::experiments::Experiments;
 use crate::model::{Guild, Snowflake};
 
@@ -186,6 +187,23 @@ impl LengthCount {
     }
 }
 
+/// Why a custom emoji can't be sent where we are (`getEmojiUnavailableReason`,
+/// 690521).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unavailable {
+    /// Another server's emoji, in a channel without Use External Emojis for
+    /// us (`DISALLOW_EXTERNAL`). The client leaves it out.
+    NotHere,
+    /// Its server no longer has the boosts it took (`available` is false;
+    /// `GUILD_SUBSCRIPTION_UNAVAILABLE`). The client shows it locked.
+    ServerBoost,
+    /// It takes Nitro (`PREMIUM_LOCKED`): another server's emoji without
+    /// Emojis Everywhere, or an animated one without Animated Emojis. The
+    /// client shows it locked, and offers Nitro on a click, which Neucord
+    /// doesn't copy.
+    Nitro,
+}
+
 /// What one message may carry (the client's message upload target, 313034).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Uploads {
@@ -268,6 +286,30 @@ impl Limits<'_> {
         let number = remaining <= (max / 10) as i64;
         let powered = !editing && self.nitro.has(Perk::IncreasedMessageLength) && length > MESSAGE && remaining >= 0;
         (number || powered).then_some(LengthCount { remaining, max, number, powered })
+    }
+
+    /// Whether we may send `emoji` in `place`, as the client's
+    /// `getEmojiUnavailableReason` decides (for chat and reactions alike). An
+    /// integration's emoji (`managed`) skips the Nitro check for other
+    /// servers, an animated one doesn't. Emoji bought with a server's role
+    /// subscription have a rule of their own, which needs those roles'
+    /// purchase data Neucord has none of; they only show to members who
+    /// hold the role (`GuildEmoji::usable_with`).
+    pub fn emoji(&self, emoji: &GuildEmoji, place: &Place) -> Result<(), Unavailable> {
+        let internal = place.guild == Some(emoji.guild_id);
+        if place.guild.is_some() && !internal && !place.external {
+            return Err(Unavailable::NotHere);
+        }
+        if !emoji.available {
+            return Err(Unavailable::ServerBoost);
+        }
+        if !internal && !emoji.managed && !self.nitro.has(Perk::EmojisEverywhere) {
+            return Err(Unavailable::Nitro);
+        }
+        if emoji.animated && !self.nitro.has(Perk::AnimatedEmojis) {
+            return Err(Unavailable::Nitro);
+        }
+        Ok(())
     }
 
     /// What a message may carry in `guild`, or in DMs. The server's side

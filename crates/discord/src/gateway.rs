@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use soup::prelude::*;
 
 use crate::embed::Embed;
+use crate::emoji::GuildEmoji;
 use crate::experiments::Experiments;
 use crate::inflate::Inflater;
 use crate::limits::Nitro;
@@ -102,6 +103,11 @@ pub enum Event {
     ThreadDelete {
         guild_id: Snowflake,
         id: Snowflake,
+    },
+    /// A server's emoji changed: all of them, as they are now.
+    GuildEmojisUpdate {
+        guild_id: Snowflake,
+        emojis: Vec<GuildEmoji>,
     },
     /// Active threads in a server, and our membership of those we've joined.
     ThreadListSync {
@@ -717,6 +723,13 @@ fn dispatch(state: &State, name: &str, data: Value) {
             Ok(guild) => Event::GuildUpdate(guild),
             Err(e) => return eprintln!("gateway: bad GUILD_UPDATE: {e}"),
         },
+        "GUILD_EMOJIS_UPDATE" => match parse_id(&data["guild_id"]) {
+            Some(guild_id) => match GuildEmoji::list(guild_id, &data["emojis"]) {
+                Some(emojis) => Event::GuildEmojisUpdate { guild_id, emojis },
+                None => return eprintln!("gateway: bad GUILD_EMOJIS_UPDATE"),
+            },
+            None => return,
+        },
         "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" => {
             match (parse_id(&data["guild_id"]), Role::deserialize(&data["role"])) {
                 (Some(guild_id), Ok(role)) => Event::RoleUpdate { guild_id, role },
@@ -1021,6 +1034,14 @@ mod tests {
             (Snowflake(1), Some(Snowflake(8)), crate::verification::VerificationLevel::High, true, 1),
             "ownership can move, and with it every permission"
         );
+
+        dispatch(
+            &state,
+            "GUILD_EMOJIS_UPDATE",
+            json!({"guild_id": "1", "emojis": [{"id": "9", "name": "blob", "available": true, "roles": ["40"]}]}),
+        );
+        let Ok(Event::GuildEmojisUpdate { guild_id, emojis }) = rx.try_recv() else { panic!("no emoji update") };
+        assert_eq!((guild_id, emojis.len(), emojis[0].roles.clone()), (Snowflake(1), 1, vec![Snowflake(40)]));
 
         dispatch(
             &state,

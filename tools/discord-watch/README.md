@@ -37,6 +37,10 @@ names so two builds differ only where Discord changed something:
 - The values named in `watch.json` (a literal, or a list or set of them),
   wherever the client defines or exports them: how many emoji a message
   can be and still show them large, which message types people write.
+- What the client calls each Unicode emoji (`:slight_smile:`), hashed the way
+  Neucord's copy of the names is: `emoji-table.mjs` writes that table from a
+  build, and `compare` says when `crates/discord/src/emoji_names.txt` no
+  longer matches the client's.
 - Every experiment the client defines, with what each variant configures.
   Discord decides per account and per server which variant applies, so a
   rule Neucord copies can differ between accounts once the code behind it
