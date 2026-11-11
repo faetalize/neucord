@@ -59,6 +59,7 @@ use gtk::{gio, glib, pango};
 use crate::config::{self, Store};
 use crate::images::Images;
 use crate::render;
+use crate::theme::Theme;
 use crate::timelines::Timelines;
 
 /// The server rail's width.
@@ -203,6 +204,8 @@ pub struct App {
     state: RefCell<state::State>,
     /// Neucord's own options, which the settings window sets.
     config: Store,
+    /// The stylesheets, one of whose options the settings window sets.
+    theme: Theme,
     /// What Neucord remembers between runs.
     remembered: Store,
     /// The settings window, while it's open.
@@ -256,6 +259,7 @@ impl App {
 
         let blank = gio::ListStore::new::<glib::BoxedAnyObject>();
         let selection = gtk::NoSelection::new(Some(blank.clone()));
+        let config = Store::open(config::config_path());
         let this = Rc::new(App {
             window,
             medium,
@@ -394,7 +398,8 @@ impl App {
             rows: RefCell::default(),
             scroll_loader: RefCell::default(),
             state: RefCell::default(),
-            config: Store::open(config::config_path()),
+            theme: Theme::install(&config),
+            config,
             remembered: Store::open(config::state_path()),
             settings_window: RefCell::default(),
             members: members::Pane::new(),
