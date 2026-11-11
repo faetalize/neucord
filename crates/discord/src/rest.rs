@@ -12,6 +12,8 @@ use soup::prelude::*;
 
 use crate::endpoints::{Call, call};
 use crate::invalid::{Change, InvalidRequests};
+use crate::model::Emoji;
+use crate::reactions::{Location, Refusal};
 use crate::stickers::Pack;
 use crate::uploads::Sent;
 use crate::{Channel, Error, Message, Snowflake, identity};
@@ -250,6 +252,75 @@ impl Rest {
         self.request(call!(DELETE_MESSAGE, channel, message), None).await
     }
 
+    /// React to `message` with `emoji`, once and without retrying a 429: what
+    /// to do about a refusal is [`crate::reactions::judge`]'s (`BB` in
+    /// 649963).
+    pub async fn add_reaction(
+        &self,
+        channel: Snowflake,
+        message: Snowflake,
+        emoji: &Emoji,
+        location: Location,
+    ) -> Result<(), Refusal> {
+        self.reaction_request(add_reaction_call(channel, message, emoji, location)).await
+    }
+
+    /// Take back a reaction, ours or with Manage Messages another's, as
+    /// [`Self::add_reaction`] sends it (`et` in 649963).
+    pub async fn remove_reaction(
+        &self,
+        channel: Snowflake,
+        message: Snowflake,
+        emoji: &Emoji,
+        location: Location,
+        user: Option<Snowflake>,
+    ) -> Result<(), Refusal> {
+        self.reaction_request(remove_reaction_call(channel, message, emoji, location, user)).await
+    }
+
+    /// Remove everyone's reactions with `emoji` (`Jf` in 649963).
+    pub async fn remove_emoji_reactions(
+        &self,
+        channel: Snowflake,
+        message: Snowflake,
+        emoji: &Emoji,
+    ) -> Result<(), Refusal> {
+        let emoji = emoji.path();
+        self.reaction_request(call!(REMOVE_EMOJI_REACTIONS, channel, message, emoji)).await
+    }
+
+    /// Remove every reaction from `message` (`Go` in 649963).
+    pub async fn remove_reactions(&self, channel: Snowflake, message: Snowflake) -> Result<(), Refusal> {
+        self.reaction_request(call!(REMOVE_REACTIONS, channel, message)).await
+    }
+
+    /// Up to `limit` of the people who reacted with `emoji` normally, after
+    /// `after` (`ao` in 649963). Not retried on a 429, as the client doesn't.
+    pub async fn reactors(
+        &self,
+        channel: Snowflake,
+        message: Snowflake,
+        emoji: &Emoji,
+        limit: u32,
+        after: Option<Snowflake>,
+    ) -> Result<Vec<crate::User>, Error> {
+        let sending = Sending { retry_rate_limit: false, ..Sending::default() };
+        let (status, response) =
+            self.send_with(reactors_call(channel, message, emoji, limit, after), None, sending).await?;
+        Self::answer(status, &response)
+    }
+
+    async fn reaction_request(&self, call: Call) -> Result<(), Refusal> {
+        let sending = Sending { retry_rate_limit: false, ..Sending::default() };
+        let result = match self.send_full(call, None, sending).await {
+            Ok((status, response, retry_after)) => {
+                Self::answer::<serde_json::Value>(status, &response).map(|_| ()).map_err(|e| (e, retry_after))
+            }
+            Err(e) => Err((e, None)),
+        };
+        result.map_err(|(error, retry_after)| Refusal { error, retry_after })
+    }
+
     /// Reopen an archived thread, as the official client does before an
     /// edit or delete there.
     pub async fn unarchive_thread(&self, thread: Snowflake) -> Result<(), Error> {
@@ -412,6 +483,16 @@ impl Rest {
         body: Option<Value>,
         options: Sending<'_>,
     ) -> Result<(u32, glib::Bytes), Error> {
+        self.send_full(call, body, options).await.map(|(status, response, _)| (status, response))
+    }
+
+    /// [`Self::send_with`], and the `Retry-After` header the response had.
+    async fn send_full(
+        &self,
+        call: Call,
+        body: Option<Value>,
+        options: Sending<'_>,
+    ) -> Result<(u32, glib::Bytes, Option<String>), Error> {
         let mut retries = 0;
         let mut captchas = 0;
         let mut answer: Option<(String, Captcha)> = None;
@@ -479,7 +560,8 @@ impl Rest {
                 answer = Some((key, captcha));
                 continue;
             }
-            return Ok((status, response));
+            let retry_after = msg.response_headers().and_then(|h| h.one("Retry-After")).map(|v| v.to_string());
+            return Ok((status, response, retry_after));
         }
     }
 
@@ -488,6 +570,37 @@ impl Rest {
             handler(wait);
         }
     }
+}
+
+/// The request that adds our reaction: the emoji in the path, and as the
+/// query `location` and `type`, 0 being a normal reaction.
+fn add_reaction_call(channel: Snowflake, message: Snowflake, emoji: &Emoji, location: Location) -> Call {
+    let emoji = emoji.path();
+    let location = glib::uri_escape_string(location.name(), None::<&str>, false);
+    call!(ADD_REACTION, channel, message, emoji).query(&format!("location={location}&type=0"))
+}
+
+/// The request that takes one back, `user`'s or ours: the type is in the path
+/// too, and the query is `location` and `burst`.
+fn remove_reaction_call(
+    channel: Snowflake,
+    message: Snowflake,
+    emoji: &Emoji,
+    location: Location,
+    user: Option<Snowflake>,
+) -> Call {
+    let emoji = emoji.path();
+    let user = user.map_or_else(|| "@me".to_owned(), |u| u.to_string());
+    let location = glib::uri_escape_string(location.name(), None::<&str>, false);
+    call!(REMOVE_REACTION, channel, message, emoji, user).query(&format!("location={location}&burst=false"))
+}
+
+/// The request for who reacted: `limit`, `after` when paging, and `type`,
+/// in the order `ao` writes them.
+fn reactors_call(channel: Snowflake, message: Snowflake, emoji: &Emoji, limit: u32, after: Option<Snowflake>) -> Call {
+    let emoji = emoji.path();
+    let after = after.map(|a| format!("&after={a}")).unwrap_or_default();
+    call!(REACTORS, channel, message, emoji).query(&format!("limit={limit}{after}&type=0"))
 }
 
 /// What sending a message sends, as `_sendMessage` in 138399 builds it.
@@ -577,10 +690,58 @@ pub(crate) fn is_captcha(body: &Value) -> bool {
 mod tests {
     use serde_json::json;
 
-    use super::{Captcha, Page, Reply, ReplyPing, base_headers, edit_body, is_md5, message_body, rate_limit_wait};
+    use super::{
+        Captcha, Page, Reply, ReplyPing, add_reaction_call, base_headers, edit_body, is_md5, message_body,
+        rate_limit_wait, reactors_call, remove_reaction_call,
+    };
+    use crate::model::Emoji;
+    use crate::reactions::Location;
     use crate::uploads::Sent;
     use crate::uploads::Voice;
     use crate::{Message, Snowflake, identity};
+
+    #[test]
+    fn reactions_are_asked_for_as_the_client_does() {
+        // `C` in 649963: `name:id` for a custom emoji, the emoji for a Unicode one,
+        // with the query as `BB` and `et` write it.
+        let (channel, message) = (Snowflake(1), Snowflake(2));
+        let blob = Emoji { id: Some(Snowflake(12)), name: Some("blob".into()), animated: false };
+        let fire = Emoji { id: None, name: Some("🔥".into()), animated: false };
+        let paths = |call: crate::endpoints::Call| (call.method(), call.path().to_owned());
+        assert_eq!(
+            paths(add_reaction_call(channel, message, &blob, Location::InlineButton)),
+            ("PUT", "/channels/1/messages/2/reactions/blob:12/@me?location=Message%20Inline%20Button&type=0".into())
+        );
+        assert_eq!(
+            paths(add_reaction_call(channel, message, &fire, Location::Message)),
+            ("PUT", "/channels/1/messages/2/reactions/%F0%9F%94%A5/@me?location=Message&type=0".into())
+        );
+        assert_eq!(
+            paths(remove_reaction_call(channel, message, &fire, Location::InlineButton, None)),
+            (
+                "DELETE",
+                "/channels/1/messages/2/reactions/%F0%9F%94%A5/0/@me?location=Message%20Inline%20Button&burst=false"
+                    .into()
+            )
+        );
+        // Someone else's, from the list of who reacted.
+        assert_eq!(
+            paths(remove_reaction_call(channel, message, &blob, Location::Message, Some(Snowflake(7)))),
+            ("DELETE", "/channels/1/messages/2/reactions/blob:12/0/7?location=Message&burst=false".into())
+        );
+        assert_eq!(
+            paths(reactors_call(channel, message, &blob, 100, None)),
+            ("GET", "/channels/1/messages/2/reactions/blob:12?limit=100&type=0".into())
+        );
+        assert_eq!(
+            paths(reactors_call(channel, message, &fire, 3, Some(Snowflake(9)))).1,
+            "/channels/1/messages/2/reactions/%F0%9F%94%A5?limit=3&after=9&type=0"
+        );
+        assert_eq!(
+            paths(add_reaction_call(channel, message, &blob, Location::ReactionPicker)).1,
+            "/channels/1/messages/2/reactions/blob:12/@me?location=Message%20Reaction%20Picker&type=0"
+        );
+    }
 
     #[test]
     fn shift_turns_the_ping_off_even_where_the_toggle_is_hidden() {

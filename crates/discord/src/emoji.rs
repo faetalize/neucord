@@ -197,6 +197,12 @@ pub fn unicode(name: &str) -> Option<&'static UnicodeEmoji> {
     catalog.by_name.get(name).map(|&n| &catalog.emoji[n])
 }
 
+/// What the client calls a Unicode emoji written out, `:name:`, or nothing
+/// for one it has no name for (`convertSurrogateToName`).
+pub fn unicode_label(glyph: &str) -> String {
+    catalog().emoji.iter().find(|e| e.glyph == glyph).map_or_else(String::new, |e| format!(":{}:", e.names[0]))
+}
+
 /// The Unicode emoji of a picker group, in the client's order, without skin
 /// tone variants (the client's default tone is a setting only the protobuf
 /// settings carry).
@@ -362,6 +368,15 @@ impl Library {
             }
         }
         results
+    }
+
+    /// The emoji `:name:` means here, found as [`Self::translate`] finds it:
+    /// a custom one by the name this library gives it, else a Unicode one.
+    pub fn find(&self, name: &str) -> Option<Item> {
+        match self.custom().find(|n| n.name == name) {
+            Some(named) => Some(Item::Custom(named.clone())),
+            None => unicode(name).map(Item::Unicode),
+        }
     }
 
     /// Writes out the `:name:`s of `text` as the client does when sending:
@@ -793,5 +808,24 @@ mod tests {
         assert!(locked_notice(&[plain.clone(), animated], true).contains("animated"));
         assert!(locked_notice(std::slice::from_ref(&plain), true).contains("can solve all of that"));
         assert!(locked_notice(std::slice::from_ref(&plain), false).contains("Upgrade to Discord Nitro"));
+    }
+    #[test]
+    fn a_name_finds_its_emoji_and_a_pick_is_what_reactions_send() {
+        let home = guild("1", &[], vec![custom("9", "smile", json!({"animated": true}))]);
+        let away = guild("2", &[], vec![custom("10", "smile", json!({}))]);
+        let library = library(&[home, away], json!({"premium_type": 2}), here(true));
+
+        // Unicode names are the client's first, so a server's `smile` is `smile~1`.
+        let unicode = library.find("smile").unwrap();
+        assert_eq!(crate::model::Emoji::from(&unicode).id, None);
+        let first = library.find("smile~1").unwrap();
+        let second = library.find("smile~2").unwrap();
+        let (first, second) = (crate::model::Emoji::from(&first), crate::model::Emoji::from(&second));
+        assert_eq!((first.id, first.name.as_deref(), first.animated), (Some(Snowflake(9)), Some("smile"), true));
+        assert_eq!((second.id, second.animated), (Some(Snowflake(10)), false));
+        assert!(library.find("nothing_like_this").is_none());
+
+        let fire = library.find("fire").unwrap();
+        assert_eq!(crate::model::Emoji::from(&fire).name.as_deref(), Some("🔥"));
     }
 }

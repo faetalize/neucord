@@ -57,7 +57,8 @@ pub fn message_display_compact(settings: &Value) -> Option<bool> {
     settings.get("message_display_compact")?.as_bool()
 }
 
-/// The "Chat" settings for embeds and media. Discord's defaults are all on.
+/// The "Chat" settings for embeds, media and reactions. Discord's defaults
+/// are all on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MediaSettings {
     /// Show embeds and link previews at all.
@@ -68,6 +69,8 @@ pub struct MediaSettings {
     pub inline_attachment_media: bool,
     /// Play GIFs without hovering them.
     pub gif_auto_play: bool,
+    /// Show the reactions under messages.
+    pub render_reactions: bool,
 }
 
 impl Default for MediaSettings {
@@ -77,6 +80,7 @@ impl Default for MediaSettings {
             inline_embed_media: true,
             inline_attachment_media: true,
             gif_auto_play: true,
+            render_reactions: true,
         }
     }
 }
@@ -89,6 +93,7 @@ pub struct MediaPatch {
     pub inline_embed_media: Option<bool>,
     pub inline_attachment_media: Option<bool>,
     pub gif_auto_play: Option<bool>,
+    pub render_reactions: Option<bool>,
 }
 
 impl MediaPatch {
@@ -99,6 +104,7 @@ impl MediaPatch {
             inline_embed_media: flag("inline_embed_media"),
             inline_attachment_media: flag("inline_attachment_media"),
             gif_auto_play: flag("gif_auto_play"),
+            render_reactions: flag("render_reactions"),
         }
     }
 
@@ -114,6 +120,7 @@ impl MediaSettings {
         set(&mut self.inline_embed_media, patch.inline_embed_media);
         set(&mut self.inline_attachment_media, patch.inline_attachment_media);
         set(&mut self.gif_auto_play, patch.gif_auto_play);
+        set(&mut self.render_reactions, patch.render_reactions);
     }
 }
 
@@ -198,6 +205,8 @@ mod tests {
         assert!(!patch.is_empty());
         media.apply(patch);
         assert_eq!(media, MediaSettings { gif_auto_play: false, ..MediaSettings::default() });
+        media.apply(MediaPatch::from_settings(&json!({"render_reactions": false})));
+        assert!(!media.render_reactions && !media.gif_auto_play, "each setting alone");
         assert!(MediaPatch::from_settings(&json!({"guild_folders": []})).is_empty());
     }
 

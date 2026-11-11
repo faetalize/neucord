@@ -23,7 +23,9 @@ use crate::inflate::Inflater;
 use crate::limits::Nitro;
 use crate::member_list::Update as MemberListUpdate;
 use crate::members::Members;
+use crate::model::Emoji;
 use crate::notifications::{GuildSettings, NotificationSettings};
+use crate::reactions::{self, Kind};
 use crate::read_state::ReadStates;
 use crate::relationships::{Presence, Relationship, Relationships};
 use crate::settings::{self, GuildFolder, MediaPatch, MediaSettings};
@@ -176,6 +178,25 @@ pub enum Event {
         votes: Vec<(u32, Snowflake)>,
         added: bool,
         many: bool,
+    },
+    /// Someone reacted, or took a reaction back.
+    Reaction(reactions::Reacted),
+    /// Reactions from several people at once, as `(emoji, who)`.
+    ReactionsAdded {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        reactions: Vec<(Emoji, Vec<Snowflake>)>,
+    },
+    /// Every reaction was removed from a message.
+    ReactionsCleared {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+    },
+    /// Every reaction with one emoji was removed from a message.
+    EmojiReactionsCleared {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        emoji: Emoji,
     },
     /// Someone started typing in a channel. In a server it carries their
     /// member, which names them.
@@ -921,6 +942,58 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 .collect();
             Event::PollVote { channel_id, message_id, votes, added: true, many: true }
         }
+        "MESSAGE_REACTION_ADD" | "MESSAGE_REACTION_REMOVE" => {
+            let (Some(channel_id), Some(message_id), Some(user_id), Ok(emoji), Some(kind)) = (
+                parse_id(&data["channel_id"]),
+                parse_id(&data["message_id"]),
+                parse_id(&data["user_id"]),
+                Emoji::deserialize(&data["emoji"]),
+                Kind::of_event(data["type"].as_u64()),
+            ) else {
+                return;
+            };
+            let colors = data["burst_colors"].as_array().into_iter().flatten().filter_map(Value::as_str);
+            Event::Reaction(reactions::Reacted {
+                channel_id,
+                message_id,
+                user_id,
+                emoji,
+                kind,
+                colors: colors.map(String::from).collect(),
+                added: name.ends_with("ADD"),
+            })
+        }
+        "MESSAGE_REACTION_ADD_MANY" => {
+            let (Some(channel_id), Some(message_id)) = (parse_id(&data["channel_id"]), parse_id(&data["message_id"]))
+            else {
+                return;
+            };
+            let reactions = data["reactions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|r| {
+                    let users = r["users"].as_array()?.iter().filter_map(parse_id).collect();
+                    Some((Emoji::deserialize(&r["emoji"]).ok()?, users))
+                })
+                .collect();
+            Event::ReactionsAdded { channel_id, message_id, reactions }
+        }
+        "MESSAGE_REACTION_REMOVE_ALL" => {
+            let (Some(channel_id), Some(message_id)) = (parse_id(&data["channel_id"]), parse_id(&data["message_id"]))
+            else {
+                return;
+            };
+            Event::ReactionsCleared { channel_id, message_id }
+        }
+        "MESSAGE_REACTION_REMOVE_EMOJI" => {
+            let (Some(channel_id), Some(message_id), Ok(emoji)) =
+                (parse_id(&data["channel_id"]), parse_id(&data["message_id"]), Emoji::deserialize(&data["emoji"]))
+            else {
+                return;
+            };
+            Event::EmojiReactionsCleared { channel_id, message_id, emoji }
+        }
         "MESSAGE_DELETE_BULK" => {
             let Some(channel_id) = parse_id(&data["channel_id"]) else { return };
             let ids = data["ids"].as_array().into_iter().flatten().filter_map(parse_id).collect();
@@ -1334,5 +1407,92 @@ mod tests {
         let Ok(Event::PollVote { votes, added, many, .. }) = rx.try_recv() else { panic!("no votes") };
         let all = [(1, Snowflake(5)), (1, Snowflake(6)), (2, Snowflake(7))];
         assert_eq!((votes, added, many), (all.to_vec(), true, true));
+    }
+    #[test]
+    fn reactions_arrive_added_or_taken_back() {
+        // 225123 passes `type` and `burst_colors` on with the rest.
+        let (state, rx) = fresh_state();
+        let fire = json!({"id": null, "name": "🔥"});
+        let one = json!({"channel_id": "3", "message_id": "9", "user_id": "5", "emoji": fire, "guild_id": "1"});
+        dispatch(&state, "MESSAGE_REACTION_ADD", one.clone());
+        let Ok(Event::Reaction(reactions::Reacted { channel_id, message_id, user_id, emoji, kind, colors, added })) =
+            rx.try_recv()
+        else {
+            panic!("no reaction")
+        };
+        assert_eq!((channel_id, message_id, user_id), (Snowflake(3), Snowflake(9), Snowflake(5)));
+        assert_eq!((emoji.name.as_deref(), kind, colors.len(), added), (Some("🔥"), Kind::Normal, 0, true));
+        dispatch(&state, "MESSAGE_REACTION_REMOVE", one);
+        let Ok(Event::Reaction(reactions::Reacted { added, .. })) = rx.try_recv() else {
+            panic!("no reaction taken back")
+        };
+        assert!(!added);
+
+        let burst = json!({"channel_id": "3", "message_id": "9", "user_id": "5", "emoji": {"id": "12", "name": "blob"},
+                           "type": 1, "burst_colors": ["#ff0000", "#00ff00"]});
+        dispatch(&state, "MESSAGE_REACTION_ADD", burst);
+        let Ok(Event::Reaction(reactions::Reacted { emoji, kind, colors, .. })) = rx.try_recv() else {
+            panic!("no super reaction")
+        };
+        assert_eq!(
+            (emoji.id, kind, colors),
+            (Some(Snowflake(12)), Kind::Burst, vec!["#ff0000".into(), "#00ff00".into()])
+        );
+    }
+
+    #[test]
+    fn reactions_that_are_poll_votes_or_unreadable_are_dropped() {
+        let (state, rx) = fresh_state();
+        let base = json!({"channel_id": "3", "message_id": "9", "user_id": "5", "emoji": {"name": "🔥"}});
+        let with = |key: &str, value: Value| {
+            let mut event = base.clone();
+            event[key] = value;
+            event
+        };
+        dispatch(&state, "MESSAGE_REACTION_ADD", with("type", json!(2)));
+        dispatch(&state, "MESSAGE_REACTION_ADD", with("emoji", json!("🔥")));
+        dispatch(&state, "MESSAGE_REACTION_ADD", with("user_id", json!(null)));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn many_reactions_arrive_at_once() {
+        let (state, rx) = fresh_state();
+        dispatch(
+            &state,
+            "MESSAGE_REACTION_ADD_MANY",
+            json!({"channel_id": "3", "message_id": "9", "reactions": [
+                {"emoji": {"name": "🔥"}, "users": ["5", "6"], "type": 0},
+                {"emoji": {"id": "12", "name": "blob"}, "users": ["7"]},
+                {"users": ["8"]}]}),
+        );
+        let Ok(Event::ReactionsAdded { channel_id, message_id, reactions }) = rx.try_recv() else {
+            panic!("no reactions")
+        };
+        assert_eq!((channel_id, message_id), (Snowflake(3), Snowflake(9)));
+        let named: Vec<_> = reactions.iter().map(|(e, users)| (e.id, users.clone())).collect();
+        assert_eq!(
+            named,
+            [(None, vec![Snowflake(5), Snowflake(6)]), (Some(Snowflake(12)), vec![Snowflake(7)])],
+            "one with no emoji is left out"
+        );
+    }
+
+    #[test]
+    fn reactions_removed_in_bulk() {
+        let (state, rx) = fresh_state();
+        dispatch(&state, "MESSAGE_REACTION_REMOVE_ALL", json!({"channel_id": "3", "message_id": "9"}));
+        let Ok(Event::ReactionsCleared { channel_id, message_id }) = rx.try_recv() else { panic!("no clear") };
+        assert_eq!((channel_id, message_id), (Snowflake(3), Snowflake(9)));
+        dispatch(
+            &state,
+            "MESSAGE_REACTION_REMOVE_EMOJI",
+            json!({"channel_id": "3", "message_id": "9", "emoji": {"id": "12", "name": "blob"}}),
+        );
+        let Ok(Event::EmojiReactionsCleared { emoji, .. }) = rx.try_recv() else { panic!("no emoji clear") };
+        assert_eq!(emoji.id, Some(Snowflake(12)));
+        dispatch(&state, "MESSAGE_REACTION_REMOVE_EMOJI", json!({"channel_id": "3", "message_id": "9"}));
+        dispatch(&state, "MESSAGE_REACTION_REMOVE_ALL", json!({"channel_id": "3"}));
+        assert!(rx.try_recv().is_err());
     }
 }

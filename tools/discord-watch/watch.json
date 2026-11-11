@@ -2,7 +2,13 @@
   "enums": {
     "AccountStanding": ["ALL_GOOD", "LIMITED", "VERY_LIMITED", "AT_RISK", "SUSPENDED"],
     "ActivityType": ["PLAYING", "STREAMING", "LISTENING", "WATCHING", "CUSTOM_STATUS", "COMPETING"],
-    "ApiErrorCode": ["UNKNOWN_ACCOUNT", "RELATIONSHIP_INVALID_NO_CONFIRMATION", "SLOWMODE_RATE_LIMITED"],
+    "ApiErrorCode": [
+      "UNKNOWN_ACCOUNT",
+      "RELATIONSHIP_INVALID_NO_CONFIRMATION",
+      "SLOWMODE_RATE_LIMITED",
+      "TOO_MANY_REACTIONS",
+      "REACTION_BLOCKED"
+    ],
     "ApplicationIntegrationType": ["GUILD_INSTALL", "USER_INSTALL"],
     "ButtonStyle": ["PRIMARY", "SECONDARY", "SUCCESS", "DESTRUCTIVE", "LINK", "PREMIUM"],
     "ChannelFlags": ["IS_SCHEDULED_FOR_DELETION", "PINNED", "IS_MODERATOR_REPORT_CHANNEL"],
@@ -21,6 +27,7 @@
     ],
     "ComponentType": ["ACTION_ROW", "BUTTON", "STRING_SELECT", "SECTION", "TEXT_DISPLAY", "CONTAINER"],
     "ConsentStatus": ["UNSPECIFIED", "PENDING", "ACCEPTED", "REJECTED"],
+    "EmojiIntention": ["REACTION", "STATUS", "COMMUNITY_CONTENT", "CHAT"],
     "EmojiUnavailableReason": ["DISALLOW_EXTERNAL", "GUILD_SUBSCRIPTION_UNAVAILABLE", "PREMIUM_LOCKED"],
     "GatewayOpcode": ["DISPATCH", "HEARTBEAT", "IDENTIFY", "RESUME", "HELLO", "HEARTBEAT_ACK", "REQUEST_GUILD_MEMBERS", "GUILD_SUBSCRIPTIONS_BULK"],
     "GuildMemberFlags": [
@@ -54,7 +61,8 @@
       "SEND_MESSAGES_IN_THREADS",
       "ATTACH_FILES",
       "USE_EXTERNAL_EMOJIS",
-      "USE_EXTERNAL_STICKERS"
+      "USE_EXTERNAL_STICKERS",
+      "ADD_REACTIONS"
     ],
     "PremiumPerk": [
       "ANIMATED_EMOJIS",
@@ -65,6 +73,7 @@
       "STREAM_HIGH_QUALITY",
       "INCREASED_MESSAGE_LENGTH"
     ],
+    "ReactionType": ["NORMAL", "BURST", "VOTE"],
     "RelationshipType": ["FRIEND", "BLOCKED", "PENDING_INCOMING", "PENDING_OUTGOING"],
     "RequiredAction": [
       "AGREEMENTS",
@@ -143,6 +152,7 @@
     "parseRangeHeader",
     "queryStickers",
     "removeReaction",
+    "removeReactionsForEmoji",
     "renderEmbeds",
     "removeFromMsgDraft",
     "requestGuildMembers",
@@ -157,6 +167,7 @@
     "updateGuildSubscriptions",
     "uploadFileToCloud",
     "uploadFileWithResumption",
+    "userHasReactedWithEmoji",
     "usesLegacyCompression",
     "validateMessage"
   ],

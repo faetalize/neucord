@@ -793,6 +793,9 @@ pub struct Message {
     pub flags: u64,
     #[serde(default)]
     pub poll: Option<crate::poll::Poll>,
+    /// What people reacted with, an emoji at a time.
+    #[serde(default, deserialize_with = "crate::reactions::list")]
+    pub reactions: Vec<crate::reactions::Reaction>,
     /// What a forward carries.
     #[serde(default)]
     pub message_snapshots: Vec<Snapshot>,
@@ -884,8 +887,12 @@ impl Message {
     /// ephemeral one, which only we can see. The client also asks that the
     /// message was sent, but only what Discord has accepted is ever listed.
     pub fn is_replyable(&self) -> bool {
-        matches!(self.kind, 0 | 7 | 19 | 20 | 23 | 24 | 25 | 32..=42 | 45 | 46 | 69)
-            && self.flags & Self::EPHEMERAL == 0
+        matches!(self.kind, 0 | 7 | 19 | 20 | 23 | 24 | 25 | 32..=42 | 45 | 46 | 69) && !self.is_ephemeral()
+    }
+
+    /// Only we can see it: an app's private answer.
+    pub fn is_ephemeral(&self) -> bool {
+        self.flags & Self::EPHEMERAL != 0
     }
 
     const FORWARD: u8 = 1;
@@ -966,6 +973,7 @@ impl Message {
             referenced_message: Referenced::Unresolved,
             message_snapshots: Vec::new(),
             poll: None,
+            reactions: Vec::new(),
             call: None,
             member: None,
             ..self.clone()

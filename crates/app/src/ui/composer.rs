@@ -676,6 +676,14 @@ impl App {
         if self.slowmode_left(channel) > 0 {
             return self.update_notice_bar();
         }
+        // `+:name:` reacts to the newest message in place of sending, unless
+        // files go with it, which send as they are.
+        if files.is_empty() && self.react_by_shortcut(channel, &typed, &library) {
+            self.typing_message_sent(channel);
+            self.set_composer_text("");
+            self.mention_popover.popdown();
+            return;
+        }
         let can_reply = self.state.borrow().can_reply(channel);
         let replying = self.reply.borrow().clone().filter(|r| r.channel == channel && can_reply);
         let reply = replying.as_ref().map(|r| Reply {
