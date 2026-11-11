@@ -8,16 +8,20 @@
 //! Booleans mostly arrive as `BoolValue` wrappers, so a setting the user
 //! never changed is simply absent, and a patch leaves it alone.
 
+use std::time::Duration;
+
 use crate::Snowflake;
+use crate::emoji::Tone;
 use crate::protobuf::{Message, Value, bool_value, string_value, uint_value, uint64_value};
 use crate::settings::{
-    CustomStatus, GuildFolder, MediaPatch, NotificationsPatch, PrivacyPatch, ReactionNotifications, SettingsPatch,
-    StatusSettings, StickerAnimation, UserStatus,
+    CustomStatus, FriendSources, GuildFolder, MediaPatch, NotificationsPatch, PrivacyPatch, ProfileVisibility,
+    ReactionNotifications, SettingsPatch, StatusSettings, StickerAnimation, UserStatus,
 };
 
 // PreloadedUserSettings.
 const VERSIONS: u32 = 1;
 const TEXT_AND_IMAGES: u32 = 6;
+const VOICE_AND_VIDEO: u32 = 5;
 const NOTIFICATIONS: u32 = 7;
 const PRIVACY: u32 = 8;
 const STATUS: u32 = 11;
@@ -28,7 +32,11 @@ const GUILD_FOLDERS: u32 = 14;
 // Versions.
 const DATA_VERSION: u32 = 3;
 
+// VoiceAndVideoSettings.
+const STREAM_NOTIFICATIONS_ENABLED: u32 = 7;
+
 // TextAndImagesSettings.
+const DIVERSITY_SURROGATE: u32 = 1;
 const INLINE_ATTACHMENT_MEDIA: u32 = 9;
 const INLINE_EMBED_MEDIA: u32 = 10;
 const GIF_AUTO_PLAY: u32 = 11;
@@ -43,10 +51,18 @@ const REACTION_NOTIFICATIONS: u32 = 7;
 const FRIEND_ONLINE_NOTIFICATIONS: u32 = 12;
 const FRIEND_ANNIVERSARY_NOTIFICATIONS: u32 = 14;
 const PROFILE_UPDATES_NOTIFICATIONS: u32 = 16;
+const UPCOMING_SERVER_EVENT_NOTIFICATIONS: u32 = 22;
 
 // PrivacySettings.
 const ALLOW_ACTIVITY_PARTY_FRIENDS: u32 = 1;
 const ALLOW_ACTIVITY_PARTY_VOICE_CHANNEL: u32 = 2;
+const RESTRICTED_GUILD_IDS: u32 = 3;
+const DEFAULT_GUILDS_RESTRICTED: u32 = 4;
+const FRIEND_SOURCE_FLAGS: u32 = 11;
+const MESSAGE_REQUEST_RESTRICTED_GUILD_IDS: u32 = 16;
+const DEFAULT_MESSAGE_REQUEST_RESTRICTED: u32 = 17;
+const DEFAULT_GUILDS_RESTRICTED_V2: u32 = 27;
+const PROFILE_VISIBILITY: u32 = 32;
 
 // StatusSettings.
 const STATUS_STATUS: u32 = 1;
@@ -90,6 +106,7 @@ impl SettingsPatch {
         let notified = |number| notifications.as_ref().and_then(|n| n.bool_value(number));
         let privacy = settings.message(PRIVACY);
         let private = |number| privacy.as_ref().and_then(|p| p.bool_value(number));
+        let voice = settings.message(VOICE_AND_VIDEO);
         Some(SettingsPatch {
             guild_folders: settings.message(GUILD_FOLDERS).map(|folders| guild_folders(&folders)),
             media: MediaPatch {
@@ -112,18 +129,42 @@ impl SettingsPatch {
                 friend_online: notified(FRIEND_ONLINE_NOTIFICATIONS),
                 friend_anniversary: notified(FRIEND_ANNIVERSARY_NOTIFICATIONS),
                 profile_updates: notified(PROFILE_UPDATES_NOTIFICATIONS),
+                go_live: voice.as_ref().and_then(|v| v.bool_value(STREAM_NOTIFICATIONS_ENABLED)),
+                upcoming_event: notified(UPCOMING_SERVER_EVENT_NOTIFICATIONS),
             },
             privacy: PrivacyPatch {
                 friends_join_game: private(ALLOW_ACTIVITY_PARTY_FRIENDS),
                 voice_participants_join_game: private(ALLOW_ACTIVITY_PARTY_VOICE_CHANNEL),
+                friend_sources: privacy
+                    .as_ref()
+                    .and_then(|p| p.int_value(FRIEND_SOURCE_FLAGS))
+                    .map(|flags| FriendSources(flags as u32)),
+                servers_restricted: private(DEFAULT_GUILDS_RESTRICTED_V2),
+                // A plain `bool`: left out when false.
+                servers_restricted_before: privacy.as_ref().map(|p| p.bool(DEFAULT_GUILDS_RESTRICTED).unwrap_or(false)),
+                restricted_servers: privacy.as_ref().map(|p| servers(p, RESTRICTED_GUILD_IDS)),
+                message_requests_restricted: private(DEFAULT_MESSAGE_REQUEST_RESTRICTED),
+                message_request_restricted_servers: privacy
+                    .as_ref()
+                    .map(|p| servers(p, MESSAGE_REQUEST_RESTRICTED_GUILD_IDS)),
+                // A plain enum: absent is `UNSET`, which is the default.
+                profile_visibility: privacy
+                    .as_ref()
+                    .and_then(|p| ProfileVisibility::from_raw(p.varint(PROFILE_VISIBILITY).unwrap_or(0))),
             },
             // A plain `bool`: `false` is not sent, so appearance without it is off.
             developer_mode: settings.message(APPEARANCE).map(|a| a.bool(DEVELOPER_MODE).unwrap_or(false)),
             message_display_compact: flag(MESSAGE_DISPLAY_COMPACT),
             status: settings.message(STATUS).map(|status| status_settings(&status)),
             localization: settings.message(LOCALIZATION).map(|l| l.string_value(LOCALE).map(String::from)),
+            skin_tone: text.as_ref().and_then(|t| t.string_value(DIVERSITY_SURROGATE)).map(Tone::from_modifier),
         })
     }
+}
+
+/// A repeated `fixed64` of server ids.
+fn servers(message: &Message, number: u32) -> Vec<Snowflake> {
+    message.fixed64s(number).into_iter().map(Snowflake).collect()
 }
 
 /// The `status` message. A status the client's picker cannot set reads as
@@ -232,6 +273,36 @@ pub enum Setting {
     CustomStatus(Option<CustomStatus>),
     /// `updateLocale` (817281).
     Locale(String),
+    /// The emoji picker's skin tone (`dK`, 554375); none is the default.
+    SkinTone(Option<Tone>),
+    GoLiveNotifications(bool),
+    UpcomingEventNotifications(bool),
+    FriendSourceFlags(FriendSources),
+    /// Direct messages from servers' members. `ServersRestricted` is the
+    /// default, with the servers it is also applied to: none leaves them as
+    /// they are, an empty list lets every server through. `ServerRestricted`
+    /// is one server.
+    DefaultServersRestricted {
+        restricted: bool,
+        apply_to: Option<Vec<Snowflake>>,
+    },
+    RestrictedServers(Vec<Snowflake>),
+    /// The same for message requests.
+    DefaultMessageRequestsRestricted {
+        restricted: bool,
+        apply_to: Option<Vec<Snowflake>>,
+    },
+    MessageRequestRestrictedServers(Vec<Snowflake>),
+    ProfileVisibility(ProfileVisibility),
+}
+
+/// How long the client waits before saving a setting (`UserSettingsDelay`):
+/// none for most; the skin tone is `FREQUENT_USER_ACTION`.
+const FREQUENT_USER_ACTION: Duration = Duration::from_secs(10);
+
+/// A repeated `fixed64`, packed as the client writes it; none if empty.
+fn servers_value(ids: &[Snowflake]) -> Option<Value> {
+    (!ids.is_empty()).then(|| Value::Bytes(ids.iter().flat_map(|id| id.0.to_le_bytes()).collect()))
 }
 
 impl Setting {
@@ -287,6 +358,45 @@ impl Setting {
                 one(STATUS, STATUS_CUSTOM, value)
             }
             Setting::Locale(locale) => one(LOCALIZATION, LOCALE, Some(string_value(&locale))),
+            Setting::SkinTone(tone) => {
+                one(TEXT_AND_IMAGES, DIVERSITY_SURROGATE, Some(string_value(tone.map_or("", Tone::modifier))))
+            }
+            Setting::GoLiveNotifications(on) => {
+                one(VOICE_AND_VIDEO, STREAM_NOTIFICATIONS_ENABLED, Some(bool_value(on)))
+            }
+            Setting::UpcomingEventNotifications(on) => {
+                one(NOTIFICATIONS, UPCOMING_SERVER_EVENT_NOTIFICATIONS, Some(bool_value(on)))
+            }
+            Setting::FriendSourceFlags(sources) => one(PRIVACY, FRIEND_SOURCE_FLAGS, Some(uint_value(sources.0))),
+            Setting::DefaultServersRestricted { restricted, apply_to } => {
+                let mut edits = vec![(DEFAULT_GUILDS_RESTRICTED_V2, Some(bool_value(restricted)))];
+                if let Some(servers) = apply_to {
+                    edits.push((RESTRICTED_GUILD_IDS, servers_value(&servers)));
+                }
+                (PRIVACY, edits)
+            }
+            Setting::RestrictedServers(servers) => one(PRIVACY, RESTRICTED_GUILD_IDS, servers_value(&servers)),
+            Setting::DefaultMessageRequestsRestricted { restricted, apply_to } => {
+                let mut edits = vec![(DEFAULT_MESSAGE_REQUEST_RESTRICTED, Some(bool_value(restricted)))];
+                if let Some(servers) = apply_to {
+                    edits.push((MESSAGE_REQUEST_RESTRICTED_GUILD_IDS, servers_value(&servers)));
+                }
+                (PRIVACY, edits)
+            }
+            Setting::MessageRequestRestrictedServers(servers) => {
+                one(PRIVACY, MESSAGE_REQUEST_RESTRICTED_GUILD_IDS, servers_value(&servers))
+            }
+            Setting::ProfileVisibility(visibility) => {
+                one(PRIVACY, PROFILE_VISIBILITY, Some(Value::Varint(visibility.raw())))
+            }
+        }
+    }
+
+    /// How long after the change the client saves it.
+    pub fn delay(&self) -> Duration {
+        match self {
+            Setting::SkinTone(_) => FREQUENT_USER_ACTION,
+            _ => Duration::ZERO,
         }
     }
 
@@ -503,6 +613,13 @@ mod tests {
                 created_at_ms: 41,
             })),
             Locale("fr".into()),
+            SkinTone(Some(Tone::MediumDark)),
+            GoLiveNotifications(false),
+            UpcomingEventNotifications(false),
+            FriendSourceFlags(FriendSources(6)),
+            DefaultServersRestricted { restricted: true, apply_to: Some(vec![Snowflake(4), Snowflake(8)]) },
+            DefaultMessageRequestsRestricted { restricted: true, apply_to: Some(vec![Snowflake(8)]) },
+            ProfileVisibility(self::ProfileVisibility::FriendsOnly),
         ];
         let mut proto = Vec::new();
         for setting in all {
@@ -531,8 +648,20 @@ mod tests {
                     friend_online: false,
                     friend_anniversary: false,
                     profile_updates: false,
+                    go_live: false,
+                    upcoming_event: false,
                 },
-                privacy: Privacy { friends_join_game: false, voice_participants_join_game: false },
+                privacy: Privacy {
+                    friends_join_game: false,
+                    voice_participants_join_game: false,
+                    friend_sources: FriendSources(6),
+                    servers_restricted: Some(true),
+                    restricted_servers: vec![Snowflake(4), Snowflake(8)],
+                    message_requests_restricted: Some(true),
+                    message_request_restricted_servers: vec![Snowflake(8)],
+                    profile_visibility: self::ProfileVisibility::FriendsOnly,
+                    ..Privacy::default()
+                },
                 status: StatusSettings {
                     status: UserStatus::Idle,
                     expires_at_ms: 50,
@@ -546,6 +675,7 @@ mod tests {
                     }),
                 },
                 locale: Some("fr".into()),
+                skin_tone: Some(Tone::MediumDark),
                 ..Settings::default()
             }
         );
@@ -666,6 +796,102 @@ mod tests {
             let (_, written) = Setting::CustomStatus(cleared).written(&proto).unwrap();
             assert_eq!(written, string_wrapper(STATUS_STATUS, "dnd"), "the status stays");
         }
+    }
+
+    #[test]
+    fn reads_privacy_skin_tone_and_the_rest_of_notifications() {
+        let privacy = [
+            bytes_field(FRIEND_SOURCE_FLAGS, &varint_field(1, 6)),
+            bool_wrapper(DEFAULT_GUILDS_RESTRICTED_V2, true),
+            bytes_field(RESTRICTED_GUILD_IDS, &fixed64s(&[5, 6])),
+            bool_wrapper(DEFAULT_MESSAGE_REQUEST_RESTRICTED, false),
+            bytes_field(MESSAGE_REQUEST_RESTRICTED_GUILD_IDS, &fixed64s(&[7])),
+            varint_field(PROFILE_VISIBILITY, 1),
+        ]
+        .concat();
+        let proto = [
+            bytes_field(TEXT_AND_IMAGES, &string_wrapper(DIVERSITY_SURROGATE, "🏽")),
+            bytes_field(VOICE_AND_VIDEO, &bool_wrapper(STREAM_NOTIFICATIONS_ENABLED, false)),
+            bytes_field(NOTIFICATIONS, &bool_wrapper(UPCOMING_SERVER_EVENT_NOTIFICATIONS, false)),
+            bytes_field(PRIVACY, &privacy),
+        ]
+        .concat();
+        let patch = patch(&proto);
+        assert_eq!(patch.skin_tone, Some(Some(Tone::Medium)));
+        assert_eq!(patch.notifications.go_live, Some(false));
+        assert_eq!(patch.notifications.upcoming_event, Some(false));
+        let privacy = patch.privacy;
+        assert_eq!(privacy.friend_sources, Some(FriendSources(6)));
+        assert_eq!(privacy.servers_restricted, Some(true));
+        assert_eq!(privacy.restricted_servers, Some(vec![Snowflake(5), Snowflake(6)]));
+        assert_eq!(privacy.message_requests_restricted, Some(false));
+        assert_eq!(privacy.message_request_restricted_servers, Some(vec![Snowflake(7)]));
+        assert_eq!(privacy.profile_visibility, Some(ProfileVisibility::FriendsOnly));
+
+        // An empty tone is the default; privacy without its lists, plain fields and enum says they are empty or off.
+        assert_eq!(
+            self::patch(&bytes_field(TEXT_AND_IMAGES, &string_wrapper(DIVERSITY_SURROGATE, ""))).skin_tone,
+            Some(None)
+        );
+        let empty = self::patch(&bytes_field(PRIVACY, &[])).privacy;
+        assert_eq!(empty.restricted_servers, Some(vec![]));
+        assert_eq!(empty.servers_restricted_before, Some(false));
+        assert_eq!(empty.profile_visibility, Some(ProfileVisibility::FriendsAndAllServers), "UNSET");
+        assert_eq!((empty.friend_sources, empty.servers_restricted), (None, None), "wrappers never set stay unsaid");
+    }
+
+    #[test]
+    fn writes_privacy_the_way_the_client_does() {
+        let proto =
+            bytes_field(PRIVACY, &[bool_wrapper(ALLOW_ACTIVITY_PARTY_FRIENDS, true), varint_field(60, 1)].concat());
+        let written = |setting: Setting| setting.written(&proto).unwrap().1;
+
+        // The default alone, and with every server: the list is a packed fixed64.
+        let alone = Setting::DefaultServersRestricted { restricted: true, apply_to: None };
+        assert_eq!(
+            written(alone),
+            [
+                bool_wrapper(ALLOW_ACTIVITY_PARTY_FRIENDS, true),
+                bool_wrapper(DEFAULT_GUILDS_RESTRICTED_V2, true),
+                varint_field(60, 1)
+            ]
+            .concat()
+        );
+        let all =
+            Setting::DefaultServersRestricted { restricted: true, apply_to: Some(vec![Snowflake(5), Snowflake(6)]) };
+        let expected = [
+            bool_wrapper(ALLOW_ACTIVITY_PARTY_FRIENDS, true),
+            bytes_field(RESTRICTED_GUILD_IDS, &fixed64s(&[5, 6])),
+            bool_wrapper(DEFAULT_GUILDS_RESTRICTED_V2, true),
+            varint_field(60, 1),
+        ];
+        assert_eq!(written(all), expected.concat());
+        // Allowing again empties the list, which leaves it out.
+        let none = Setting::DefaultServersRestricted { restricted: false, apply_to: Some(vec![]) };
+        let expected = [
+            bool_wrapper(ALLOW_ACTIVITY_PARTY_FRIENDS, true),
+            bool_wrapper(DEFAULT_GUILDS_RESTRICTED_V2, false),
+            varint_field(60, 1),
+        ];
+        assert_eq!(written(none), expected.concat(), "a false wrapper is empty but there");
+
+        let flags = written(Setting::FriendSourceFlags(FriendSources(6)));
+        assert_eq!(Message::parse(&flags).unwrap().int_value(FRIEND_SOURCE_FLAGS), Some(6));
+        let visibility = written(Setting::ProfileVisibility(ProfileVisibility::FriendsAndSmallServers));
+        assert_eq!(Message::parse(&visibility).unwrap().varint(PROFILE_VISIBILITY), Some(2));
+        let requests =
+            Setting::DefaultMessageRequestsRestricted { restricted: true, apply_to: Some(vec![Snowflake(9)]) };
+        let requests = written(requests);
+        let requests = Message::parse(&requests).unwrap();
+        assert_eq!(requests.bool_value(DEFAULT_MESSAGE_REQUEST_RESTRICTED), Some(true));
+        assert_eq!(requests.fixed64s(MESSAGE_REQUEST_RESTRICTED_GUILD_IDS), vec![9]);
+        let servers = Setting::RestrictedServers(vec![Snowflake(3)]);
+        assert_eq!(Message::parse(&written(servers)).unwrap().fixed64s(RESTRICTED_GUILD_IDS), vec![3]);
+
+        let (group, tone) = Setting::SkinTone(Some(Tone::Dark)).written(&[]).unwrap();
+        assert_eq!((group, tone), (TEXT_AND_IMAGES, string_wrapper(DIVERSITY_SURROGATE, "🏿")));
+        let (_, default) = Setting::SkinTone(None).written(&[]).unwrap();
+        assert_eq!(default, string_wrapper(DIVERSITY_SURROGATE, ""), "the default is an empty string, there");
     }
 
     #[test]

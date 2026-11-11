@@ -17,6 +17,7 @@ pub mod emoji;
 mod endpoints;
 pub mod experiments;
 pub mod forum;
+pub mod gates;
 pub mod gateway;
 pub mod gifs;
 pub mod held;
