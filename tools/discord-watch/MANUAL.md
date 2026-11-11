@@ -362,9 +362,6 @@ changed for unrelated reasons only needs a note in the issue.
 - **The emoji and sticker picker's menu** (`EXPRESSION_PICKER` in
   `ui/menus.rs`). Client: 233503; every item needs Developer Mode, and the
   id is 50268. The sticker link is `zg` in 378058.
-- **The GIF picker's menu** (`GIF_PICKER` in `ui/menus.rs`). Client: 400017
-  (anchor `gif-picker-copy-link`), Copy Link, opened by `handleContextMenu`
-  in 884037 from a result and not from a category tile.
 - **Poll vote counts and shares** (`poll.rs`). Client: 432005 and 969632
   count the votes, and 951727 works out shares, the leader and when counts
   show.
