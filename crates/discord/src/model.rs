@@ -820,6 +820,16 @@ pub struct Message {
     pub message_snapshots: Vec<Snapshot>,
     #[serde(default)]
     pub components: Vec<crate::component::Component>,
+    /// The app a message with components belongs to, if it isn't its author.
+    #[serde(default)]
+    pub application_id: Option<Snowflake>,
+    /// What the sender called it; an app's response to an interaction
+    /// carries the interaction's.
+    #[serde(default, deserialize_with = "nonce")]
+    pub nonce: Option<String>,
+    /// Ours: what is pending on its components, and what was picked in them.
+    #[serde(skip)]
+    pub local: crate::interaction::Local,
     /// For a call's system message: who joined it, and when it ended.
     #[serde(default)]
     pub call: Option<Call>,
@@ -1146,6 +1156,15 @@ pub enum Referenced {
     Message(Box<Message>),
 }
 
+/// A nonce is a string, though some senders write a number.
+fn nonce<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Ok(match Value::deserialize(d)? {
+        Value::String(s) => Some(s),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    })
+}
+
 fn referenced<'de, D: Deserializer<'de>>(d: D) -> Result<Referenced, D::Error> {
     Ok(match Option::<Box<Message>>::deserialize(d)? {
         Some(message) => Referenced::Message(message),
@@ -1166,6 +1185,8 @@ pub struct MessageEdit {
     pub flags: Option<u64>,
     /// A poll that changed, such as one ended early.
     pub poll: Option<crate::poll::Poll>,
+    /// An app's response replacing the components.
+    pub components: Option<Vec<crate::component::Component>>,
 }
 
 impl MessageEdit {
@@ -1190,6 +1211,11 @@ impl MessageEdit {
                 poll.results.get_or_insert_with(Default::default).is_finalized = true;
             }
         }
+        if let Some(components) = self.components {
+            message.components = components;
+        }
+        // The menus show what the message says again (`MESSAGE_UPDATE` in 935548).
+        message.local.forget_picks();
     }
 }
 
@@ -1624,5 +1650,27 @@ mod tests {
         assert_eq!(poll.expiry.as_deref(), Some("2026-01-01T00:00:00+00:00"));
         assert!(poll.results.as_ref().is_some_and(|r| r.is_finalized));
         assert_eq!((poll.votes(1), poll.me_voted(1)), (3, true));
+    }
+
+    #[test]
+    fn an_update_replaces_components_and_clears_what_was_picked() {
+        let mut m: Message = serde_json::from_str(
+            r#"{"id":"100","channel_id":"11","author":{"id":"5","username":"a"},"timestamp":"t",
+                "application_id":"77","nonce":42,
+                "components":[{"type":1,"components":[{"type":2,"style":1,"custom_id":"a"}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (m.application_id, m.nonce.as_deref()),
+            (Some(Snowflake(77)), Some("42")),
+            "a number is a nonce too"
+        );
+        m.local.queue(Snowflake(1), "menu", Some(&["x".to_owned()]));
+        MessageEdit { embeds: Some(Vec::new()), ..Default::default() }.apply(&mut m);
+        assert_eq!(m.local.picked("menu"), None, "any update, as the client clears it");
+        let update = vec![crate::component::Component::Unknown];
+        MessageEdit { components: Some(update.clone()), ..Default::default() }.apply(&mut m);
+        assert_eq!(m.components, update);
+        assert!(!m.local.can_queue(), "what is on its way stays until Discord answers");
     }
 }

@@ -38,6 +38,7 @@
       "AUTOMOD_QUARANTINED_BIO",
       "AUTOMOD_QUARANTINED_SERVER_TAG"
     ],
+    "InteractionType": ["PING", "APPLICATION_COMMAND", "MESSAGE_COMPONENT"],
     "LoginRequiredAction": ["UPDATE_PASSWORD"],
     "MFALevel": ["NONE", "ELEVATED"],
     "MediaTakedownRegulation": ["TIDA", "UK_STOPNCII", "BRAZIL_ONLINE_SAFETY_OF_WOMEN"],
@@ -190,7 +191,9 @@
     "GuildStickersStore",
     "GuildSubscriptionsStore",
     "GuildVerificationStore",
+    "InteractionStore",
     "JoinedThreadsStore",
+    "LocalInteractionComponentStateStore",
     "LoginRequiredActionStore",
     "MessageStore",
     "PendingReplyStore",

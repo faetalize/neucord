@@ -22,6 +22,7 @@ pub mod history;
 mod identity;
 pub mod images;
 mod inflate;
+pub mod interaction;
 mod invalid;
 pub mod limits;
 pub mod markup;

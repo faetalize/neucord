@@ -107,6 +107,18 @@ changed for unrelated reasons only needs a note in the issue.
   answers, `D` in 180662 (anchor `optimistic`: what we had and drop goes
   first, then the new picks); and who is offered End Poll Now, in 761304
   (anchor `end-poll-early`: our own poll, until its expiry).
+- **Pressing buttons and picking from menus** (`interaction.rs`, `Rest::interact`,
+  `permissions::components_blocked`, `ui/components.rs`). The endpoint, the
+  gateway events, `InteractionStore` and the component state store are
+  watched. Not watched: the body, which 964363 builds in a variable (`S`,
+  anchor `canQueueInteraction`: `application_id` is the message's or its
+  author's, a DM's `guild_id` is `null`, a menu's data spreads its `type` and
+  `values`), and how a refusal reads (`T` just below); when a click sends,
+  `V` in 232430 (anchor `STOREFRONT_PREMIUM_BUTTON`: a premium button opens
+  the store instead) and a menu, `nt` there (anchor `onSelectInteraction`: one
+  to pick sends when chosen, several when the list closes with a change); and
+  what turns components off, `v` in 911408 (anchor
+  `getInteractionComponentState`) with `O` and the menu limits in 257249.
 - **Forum and media channels take no message** (the forum page in
   `select_channel`, `permissions::can_send`, `update_notice_bar`). Neucord
   shows no box there, loads nothing and refuses to send, whatever Send
