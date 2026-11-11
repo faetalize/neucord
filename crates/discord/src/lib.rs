@@ -32,6 +32,7 @@ pub mod member_list;
 pub mod members;
 pub mod model;
 pub mod notes;
+pub mod notification_edit;
 pub mod notifications;
 pub mod permissions;
 pub mod poll;

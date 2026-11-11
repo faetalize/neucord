@@ -17,6 +17,7 @@ use crate::gifs::{Gif, Picker, Request, Tile, Tiles};
 use crate::interaction::{Failure, Press};
 use crate::invalid::{Change, InvalidRequests};
 use crate::model::Emoji;
+use crate::notification_edit;
 use crate::profile::{self, Profile};
 use crate::reactions::{Location, Refusal};
 use crate::scheduled::{self, Scheduled};
@@ -553,6 +554,43 @@ impl Rest {
         let body = json!({ "token": null });
         let call = call!(ACK, channel, message);
         let _: serde_json::Value = self.request(call, Some(body)).await?;
+        Ok(())
+    }
+
+    /// Mark everything after `before` in `channel` unread: an ack to the message
+    /// before the one chosen, with `manual` and the mentions after it (439147).
+    pub async fn ack_unread(&self, channel: Snowflake, before: Snowflake, mentions: u32) -> Result<(), Error> {
+        let call = call!(ACK, channel, message = before);
+        let _: serde_json::Value = self.request(call, Some(notification_edit::unread_body(mentions))).await?;
+        Ok(())
+    }
+
+    /// Mark many channels read at once (`BULK_ACK`, 218461): a hundred to a
+    /// request, a second between requests, and the rest dropped when one fails.
+    pub async fn ack_bulk(&self, acks: &[notification_edit::BulkAck]) -> Result<(), Error> {
+        let bodies = notification_edit::bulk_ack_bodies(acks);
+        for (n, body) in bodies.into_iter().enumerate() {
+            if n > 0 {
+                glib::timeout_future(std::time::Duration::from_secs(1)).await;
+            }
+            let _: serde_json::Value = self.request(call!(ACK_BULK), Some(body)).await?;
+        }
+        Ok(())
+    }
+
+    /// Save notification settings: for a server through the bulk endpoint, for
+    /// the DMs (`None`) to their own (931260).
+    pub async fn save_notification_settings(
+        &self,
+        guild: Option<Snowflake>,
+        settings: serde_json::Value,
+    ) -> Result<(), Error> {
+        let _: serde_json::Value = match guild {
+            Some(guild) => {
+                self.request(call!(SAVE_GUILD_SETTINGS_BULK), Some(notification_edit::bulk(guild, settings))).await?
+            }
+            None => self.request(call!(SAVE_GUILD_SETTINGS, guild = "@me"), Some(settings)).await?,
+        };
         Ok(())
     }
 

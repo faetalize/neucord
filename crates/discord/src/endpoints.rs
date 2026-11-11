@@ -34,6 +34,9 @@ pub(crate) const END_POLL: Endpoint = Endpoint::post("/channels/{channel}/polls/
 pub(crate) const INTERACT: Endpoint = Endpoint::post("/interactions");
 pub(crate) const TYPING: Endpoint = Endpoint::post("/channels/{channel}/typing");
 pub(crate) const ACK: Endpoint = Endpoint::post("/channels/{channel}/messages/{message}/ack");
+pub(crate) const ACK_BULK: Endpoint = Endpoint::post("/read-states/ack-bulk");
+pub(crate) const SAVE_GUILD_SETTINGS_BULK: Endpoint = Endpoint::patch("/users/@me/guilds/settings");
+pub(crate) const SAVE_GUILD_SETTINGS: Endpoint = Endpoint::patch("/users/@me/guilds/{guild}/settings");
 pub(crate) const CREATE_THREAD: Endpoint = Endpoint::post("/channels/{channel}/threads");
 #[rustfmt::skip]
 pub(crate) const CREATE_THREAD_FROM_MESSAGE: Endpoint = Endpoint::post("/channels/{channel}/messages/{message}/threads");
