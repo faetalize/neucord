@@ -92,6 +92,13 @@ impl Channel {
         self.flags & (1 << 19) != 0
     }
 
+    /// A forum that keeps its posts' media from being saved, copied or
+    /// opened in a browser (`HIDE_MEDIA_DOWNLOAD_OPTIONS`; the client reads
+    /// it off a post's parent in 207133).
+    pub fn hides_media_options(&self) -> bool {
+        self.flags & (1 << 15) != 0
+    }
+
     /// How the channel's tag filter matches until we choose
     /// (`getDefaultTagSetting`, 95701).
     pub fn default_tag_match(&self) -> TagMatch {
@@ -1245,6 +1252,12 @@ mod tests {
             serde_json::to_string(&body).unwrap(),
             r#"{"guild_id":"1","channel_id":"15","threads":[{"thread_id":"20","ack_message_id":"30"}]}"#
         );
+    }
+
+    #[test]
+    fn a_forum_can_keep_its_medias_options_hidden() {
+        assert!(channel(json!({"id": "15", "type": 15, "flags": 1 << 15})).hides_media_options());
+        assert!(!channel(json!({"id": "15", "type": 15, "flags": 1 << 1})).hides_media_options());
     }
 
     #[test]
