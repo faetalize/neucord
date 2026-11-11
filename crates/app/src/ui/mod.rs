@@ -35,6 +35,7 @@ mod scheduling;
 mod sidebar;
 mod state;
 mod stickers;
+mod switcher;
 mod thread_line;
 mod threads;
 mod typing;
@@ -173,6 +174,8 @@ pub struct App {
     threads_view: RefCell<Option<Rc<threads::View>>>,
     /// Opens the thread browser, from the chat's header.
     threads_button: gtk::Button,
+    /// The quick switcher, while it's open.
+    switcher: RefCell<Option<Rc<switcher::View>>>,
     /// The content of messages whose rows have moved on to others, for when
     /// they come back (see [`chat::KeptContent`]).
     kept_content: RefCell<crate::kept::Kept<Snowflake, chat::KeptContent>>,
@@ -345,6 +348,7 @@ impl App {
                 .tooltip_text("Threads")
                 .visible(false)
                 .build(),
+            switcher: RefCell::default(),
             kept_content: RefCell::new(crate::kept::Kept::new(chat::KEPT_CONTENT)),
             rows: RefCell::default(),
             scroll_loader: RefCell::default(),
@@ -433,9 +437,21 @@ impl App {
                 }
             })
             .build();
-        self.window.add_action_entries([logout, standing, scheduled]);
+        let switch = gio::ActionEntry::builder("quick-switcher")
+            .activate({
+                let this = Rc::downgrade(self);
+                move |_: &adw::ApplicationWindow, _, _| {
+                    if let Some(this) = this.upgrade() {
+                        this.toggle_switcher();
+                    }
+                }
+            })
+            .build();
+        self.window.add_action_entries([logout, standing, scheduled, switch]);
         if let Some(app) = self.window.application() {
             app.set_accels_for_action("win.logout", &["<Control><Shift>l"]);
+            // The client binds both (`mod+k`, `mod+t`).
+            app.set_accels_for_action("win.quick-switcher", &["<Control>k", "<Control>t"]);
             // Notification clicks arrive as an app action, with the channel id.
             let open = gio::ActionEntry::builder("open-channel")
                 .parameter_type(Some(glib::VariantTy::STRING))

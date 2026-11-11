@@ -50,6 +50,7 @@ pub mod settings;
 pub mod shape;
 pub mod stickers;
 pub mod subscriptions;
+pub mod switcher;
 pub mod system;
 pub mod thread_creation;
 pub mod threads;
