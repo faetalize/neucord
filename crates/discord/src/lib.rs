@@ -61,6 +61,7 @@ pub mod thread_creation;
 pub mod threads;
 pub mod typing;
 pub mod uploads;
+pub mod usage;
 pub mod verification;
 pub mod voice;
 

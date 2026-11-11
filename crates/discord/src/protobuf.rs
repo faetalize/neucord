@@ -121,6 +121,30 @@ fn take<'a>(buf: &mut &'a [u8], len: usize) -> Option<&'a [u8]> {
     Some(head)
 }
 
+/// A message with `fields` in the order given, which a library writes in
+/// field order.
+pub fn build(fields: &[(u32, Value)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (number, value) in fields {
+        push_value(&mut out, *number, value);
+    }
+    out
+}
+
+/// A packed repeated varint field's payload.
+pub fn packed(values: &[u64]) -> Value {
+    let mut out = Vec::new();
+    for value in values {
+        push_varint(&mut out, *value);
+    }
+    Value::Bytes(out)
+}
+
+/// An `int32`, which a negative number writes as ten bytes.
+pub fn int32(value: i32) -> Value {
+    Value::Varint(i64::from(value) as u64)
+}
+
 fn push_value(out: &mut Vec<u8>, number: u32, value: &Value) {
     match value {
         Value::Varint(v) => push_field(out, number, Wire::Varint(*v)),

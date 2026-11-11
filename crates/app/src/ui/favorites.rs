@@ -6,19 +6,25 @@
 use std::rc::Rc;
 
 use discord::emoji::{Item, Library};
-use discord::frecency::{Frecency, FrecencyPatch, MAX_FAVORITE_EMOJI, Setting, TooMany, toggled};
+use discord::frecency::{FrecencyPatch, MAX_FAVORITE_EMOJI, Setting, TooMany, toggled};
 use discord::settings_sync::Schedule;
 use gtk::glib;
 
 use super::App;
+use super::state::now_ms;
 
 impl App {
-    /// Load the favourites if they aren't yet, as `loadIfNecessary` does for
-    /// the emoji picker (920134), then run `loaded`.
+    /// Load the favourites if they aren't yet, as `loadIfNecessary` does
+    /// (the emoji picker opening, typing `:` to complete an emoji, the first look
+    /// at what is used), then run `loaded`. Nothing runs if they already are.
     pub(super) fn load_frecency(self: &Rc<Self>, loaded: impl Fn() + 'static) {
         let rest = {
             let mut state = self.state.borrow_mut();
-            if state.frecency_sync.is_loaded() || state.frecency_loading {
+            if state.frecency_sync.is_loaded() {
+                return;
+            }
+            state.frecency_waiting.push(Rc::new(loaded));
+            if state.frecency_loading {
                 return;
             }
             state.frecency_loading = true;
@@ -30,14 +36,16 @@ impl App {
             let proto = rest.settings_proto(2).await;
             let mut state = this.state.borrow_mut();
             state.frecency_loading = false;
+            let waiting = std::mem::take(&mut state.frecency_waiting);
             match proto {
                 Ok(proto) => {
                     let patch = FrecencyPatch::from_proto_bytes(&proto);
                     let offline = state.frecency_sync.connected(proto);
-                    state.frecency = Frecency::default();
-                    state.frecency.apply(patch.unwrap_or_default());
+                    state.frecency.load(patch.unwrap_or_default(), now_ms() as u64);
                     drop(state);
-                    loaded();
+                    for loaded in waiting {
+                        loaded();
+                    }
                     if let Some(schedule) = offline {
                         this.save_frecency_after(schedule);
                     }
@@ -54,10 +62,11 @@ impl App {
             return;
         }
         state.frecency_sync.received(proto, partial);
-        if !partial {
-            state.frecency = Frecency::default();
+        let patch = FrecencyPatch::from_proto_bytes(proto).unwrap_or_default();
+        match partial {
+            true => state.frecency.apply(patch, now_ms() as u64),
+            false => state.frecency.load(patch, now_ms() as u64),
         }
-        state.frecency.apply(FrecencyPatch::from_proto_bytes(proto).unwrap_or_default());
     }
 
     /// Whether the emoji is one of the account's favourites.
@@ -79,13 +88,13 @@ impl App {
         };
         let edited = self.state.borrow_mut().frecency_sync.edit(Setting::FavoriteEmojis(list));
         let Some(edited) = edited else { return self.toast("Favorites aren't loaded yet") };
-        self.state.borrow_mut().frecency.apply(edited.patch);
+        self.state.borrow_mut().frecency.apply(edited.patch, now_ms() as u64);
         if let Some(schedule) = edited.schedule {
             self.save_frecency_after(schedule);
         }
     }
 
-    fn save_frecency_after(self: &Rc<Self>, schedule: Schedule) {
+    pub(super) fn save_frecency_after(self: &Rc<Self>, schedule: Schedule) {
         let this = Rc::downgrade(self);
         glib::timeout_add_local_once(schedule.after, move || {
             if let Some(this) = this.upgrade() {
@@ -95,9 +104,14 @@ impl App {
     }
 
     fn save_frecency(self: &Rc<Self>, generation: u64) {
-        let (save, rest) = {
+        let (save, rest, sent) = {
             let mut state = self.state.borrow_mut();
-            (state.frecency_sync.save(generation), state.rest.clone())
+            // What is used goes in just before the send (`beforeSendCallbacks`), once loaded.
+            let (added, sent) = match state.frecency_sync.is_loaded() {
+                true => state.frecency.stores.before_send(now_ms() as u64),
+                false => Default::default(),
+            };
+            (state.frecency_sync.save_with(generation, added), state.rest.clone(), sent)
         };
         let (Some(save), Some(rest)) = (save, rest) else { return };
         let this = self.clone();
@@ -105,16 +119,19 @@ impl App {
             use discord::settings_sync::SaveError;
             match rest.save_settings(&save).await {
                 Ok(saved) => {
-                    let applied = this.state.borrow_mut().frecency_sync.saved(&save, &saved);
-                    if let Some(applied) = applied {
+                    // What the save carried is the account's now: the answer is what it holds.
+                    let applied = {
                         let mut state = this.state.borrow_mut();
-                        state.frecency = Frecency::default();
-                        state.frecency.apply(applied.patch);
-                        drop(state);
+                        state.frecency.stores.saved(sent);
+                        state.frecency_sync.saved(&save, &saved)
+                    };
+                    if let Some(applied) = applied {
+                        this.state.borrow_mut().frecency.load(applied.patch, now_ms() as u64);
                         if let Some(schedule) = applied.schedule {
                             this.save_frecency_after(schedule);
                         }
                     }
+                    this.usage_saved();
                 }
                 Err(SaveError::RateLimited { retry_after }) => {
                     let retry = this.state.borrow_mut().frecency_sync.rate_limited(retry_after.as_deref());
@@ -124,10 +141,9 @@ impl App {
                     // The client asks for the settings again and starts over.
                     match rest.settings_proto(2).await {
                         Ok(proto) => {
-                            let patch = this.state.borrow_mut().frecency_sync.reloaded(proto);
                             let mut state = this.state.borrow_mut();
-                            state.frecency = Frecency::default();
-                            state.frecency.apply(patch.unwrap_or_default());
+                            let patch = state.frecency_sync.reloaded(proto);
+                            state.frecency.load(patch.unwrap_or_default(), now_ms() as u64);
                         }
                         Err(e) => eprintln!("favourites: {e}"),
                     }

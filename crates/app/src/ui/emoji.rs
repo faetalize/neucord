@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use discord::emoji::{Category, Item, Library, Place, Tone};
+use discord::emoji::{Category, Intention, Item, Library, Place, Scores, Tone};
 use discord::permissions::{self, Permissions};
 use discord::{Setting, Snowflake};
 
@@ -128,10 +128,11 @@ impl App {
         self: &Rc<Self>,
         channel: Snowflake,
         parent: &impl IsA<gtk::Widget>,
+        intention: Intention,
         picked: impl Fn(&Rc<App>, &Item) + 'static,
     ) {
         let library = self.emoji_library(channel);
-        self.open_library_picker(library, parent, picked);
+        self.open_library_picker(library, parent, intention, picked);
     }
 
     /// The picker over `library`, wherever its emoji are for.
@@ -139,6 +140,7 @@ impl App {
         self: &Rc<Self>,
         library: Library,
         parent: &impl IsA<gtk::Widget>,
+        intention: Intention,
         picked: impl Fn(&Rc<App>, &Item) + 'static,
     ) {
         let library = Rc::new(library);
@@ -153,13 +155,20 @@ impl App {
             rows: Rc::new({
                 let (library, tone, app) = (library.clone(), tone.clone(), Rc::downgrade(self));
                 move |query| {
-                    let shortcuts = app.upgrade().map(|app| app.emoji_shortcuts(&library)).unwrap_or_default();
-                    rows(&library, query, tone(), shortcuts)
+                    let app = app.upgrade();
+                    let shortcuts =
+                        app.as_ref().map(|app| app.emoji_shortcuts(&library, intention)).unwrap_or_default();
+                    let scores = app.as_ref().map(|app| app.emoji_scores(intention)).unwrap_or_default();
+                    rows(&library, query, tone(), shortcuts, &scores)
                 }
             }),
             cell: Rc::new(cell_button),
-            best: Rc::new(move |query| {
-                library.search(query, 1).unlocked.first().cloned().map(|item| toned(item, tone()))
+            best: Rc::new({
+                let app = Rc::downgrade(self);
+                move |query| {
+                    let scores = app.upgrade().map(|app| app.emoji_scores(intention)).unwrap_or_default();
+                    library.search(query, 1, &scores).unlocked.first().cloned().map(|item| toned(item, tone()))
+                }
             }),
         };
         // The skin tone button lists the emoji again once a tone is chosen.
@@ -188,14 +197,27 @@ impl App {
     }
 
     /// The emoji the picker lists first: the favourites, then those used
-    /// most, as far as `library` has them.
-    fn emoji_shortcuts(&self, library: &Library) -> Shortcuts {
-        let state = self.state.borrow();
+    /// most (reactions for a reaction picker), as far as `library` has them.
+    fn emoji_shortcuts(&self, library: &Library, intention: Intention) -> Shortcuts {
+        let mut state = self.state.borrow_mut();
         let favorites = state.frecency.favorite_emojis.iter().filter_map(|key| library.item(key)).collect();
-        let frequent = discord::frecency::frequently_used(&state.frecency.emoji_usage, now_ms() as u64, |key| {
-            library.item(key).is_some()
-        });
+        let stores = &mut state.frecency.stores;
+        let history = match intention {
+            Intention::Chat => &mut stores.emoji.history,
+            Intention::Reaction => &mut stores.reactions.history,
+        };
+        let frequent = history.frequently(now_ms() as u64, |key| library.item(key).is_some());
         Shortcuts { favorites, frequent: frequent.iter().filter_map(|key| library.item(key)).collect() }
+    }
+
+    /// How much each emoji was used, for a search to rank by.
+    pub(super) fn emoji_scores(&self, intention: Intention) -> Scores {
+        let mut state = self.state.borrow_mut();
+        let stores = &mut state.frecency.stores;
+        match intention {
+            Intention::Chat => stores.emoji.history.scores(now_ms() as u64),
+            Intention::Reaction => stores.reactions.history.scores(now_ms() as u64),
+        }
     }
 
     /// The skin tone button of the picker: the tone emoji take by default,
@@ -251,7 +273,7 @@ struct Shortcuts {
     frequent: Vec<Item>,
 }
 
-fn rows(library: &Library, query: &str, tone: Option<Tone>, shortcuts: Shortcuts) -> Vec<Row<Item>> {
+fn rows(library: &Library, query: &str, tone: Option<Tone>, shortcuts: Shortcuts, scores: &Scores) -> Vec<Row<Item>> {
     let mut rows = Vec::new();
     if query.is_empty() {
         let toned = |items: Vec<Item>| items.into_iter().map(|item| toned(item, tone)).collect();
@@ -265,7 +287,7 @@ fn rows(library: &Library, query: &str, tone: Option<Tone>, shortcuts: Shortcuts
             Row::section(&mut rows, COLUMNS, category.label().to_owned(), unicode);
         }
     } else {
-        let found = library.search(query, SEARCH);
+        let found = library.search(query, SEARCH, scores);
         let toned = |items: Vec<Item>| items.into_iter().map(|item| toned(item, tone)).collect();
         Row::section(&mut rows, COLUMNS, "Search Results".to_owned(), toned(found.unlocked));
         Row::section(&mut rows, COLUMNS, "Needs Nitro".to_owned(), toned(found.locked));
@@ -274,7 +296,7 @@ fn rows(library: &Library, query: &str, tone: Option<Tone>, shortcuts: Shortcuts
 }
 
 /// A Unicode emoji in the account's skin tone, if it has one.
-fn toned(item: Item, tone: Option<Tone>) -> Item {
+pub(super) fn toned(item: Item, tone: Option<Tone>) -> Item {
     match item {
         Item::Unicode(e) => Item::Unicode(e.toned(tone)),
         custom => custom,

@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 
 use discord::channel_icon;
 use discord::cooldowns::Slowmode;
@@ -130,8 +131,18 @@ pub(super) struct State {
     /// the emoji picker opens), and how they are saved.
     pub(super) frecency: discord::frecency::Frecency,
     pub(super) frecency_sync: discord::settings_sync::SettingsSync<discord::frecency::Frecent>,
-    /// The first load is on its way.
+    /// The first load is on its way, and what waits for it.
     pub(super) frecency_loading: bool,
+    pub(super) frecency_waiting: Vec<Rc<dyn Fn()>>,
+    /// The connection is open, which is when what is used gets looked at to
+    /// be saved; the next look is the timer of this generation, and a look
+    /// follows another this long after it.
+    pub(super) usage_active: bool,
+    pub(super) usage_timer: u64,
+    pub(super) usage_interval: Option<std::time::Duration>,
+    /// The channel and server counted as opened last.
+    pub(super) last_counted_channel: Option<Snowflake>,
+    pub(super) last_counted_guild: Option<Snowflake>,
     /// What the gateway was last told we show as.
     pub(super) presence: discord::presence::PresenceReporter,
     /// Which presence update is waiting for its turn; a newer one replaces it.

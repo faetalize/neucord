@@ -179,7 +179,7 @@ impl App {
     }
 
     fn pick_emoji(self: &Rc<Self>, channel: Snowflake, message: Snowflake, parent: &gtk::Widget, at: Location) {
-        self.open_emoji_picker(channel, parent, move |app, item| {
+        self.open_emoji_picker(channel, parent, discord::emoji::Intention::Reaction, move |app, item| {
             app.add_reaction(channel, message, Emoji::from(item), at, true);
         });
     }
@@ -226,6 +226,10 @@ impl App {
         let clash = self.message_in(channel, message).is_some_and(|m| m.reacted_the_other_way(&emoji, Kind::Normal));
         if clash {
             return self.show_reaction_notice(Notice::Clash);
+        }
+        // Counted as it shows, whether or not Discord takes it.
+        if let Some(key) = discord::emoji::reaction_key(&emoji) {
+            self.track_reaction_use(&key);
         }
         let this = self.clone();
         glib::spawn_future_local(async move {

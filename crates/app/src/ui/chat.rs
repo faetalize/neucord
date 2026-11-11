@@ -708,6 +708,7 @@ impl App {
     }
 
     pub(super) fn select_channel(self: &Rc<Self>, id: Snowflake) {
+        self.track_channel_use(id);
         let (title, forum, rest, left) = {
             let mut state = self.state.borrow_mut();
             let left = state.channel.filter(|&c| c != id);

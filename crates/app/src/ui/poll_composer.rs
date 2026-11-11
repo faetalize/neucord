@@ -244,7 +244,7 @@ impl Editor {
 
     fn pick_emoji(self: &Rc<Self>, app: &Rc<App>, row: &Rc<Row>) {
         let (editor, row_weak) = (Rc::downgrade(self), Rc::downgrade(row));
-        app.open_emoji_picker(self.channel, &row.emoji, move |app, item| {
+        app.open_emoji_picker(self.channel, &row.emoji, discord::emoji::Intention::Chat, move |app, item| {
             let (Some(editor), Some(row)) = (editor.upgrade(), row_weak.upgrade()) else { return };
             editor.set_emoji(app, &row, Some(item.clone()));
         });

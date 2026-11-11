@@ -43,6 +43,7 @@ mod threads;
 mod typing;
 mod unread;
 mod uploads;
+mod usage;
 mod voice;
 mod widgets;
 
