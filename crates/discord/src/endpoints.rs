@@ -45,6 +45,7 @@ pub(crate) const LEAVE_THREAD: Endpoint = Endpoint::delete("/channels/{channel}/
 pub(crate) const POST_DATA: Endpoint = Endpoint::post("/channels/{channel}/post-data");
 pub(crate) const USER: Endpoint = Endpoint::get("/users/{user}");
 pub(crate) const USER_PROFILE: Endpoint = Endpoint::get("/users/{user}/profile");
+pub(crate) const MUTUAL_FRIENDS: Endpoint = Endpoint::get("/users/{user}/relationships");
 pub(crate) const NOTE: Endpoint = Endpoint::get("/users/@me/notes/{user}");
 pub(crate) const SET_NOTE: Endpoint = Endpoint::put("/users/@me/notes/{user}");
 pub(crate) const OPEN_DM: Endpoint = Endpoint::post("/users/@me/channels");

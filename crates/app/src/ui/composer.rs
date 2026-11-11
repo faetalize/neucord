@@ -431,7 +431,7 @@ impl App {
             channel: message.channel_id,
             guild,
             to: message.id,
-            author: message.author.display_name().to_owned(),
+            author: self.state.borrow().name_in(message.channel_id, &message.author),
             fixed_ping,
         }));
         self.composer.grab_focus();

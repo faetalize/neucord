@@ -23,7 +23,7 @@ use crate::experiments::Experiments;
 use crate::inflate::Inflater;
 use crate::limits::Nitro;
 use crate::member_list::Update as MemberListUpdate;
-use crate::members::Members;
+use crate::members::{Known, Members};
 use crate::model::Emoji;
 use crate::notifications::{GuildSettings, NotificationSettings};
 use crate::reactions::{self, Kind};
@@ -168,7 +168,7 @@ pub enum Event {
     /// we asked for who aren't members.
     Members {
         guild_id: Snowflake,
-        members: Vec<(Snowflake, Vec<Snowflake>)>,
+        members: Vec<(Snowflake, Known)>,
         not_found: Vec<Snowflake>,
     },
     /// A server's settings changed, its roles among them. It has no channels
@@ -636,15 +636,16 @@ fn guild_with_member(value: &Value, merged: &Value, me: Snowflake) -> Option<Gui
 
 /// Everyone's members a guild object carries, as in [`guild_with_member`],
 /// with their roles.
-fn members_of(value: &Value, merged: &Value) -> Vec<(Snowflake, Vec<Snowflake>)> {
+fn members_of(value: &Value, merged: &Value) -> Vec<(Snowflake, Known)> {
     let members = value["members"].as_array().into_iter().chain(merged.as_array()).flatten();
-    members.filter_map(member_roles).collect()
+    members.filter_map(member_known).collect()
 }
 
-/// A member's user and roles; it names its user either inline or by id.
-fn member_roles(member: &Value) -> Option<(Snowflake, Vec<Snowflake>)> {
+/// A member's user, roles, nickname and picture; it names its user either
+/// inline or by id.
+fn member_known(member: &Value) -> Option<(Snowflake, Known)> {
     let user = parse_id(&member["user"]["id"]).or_else(|| parse_id(&member["user_id"]))?;
-    Some((user, Member::from_value(member).roles))
+    Some((user, Known::from_value(member)))
 }
 
 /// READY's DMs, message requests included. Recipients come either inline as `recipients` (the classic
@@ -787,14 +788,18 @@ fn dispatch(state: &State, name: &str, data: Value) {
         "GUILD_MEMBER_UPDATE" => {
             let Some(guild_id) = parse_id(&data["guild_id"]) else { return };
             if !state.me.get().is_some_and(|me| is_me(&data, me)) {
-                let Some(member) = member_roles(&data) else { return };
+                let Some(member) = member_known(&data) else { return };
                 return send_event(state, Event::Members { guild_id, members: vec![member], not_found: Vec::new() });
+            }
+            // Our own nickname and picture show in the chat like anyone's.
+            if let Some(known) = member_known(&data) {
+                send_event(state, Event::Members { guild_id, members: vec![known], not_found: Vec::new() });
             }
             Event::MemberUpdate { guild_id, member: Member::from_value(&data) }
         }
         "GUILD_MEMBERS_CHUNK" => {
             let Some(guild_id) = parse_id(&data["guild_id"]) else { return };
-            let members = data["members"].as_array().into_iter().flatten().filter_map(member_roles).collect();
+            let members = data["members"].as_array().into_iter().flatten().filter_map(member_known).collect();
             let not_found = data["not_found"].as_array().into_iter().flatten().filter_map(parse_id).collect();
             Event::Members { guild_id, members, not_found }
         }
@@ -866,7 +871,9 @@ fn dispatch(state: &State, name: &str, data: Value) {
             let Some(update) = MemberListUpdate::from_value(&data) else {
                 return eprintln!("gateway: bad GUILD_MEMBER_LIST_UPDATE");
             };
-            let members = update.members().iter().map(|m| (m.user.id, m.roles.clone())).collect();
+            let members = (update.members().iter())
+                .map(|m| (m.user.id, Known { roles: m.roles.clone(), nick: m.nick.clone(), avatar: m.avatar.clone() }))
+                .collect();
             send_event(state, Event::Members { guild_id: update.guild, members, not_found: Vec::new() });
             Event::MemberList(Box::new(update))
         }
@@ -1184,7 +1191,12 @@ mod tests {
                 "GUILD_MEMBER_UPDATE",
                 json!({"guild_id": "1", "user": {"id": user}, "roles": ["40"], "communication_disabled_until": until}),
             );
-            rx.try_recv().ok()
+            // Our own nickname and picture come first, as theirs do.
+            let first = rx.try_recv().ok();
+            match first {
+                Some(Event::Members { .. }) if user == "5" => rx.try_recv().ok(),
+                first => first,
+            }
         };
         assert!(
             matches!(update("8", json!("2026-10-28T12:00:00+00:00")), Some(Event::Members { .. })),
@@ -1289,11 +1301,20 @@ mod tests {
         );
         assert!(matches!(rx.try_recv(), Ok(Event::GuildCreate(_))));
         let Ok(Event::Members { guild_id, members, .. }) = rx.try_recv() else { panic!("no members") };
-        assert_eq!((guild_id, members), (Snowflake(2), vec![(Snowflake(7), vec![Snowflake(41)])]));
+        let roles = |ids: &[u64]| Known { roles: ids.iter().map(|&id| Snowflake(id)).collect(), ..Known::default() };
+        assert_eq!((guild_id, members), (Snowflake(2), vec![(Snowflake(7), roles(&[41]))]));
 
         dispatch(&state, "GUILD_MEMBER_UPDATE", json!({"guild_id": "1", "user": {"id": "6"}, "roles": []}));
         let Ok(Event::Members { members, .. }) = rx.try_recv() else { panic!("someone else's update") };
-        assert_eq!(members, vec![(Snowflake(6), vec![])]);
+        assert_eq!(members, vec![(Snowflake(6), Known::default())]);
+        dispatch(
+            &state,
+            "GUILD_MEMBER_UPDATE",
+            json!({"guild_id": "1", "user": {"id": "6"}, "roles": [], "nick": "Six", "avatar": "av"}),
+        );
+        let Ok(Event::Members { members, .. }) = rx.try_recv() else { panic!("someone else's update") };
+        assert_eq!(members[0].1.nick.as_deref(), Some("Six"));
+        assert_eq!(members[0].1.avatar.as_deref(), Some("av"));
 
         dispatch(
             &state,
@@ -1302,7 +1323,7 @@ mod tests {
                    "chunk_index": 0, "chunk_count": 1}),
         );
         let Ok(Event::Members { members, not_found, .. }) = rx.try_recv() else { panic!("no chunk") };
-        assert_eq!((members, not_found), (vec![(Snowflake(8), vec![Snowflake(40)])], vec![Snowflake(9)]));
+        assert_eq!((members, not_found), (vec![(Snowflake(8), roles(&[40]))], vec![Snowflake(9)]));
     }
 
     #[test]
@@ -1404,7 +1425,10 @@ mod tests {
         );
         // Their roles colour names in the chat, as the client's member store takes them.
         let Ok(Event::Members { guild_id, members, .. }) = rx.try_recv() else { panic!("no members") };
-        assert_eq!((guild_id, members), (Snowflake(1), vec![(Snowflake(6), vec![Snowflake(40)])]));
+        assert_eq!(
+            (guild_id, members),
+            (Snowflake(1), vec![(Snowflake(6), Known { roles: vec![Snowflake(40)], ..Known::default() })])
+        );
         let Ok(Event::MemberList(update)) = rx.try_recv() else { panic!("no list") };
         assert_eq!((update.guild, update.list.as_str(), update.ops.len()), (Snowflake(1), "everyone", 1));
 

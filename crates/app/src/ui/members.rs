@@ -22,7 +22,7 @@ use super::friends::presence_dot;
 use super::menus;
 use super::profile::UserTarget;
 use super::state::Target;
-use super::widgets::avatar_widget;
+use super::widgets::avatar_widget_in;
 use crate::render;
 
 /// How long the list rests before the ranges it shows are sent, as the
@@ -97,6 +97,9 @@ mod rows {
 pub(super) struct Pane {
     pub(super) root: adw::ToolbarView,
     stack: gtk::Stack,
+    title: adw::WindowTitle,
+    /// A DM's panel, which the profile is drawn in.
+    panel: gtk::Box,
     scroller: gtk::ScrolledWindow,
     rows: rows::Rows,
     /// The toggles in the headers of the pages beside the pane.
@@ -110,16 +113,24 @@ pub(super) struct Pane {
 impl Pane {
     pub(super) fn new() -> Self {
         let rows = rows::Rows::new();
-        let header = adw::HeaderBar::builder().title_widget(&adw::WindowTitle::new("Members", "")).build();
+        let title = adw::WindowTitle::new("Members", "");
+        let header = adw::HeaderBar::builder().title_widget(&title).build();
         let scroller = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build();
         let stack = gtk::Stack::new();
         stack.add_named(&scroller, Some("list"));
         stack.add_named(&adw::Spinner::new(), Some("loading"));
+        let panel = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+        stack.add_named(
+            &gtk::ScrolledWindow::builder().child(&panel).hscrollbar_policy(gtk::PolicyType::Never).build(),
+            Some("profile"),
+        );
         let root = adw::ToolbarView::builder().content(&stack).build();
         root.add_top_bar(&header);
         Pane {
             root,
             stack,
+            title,
+            panel,
             scroller,
             rows,
             toggles: RefCell::default(),
@@ -221,8 +232,10 @@ impl App {
             // Over the chat, the pane stays as it was; docked, as it was left.
             if self.right.is_collapsed() { self.right.shows_sidebar() } else { !self.state.borrow().members_closed }
         };
+        let tooltip = if matches!(target, Some(Target::Dm(_))) { "User Profile" } else { "Member List" };
         for toggle in &*self.members.toggles.borrow() {
             toggle.set_visible(target.is_some());
+            toggle.set_tooltip_text(Some(tooltip));
         }
         self.right.set_show_sidebar(wanted);
         self.show_member_list(target);
@@ -235,6 +248,7 @@ impl App {
         for toggle in &*self.members.toggles.borrow() {
             toggle.set_active(shown);
         }
+        self.sync_profile_panel();
         self.subscribe_open();
         self.settle_members();
     }
@@ -322,7 +336,7 @@ impl App {
     }
 
     /// Show `target`'s list, starting at its top where it isn't the one shown.
-    fn show_member_list(&self, target: Option<Target>) {
+    fn show_member_list(self: &Rc<Self>, target: Option<Target>) {
         let changed = *self.members.shown.borrow() != target;
         if changed {
             *self.members.shown.borrow_mut() = target;
@@ -331,10 +345,32 @@ impl App {
             self.members.rows.changed(len, 0, old, len);
             self.members.scroller.vadjustment().set_value(0.0);
         }
+        self.sync_profile_panel();
         self.show_loading_or_list();
     }
 
+    /// A DM's panel shows the profile once it is shown, as the client's
+    /// renders it; anywhere else there is none.
+    fn sync_profile_panel(self: &Rc<Self>) {
+        let target = self.members.shown.borrow().clone();
+        match target {
+            Some(Target::Dm(channel)) => {
+                self.members.title.set_title("User Profile");
+                if self.right.shows_sidebar() {
+                    self.show_profile_panel(channel, &self.members.panel);
+                }
+            }
+            _ => {
+                self.members.title.set_title("Members");
+                self.forget_profile_panel();
+            }
+        }
+    }
+
     fn show_loading_or_list(&self) {
+        if matches!(&*self.members.shown.borrow(), Some(Target::Dm(_))) {
+            return self.members.stack.set_visible_child_name("profile");
+        }
         let loading = match &*self.members.shown.borrow() {
             Some(Target::Server { guild, list, .. }) => {
                 self.state.borrow().member_lists.get(*guild, list).is_none_or(|l| l.is_unknown())
@@ -353,7 +389,7 @@ impl App {
                 state.member_lists.get(*guild, list).filter(|l| !l.is_unknown()).map_or(0, |l| l.len())
             }
             Some(Target::Group(id)) => state.find_channel(*id).map_or(0, |(_, c)| 2 + c.recipients.len()),
-            None => 0,
+            Some(Target::Dm(_)) | None => 0,
         }
     }
 
@@ -440,9 +476,9 @@ impl App {
                     presence.status = Status::Online;
                 }
                 let owner = channel.owner_id == Some(user.id);
-                self.person(user, None, user.display_name(), None, &presence, owner)
+                self.person(user, None, &state.name_in(*id, user), None, &presence, owner)
             }
-            None => placeholder(),
+            Some(Target::Dm(_)) | None => placeholder(),
         }
     }
 
@@ -463,8 +499,10 @@ impl App {
         if status == Status::Offline {
             row.add_css_class("dimmed");
         }
+        let state = self.state.borrow();
+        let server = guild.and_then(|g| Some((g, state.members.avatar(g, user.id)?)));
         let avatar = gtk::Overlay::builder()
-            .child(&avatar_widget(user, 32, Some(&self.images)))
+            .child(&avatar_widget_in(user, 32, Some(&self.images), server))
             .valign(gtk::Align::Center)
             .build();
         avatar.add_overlay(&presence_dot(status));

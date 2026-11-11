@@ -42,6 +42,8 @@ pub(super) enum Target {
     Server { guild: Snowflake, channel: Snowflake, list: String },
     /// A group DM's, which its channel holds.
     Group(Snowflake),
+    /// The profile of the person a DM is with, which has no list.
+    Dm(Snowflake),
 }
 
 /// Where the unread messages of a channel started when it was opened, for
@@ -350,6 +352,28 @@ impl State {
         }
     }
 
+    /// What `user` is called in `channel` (`getName`, 562153): their
+    /// nickname in a server, our name for a friend in a DM, else the name
+    /// they go by.
+    pub(super) fn name_in(&self, channel: Snowflake, user: &User) -> String {
+        self.nick_in(channel, user.id).unwrap_or_else(|| user.display_name().to_owned())
+    }
+
+    /// The name given to someone in `channel`, if one was.
+    pub(super) fn nick_in(&self, channel: Snowflake, user: Snowflake) -> Option<String> {
+        match self.find_channel(channel)? {
+            (Some(guild), _) => self.members.nick(guild.id, user).map(str::to_owned),
+            (None, _) => self.relationships.get(user).and_then(|r| r.nickname.clone()),
+        }
+    }
+
+    /// The picture `user` set for the server `channel` is in, with the
+    /// server: what shows instead of their own.
+    pub(super) fn avatar_in(&self, channel: Snowflake, user: Snowflake) -> Option<(Snowflake, &str)> {
+        let guild = self.find_channel(channel)?.0?.id;
+        Some((guild, self.members.avatar(guild, user)?))
+    }
+
     /// The colour of `user`'s name in `channel`: their highest coloured role,
     /// in a server.
     pub(super) fn name_colour(&self, channel: Snowflake, user: Snowflake) -> Option<RoleColour> {
@@ -384,7 +408,14 @@ impl State {
         let id = self.channel.filter(|_| self.page.is_none())?;
         let (guild, channel) = self.find_channel(id)?;
         let Some(guild) = guild else {
-            return (channel.kind == discord::ChannelKind::GroupDm).then_some(Target::Group(id));
+            return match channel.kind {
+                discord::ChannelKind::GroupDm => Some(Target::Group(id)),
+                // A system account's DM has no profile to show.
+                discord::ChannelKind::Dm => {
+                    (!channel.is_system_dm() && !channel.recipients.is_empty()).then_some(Target::Dm(id))
+                }
+                _ => None,
+            };
         };
         let channel = match channel.kind {
             discord::ChannelKind::AnnouncementThread => guild.channel(channel.parent_id?)?,
@@ -643,6 +674,35 @@ mod tests {
     }
 
     #[test]
+    fn people_are_called_what_they_chose_where_they_are() {
+        use discord::members::Known;
+        let mut state = open_server(None, json!({}));
+        state.private_channels = vec![
+            serde_json::from_value(json!({"id": "30", "type": 1, "recipients": [{"id": "6", "username": "six"}]}))
+                .unwrap(),
+        ];
+        let user = |id: u64| -> User {
+            serde_json::from_value(json!({"id": id.to_string(), "username": "u", "global_name": "Global"})).unwrap()
+        };
+        let (server, dm) = (Snowflake(9), Snowflake(30));
+        assert_eq!(state.name_in(server, &user(6)), "Global", "no nickname known");
+        let known = Known { nick: Some("Nick".into()), avatar: Some("av".into()), ..Known::default() };
+        state.members.add(Snowflake(1), vec![(Snowflake(6), known)], &[]);
+        assert_eq!(state.name_in(server, &user(6)), "Nick");
+        assert_eq!(state.avatar_in(server, Snowflake(6)), Some((Snowflake(1), "av")));
+        assert_eq!(state.name_in(server, &user(7)), "Global", "someone else's");
+        // A DM has no server nicknames, but our name for a friend counts.
+        assert_eq!(state.name_in(dm, &user(6)), "Global");
+        assert_eq!(state.avatar_in(dm, Snowflake(6)), None);
+        let friend = json!({"id": "6", "type": 1, "nickname": "Pal", "user": {"id": "6", "username": "u"}});
+        state
+            .relationships
+            .add(discord::relationships::Relationship::from_value(&friend, &Default::default()).unwrap());
+        assert_eq!(state.name_in(dm, &user(6)), "Pal");
+        assert_eq!(state.name_in(server, &user(6)), "Nick", "a server's choice isn't ours to rename");
+    }
+
+    #[test]
     fn which_channels_have_a_member_list() {
         let mut state = open_server(None, json!({}));
         let guild: Snowflake = Snowflake(1);
@@ -679,9 +739,19 @@ mod tests {
         state.private_channels = vec![
             serde_json::from_value(json!({"id": "30", "type": 1})).unwrap(),
             serde_json::from_value(json!({"id": "31", "type": 3})).unwrap(),
+            serde_json::from_value(json!({"id": "32", "type": 1, "recipients": [{"id": "5", "username": "u"}]}))
+                .unwrap(),
+            serde_json::from_value(
+                json!({"id": "33", "type": 1, "recipients": [{"id": "6", "username": "u", "system": true}]}),
+            )
+            .unwrap(),
         ];
         state.channel = Some(Snowflake(30));
-        assert_eq!(state.member_target(), None, "a DM shows a profile, not a list");
+        assert_eq!(state.member_target(), None, "a DM with no one has no profile");
+        state.channel = Some(Snowflake(32));
+        assert_eq!(state.member_target(), Some(Target::Dm(Snowflake(32))), "a DM shows a profile, not a list");
+        state.channel = Some(Snowflake(33));
+        assert_eq!(state.member_target(), None, "Discord's own account has none");
         state.channel = Some(Snowflake(31));
         assert_eq!(state.member_target(), Some(Target::Group(Snowflake(31))));
     }

@@ -222,6 +222,12 @@ impl Rest {
         Profile::from_value(&answer).ok_or_else(|| Error::Protocol("a profile without a user".into()))
     }
 
+    /// The friends we share with `user`, which the panel asks for when its
+    /// section opens (`q0` in 803306). They come as users.
+    pub async fn mutual_friends(&self, user: Snowflake) -> Result<Vec<crate::User>, Error> {
+        self.request(call!(MUTUAL_FRIENDS, user), None).await
+    }
+
     /// Our note on `user`, which doesn't exist (a 404) until we write one.
     pub async fn note(&self, user: Snowflake) -> Result<Option<String>, Error> {
         let answer: Value = self.request(call!(NOTE, user), None).await?;

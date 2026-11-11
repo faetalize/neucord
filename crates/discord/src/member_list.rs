@@ -68,6 +68,8 @@ pub struct Group {
 pub struct Member {
     pub user: User,
     pub nick: Option<String>,
+    /// Their picture in this server.
+    pub avatar: Option<String>,
     pub roles: Vec<Snowflake>,
     pub presence: Presence,
 }
@@ -96,6 +98,7 @@ impl Item {
         Some(Item::Member(Member {
             user: User::deserialize(&value["member"]["user"]).ok()?,
             nick: member.get("nick").and_then(Value::as_str).map(str::to_owned),
+            avatar: member.get("avatar").and_then(Value::as_str).map(str::to_owned),
             roles: roles.filter_map(|r| r.as_str()?.parse().ok().map(Snowflake)).collect(),
             presence: match &value["member"]["presence"] {
                 presence @ Value::Object(_) => Presence::from_value(presence),
@@ -452,6 +455,7 @@ mod tests {
         Item::Member(Member {
             user: serde_json::from_value(json!({"id": id.to_string(), "username": name})).unwrap(),
             nick: None,
+            avatar: None,
             roles: Vec::new(),
             presence: Presence::default(),
         })
