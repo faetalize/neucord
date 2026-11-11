@@ -15,6 +15,7 @@ use discord::permissions;
 use discord::read_state::ReadStates;
 use discord::relationships::Relationships;
 use discord::settings::{GuildFolder, MediaSettings, RailEntry};
+use discord::stickers::Packs;
 use discord::subscriptions::Subscriptions;
 use discord::threads;
 use discord::typing::Typing;
@@ -74,6 +75,8 @@ pub(super) struct State {
     /// A step Discord requires before the account can be used.
     pub(super) required_action: Option<String>,
     pub(super) guilds: Vec<Guild>,
+    /// Discord's standard sticker packs, once the picker has fetched them.
+    pub(super) sticker_packs: Packs,
     /// DMs and group DMs, message requests included.
     pub(super) private_channels: Vec<Channel>,
     pub(super) relationships: Relationships,
@@ -132,6 +135,17 @@ impl State {
     pub(super) fn rail_layout(&self) -> Vec<RailEntry> {
         let ids: Vec<Snowflake> = self.guilds.iter().map(|g| g.id).collect();
         discord::settings::rail_layout(&self.guild_folders, &ids)
+    }
+
+    /// The servers as the client's emoji and sticker pickers list them: the
+    /// channel's own (`own`) first, then the rail's order.
+    pub(super) fn guilds_in_picker_order(&self, own: Option<Snowflake>) -> Vec<&Guild> {
+        let rail = self.rail_layout().into_iter().flat_map(|entry| match entry {
+            RailEntry::Guild(id) => vec![id],
+            RailEntry::Folder { guilds, .. } => guilds,
+        });
+        let order: Vec<Snowflake> = own.into_iter().chain(rail.filter(|id| Some(*id) != own)).collect();
+        order.iter().filter_map(|id| self.guilds.iter().find(|g| g.id == *id)).collect()
     }
 
     /// The first server in rail order, opened on first connect.

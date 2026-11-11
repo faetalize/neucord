@@ -154,6 +154,11 @@ impl App {
                         guild.emojis = emojis;
                     }
                 }
+                Event::GuildStickersUpdate { guild_id, stickers } => {
+                    if let Some(guild) = self.state.borrow_mut().guilds.iter_mut().find(|g| g.id == guild_id) {
+                        guild.stickers = stickers;
+                    }
+                }
                 Event::RoleUpdate { guild_id, role } => {
                     if let Some(guild) = self.state.borrow_mut().guilds.iter_mut().find(|g| g.id == guild_id) {
                         guild.set_role(role);

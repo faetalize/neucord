@@ -27,6 +27,7 @@ use crate::notifications::{GuildSettings, NotificationSettings};
 use crate::read_state::ReadStates;
 use crate::relationships::{Presence, Relationship, Relationships};
 use crate::settings::{self, GuildFolder, MediaPatch, MediaSettings};
+use crate::stickers::Listed;
 use crate::verification::Account;
 use crate::{Channel, Error, Guild, Member, Message, MessageEdit, Role, Snowflake, ThreadMember, User, identity};
 
@@ -108,6 +109,11 @@ pub enum Event {
     GuildEmojisUpdate {
         guild_id: Snowflake,
         emojis: Vec<GuildEmoji>,
+    },
+    /// A server's stickers changed: all of them, as they are now.
+    GuildStickersUpdate {
+        guild_id: Snowflake,
+        stickers: Vec<Listed>,
     },
     /// Active threads in a server, and our membership of those we've joined.
     ThreadListSync {
@@ -730,6 +736,13 @@ fn dispatch(state: &State, name: &str, data: Value) {
             },
             None => return,
         },
+        "GUILD_STICKERS_UPDATE" => match parse_id(&data["guild_id"]) {
+            Some(guild_id) => match Listed::guild_list(guild_id, &data["stickers"]) {
+                Some(stickers) => Event::GuildStickersUpdate { guild_id, stickers },
+                None => return eprintln!("gateway: bad GUILD_STICKERS_UPDATE"),
+            },
+            None => return,
+        },
         "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" => {
             match (parse_id(&data["guild_id"]), Role::deserialize(&data["role"])) {
                 (Some(guild_id), Ok(role)) => Event::RoleUpdate { guild_id, role },
@@ -1042,6 +1055,17 @@ mod tests {
         );
         let Ok(Event::GuildEmojisUpdate { guild_id, emojis }) = rx.try_recv() else { panic!("no emoji update") };
         assert_eq!((guild_id, emojis.len(), emojis[0].roles.clone()), (Snowflake(1), 1, vec![Snowflake(40)]));
+
+        dispatch(
+            &state,
+            "GUILD_STICKERS_UPDATE",
+            json!({"guild_id": "1", "stickers": [{"id": "8", "name": "wave", "format_type": 1, "available": true}]}),
+        );
+        let Ok(Event::GuildStickersUpdate { guild_id, stickers }) = rx.try_recv() else { panic!("no sticker update") };
+        assert_eq!((guild_id, stickers.len(), stickers[0].sticker.name.as_str()), (Snowflake(1), 1, "wave"));
+        dispatch(&state, "GUILD_STICKERS_UPDATE", json!({"guild_id": "1", "stickers": []}));
+        let Ok(Event::GuildStickersUpdate { stickers, .. }) = rx.try_recv() else { panic!("no sticker update") };
+        assert!(stickers.is_empty(), "a server that lost its last sticker");
 
         dispatch(
             &state,

@@ -53,7 +53,8 @@
       "MANAGE_THREADS",
       "SEND_MESSAGES_IN_THREADS",
       "ATTACH_FILES",
-      "USE_EXTERNAL_EMOJIS"
+      "USE_EXTERNAL_EMOJIS",
+      "USE_EXTERNAL_STICKERS"
     ],
     "PremiumPerk": [
       "ANIMATED_EMOJIS",
@@ -74,6 +75,7 @@
     ],
     "StatusType": ["ONLINE", "IDLE", "DND", "INVISIBLE", "OFFLINE"],
     "StickerFormat": ["PNG", "APNG", "LOTTIE", "GIF"],
+    "StickerSendability": ["SENDABLE", "SENDABLE_WITH_PREMIUM", "NONSENDABLE", "SENDABLE_WITH_BOOSTED_GUILD"],
     "ThreadMemberFlags": ["HAS_INTERACTED", "ALL_MESSAGES", "ONLY_MENTIONS", "NO_MESSAGES"],
     "VerificationLevel": ["NONE", "LOW", "MEDIUM", "HIGH", "VERY_HIGH"]
   },
@@ -116,6 +118,7 @@
     "getMaxTotalAttachmentSize",
     "getResumePosition",
     "getSendMessageOptionsForReply",
+    "getSendMessageOptionsForStickers",
     "getSystemMessageUserJoin",
     "getUploadPayload",
     "getUserMaxFileSize",
@@ -138,6 +141,7 @@
     "isSystemUser",
     "loadComplete",
     "parseRangeHeader",
+    "queryStickers",
     "removeReaction",
     "renderEmbeds",
     "removeFromMsgDraft",
@@ -163,6 +167,7 @@
     "EmojiStore",
     "GuildMemberRequesterStore",
     "GuildRoleStore",
+    "GuildStickersStore",
     "GuildSubscriptionsStore",
     "GuildVerificationStore",
     "JoinedThreadsStore",
@@ -175,6 +180,8 @@
     "RpcNotificationSettingsStore",
     "SafetyHubStore",
     "SlowmodeStore",
+    "StickerMessagePreviewStore",
+    "StickersPackStore",
     "TypingStore",
     "UploadAttachmentStore"
   ],

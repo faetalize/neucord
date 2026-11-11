@@ -12,6 +12,7 @@ use soup::prelude::*;
 
 use crate::endpoints::{Call, call};
 use crate::invalid::{Change, InvalidRequests};
+use crate::stickers::Pack;
 use crate::uploads::Sent;
 use crate::{Channel, Error, Message, Snowflake, identity};
 
@@ -202,15 +203,26 @@ impl Rest {
         self.request(call!(USER, user = id), None).await
     }
 
-    /// Post `content` and the uploaded `attachments`, which may be all of it.
+    /// Discord's standard sticker packs, as the client fetches them when the
+    /// sticker picker opens (`fetchStickerPacks` in 631576): the locale is
+    /// the only query field.
+    pub async fn sticker_packs(&self) -> Result<Vec<Pack>, Error> {
+        let call = call!(STICKER_PACKS).query(&format!("locale={}", identity::LOCALE));
+        let answer: Value = self.request(call, None).await?;
+        Ok(Pack::list(&answer))
+    }
+
+    /// Post `content`, the uploaded `attachments` and a `sticker`, which
+    /// with any one of them may be all of it.
     pub async fn send_message(
         &self,
         channel: Snowflake,
         content: &str,
         reply: Option<Reply>,
         attachments: &[Sent<'_>],
+        sticker: Option<Snowflake>,
     ) -> Result<Message, Error> {
-        let body = message_body(channel, content, &Snowflake::now().to_string(), reply, attachments);
+        let body = message_body(channel, content, &Snowflake::now().to_string(), reply, attachments, sticker);
         self.request(call!(SEND_MESSAGE, channel), Some(body)).await
     }
 
@@ -472,6 +484,7 @@ fn message_body(
     nonce: &str,
     reply: Option<Reply>,
     attachments: &[Sent<'_>],
+    sticker: Option<Snowflake>,
 ) -> Value {
     let mut body = json!({
         "content": content,
@@ -492,6 +505,10 @@ fn message_body(
     }
     if !attachments.is_empty() {
         body["attachments"] = attachments.iter().enumerate().map(|(index, a)| a.body(index)).collect();
+    }
+    if let Some(sticker) = sticker {
+        // A list, though the picker only ever picks one.
+        body["sticker_ids"] = json!([sticker]);
     }
     body
 }
@@ -527,7 +544,7 @@ fn is_md5(hash: &str) -> bool {
 }
 
 fn base_headers(token: Option<&str>) -> Vec<(&'static str, String)> {
-    let mut headers = vec![("X-Discord-Locale", "en-US".to_owned())];
+    let mut headers = vec![("X-Discord-Locale", identity::LOCALE.to_owned())];
     match token {
         Some(token) => headers.push(("Authorization", token.to_owned())),
         // Without it, logging in turns down valid two-factor codes.
@@ -592,18 +609,38 @@ mod tests {
             spoiler: false,
             content_type: "image/png",
         };
-        let body = message_body(Snowflake(9), "", "1", None, &[sent("a.png"), sent("b.png")]);
+        let body = message_body(Snowflake(9), "", "1", None, &[sent("a.png"), sent("b.png")], None);
         assert_eq!(body["content"], "", "files alone are a message");
         assert_eq!(
             (body["attachments"][0]["id"].as_str(), body["attachments"][1]["id"].as_str()),
             (Some("0"), Some("1"))
         );
         assert_eq!(body["attachments"][1]["filename"], "b.png");
-        assert!(message_body(Snowflake(9), "hi", "1", None, &[]).get("attachments").is_none());
+        assert!(message_body(Snowflake(9), "hi", "1", None, &[], None).get("attachments").is_none());
         // A reply to a message goes with the files.
         let reply = Reply { to: Snowflake(3), guild: None, ping: true };
-        let body = message_body(Snowflake(9), "hi", "1", Some(reply), &[sent("a.png")]);
+        let body = message_body(Snowflake(9), "hi", "1", Some(reply), &[sent("a.png")], None);
         assert_eq!(body["message_reference"], json!({ "message_id": "3", "channel_id": "9" }));
+        assert_eq!(body["attachments"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn a_sticker_goes_by_id_alone_or_with_text_a_reply_and_files() {
+        // `_sendMessage` (138399) adds `sticker_ids` to the same body, whatever else is in it.
+        let body = message_body(Snowflake(9), "", "1", None, &[], Some(Snowflake(5)));
+        assert_eq!((body["content"].as_str(), body["sticker_ids"].clone()), (Some(""), json!(["5"])));
+        assert!(message_body(Snowflake(9), "", "1", None, &[], None).get("sticker_ids").is_none());
+        let reply = Reply { to: Snowflake(3), guild: Some(Snowflake(2)), ping: false };
+        let sent = Sent {
+            filename: "a.png",
+            uploaded_filename: "u/f",
+            description: None,
+            spoiler: false,
+            content_type: "image/png",
+        };
+        let body = message_body(Snowflake(9), "hi", "1", Some(reply), &[sent], Some(Snowflake(5)));
+        assert_eq!((body["content"].as_str(), body["sticker_ids"].clone()), (Some("hi"), json!(["5"])));
+        assert_eq!(body["message_reference"]["message_id"], "3");
         assert_eq!(body["attachments"].as_array().map(Vec::len), Some(1));
     }
 

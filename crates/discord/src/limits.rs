@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::emoji::{GuildEmoji, Place};
 use crate::experiments::Experiments;
 use crate::model::{Guild, Snowflake};
+use crate::stickers::{Origin, Place as StickerPlace};
 
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
@@ -204,6 +205,22 @@ pub enum Unavailable {
     Nitro,
 }
 
+/// Why a sticker can't be sent where we are (`SENDABLE_WITH_PREMIUM`,
+/// `SENDABLE_WITH_BOOSTED_GUILD` and `NONSENDABLE` of 361670's sendability).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StickerUnavailable {
+    /// Another server's sticker, in a channel without Use External Stickers
+    /// for us (`NONSENDABLE`).
+    NotHere,
+    /// Its server no longer has the boosts it took (`available` is false;
+    /// `SENDABLE_WITH_BOOSTED_GUILD`).
+    ServerBoost,
+    /// Another server's sticker without Stickers Everywhere
+    /// (`SENDABLE_WITH_PREMIUM`). The client opens a Nitro upsell on a
+    /// click, which Neucord doesn't copy.
+    Nitro,
+}
+
 /// What one message may carry (the client's message upload target, 313034).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Uploads {
@@ -310,6 +327,28 @@ impl Limits<'_> {
             return Err(Unavailable::Nitro);
         }
         Ok(())
+    }
+
+    /// Whether we may send a sticker from `origin` in `place`, as the client's
+    /// sendability decides (`W$` in 361670). A standard pack's is open to
+    /// everyone. A server's own is, unless its server lost its boosts; from
+    /// another server it needs Use External Stickers (a DM needs none) and
+    /// then Stickers Everywhere.
+    pub fn sticker(&self, origin: &Origin, place: &StickerPlace) -> Result<(), StickerUnavailable> {
+        let Origin::Guild { guild_id, available } = *origin else { return Ok(()) };
+        if !available {
+            return Err(StickerUnavailable::ServerBoost);
+        }
+        if place.guild == Some(guild_id) {
+            return Ok(());
+        }
+        if !place.external_stickers {
+            return Err(StickerUnavailable::NotHere);
+        }
+        match self.nitro.has(Perk::StickersEverywhere) {
+            true => Ok(()),
+            false => Err(StickerUnavailable::Nitro),
+        }
     }
 
     /// What a message may carry in `guild`, or in DMs. The server's side
@@ -556,5 +595,42 @@ mod tests {
         assert!(!can(&full, &none, Auto, 720, 30, None));
         let auto = experiments(&[("2025-10-go-live-auto-quality", 2)]);
         assert!(can(&free, &auto, Auto, 0, 0, None));
+    }
+
+    #[test]
+    fn stickers_follow_the_clients_sendability() {
+        // `W$` in 361670: a pack's is open; a server's own too unless it lost its boosts; another
+        // server's needs Use External Stickers (not in a DM) and then Stickers Everywhere.
+        let none = Experiments::default();
+        let free = Nitro::default();
+        let basic = nitro(json!({"premium_type": 3}));
+        let classic = nitro(json!({"premium_type": 1}));
+        let can = |n: &Nitro, origin: Origin, guild: Option<u64>, external: bool| {
+            let place =
+                StickerPlace { guild: guild.map(Snowflake), external_emojis: true, external_stickers: external };
+            Limits { nitro: n, experiments: &none, me: ME }.sticker(&origin, &place)
+        };
+        let server = |id: u64, available| Origin::Guild { guild_id: Snowflake(id), available };
+        let pack = Origin::Pack { pack_id: Snowflake(9) };
+        assert_eq!(can(&free, pack, Some(1), false), Ok(()), "a pack, even without Use External Stickers");
+        assert_eq!(
+            can(&free, server(1, true), Some(1), false),
+            Ok(()),
+            "its own server's, with no Nitro or permission"
+        );
+        assert_eq!(can(&free, server(2, true), Some(1), true), Err(StickerUnavailable::Nitro));
+        assert_eq!(can(&basic, server(2, true), Some(1), true), Ok(()), "Basic has Stickers Everywhere");
+        assert_eq!(can(&classic, server(2, true), Some(1), true), Err(StickerUnavailable::Nitro), "Classic doesn't");
+        assert_eq!(can(&basic, server(2, true), Some(1), false), Err(StickerUnavailable::NotHere));
+        assert_eq!(
+            can(&free, server(2, true), Some(1), false),
+            Err(StickerUnavailable::NotHere),
+            "the permission first"
+        );
+        assert_eq!(can(&basic, server(2, true), None, true), Ok(()), "a DM");
+        assert_eq!(can(&free, server(2, true), None, true), Err(StickerUnavailable::Nitro));
+        // Lost boosts win over everything, in its own server too.
+        assert_eq!(can(&basic, server(1, false), Some(1), true), Err(StickerUnavailable::ServerBoost));
+        assert_eq!(can(&basic, server(2, false), Some(1), false), Err(StickerUnavailable::ServerBoost));
     }
 }
