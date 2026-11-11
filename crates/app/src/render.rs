@@ -481,15 +481,18 @@ impl<'a> Inline<'a> {
         if let Some(images) = cx.images {
             let size = if cx.jumbo { JUMBO_EMOJI } else { EMOJI };
             let request = emoji_request(size, images.scale());
-            for (n, emoji) in emoji.into_iter().enumerate() {
-                let weak = text.downgrade();
-                let url = discord::cdn::emoji_url(emoji.id, emoji.animated, request);
-                images.load(&url, emoji.animated, move |paintable| {
-                    if let Some(text) = weak.upgrade() {
-                        text.set_image(n, paintable);
-                    }
-                });
-            }
+            // An animated one shows its still (the PNG, shared by every
+            // message with it) until the rules let it move.
+            let emoji = emoji
+                .into_iter()
+                .enumerate()
+                .map(|(n, emoji)| {
+                    let still = discord::cdn::emoji_url(emoji.id, false, request);
+                    let moving = emoji.animated.then(|| discord::cdn::emoji_url(emoji.id, true, request));
+                    (n, still, moving)
+                })
+                .collect();
+            images.set_emoji(&text, emoji);
         }
         text.upcast()
     }

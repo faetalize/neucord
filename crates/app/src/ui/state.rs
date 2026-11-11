@@ -5,27 +5,43 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use discord::channel_icon;
+use discord::channel_list::{self, Collapsed, Facts, Row};
 use discord::cooldowns::Slowmode;
 use discord::experiments::Experiments;
 use discord::gifs::Tiles;
+use discord::interaction::Failure;
 use discord::limits::{Limits, Nitro};
 use discord::member_list::{self, MemberLists};
 use discord::members::{Members, RoleColour};
-use discord::notifications::{NotificationSettings, Place};
+use discord::notice::Notice;
+use discord::notification_edit::{self, BulkAck};
+use discord::notifications::{Level, NotificationSettings, Place};
 use discord::permissions;
+use discord::post_creation;
 use discord::read_state::ReadStates;
 use discord::relationships::Relationships;
-use discord::settings::{GuildFolder, MediaSettings, RailEntry};
+use discord::settings::{RailEntry, Settings};
 use discord::stickers::Packs;
 use discord::subscriptions::Subscriptions;
 use discord::thread_creation;
 use discord::threads;
 use discord::typing::Typing;
+use discord::verification;
 use discord::verification::Account;
+use discord::voice_states::{VoiceState, VoiceStates};
 use discord::{Channel, ChannelKind, Gateway, Guild, Message, Rest, Resume, Snowflake, User};
 use gtk::glib;
 
 use super::friends::Tab;
+use crate::tray::Alert;
+
+/// A press of ours on a message's component, until it is answered.
+pub(super) struct Pending {
+    pub(super) channel: Snowflake,
+    pub(super) message: Snowflake,
+    /// The app whose message it is.
+    pub(super) application: Snowflake,
+}
 
 /// What Home shows in place of a channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,6 +58,8 @@ pub(super) enum Target {
     Server { guild: Snowflake, channel: Snowflake, list: String },
     /// A group DM's, which its channel holds.
     Group(Snowflake),
+    /// The profile of the person a DM is with, which has no list.
+    Dm(Snowflake),
 }
 
 /// Where the unread messages of a channel started when it was opened, for
@@ -53,6 +71,21 @@ pub(super) struct Unread {
     pub(super) acked: Snowflake,
     /// The first unread message has been in view.
     pub(super) seen: bool,
+}
+
+/// What the menu item for reading a channel is (see [`State::read_item`]).
+pub(super) enum ReadItem {
+    Read { enabled: bool },
+    Unread,
+}
+
+/// A group of the sidebar: a category and the channels it lists, or the
+/// channels that are in none.
+pub(super) struct Section<'a> {
+    pub(super) category: Option<&'a Channel>,
+    /// The category is folded, which leaves out most of its channels.
+    pub(super) folded: bool,
+    pub(super) channels: Vec<&'a Channel>,
 }
 
 #[derive(Default)]
@@ -84,8 +117,6 @@ pub(super) struct State {
     /// DMs and group DMs, message requests included.
     pub(super) private_channels: Vec<Channel>,
     pub(super) relationships: Relationships,
-    /// The user's server folders, which also order the rail.
-    pub(super) guild_folders: Vec<GuildFolder>,
     /// Folders the user expanded in the rail (by folder id).
     pub(super) open_folders: std::collections::HashSet<u64>,
     /// The open guild; `None` is Home, the DM list.
@@ -103,9 +134,12 @@ pub(super) struct State {
     pub(super) revealed_spoilers: HashMap<Snowflake, HashSet<usize>>,
     /// This session's id, which interactions name.
     pub(super) session_id: String,
-    /// Where each interaction of ours that Discord hasn't answered belongs:
-    /// its channel and message, by nonce.
-    pub(super) interactions: HashMap<Snowflake, (Snowflake, Snowflake)>,
+    /// The component presses of ours that Discord hasn't answered, by nonce.
+    pub(super) interactions: HashMap<Snowflake, Pending>,
+    /// The apps and commands fetched for slash commands.
+    pub(super) commands: discord::commands::CommandIndex,
+    /// Commands we ran that their app hasn't answered, by nonce.
+    pub(super) running: HashMap<Snowflake, super::slash::Running>,
     /// Display names by user id, accumulated from every user we see plus lazy
     /// `GET /users/{id}` lookups, so mentions resolve even for people no longer
     /// in the server.
@@ -119,15 +153,22 @@ pub(super) struct State {
     pub(super) notes: discord::notes::Notes,
     pub(super) read: ReadStates,
     pub(super) notifications: NotificationSettings,
-    /// How embeds and media show.
-    pub(super) media: MediaSettings,
-    /// Menus offer to copy ids.
-    pub(super) developer_mode: bool,
+    /// The categories folded in the sidebar.
+    pub(super) collapsed: Collapsed,
+    /// The account's client settings: server folders (which also order the
+    /// rail), how media shows, Developer Mode, compact display.
+    pub(super) settings: Settings,
+    /// Saving changes to `settings`.
+    pub(super) sync: discord::settings_sync::SettingsSync,
+    /// What the gateway was last told we show as.
+    pub(super) presence: discord::presence::PresenceReporter,
+    /// Which presence update is waiting for its turn; a newer one replaces it.
+    pub(super) presence_timer: u64,
+    /// Which wait for a status to end is current; a newer one replaces it.
+    pub(super) expiry_timer: u64,
     /// The message menu's last groups come in the order the client uses
     /// where the media takedown regulation is TIDA.
     pub(super) media_takedown_regulated: bool,
-    /// Compact message display, which sizes history pages.
-    pub(super) message_display_compact: bool,
     /// Acks waiting to be sent: channel → newest message read.
     pub(super) pending_acks: HashMap<Snowflake, Snowflake>,
     /// How long until we may post again in each channel.
@@ -147,12 +188,28 @@ pub(super) struct State {
     /// The user closed the member list pane beside the chat, which is open
     /// until they do.
     pub(super) members_closed: bool,
+    /// Who is in each server's voice channels.
+    pub(super) voice: VoiceStates,
+    /// What each message search holds, by where it looks.
+    pub(super) searches: HashMap<discord::search::Context, super::search::Saved>,
+    /// Channels opened this session, newest first, for the quick switcher.
+    pub(super) quick_history: Vec<Snowflake>,
 }
 
 impl State {
+    /// What a voice channel's participants are called: their nickname in the
+    /// server, else their display name, which the update or an earlier
+    /// message told us.
+    pub(super) fn voice_name(&self, state: &VoiceState) -> String {
+        let name = state.nick.as_deref().or_else(|| state.user.as_ref().map(|u| u.display_name()));
+        name.map(str::to_owned)
+            .or_else(|| self.users.get(&state.user_id.0).cloned())
+            .unwrap_or_else(|| "...".to_owned())
+    }
+
     pub(super) fn rail_layout(&self) -> Vec<RailEntry> {
         let ids: Vec<Snowflake> = self.guilds.iter().map(|g| g.id).collect();
-        discord::settings::rail_layout(&self.guild_folders, &ids)
+        discord::settings::rail_layout(&self.settings.guild_folders, &ids)
     }
 
     /// The servers as the client's emoji and sticker pickers list them: the
@@ -201,6 +258,32 @@ impl State {
         self.me.as_ref().map(|u| u.id)
     }
 
+    /// Where commands would run if `channel` is open, for what they may be.
+    pub(super) fn command_place(&self, channel: Snowflake) -> Option<discord::commands::Place> {
+        let (guild, channel) = self.find_channel(channel)?;
+        Some(discord::commands::Place::of(guild, channel, self.account.as_ref()?, now_unix()))
+    }
+
+    /// A press of ours is over, answered or refused by the request itself
+    /// (`failure`). A refusal that says the app's command is out of date
+    /// makes the indexes with it stale, as it does for a command we ran
+    /// (`T` in 964363 dispatches the same for a press).
+    pub(super) fn end_press(&mut self, nonce: Snowflake, failure: Option<&Failure>) -> Option<Pending> {
+        let press = self.interactions.remove(&nonce)?;
+        if failure.is_some_and(|f| f.stale_command) {
+            self.commands_out_of_date(press.application, press.channel);
+        }
+        Some(press)
+    }
+
+    /// Discord refused something of `application`'s in `channel` as out of
+    /// date (`APPLICATION_COMMAND_EXECUTE_BAD_VERSION`): the server's index,
+    /// or the DM's, and the account's, are fetched again if they hold the app.
+    pub(super) fn commands_out_of_date(&mut self, application: Snowflake, channel: Snowflake) {
+        let context = self.find_channel(channel).map_or(channel, |(guild, c)| guild.map_or(c.id, |g| g.id));
+        self.commands.out_of_date(application, context);
+    }
+
     /// The guild a channel or thread belongs to and the channel itself;
     /// `None` guild for DMs.
     pub(super) fn find_channel(&self, id: Snowflake) -> Option<(Option<&Guild>, &Channel)> {
@@ -239,11 +322,59 @@ impl State {
         }
     }
 
+    /// What stands where the message box would in a channel, so nothing we
+    /// may post to has one (#51). Slowmode isn't one: the box stays, and the
+    /// wait shows above it.
+    pub(super) fn notice(&self, id: Snowflake) -> Option<Notice> {
+        let (guild, channel) = self.find_channel(id)?;
+        let guild = guild.zip(self.account.as_ref());
+        Notice::of(
+            channel.is_system_dm(),
+            channel.is_request().then_some(channel.spam),
+            guild.and_then(|(g, a)| g.timeout_left(a, now_unix())),
+            guild.and_then(|(g, a)| verification::gate(g, a, now_unix())),
+            guild.is_some() && !self.can_send(id),
+        )
+    }
+
+    /// Whether the message box is withheld from the channel: its page of
+    /// posts stands in for a forum's, and a notice for the rest.
+    pub(super) fn box_blocked(&self, id: Snowflake) -> bool {
+        self.find_channel(id).is_some_and(|(_, c)| c.kind.is_forum_like()) || self.notice(id).is_some()
+    }
+
     /// Whether files may be attached in the channel (see [`permissions::can_attach`]).
     pub(super) fn can_attach(&self, id: Snowflake) -> bool {
         match (self.find_channel(id), &self.account) {
             (Some((guild, channel)), Some(me)) => permissions::can_attach(guild, channel, me, now_unix()),
             _ => false,
+        }
+    }
+
+    /// Whether the post form shows in the forum or media channel (see
+    /// [`post_creation::can_post`]).
+    pub(super) fn can_post(&self, forum: Snowflake) -> bool {
+        match (self.find_channel(forum), &self.account) {
+            (Some((Some(guild), channel)), Some(me)) => post_creation::can_post(guild, channel, me, now_unix()),
+            _ => false,
+        }
+    }
+
+    /// Whether the post form takes files (see [`post_creation::can_attach`]).
+    pub(super) fn can_attach_to_post(&self, forum: Snowflake) -> bool {
+        match (self.find_channel(forum), &self.account) {
+            (Some((Some(guild), channel)), Some(me)) => post_creation::can_attach(guild, channel, me, now_unix()),
+            _ => false,
+        }
+    }
+
+    /// The tags the post form offers in the forum (see [`post_creation::tag_choices`]).
+    pub(super) fn post_tags(&self, forum: Snowflake) -> Vec<discord::model::Tag> {
+        match (self.find_channel(forum), &self.account) {
+            (Some((Some(guild), channel)), Some(me)) => {
+                post_creation::tag_choices(guild, channel, me, now_unix()).into_iter().cloned().collect()
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -350,6 +481,28 @@ impl State {
         }
     }
 
+    /// What `user` is called in `channel` (`getName`, 562153): their
+    /// nickname in a server, our name for a friend in a DM, else the name
+    /// they go by.
+    pub(super) fn name_in(&self, channel: Snowflake, user: &User) -> String {
+        self.nick_in(channel, user.id).unwrap_or_else(|| user.display_name().to_owned())
+    }
+
+    /// The name given to someone in `channel`, if one was.
+    pub(super) fn nick_in(&self, channel: Snowflake, user: Snowflake) -> Option<String> {
+        match self.find_channel(channel)? {
+            (Some(guild), _) => self.members.nick(guild.id, user).map(str::to_owned),
+            (None, _) => self.relationships.get(user).and_then(|r| r.nickname.clone()),
+        }
+    }
+
+    /// The picture `user` set for the server `channel` is in, with the
+    /// server: what shows instead of their own.
+    pub(super) fn avatar_in(&self, channel: Snowflake, user: Snowflake) -> Option<(Snowflake, &str)> {
+        let guild = self.find_channel(channel)?.0?.id;
+        Some((guild, self.members.avatar(guild, user)?))
+    }
+
     /// The colour of `user`'s name in `channel`: their highest coloured role,
     /// in a server.
     pub(super) fn name_colour(&self, channel: Snowflake, user: Snowflake) -> Option<RoleColour> {
@@ -384,7 +537,14 @@ impl State {
         let id = self.channel.filter(|_| self.page.is_none())?;
         let (guild, channel) = self.find_channel(id)?;
         let Some(guild) = guild else {
-            return (channel.kind == discord::ChannelKind::GroupDm).then_some(Target::Group(id));
+            return match channel.kind {
+                discord::ChannelKind::GroupDm => Some(Target::Group(id)),
+                // A system account's DM has no profile to show.
+                discord::ChannelKind::Dm => {
+                    (!channel.is_system_dm() && !channel.recipients.is_empty()).then_some(Target::Dm(id))
+                }
+                _ => None,
+            };
         };
         let channel = match channel.kind {
             discord::ChannelKind::AnnouncementThread => guild.channel(channel.parent_id?)?,
@@ -399,9 +559,49 @@ impl State {
         })
     }
 
-    /// The server's channels we can view, in sidebar order.
-    pub(super) fn sidebar<'a>(&self, guild: &'a Guild) -> Vec<(Option<&'a str>, Vec<&'a Channel>)> {
+    /// The channels we can see in a server, grouped by category in sidebar
+    /// order: where the client's default channel comes from, whatever is folded.
+    pub(super) fn channels_by_category<'a>(&self, guild: &'a Guild) -> Vec<(Option<&'a Channel>, Vec<&'a Channel>)> {
         self.account.as_ref().map(|me| guild.sidebar(me, now_unix())).unwrap_or_default()
+    }
+
+    /// What the sidebar lists of a server: its channels by category, less
+    /// the ones a folded category or Hide Muted Channels leaves out
+    /// ([`channel_list::row`]).
+    pub(super) fn sidebar<'a>(&self, guild: &'a Guild) -> Vec<Section<'a>> {
+        let now = now_unix();
+        let hide_muted = self.notifications.hide_muted_channels(guild.id);
+        let mut sections = Vec::new();
+        for (category, channels) in self.channels_by_category(guild) {
+            let folded = category.is_some_and(|c| self.collapsed.contains(c.id));
+            let rows: Vec<(Row, &Channel)> = channels
+                .into_iter()
+                .map(|c| (channel_list::row(&self.list_facts(guild, c, now), hide_muted, folded), c))
+                .collect();
+            if !channel_list::category_listed(&rows.iter().map(|&(row, _)| row).collect::<Vec<_>>()) {
+                continue;
+            }
+            let channels = rows.into_iter().filter(|&(row, _)| row == Row::Listed).map(|(_, c)| c).collect();
+            sections.push(Section { category, folded, channels });
+        }
+        sections
+    }
+
+    fn list_facts(&self, guild: &Guild, channel: &Channel, now: i64) -> Facts {
+        let open_thread = self.channel.and_then(|id| guild.thread(id)).is_some_and(|t| t.parent_id == Some(channel.id));
+        Facts {
+            selected: self.channel == Some(channel.id),
+            thread_open: open_thread,
+            has_threads: !self.sidebar_threads(guild, channel).is_empty(),
+            mentions: self.read.mentions(channel.id) > 0,
+            muted: self.notifications.channel_muted_itself(guild.id, channel.id, now),
+            category_muted: channel
+                .parent_id
+                .is_some_and(|parent| self.notifications.channel_muted_itself(guild.id, parent, now)),
+            unread: self.is_unread(channel),
+            text_like: channel.kind.is_text() || channel.kind.is_forum_like(),
+            vocal: channel.kind.is_vocal(),
+        }
     }
 
     /// The threads the sidebar lists under `parent` (see [`threads::listed`]).
@@ -413,7 +613,9 @@ impl State {
             channel: parent.id,
             parent: parent.parent_id,
         };
-        let muted = self.notifications.channel_muted(&place, now_unix());
+        // A folded category lists its threads as a muted one does: the unread ones.
+        let folded = parent.parent_id.is_some_and(|category| self.collapsed.contains(category));
+        let muted = self.notifications.channel_muted(&place, now_unix()) || folded;
         let listed = threads::listed(guild, parent, self.channel, muted, &self.read, now_ms());
         listed.into_iter().filter(|t| guild.can_view(t, me, now_unix())).collect()
     }
@@ -450,6 +652,20 @@ impl State {
         }
     }
 
+    /// Whether `thread` is a post of a forum or media channel, which the
+    /// client words some of its items for.
+    pub(super) fn is_forum_post(&self, thread: Snowflake) -> bool {
+        self.find_channel(thread).is_some_and(|(guild, t)| {
+            t.kind.is_thread()
+                && guild.zip(t.parent_id).and_then(|(g, p)| g.channel(p)).is_some_and(|p| p.kind.is_forum_like())
+        })
+    }
+
+    /// Whether our mute of `thread` is running.
+    pub(super) fn thread_is_muted(&self, thread: Snowflake) -> bool {
+        self.find_channel(thread).is_some_and(|(_, t)| Self::thread_muted(t))
+    }
+
     /// A thread we muted.
     pub(super) fn thread_muted(thread: &Channel) -> bool {
         thread.member.as_ref().is_some_and(|m| m.is_muted(now_unix()))
@@ -462,6 +678,116 @@ impl State {
             .channels
             .iter()
             .filter(move |c| kind(c.kind) && self.account.as_ref().is_some_and(|me| guild.can_view(c, me, now)))
+    }
+
+    /// Whether `channel` has anything unread or a mention waiting.
+    pub(super) fn has_news(&self, channel: &Channel) -> bool {
+        self.is_unread(channel) || self.read.mentions(channel.id) > 0
+    }
+
+    /// What "Mark As Read" on a channel or a category acks, each with its
+    /// newest message (`hS` in 334738): a category's channels and the active
+    /// threads we joined in them, read or not; a channel just itself. A forum
+    /// has no message of its own to ack, so it gets the moment, as a snowflake
+    /// made from the clock (`fromTimestamp(Date.now())`).
+    pub(super) fn ack_targets(&self, id: Snowflake) -> Vec<(Snowflake, Snowflake)> {
+        let Some((guild, channel)) = self.find_channel(id) else { return Vec::new() };
+        let newest = |c: &Channel| Some((c.id, c.last_message_id?));
+        if channel.kind.is_forum_like() {
+            return vec![(id, Snowflake::from_unix_ms(now_ms()))];
+        }
+        if channel.kind != ChannelKind::Category {
+            return newest(channel).into_iter().collect();
+        }
+        let Some(guild) = guild else { return Vec::new() };
+        let children = self.category_children(guild, id);
+        let threads = threads::joined_active(guild).filter(|t| children.iter().any(|c| Some(c.id) == t.parent_id));
+        children.iter().copied().chain(threads).filter_map(newest).collect()
+    }
+
+    /// A category's channels we can see that the client lists with it
+    /// (`getCategories` filtered by `Z_`): text, forums, voice and stages.
+    fn category_children<'a>(&'a self, guild: &'a Guild, category: Snowflake) -> Vec<&'a Channel> {
+        self.visible(guild, |k| k.is_text() || k.is_vocal() || k.is_forum_like())
+            .filter(|c| c.parent_id == Some(category))
+            .collect()
+    }
+
+    /// What "Mark As Read" on a server, or on a folder (all its servers), acks
+    /// (567035, filtered by `BULK_ACK` in 218461): every forum and media
+    /// channel we can see, with the moment, and the channels and calls and the
+    /// threads we joined in them that have something unread or a mention, each
+    /// with its newest message.
+    pub(super) fn guild_acks(&self, guild: &Guild) -> Vec<BulkAck> {
+        let channels: Vec<&Channel> =
+            self.visible(guild, |k| k.is_text() || k.is_vocal() || k.is_forum_like()).collect();
+        let threads = threads::joined_active(guild).filter(|t| channels.iter().any(|c| Some(c.id) == t.parent_id));
+        channels
+            .iter()
+            .copied()
+            .chain(threads)
+            .filter_map(|c| {
+                if c.kind.is_forum_like() {
+                    Some(BulkAck { channel: c.id, message: Snowflake::from_unix_ms(now_ms()) })
+                } else {
+                    self.has_news(c).then_some(())?;
+                    Some(BulkAck { channel: c.id, message: c.last_message_id? })
+                }
+            })
+            .collect()
+    }
+
+    /// Whether a server has anything unread or a mention, even muted
+    /// (`getGuildHasUnreadIgnoreMuted` in 458294): what Mark As Read on its
+    /// icon, or on a folder, is greyed by.
+    pub(super) fn guild_has_news(&self, guild: &Guild) -> bool {
+        let channels = self.visible(guild, |k| k.is_text() || k.is_vocal() || k.is_forum_like());
+        let mut channels = channels.filter(|c| !c.kind.is_vocal() || self.read.mentions(c.id) > 0);
+        channels.any(|c| self.has_news(c)) || threads::joined_active(guild).any(|t| self.has_news(t))
+    }
+
+    /// What the one item the client shows for reading and unreading a channel
+    /// offers (511904): Mark As Read, enabled while something is unread, or
+    /// where the experiment gives it and nothing is, Mark Unread.
+    pub(super) fn read_item(&self, id: Snowflake) -> Option<ReadItem> {
+        let (guild, channel) = self.find_channel(id)?;
+        // A thread we haven't joined, or one that is archived, keeps no read mark (`canBeUnread`).
+        let trackable = !channel.kind.is_thread() || (channel.member.is_some() && channel.is_active_thread());
+        let unread = if channel.kind.is_forum_like() {
+            guild.is_some_and(|g| threads::forum_unread_posts(g, channel, &self.read) > 0)
+        } else if channel.kind == ChannelKind::Category {
+            guild.is_some_and(|g| {
+                let children = self.category_children(g, id);
+                children.iter().any(|c| self.has_news(c))
+                    || threads::joined_active(g)
+                        .filter(|t| children.iter().any(|c| Some(c.id) == t.parent_id))
+                        .any(|t| !Self::thread_muted(t) && self.has_news(t))
+            })
+        } else {
+            trackable && self.has_news(channel)
+        };
+        let can_be_unread = trackable && channel.kind != ChannelKind::Category && channel.last_message_id.is_some();
+        let offered = self
+            .account
+            .as_ref()
+            .is_some_and(|me| notification_edit::offers_mark_channel_unread(&self.experiments, me.id));
+        Some(if offered && !unread && can_be_unread { ReadItem::Unread } else { ReadItem::Read { enabled: unread } })
+    }
+
+    /// Which messages in a thread we joined notify (607508).
+    pub(super) fn thread_notification_level(&self, id: Snowflake) -> Option<Level> {
+        let (_, thread) = self.find_channel(id)?;
+        let parent = self.place(thread.parent_id?)?;
+        Some(self.notifications.thread_level(thread, &parent, now_unix()))
+    }
+
+    /// The folds Discord doesn't have yet, with each category's server.
+    pub(super) fn unsaved_folds(&self) -> Vec<(Snowflake, Snowflake, bool)> {
+        self.collapsed
+            .unsaved()
+            .into_iter()
+            .filter_map(|(category, folded)| Some((self.find_channel(category)?.0?.id, category, folded)))
+            .collect()
     }
 
     pub(super) fn place(&self, id: Snowflake) -> Option<Place> {
@@ -509,6 +835,18 @@ impl State {
         (unread, mentions)
     }
 
+    /// What the tray icon says: the rail's badges added up. Servers count
+    /// as the rail counts them, so a muted one adds mentions but no dot.
+    pub(super) fn tray_alert(&self) -> Alert {
+        let (mut unread, mut mentions) = (false, self.home_badge());
+        for guild in &self.guilds {
+            let (guild_unread, guild_mentions) = self.guild_badge(guild);
+            unread |= guild_unread;
+            mentions += guild_mentions;
+        }
+        Alert::new(unread, mentions)
+    }
+
     /// Everything the rail shows that can change without the guild list changing.
     /// What the rail is built from: its servers and folders, in order, with
     /// their names and icons. Markers aside, it changes rarely.
@@ -528,13 +866,22 @@ impl State {
         hasher.finish()
     }
 
-    pub(super) fn rail_signature(&self) -> Vec<u64> {
-        let mut sig = vec![self.guild.map_or(0, |g| g.0), self.home_badge() as u64];
+    /// The rail's signature, and the count on the app icon and in the title
+    /// (see [`discord::badge`]), from the one pass over every server. A
+    /// server's dot counts, but not a DM's, as in the client (`hasAnyUnread`
+    /// in 458294 holds servers only).
+    pub(super) fn rail_signature(&self) -> (Vec<u64>, i64) {
+        let home = self.home_badge();
+        let mut sig = vec![self.guild.map_or(0, |g| g.0), home as u64];
+        let (mut mentions, mut any_unread) = (home, false);
         for guild in &self.guilds {
-            let (unread, mentions) = self.guild_badge(guild);
-            sig.extend([guild.id.0, unread as u64, mentions as u64]);
+            let (unread, guild_mentions) = self.guild_badge(guild);
+            sig.extend([guild.id.0, unread as u64, guild_mentions as u64]);
+            mentions += guild_mentions;
+            any_unread |= unread;
         }
-        sig
+        // The client's "disable unread badge" setting is #86's.
+        (sig, discord::badge::count(mentions, any_unread, false))
     }
 
     /// The same for the sidebar: the open place, selection, order and markers.
@@ -544,8 +891,10 @@ impl State {
         let channels: Vec<(Place, &Channel)> = match self.guild.and_then(|id| self.guilds.iter().find(|g| g.id == id)) {
             Some(guild) => {
                 let mut rows = Vec::new();
-                for (_, channels) in self.sidebar(guild) {
-                    for c in channels {
+                sig.push(self.notifications.hide_muted_channels(guild.id) as u64);
+                for section in self.sidebar(guild) {
+                    sig.extend([section.category.map_or(0, |c| c.id.0), section.folded as u64]);
+                    for c in section.channels {
                         rows.push((
                             Place { guild: Some(guild.id), guild_default: 0, channel: c.id, parent: c.parent_id },
                             c,
@@ -553,6 +902,14 @@ impl State {
                         let mut icon = std::collections::hash_map::DefaultHasher::new();
                         channel_icon::of(guild, c).hash(&mut icon);
                         sig.push(icon.finish());
+                        if c.kind == ChannelKind::Voice {
+                            for v in self.voice.in_channel(guild.id, c.id, |v| self.voice_name(v)) {
+                                let mut hash = std::collections::hash_map::DefaultHasher::new();
+                                (v.user_id, v.muted(), v.deafened(), v.self_video, v.self_stream, self.voice_name(v))
+                                    .hash(&mut hash);
+                                sig.push(hash.finish());
+                            }
+                        }
                         for t in self.sidebar_threads(guild, c) {
                             // A muted thread shows as muted; its place stands for that.
                             sig.extend([t.id.0, Self::thread_muted(t) as u64]);
@@ -643,6 +1000,64 @@ mod tests {
     }
 
     #[test]
+    fn a_press_refused_as_out_of_date_marks_its_apps_commands_stale() {
+        use discord::commands::Target;
+        use std::time::Instant;
+        let mut state = open_server(None, json!({}));
+        let index = json!({
+            "version": "7",
+            "applications": [{"id": "200", "name": "Dicey", "description": "", "bot_id": "300"}],
+            "application_commands": [{"id": "400", "application_id": "200", "version": "5", "type": 1,
+                "name": "roll", "description": "Roll"}],
+        });
+        let guild = Target::Guild(Snowflake(1));
+        state.commands.loaded(guild, &index, Snowflake(5));
+        let press = |application| Pending { channel: Snowflake(9), message: Snowflake(70), application };
+        let refused = Failure { stale_command: true, ..Failure::default() };
+
+        // Another app's press, or one that failed for another reason, changes nothing.
+        state.interactions.insert(Snowflake(1), press(Snowflake(999)));
+        state.interactions.insert(Snowflake(2), press(Snowflake(200)));
+        assert!(state.end_press(Snowflake(1), Some(&refused)).is_some());
+        assert!(state.end_press(Snowflake(2), Some(&Failure::default())).is_some());
+        assert!(!state.commands.wants(guild, Instant::now()), "still current");
+
+        state.interactions.insert(Snowflake(3), press(Snowflake(200)));
+        assert!(state.end_press(Snowflake(3), Some(&refused)).is_some());
+        assert!(state.commands.wants(guild, Instant::now()), "fetched again");
+        assert!(state.end_press(Snowflake(3), None).is_none(), "a press ends once");
+    }
+
+    #[test]
+    fn people_are_called_what_they_chose_where_they_are() {
+        use discord::members::Known;
+        let mut state = open_server(None, json!({}));
+        state.private_channels = vec![
+            serde_json::from_value(json!({"id": "30", "type": 1, "recipients": [{"id": "6", "username": "six"}]}))
+                .unwrap(),
+        ];
+        let user = |id: u64| -> User {
+            serde_json::from_value(json!({"id": id.to_string(), "username": "u", "global_name": "Global"})).unwrap()
+        };
+        let (server, dm) = (Snowflake(9), Snowflake(30));
+        assert_eq!(state.name_in(server, &user(6)), "Global", "no nickname known");
+        let known = Known { nick: Some("Nick".into()), avatar: Some("av".into()), ..Known::default() };
+        state.members.add(Snowflake(1), vec![(Snowflake(6), known)], &[]);
+        assert_eq!(state.name_in(server, &user(6)), "Nick");
+        assert_eq!(state.avatar_in(server, Snowflake(6)), Some((Snowflake(1), "av")));
+        assert_eq!(state.name_in(server, &user(7)), "Global", "someone else's");
+        // A DM has no server nicknames, but our name for a friend counts.
+        assert_eq!(state.name_in(dm, &user(6)), "Global");
+        assert_eq!(state.avatar_in(dm, Snowflake(6)), None);
+        let friend = json!({"id": "6", "type": 1, "nickname": "Pal", "user": {"id": "6", "username": "u"}});
+        state
+            .relationships
+            .add(discord::relationships::Relationship::from_value(&friend, &Default::default()).unwrap());
+        assert_eq!(state.name_in(dm, &user(6)), "Pal");
+        assert_eq!(state.name_in(server, &user(6)), "Nick", "a server's choice isn't ours to rename");
+    }
+
+    #[test]
     fn which_channels_have_a_member_list() {
         let mut state = open_server(None, json!({}));
         let guild: Snowflake = Snowflake(1);
@@ -679,9 +1094,19 @@ mod tests {
         state.private_channels = vec![
             serde_json::from_value(json!({"id": "30", "type": 1})).unwrap(),
             serde_json::from_value(json!({"id": "31", "type": 3})).unwrap(),
+            serde_json::from_value(json!({"id": "32", "type": 1, "recipients": [{"id": "5", "username": "u"}]}))
+                .unwrap(),
+            serde_json::from_value(
+                json!({"id": "33", "type": 1, "recipients": [{"id": "6", "username": "u", "system": true}]}),
+            )
+            .unwrap(),
         ];
         state.channel = Some(Snowflake(30));
-        assert_eq!(state.member_target(), None, "a DM shows a profile, not a list");
+        assert_eq!(state.member_target(), None, "a DM with no one has no profile");
+        state.channel = Some(Snowflake(32));
+        assert_eq!(state.member_target(), Some(Target::Dm(Snowflake(32))), "a DM shows a profile, not a list");
+        state.channel = Some(Snowflake(33));
+        assert_eq!(state.member_target(), None, "Discord's own account has none");
         state.channel = Some(Snowflake(31));
         assert_eq!(state.member_target(), Some(Target::Group(Snowflake(31))));
     }
@@ -724,6 +1149,245 @@ mod tests {
     }
 
     #[test]
+    fn mark_as_read_acks_what_the_client_acks() {
+        let mut state = open_server(None, json!({"last_message_id": "100"}));
+        state.guilds[0].set_role(serde_json::from_value(json!({"id": "1", "permissions": "1049600"})).unwrap());
+        let add = |state: &mut State, json: serde_json::Value| {
+            state.guilds[0].channels.push(serde_json::from_value(json).unwrap());
+        };
+        add(&mut state, json!({"id": "8", "type": 4, "name": "Cat"}));
+        add(&mut state, json!({"id": "20", "type": 0, "parent_id": "8", "last_message_id": "300"}));
+        add(&mut state, json!({"id": "21", "type": 2, "parent_id": "8", "last_message_id": "310"}));
+        add(&mut state, json!({"id": "22", "type": 0, "parent_id": "8"}));
+        add(&mut state, json!({"id": "23", "type": 15, "parent_id": "8", "last_message_id": "320"}));
+        state.guilds[0].threads = vec![
+            serde_json::from_value(
+                json!({"id": "40", "type": 11, "parent_id": "20", "last_message_id": "1570000000000000000",
+                "member": {"flags": 0, "join_timestamp": "2026-10-28T00:00:00Z"}}),
+            )
+            .unwrap(),
+            serde_json::from_value(json!({"id": "41", "type": 11, "parent_id": "20", "last_message_id": "340"}))
+                .unwrap(),
+        ];
+        state.read = ReadStates::from_ready(&json!([
+            {"id": "9", "last_message_id": "100", "mention_count": 0},
+            {"id": "20", "last_message_id": "300", "mention_count": 0},
+            {"id": "21", "last_message_id": "300", "mention_count": 1},
+            {"id": "40", "last_message_id": "1", "mention_count": 2},
+        ]));
+        let ids = |targets: Vec<(Snowflake, Snowflake)>| targets.iter().map(|(c, m)| (c.0, m.0)).collect::<Vec<_>>();
+        // A category acks its channels, forums among them, read or not, and the threads we joined in them:
+        // not a channel with nothing in it, nor a thread we haven't joined.
+        let thread = 1_570_000_000_000_000_000;
+        assert_eq!(ids(state.ack_targets(Snowflake(8))), [(20, 300), (21, 310), (23, 320), (40, thread)]);
+        assert_eq!(ids(state.ack_targets(Snowflake(20))), [(20, 300)]);
+        assert!(state.ack_targets(Snowflake(22)).is_empty(), "no message yet");
+        // A forum has no message of its own: it is read up to the moment.
+        let forum = state.ack_targets(Snowflake(23));
+        assert_eq!(forum.len(), 1);
+        assert_eq!(forum[0].0, Snowflake(23));
+        assert!(forum[0].1.unix_ms().abs_diff(now_ms()) < 5_000, "a snowflake of the clock");
+
+        // A server acks every forum, and only what else is unread or mentions us.
+        let acks: Vec<(u64, u64)> =
+            state.guild_acks(&state.guilds[0]).iter().map(|a| (a.channel.0, a.message.0)).collect();
+        let channels: Vec<u64> = acks.iter().map(|a| a.0).collect();
+        assert_eq!(channels, [21, 23, 40]);
+        assert_eq!((acks[0].1, acks[2].1), (310, thread));
+    }
+
+    #[test]
+    fn mark_as_read_is_greyed_by_what_the_client_greys_it_by() {
+        let mut state = open_server(None, json!({"last_message_id": "100"}));
+        state.guilds[0].set_role(serde_json::from_value(json!({"id": "1", "permissions": "1049600"})).unwrap());
+        let mut add = |json: serde_json::Value| state.guilds[0].channels.push(serde_json::from_value(json).unwrap());
+        add(json!({"id": "8", "type": 4, "name": "Cat"}));
+        add(json!({"id": "20", "type": 0, "parent_id": "8", "last_message_id": "300"}));
+        add(json!({"id": "21", "type": 0, "parent_id": "8", "last_message_id": "310"}));
+        add(json!({"id": "23", "type": 15, "parent_id": "8", "last_message_id": "320"}));
+        state.guilds[0].threads = vec![
+            serde_json::from_value(json!({"id": "40", "type": 11, "parent_id": "23",
+                       "last_message_id": "20971520", "thread_metadata": {"archived": false, "auto_archive_duration": 60},
+                       "member": {"flags": 0, "join_timestamp": "2026-10-28T00:00:00Z"}}))
+            .unwrap(),
+        ];
+        state.read = ReadStates::from_ready(&json!([
+            {"id": "20", "last_message_id": "300", "mention_count": 0},
+            {"id": "21", "last_message_id": "300", "mention_count": 0},
+            {"id": "23", "last_message_id": "8388608", "mention_count": 0},
+            {"id": "40", "last_message_id": "4194304", "mention_count": 0},
+        ]));
+        let enabled = |state: &State, id: u64| match state.read_item(Snowflake(id)) {
+            Some(ReadItem::Read { enabled }) => Some(enabled),
+            _ => None,
+        };
+        assert_eq!(enabled(&state, 20), Some(false), "nothing unread");
+        assert_eq!(enabled(&state, 21), Some(true), "a message after what we read");
+        assert_eq!(enabled(&state, 8), Some(true), "a category with one unread");
+        assert_eq!(enabled(&state, 23), Some(true), "a forum with a post newer than its mark");
+        assert_eq!(enabled(&state, 40), Some(true), "a joined thread");
+        state.guilds[0].threads.push(
+            serde_json::from_value(json!({"id": "41", "type": 11, "parent_id": "20", "last_message_id": "20971520",
+                       "thread_metadata": {"archived": false, "auto_archive_duration": 60}}))
+            .unwrap(),
+        );
+        assert_eq!(enabled(&state, 41), Some(false), "a thread we haven't joined keeps no read mark");
+
+        // Mark Unread replaces it, where the experiment gives it, on what is read and has a message.
+        state.experiments =
+            Experiments::from_ready(&json!({"apex_experiments": {"assignments": {"1": {"5": {"assignments": [
+                [discord::experiments::murmur3("2026-08-mark-channel-unread"), 1, 0, 1]
+            ]}}}}}));
+        assert!(matches!(state.read_item(Snowflake(20)), Some(ReadItem::Unread)));
+        assert_eq!(enabled(&state, 21), Some(true), "unread stays Mark As Read");
+        assert_eq!(enabled(&state, 8), Some(true), "never on a category");
+        assert!(state.read_item(Snowflake(22)).is_none(), "not a channel");
+        state.guilds[0].channels.iter_mut().find(|c| c.id == Snowflake(20)).unwrap().last_message_id = None;
+        assert_eq!(enabled(&state, 20), Some(false), "nothing to mark unread from");
+    }
+
+    /// A server with a category of two channels and one outside it, which everyone sees.
+    fn categorised(extra: serde_json::Value) -> State {
+        let mut state = open_server(None, json!({"position": 0}));
+        state.guilds[0].set_role(serde_json::from_value(json!({"id": "1", "permissions": "1049600"})).unwrap());
+        for channel in [
+            json!({"id": "8", "type": 4, "name": "Cat", "position": 1}),
+            json!({"id": "20", "type": 0, "parent_id": "8", "name": "busy", "position": 0, "last_message_id": "300"}),
+            json!({"id": "21", "type": 0, "parent_id": "8", "name": "quiet", "position": 1, "last_message_id": "300"}),
+            json!({"id": "22", "type": 2, "parent_id": "8", "name": "call", "position": 2}),
+        ] {
+            state.guilds[0].channels.push(serde_json::from_value(channel).unwrap());
+        }
+        state.read = ReadStates::from_ready(&json!([
+            {"id": "20", "last_message_id": "100", "mention_count": 0},
+            {"id": "21", "last_message_id": "300", "mention_count": 0},
+        ]));
+        state.notifications = NotificationSettings::from_ready(&json!([extra]));
+        state
+    }
+
+    fn listed(state: &State) -> Vec<(Option<u64>, Vec<u64>)> {
+        let sections = state.sidebar(&state.guilds[0]);
+        sections.iter().map(|s| (s.category.map(|c| c.id.0), s.channels.iter().map(|c| c.id.0).collect())).collect()
+    }
+
+    #[test]
+    fn a_folded_category_lists_what_is_unread_and_hiding_muted_channels_drops_them() {
+        let mut state = categorised(json!({"guild_id": "1", "channel_overrides": [
+            {"channel_id": "21", "muted": true, "mute_config": null}
+        ]}));
+        assert_eq!(listed(&state), [(None, vec![9]), (Some(8), vec![20, 21, 22])]);
+
+        // Folded: the unread channel stays; the muted one, the read one and the call go.
+        state.collapsed.set(Snowflake(8), true);
+        assert_eq!(listed(&state), [(None, vec![9]), (Some(8), vec![20])]);
+        // The one that is open stays too, and a mention.
+        state.channel = Some(Snowflake(21));
+        assert_eq!(listed(&state)[1].1, [20, 21]);
+        state.channel = None;
+        state.read = ReadStates::from_ready(&json!([
+            {"id": "20", "last_message_id": "300", "mention_count": 0},
+            {"id": "22", "last_message_id": "300", "mention_count": 2},
+        ]));
+        assert_eq!(listed(&state)[1].1, [22], "all read but a call with a mention");
+
+        // Unfolded, with muted channels hidden: the muted channel is the one to go.
+        state.collapsed.set(Snowflake(8), false);
+        state.notifications.apply(Some(Snowflake(1)), &json!({"hide_muted_channels": true}));
+        assert_eq!(listed(&state)[1].1, [20, 22]);
+        // A category with nothing but hidden channels goes too, and a folded one keeps its heading.
+        state
+            .notifications
+            .apply(Some(Snowflake(1)), &json!({"channel_overrides": {"20": {"muted": true}, "22": {"muted": true}}}));
+        state.read = ReadStates::default();
+        assert_eq!(listed(&state), [(None, vec![9])]);
+        state.notifications.apply(Some(Snowflake(1)), &json!({"hide_muted_channels": false}));
+        state.collapsed.set(Snowflake(8), true);
+        assert_eq!(listed(&state)[1], (Some(8), vec![]), "only its heading");
+    }
+
+    #[test]
+    fn what_a_server_wants_saved_includes_folds_with_their_servers() {
+        let mut state = categorised(json!({"guild_id": "1"}));
+        assert!(state.unsaved_folds().is_empty());
+        state.collapsed.set(Snowflake(8), true);
+        state.collapsed.set(Snowflake(77), true);
+        assert_eq!(
+            state.unsaved_folds(),
+            [(Snowflake(1), Snowflake(8), true)],
+            "a category we don't know has no server"
+        );
+    }
+
+    #[test]
+    fn a_thread_is_worded_by_its_parent_and_its_level_follows_its_member() {
+        let mut state = categorised(json!({"guild_id": "1", "message_notifications": 1}));
+        state.guilds[0]
+            .channels
+            .push(serde_json::from_value(json!({"id": "30", "type": 15, "name": "ideas"})).unwrap());
+        state.guilds[0].threads = ["20", "30"]
+            .into_iter()
+            .zip([40, 41])
+            .map(|(parent, id)| {
+                serde_json::from_value(json!({"id": id.to_string(), "type": 11, "parent_id": parent,
+                    "member": {"flags": 4, "muted": false, "join_timestamp": "2026-10-28T00:00:00Z"}}))
+                .unwrap()
+            })
+            .collect();
+        assert!(!state.is_forum_post(Snowflake(40)) && state.is_forum_post(Snowflake(41)));
+        assert!(!state.is_forum_post(Snowflake(20)), "a channel is no post");
+        assert_eq!(state.thread_notification_level(Snowflake(40)), Some(Level::Mentions), "its own flags");
+        state.guilds[0].threads[0].member.as_mut().unwrap().flags = 0;
+        assert_eq!(state.thread_notification_level(Snowflake(40)), Some(Level::Mentions), "its parent's level");
+        state.guilds[0].threads[0].member.as_mut().unwrap().muted = true;
+        assert!(state.thread_is_muted(Snowflake(40)) && !state.thread_is_muted(Snowflake(41)));
+        state.guilds[0].threads[0].member = None;
+        assert_eq!(state.thread_notification_level(Snowflake(40)), Some(Level::Nothing), "not joined");
+    }
+
+    #[test]
+    fn a_server_is_greyed_by_news_in_what_we_can_see() {
+        let mut state = open_server(None, json!({"last_message_id": "100"}));
+        state.guilds[0].set_role(serde_json::from_value(json!({"id": "1", "permissions": "1049600"})).unwrap());
+        state.read = ReadStates::from_ready(&json!([{"id": "9", "last_message_id": "100", "mention_count": 0}]));
+        assert!(!state.guild_has_news(&state.guilds[0]));
+        state.read = ReadStates::from_ready(&json!([{"id": "9", "last_message_id": "50", "mention_count": 0}]));
+        assert!(state.guild_has_news(&state.guilds[0]));
+    }
+
+    #[test]
+    fn the_message_box_is_blocked_where_the_notice_bar_would_replace_it() {
+        let mut state = open_server(None, json!({}));
+        let id = Snowflake(9);
+        let everyone =
+            |permissions: &str| serde_json::from_value(json!({"id": "1", "permissions": permissions})).unwrap();
+        state.guilds[0].set_role(everyone("1024"));
+        assert_eq!(state.notice(id), Some(Notice::Denied));
+        assert!(state.box_blocked(id));
+        state.guilds[0].set_role(everyone("3072"));
+        assert!(!state.box_blocked(id), "with Send Messages");
+        assert!(!state.box_blocked(Snowflake(77)), "a channel we don't know");
+
+        state.guilds[0].channels[0].kind = ChannelKind::Forum;
+        assert!(state.box_blocked(id), "a forum has its page of posts in its place");
+
+        let dm = |extra: serde_json::Value| -> Channel {
+            let mut dm = json!({"id": "50", "type": 1, "recipients": [{"id": "6", "username": "x"}]});
+            dm.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(dm).unwrap()
+        };
+        state.private_channels = vec![dm(json!({}))];
+        assert!(!state.box_blocked(Snowflake(50)), "an ordinary DM");
+        state.private_channels = vec![dm(json!({"is_message_request": true}))];
+        assert_eq!(state.notice(Snowflake(50)), Some(Notice::Request { spam: false }));
+        state.private_channels = vec![dm(json!({"is_spam": true}))];
+        assert_eq!(state.notice(Snowflake(50)), Some(Notice::Request { spam: true }));
+        state.private_channels =
+            vec![dm(json!({"recipients": [{"id": "643945264868098049", "username": "Discord", "system": true}]}))];
+        assert_eq!(state.notice(Snowflake(50)), Some(Notice::System));
+    }
+
+    #[test]
     fn a_calls_chat_counts_mentions_for_the_server_but_never_an_unread_dot() {
         let mut state = open_server(None, json!({"type": 2, "last_message_id": "200"}));
         state.guilds[0].set_role(serde_json::from_value(json!({"id": "1", "permissions": "1049600"})).unwrap());
@@ -735,6 +1399,19 @@ mod tests {
         // The same chat in a text channel lights the dot.
         state.guilds[0].channels[0].kind = ChannelKind::Text;
         assert_eq!(state.guild_badge(&state.guilds[0]), (true, 2));
+    }
+
+    #[test]
+    fn the_tray_adds_up_what_the_rail_shows() {
+        let mut state = open_server(None, json!({"last_message_id": "200"}));
+        state.guilds[0].set_role(serde_json::from_value(json!({"id": "1", "permissions": "1049600"})).unwrap());
+        assert_eq!(state.tray_alert(), Alert::Quiet, "a channel we never opened counts as read");
+        state.read = ReadStates::from_ready(&json!([{"id": "9", "last_message_id": "200", "mention_count": 0}]));
+        assert_eq!(state.tray_alert(), Alert::Quiet, "everything is read");
+        state.read = ReadStates::from_ready(&json!([{"id": "9", "last_message_id": "100", "mention_count": 0}]));
+        assert_eq!(state.tray_alert(), Alert::Unread);
+        state.read = ReadStates::from_ready(&json!([{"id": "9", "last_message_id": "100", "mention_count": 2}]));
+        assert_eq!(state.tray_alert(), Alert::Mentions(2));
     }
 
     #[test]

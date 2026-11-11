@@ -9,7 +9,7 @@ use gtk::glib;
 use gtk::prelude::*;
 
 use super::App;
-use super::state::{Page, State, now_ms};
+use super::state::{Page, now_ms};
 
 impl App {
     pub(super) fn logout(self: &Rc<Self>) {
@@ -109,6 +109,22 @@ impl App {
             match event {
                 Event::Ready(ready) => self.on_ready(*ready),
                 Event::GuildCreate(guild) => self.on_guild(guild),
+                Event::GuildVoiceStates { guild_id, states } => {
+                    self.state.borrow_mut().voice.replace_guild(guild_id, states);
+                    self.refresh_badges();
+                }
+                Event::VoiceStates(updates) => {
+                    let mut changed = false;
+                    {
+                        let mut state = self.state.borrow_mut();
+                        for update in updates {
+                            changed |= state.voice.apply(update);
+                        }
+                    }
+                    if changed {
+                        self.refresh_badges();
+                    }
+                }
                 Event::PrivateChannelCreate(channel) | Event::PrivateChannelUpdate(channel) => {
                     self.on_private_channel(channel)
                 }
@@ -196,7 +212,11 @@ impl App {
                 Event::TypingStart { channel_id, user_id, user } => self.on_typing(channel_id, user_id, user.as_ref()),
                 Event::MessageCreate(message) => self.on_message(*message),
                 Event::MessageUpdate(edit) => self.on_message_update(edit),
-                Event::Interaction { nonce, outcome } => self.on_interaction(nonce, outcome),
+                Event::Interaction { nonce, outcome, reason } => self.on_interaction(nonce, outcome, reason),
+                Event::InteractionCreated { nonce } => self.command_created(nonce),
+                Event::Autocomplete { nonce, choices } => self.on_autocomplete(nonce, &choices),
+                Event::CommandIndexChanged { guild, version } => self.command_index_changed(guild, version),
+                Event::UserApplicationChanged => self.state.borrow_mut().commands.user_changed(),
                 Event::MessageDelete { id, channel_id } => self.on_message_delete(id, channel_id),
                 Event::MessageDeleteBulk { ids, channel_id } => self.on_message_delete_bulk(ids, channel_id),
                 Event::PollVote { channel_id, message_id, votes, added, many } => {
@@ -212,8 +232,11 @@ impl App {
                 Event::EmojiReactionsCleared { channel_id, message_id, emoji } => {
                     self.on_reactions_cleared(channel_id, message_id, Some(&emoji))
                 }
-                Event::MessageAck { channel_id, message_id } => {
-                    self.state.borrow_mut().read.ack(channel_id, message_id);
+                Event::MessageAck { channel_id, message_id, manual } => {
+                    match manual {
+                        Some(mentions) => self.state.borrow_mut().read.mark_unread(channel_id, message_id, mentions),
+                        None => self.state.borrow_mut().read.ack(channel_id, message_id),
+                    }
                     self.forum_read(channel_id);
                     self.withdraw_notification(channel_id);
                     self.refresh_badges();
@@ -231,12 +254,12 @@ impl App {
                     self.state.borrow_mut().required_action = action;
                     self.apply_required_action();
                 }
-                Event::MediaSettingsUpdate(patch) => {
-                    self.state.borrow_mut().media.apply(patch);
-                    self.refresh_rows();
+                Event::SettingsUpdate { patch, replace, proto } => {
+                    if let Some(update) = proto {
+                        self.state.borrow_mut().sync.received(&update, !replace);
+                    }
+                    self.apply_settings(patch, replace);
                 }
-                Event::DeveloperModeUpdate(on) => self.state.borrow_mut().developer_mode = on,
-                Event::MessageDisplayCompactUpdate(on) => self.state.borrow_mut().message_display_compact = on,
                 Event::RelationshipAdd { relationship, notify } => {
                     self.learn_users(std::iter::once(&relationship.user));
                     let blocked = relationship.kind == discord::relationships::Kind::Blocked;
@@ -257,6 +280,8 @@ impl App {
                     self.state.borrow_mut().profiles.doubt(user_id);
                     self.state.borrow_mut().relationships.update(user_id, nickname);
                     self.relationships_changed(false);
+                    // What we call them shows in DMs.
+                    self.refresh_rows();
                 }
                 Event::RelationshipRemove(user_id) => {
                     self.withdraw_friend_request(user_id);
@@ -272,21 +297,20 @@ impl App {
                         self.queue_friends_refresh();
                         // A group DM's friends.
                         self.refresh_member_rows();
+                        self.refresh_profile_views();
                     }
-                }
-                Event::GuildFoldersUpdate(folders) => {
-                    self.state.borrow_mut().guild_folders = folders;
-                    self.rebuild_rail();
                 }
                 Event::NotificationSettingsUpdate(settings) => {
                     self.state.borrow_mut().notifications.update(settings);
                     self.refresh_badges();
                 }
                 Event::Resumed => {
+                    self.state.borrow_mut().sync.disconnected();
                     self.timelines.borrow_mut().held.resumed();
                     self.state.borrow_mut().members.resumed();
                     self.send_member_requests();
                     self.subscribe_session(false);
+                    self.resend_presence();
                     let name = {
                         let mut state = self.state.borrow_mut();
                         state.reconnect_attempts = 0;
@@ -296,6 +320,7 @@ impl App {
                     // Replayed messages have already updated the open channel.
                 }
                 Event::Closed { code, reason, resume } => {
+                    self.state.borrow_mut().sync.disconnected();
                     self.timelines.borrow_mut().held.closed();
                     {
                         let mut state = self.state.borrow_mut();
@@ -304,7 +329,7 @@ impl App {
                         state.resume = resume;
                     }
                     if Event::is_fatal_close(code) {
-                        *self.state.borrow_mut() = State::default();
+                        *self.state.borrow_mut() = self.fresh_state();
                         glib::spawn_future_local(async {
                             let _ = session::clear_token().await;
                         });
@@ -336,14 +361,14 @@ impl App {
             relationships,
             read_states,
             notification_settings,
-            guild_folders,
-            media_settings,
-            developer_mode,
+            collapsed,
+            settings,
+            settings_proto,
             media_takedown_regulated,
-            message_display_compact,
             required_action,
             experiments,
             session_id,
+            voice_states,
         } = ready;
         self.learn_users(private_channels.iter().flat_map(|c| &c.recipients));
         self.learn_users(
@@ -356,7 +381,7 @@ impl App {
             .flat_map(|list| relationships.list(list))
             .map(|r| &r.user),
         );
-        let (store, was_ready) = {
+        let (store, was_ready, offline_save) = {
             let mut state = self.state.borrow_mut();
             let was_ready = state.ready_seen;
             state.ready_seen = true;
@@ -372,22 +397,26 @@ impl App {
             state.notes.clear();
             state.typing.clear();
             state.read = read_states;
-            state.guild_folders = guild_folders;
             state.notifications = notification_settings;
-            state.media = media_settings;
-            state.developer_mode = developer_mode;
+            state.collapsed = collapsed;
+            self.images.motion().set_media(settings.media);
+            state.settings = settings;
+            let offline_save = settings_proto.and_then(|proto| state.sync.connected(proto));
             state.media_takedown_regulated = media_takedown_regulated;
-            state.message_display_compact = message_display_compact;
             state.required_action = required_action;
             state.account = Some(account);
             state.nitro = nitro;
             state.experiments = experiments;
             state.session_id = session_id;
+            state.voice = voice_states;
+            // A new session: every index is out of date, and no command is waiting on this one.
+            state.commands.session_started();
+            state.running.clear();
             let store = (!state.persisted).then(|| (state.token.clone(), user.username.clone()));
             state.persisted = true;
             state.users.insert(user.id.0, user.display_name().to_string());
             state.me = Some(user);
-            (store, was_ready)
+            (store, was_ready, offline_save)
         };
         if let Some((Some(token), username)) = store {
             glib::spawn_future_local(async move {
@@ -397,6 +426,11 @@ impl App {
             });
         }
 
+        self.settings_replaced();
+        self.status_ready();
+        if let Some(schedule) = offline_save {
+            self.save_settings_after(schedule);
+        }
         let me = self.state.borrow().me.as_ref().map(|u| u.display_name().to_owned()).unwrap_or_default();
         self.me_label.set_label(&me);
         // READY may bring other Nitro, which changes the length limit.
@@ -503,6 +537,7 @@ impl App {
     fn relationships_changed(self: &Rc<Self>, blocks_changed: bool) {
         self.refresh_badges();
         self.queue_friends_refresh();
+        self.refresh_profile_views();
         if blocks_changed {
             self.refresh_typing();
             self.refresh_rows();

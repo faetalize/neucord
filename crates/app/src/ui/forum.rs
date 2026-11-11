@@ -79,6 +79,8 @@ pub(super) struct Page {
     chips: adw::WrapBox,
     sort_button: gtk::MenuButton,
     new_posts: gtk::Button,
+    /// Opens the form that starts a post, where we may.
+    post_button: gtk::Button,
     stack: gtk::Stack,
     model: gio::ListStore,
     list: gtk::ListView,
@@ -105,6 +107,12 @@ impl Page {
                 .valign(gtk::Align::Start)
                 .build(),
             new_posts: gtk::Button::builder().visible(false).valign(gtk::Align::Start).build(),
+            post_button: gtk::Button::builder()
+                .label("New Post")
+                .visible(false)
+                .valign(gtk::Align::Start)
+                .css_classes(["suggested-action"])
+                .build(),
             stack: gtk::Stack::new(),
             list: gtk::ListView::builder().model(&selection).single_click_activate(true).build(),
             grid: gtk::GridView::builder()
@@ -161,7 +169,7 @@ pub(super) const EDIT_TAGS: Entry<ThreadTarget> = Entry::Item(Item {
 pub(super) const COPY_TAG_ID: Entry<Tagged> = Entry::Item(Item {
     name: "copy-tag-id",
     label: "Copy Tag _ID",
-    shows: |app, _| app.state.borrow().developer_mode,
+    shows: |app, _| app.state.borrow().settings.developer_mode,
     kind: Kind::Action(|app, tag| app.copy(&tag.0.to_string())),
 });
 
@@ -232,6 +240,16 @@ impl App {
         page.sort_button.set_popover(Some(&gtk::PopoverMenu::from_model(None::<&gio::MenuModel>)));
         page.sort_button.insert_action_group("forum", Some(&page.actions));
         self.forum_actions();
+        page.post_button.connect_clicked({
+            let this = Rc::downgrade(self);
+            move |_| {
+                if let Some(this) = this.upgrade()
+                    && let Some(id) = this.forum_shown()
+                {
+                    this.open_post_form(id);
+                }
+            }
+        });
         page.new_posts.connect_clicked({
             let this = Rc::downgrade(self);
             move |_| {
@@ -244,6 +262,7 @@ impl App {
         let bar = gtk::Box::builder().spacing(6).margin_top(6).margin_bottom(6).margin_start(12).margin_end(12).build();
         bar.append(&page.chips);
         bar.append(&page.new_posts);
+        bar.append(&page.post_button);
         bar.append(&page.sort_button);
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
         column.append(&bar);
@@ -343,7 +362,7 @@ impl App {
     }
 
     /// Show the new posts, as the client's button does (`RESORT_THREADS`).
-    fn forum_resort(self: &Rc<Self>) {
+    pub(super) fn forum_resort(self: &Rc<Self>) {
         let Some(id) = self.forum_shown() else { return };
         {
             let state = self.state.borrow();
@@ -402,6 +421,8 @@ impl App {
         set("sort", if view.sort == Sort::CreationDate { "created" } else { "active" });
         set("layout", if view.layout == Layout::Grid { "grid" } else { "list" });
         set("match", if view.tag_match == TagMatch::All { "all" } else { "some" });
+
+        page.post_button.set_visible(state.can_post(id));
 
         // The tags, each a toggle that filters by it.
         while let Some(child) = page.chips.first_child() {
@@ -991,7 +1012,7 @@ impl App {
             preview,
             media,
             reaction,
-            reactable: state.media.render_reactions && state.reacting(post).update,
+            reactable: state.settings.media.render_reactions && state.reacting(post).update,
             count: forum::message_count_text(messages, post),
             unread_count,
             time,
@@ -1025,7 +1046,7 @@ impl App {
                 .valign(gtk::Align::Center)
                 .build();
             if let Some((url, original)) = &card.media {
-                self.images.set_sized(&picture, url, size, *original, false);
+                self.images.set_sized(&picture, url, size, *original);
             }
             picture
         };
@@ -1276,7 +1297,7 @@ struct Card {
 }
 
 /// A tag's emoji, if it has one.
-fn tag_emoji(tag: &Tag) -> Option<Emoji> {
+pub(super) fn tag_emoji(tag: &Tag) -> Option<Emoji> {
     (tag.emoji_id.is_some() || tag.emoji_name.is_some()).then(|| Emoji {
         id: tag.emoji_id,
         name: tag.emoji_name.clone(),

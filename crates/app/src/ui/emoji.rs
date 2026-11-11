@@ -29,7 +29,7 @@ pub(super) const AUTOCOMPLETE: usize = 50;
 
 /// Only in Developer Mode, like the rest of the picker's menu (233503).
 fn developer(app: &App) -> bool {
-    app.state.borrow().developer_mode
+    app.state.borrow().settings.developer_mode
 }
 
 /// The emoji a menu was opened on.
@@ -105,7 +105,18 @@ impl App {
         parent: &impl IsA<gtk::Widget>,
         picked: impl Fn(&Rc<App>, &Item) + 'static,
     ) {
-        let library = Rc::new(self.emoji_library(channel));
+        let library = self.emoji_library(channel);
+        self.open_library_picker(library, parent, picked);
+    }
+
+    /// The picker over `library`, wherever its emoji are for.
+    pub(super) fn open_library_picker(
+        self: &Rc<Self>,
+        library: Library,
+        parent: &impl IsA<gtk::Widget>,
+        picked: impl Fn(&Rc<App>, &Item) + 'static,
+    ) {
+        let library = Rc::new(library);
         let spec = Spec {
             placeholder: "Search emoji",
             columns: COLUMNS,
@@ -118,6 +129,14 @@ impl App {
             best: Rc::new(move |query| library.search(query, 1).unlocked.first().cloned()),
         };
         picker::open(self, parent, spec, picked);
+    }
+
+    /// The emoji a status may carry: every server's, as in a DM, where the
+    /// client applies the same Nitro rules (`getEmojiUnavailableReason`,
+    /// 690521, with the status intention and no channel).
+    pub(super) fn status_emoji_library(&self) -> Library {
+        let state = self.state.borrow();
+        Library::new(state.guilds_in_picker_order(None), &state.limits(), &Place { guild: None, external: true })
     }
 }
 
@@ -180,7 +199,7 @@ pub(super) fn glyph(item: &Item, images: &Images) -> gtk::Widget {
             let size = ((SIZE * images.scale()) as u32).next_power_of_two().clamp(16, 4096) as u16;
             // A still, even for an animated emoji: a screenful of them
             // moving would be a lot of drawing.
-            images.set(&picture, &discord::cdn::emoji_url(named.emoji.id.0, false, size), false);
+            images.set(&picture, &discord::cdn::emoji_url(named.emoji.id.0, false, size));
             picture.upcast()
         }
     }
