@@ -387,6 +387,17 @@ changed for unrelated reasons only needs a note in the issue.
   thread member's flags, else nothing under a muted parent, else the
   parent's level. In threads, the decision ignores what the server
   suppresses, and our thread mute (`JoinedThreadsStore`) silences all.
+- **Mutes, notification settings and read marks** (`notification_edit.rs`,
+  `notify_menus.rs`). Requests: 931260 (anchor `USER_GUILD_SETTINGS_BULK`)
+  sends a server's settings keyed under `guilds` to the bulk endpoint and the
+  DMs' to `@me`'s; `updateGuildNotificationSettings` and
+  `updateChannelOverrideSettings` (832712) are watched. The durations are
+  `Xx` in 355097. `BULK_ACK` in 218461 (anchor `ack-bulk`) sends a hundred
+  read states at a time, a second apart, and stops at the first failure.
+  Mark Unread is 439147 (anchor `Marking unread`): the ack goes to the
+  newest loaded message before it, with the mentions after it. The items and
+  where they show: 507238 and 871638 (anchor `mark-guild-read`) for servers,
+  995102, 288104 and 511904 for channels, 20883 for messages.
 - **What adds a mention** (`counts_mention`, `is_dropped`).
   `MESSAGE_CREATE` in 218461 (anchor `mentionCount++`): nothing from a
   blocked author or command user (`isBlockedOrIgnoredForMessage`, watched
