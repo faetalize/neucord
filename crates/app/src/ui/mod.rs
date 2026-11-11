@@ -205,6 +205,10 @@ pub struct App {
 
 impl App {
     pub fn new(app: &adw::Application) -> Rc<Self> {
+        // GTK 4 doesn't speak xdg-decoration (it never asks a compositor to
+        // draw the frame), so the window is always drawn client-side, and the
+        // title bar is the header bar every page carries, with the window
+        // controls in the order the desktop's button layout gives.
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("Neucord")
