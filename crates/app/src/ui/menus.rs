@@ -111,6 +111,16 @@ pub(super) fn message(regulated: bool) -> Table<MessageTarget> {
     if regulated { MESSAGE_REGULATED } else { MESSAGE }
 }
 
+/// What a search result's menu offers of the official client's (847342), in
+/// its order. Copy and Search with Google (a selection), Pin Message and Mark
+/// Unread aren't here: a result's text can't be selected, and Neucord has
+/// neither of the others yet. There is no reply, reaction or edit.
+pub(super) const SEARCH_RESULT: Table<MessageTarget> = &[
+    &[chat::COPY_MESSAGE_LINK, edits::DELETE],
+    &[chat::COPY_LINK, chat::OPEN_LINK],
+    &[chat::COPY_MESSAGE_ID, chat::COPY_AUTHOR_ID],
+];
+
 /// A thread's menu, from its row in the sidebar or the browser and the box
 /// under the message that started it: what Neucord has of the client's
 /// (949488), and from a forum post's card. Join Thread and Edit Tags are in

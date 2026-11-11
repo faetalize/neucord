@@ -118,6 +118,15 @@ pub(super) const COPY_MESSAGE_ID: Entry<MessageTarget> = Entry::Item(Item {
     kind: menus::Kind::Action(copy_message_id),
 });
 
+/// Only in Developer Mode, like every copy of an id (50268): the message's
+/// author, in a search result's menu.
+pub(super) const COPY_AUTHOR_ID: Entry<MessageTarget> = Entry::Item(Item {
+    name: "copy-author-id",
+    label: "Copy Author I_D",
+    shows: |app, _| app.state.borrow().developer_mode,
+    kind: menus::Kind::Action(|app, target| app.copy(&target.message.author.id.to_string())),
+});
+
 pub(super) fn copy_message_id(app: &Rc<App>, target: &MessageTarget) {
     let message = target.shown();
     app.copy(&match app.shift_held() {
@@ -237,6 +246,15 @@ impl App {
         page.add_controller(self.drop_target());
         let header = self.header.header_bar(&[self.sidebar_toggle().upcast_ref()]);
         header.pack_end(&self.members_toggle());
+        header.pack_end(&self.search_button);
+        self.search_button.connect_clicked({
+            let this = Rc::downgrade(self);
+            move |_| {
+                if let Some(this) = this.upgrade() {
+                    this.toggle_search();
+                }
+            }
+        });
         header.pack_end(&self.threads_button);
         self.threads_button.connect_clicked({
             let this = Rc::downgrade(self);
@@ -708,6 +726,13 @@ impl App {
     }
 
     pub(super) fn select_channel(self: &Rc<Self>, id: Snowflake) {
+        self.select_channel_at(id, None);
+    }
+
+    /// Open a channel, at `target` if a message is given: then the page
+    /// around it is asked for, not the newest, as the client does when a
+    /// link or a search result takes it there.
+    pub(super) fn select_channel_at(self: &Rc<Self>, id: Snowflake, target: Option<Snowflake>) {
         let (title, forum, rest, left) = {
             let mut state = self.state.borrow_mut();
             let left = state.channel.filter(|&c| c != id);
@@ -801,7 +826,9 @@ impl App {
         self.update_unread_bar();
         self.settle_at_end();
 
-        if rest.is_some() && fetch {
+        if let Some(message) = target.filter(|_| rest.is_some()) {
+            self.jump_to(id, message);
+        } else if rest.is_some() && fetch {
             self.load_newest(id);
         } else if !loading && !detached && self.chat_visible() {
             // What we hold is shown as it is, and reading it is all a page

@@ -147,6 +147,8 @@ pub(super) struct State {
     /// The user closed the member list pane beside the chat, which is open
     /// until they do.
     pub(super) members_closed: bool,
+    /// What each message search holds, by where it looks.
+    pub(super) searches: HashMap<discord::search::Context, super::search::Saved>,
 }
 
 impl State {

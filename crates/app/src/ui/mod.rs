@@ -31,6 +31,7 @@ mod reactions;
 mod reactors;
 mod requests;
 mod scheduling;
+mod search;
 mod sidebar;
 mod state;
 mod stickers;
@@ -170,6 +171,10 @@ pub struct App {
     threads_view: RefCell<Option<Rc<threads::View>>>,
     /// Opens the thread browser, from the chat's header.
     threads_button: gtk::Button,
+    /// Opens the message search, from the chat's header.
+    search_button: gtk::Button,
+    /// The message search box, while it's open.
+    search_view: RefCell<Option<Rc<search::View>>>,
     /// The content of messages whose rows have moved on to others, for when
     /// they come back (see [`chat::KeptContent`]).
     kept_content: RefCell<crate::kept::Kept<Snowflake, chat::KeptContent>>,
@@ -341,6 +346,12 @@ impl App {
                 .tooltip_text("Threads")
                 .visible(false)
                 .build(),
+            search_button: gtk::Button::builder()
+                .icon_name("system-search-symbolic")
+                .tooltip_text("Search")
+                .visible(false)
+                .build(),
+            search_view: RefCell::default(),
             kept_content: RefCell::new(crate::kept::Kept::new(chat::KEPT_CONTENT)),
             rows: RefCell::default(),
             scroll_loader: RefCell::default(),
@@ -429,9 +440,20 @@ impl App {
                 }
             })
             .build();
-        self.window.add_action_entries([logout, standing, scheduled]);
+        let find = gio::ActionEntry::builder("search")
+            .activate({
+                let this = Rc::downgrade(self);
+                move |_: &adw::ApplicationWindow, _, _| {
+                    if let Some(this) = this.upgrade() {
+                        this.toggle_search();
+                    }
+                }
+            })
+            .build();
+        self.window.add_action_entries([logout, standing, scheduled, find]);
         if let Some(app) = self.window.application() {
             app.set_accels_for_action("win.logout", &["<Control><Shift>l"]);
+            app.set_accels_for_action("win.search", &["<Control>f"]);
             // Notification clicks arrive as an app action, with the channel id.
             let open = gio::ActionEntry::builder("open-channel")
                 .parameter_type(Some(glib::VariantTy::STRING))

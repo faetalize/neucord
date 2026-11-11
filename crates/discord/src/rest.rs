@@ -20,6 +20,7 @@ use crate::model::Emoji;
 use crate::profile::{self, Profile};
 use crate::reactions::{Location, Refusal};
 use crate::scheduled::{self, Scheduled};
+use crate::search;
 use crate::stickers::Pack;
 use crate::threads::ArchivedPage;
 use crate::uploads::Sent;
@@ -68,6 +69,16 @@ impl Page {
             Page::Around(id) => format!("limit={limit}&around={id}"),
         }
     }
+}
+
+/// How a search was answered.
+#[derive(Debug)]
+pub enum Searched {
+    Page(search::Page),
+    /// Discord is indexing the server or DM first; `Retry-After`, if sent.
+    Indexing {
+        retry_after: Option<String>,
+    },
 }
 
 /// Send a message as a reply.
@@ -208,6 +219,28 @@ impl Rest {
         // Discord sends newest first, whichever way the page goes.
         messages.sort_by_key(|m| m.id);
         Ok(messages)
+    }
+
+    /// A page of search results, or word that Discord is still indexing
+    /// (a 202), as `fetch` in 177068 tells them apart. `attempts` is how
+    /// many times it has been asked again, which the client writes into the
+    /// query itself.
+    pub async fn search_messages(&self, request: &search::Request, attempts: u32) -> Result<Searched, Error> {
+        let query = request.query(attempts);
+        let call = match request.context {
+            search::Context::Guild(guild) => call!(SEARCH_GUILD_MESSAGES, guild).query(&query),
+            search::Context::Channel(channel) => call!(SEARCH_CHANNEL_MESSAGES, channel).query(&query),
+        };
+        let (status, response, retry_after) = self.send_full(call, None, Sending::default()).await?;
+        match status {
+            202 => Ok(Searched::Indexing { retry_after }),
+            _ => {
+                let answer: Value = Self::answer(status, &response)?;
+                search::Page::from_value(&answer)
+                    .map(Searched::Page)
+                    .ok_or_else(|| Error::Protocol("search results without a total".into()))
+            }
+        }
     }
 
     /// Look up any user by id, to name a mention whose user we have not seen.

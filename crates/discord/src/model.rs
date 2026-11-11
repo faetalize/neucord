@@ -22,6 +22,12 @@ impl Snowflake {
         ((self.0 >> 22) + Self::DISCORD_EPOCH_MS) as i64
     }
 
+    /// The first snowflake of the millisecond `unix_ms` (`fromTimestamp` in
+    /// 811091): 0 for anything before Discord's epoch.
+    pub fn from_unix_ms(unix_ms: i64) -> Self {
+        Snowflake(((unix_ms - Self::DISCORD_EPOCH_MS as i64).max(0) as u64) << 22)
+    }
+
     /// A snowflake for "now", used as a message nonce.
     pub fn now() -> Self {
         let unix_ms = (glib::real_time() / 1000) as u64;
