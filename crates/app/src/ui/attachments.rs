@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use discord::settings::MediaSettings;
+use discord::settings::{MediaSettings, StickerAnimation};
 use discord::{Attachment, Snowflake, Sticker};
 use gtk::glib;
 use gtk::prelude::*;
@@ -60,8 +60,9 @@ pub(super) fn attachment(attachment: &Attachment, voice: bool, images: &Images, 
     }
 }
 
-/// A sticker, or for one we can't draw, its name.
-pub(super) fn sticker(sticker: &Sticker, images: &Images, autoplay: bool) -> gtk::Widget {
+/// A sticker, or for one we can't draw, its name. An animated one moves as
+/// `animation` says: always, only under the pointer, or never.
+pub(super) fn sticker(sticker: &Sticker, images: &Images, animation: StickerAnimation) -> gtk::Widget {
     let size = Sticker::SIZE;
     let request = crate::images::request_size((size as i32, size as i32), images.scale(), None).0;
     let Some((url, animated)) = sticker.image(request) else {
@@ -78,7 +79,24 @@ pub(super) fn sticker(sticker: &Sticker, images: &Images, autoplay: bool) -> gtk
     fitted.picture.set_css_classes(&[]);
     fitted.picture.set_tooltip_text(Some(&sticker.name));
     fitted.picture.set_alternative_text(Some(&sticker.name));
-    images.set(&fitted.picture, &url, animated && autoplay);
+    images.set(&fitted.picture, &url, animated && animation == StickerAnimation::Always);
+    if animated && animation == StickerAnimation::OnInteraction {
+        let motion = gtk::EventControllerMotion::new();
+        let play = |on: bool| {
+            let (picture, images, url) = (fitted.picture.downgrade(), images.clone(), url.clone());
+            move |_: &gtk::EventControllerMotion| {
+                if let Some(picture) = picture.upgrade() {
+                    images.set(&picture, &url, on);
+                }
+            }
+        };
+        motion.connect_enter({
+            let play = play(true);
+            move |motion, _, _| play(motion)
+        });
+        motion.connect_leave(play(false));
+        fitted.frame.add_controller(motion);
+    }
     // So a right-click on it can say which one.
     fitted.frame.set_widget_name(&format!("{STICKER_NAME}{}", sticker.id));
     fitted.frame.upcast()

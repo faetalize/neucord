@@ -48,6 +48,7 @@ pub mod scheduled;
 pub mod session;
 pub mod settings;
 mod settings_proto;
+pub mod settings_sync;
 pub mod shape;
 pub mod stickers;
 pub mod subscriptions;
@@ -65,6 +66,7 @@ pub use model::{
     Role, Snowflake, Sticker, ThreadMember, ThreadMetadata, User,
 };
 pub use rest::{Captcha, CaptchaSolver, Rest};
+pub use settings_proto::Setting;
 
 /// Errors surfaced to the UI. Never contains the token.
 #[derive(Debug)]

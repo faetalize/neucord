@@ -1952,6 +1952,7 @@ impl App {
         let cx = Context {
             spoilers: Some(self.spoilers(message.id)),
             jumbo: discord::markup::is_jumbo(&spans),
+            animate_emoji: media.animate_emoji,
             on_mention: live.then(|| self.mention_opener(message)),
             ..Context::new(names, Some(&self.images))
         };
@@ -1975,7 +1976,7 @@ impl App {
             body.append(&attachments::attachment(attachment, voice, &self.images, &media));
         }
         for sticker in &message.sticker_items {
-            body.append(&attachments::sticker(sticker, &self.images, media.gif_auto_play));
+            body.append(&attachments::sticker(sticker, &self.images, media.animate_stickers));
         }
         // A link in a spoiler covers all the message's embeds, as in Discord.
         let spoilered = discord::embed::has_spoilered_link(&message.content);
