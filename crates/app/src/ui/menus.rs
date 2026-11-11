@@ -16,8 +16,8 @@ use gtk::{gdk, gio, glib};
 use super::App;
 use super::chat::{self, MessageTarget};
 use super::{
-    composer, create_thread, edits, emoji, forum, gifs, picker, poll_composer, polls, profile, reactions, reactors,
-    scheduling, sidebar, stickers, threads, uploads, voice,
+    attachments, composer, create_thread, edits, emoji, forum, gifs, picker, poll_composer, polls, profile, reactions,
+    reactors, scheduling, sidebar, stickers, threads, uploads, voice,
 };
 
 /// One entry of a menu, for what it was opened on: a `T`. `C` is what
@@ -88,13 +88,14 @@ const MESSAGE: Table<MessageTarget> = &[
     &[edits::EDIT, composer::REPLY, create_thread::MESSAGE_MENU],
     &[chat::COPY_TEXT, chat::COPY_MESSAGE_LINK, polls::END_POLL],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
+    &[attachments::SAVE_FILE],
     &[chat::COPY_LINK, chat::OPEN_LINK],
     &[chat::COPY_MESSAGE_ID, stickers::MESSAGE_DETAILS],
 ];
 
 /// [`MESSAGE`] where the media takedown regulation is TIDA: the client (761304)
 /// puts the Copy ID group (50268) before the link group (777933). The group
-/// between them holds nothing Neucord has.
+/// between them is the media's: Save File is all Neucord has of it.
 const MESSAGE_REGULATED: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
     &[reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
@@ -102,6 +103,7 @@ const MESSAGE_REGULATED: Table<MessageTarget> = &[
     &[chat::COPY_TEXT, chat::COPY_MESSAGE_LINK, polls::END_POLL],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
     &[chat::COPY_MESSAGE_ID, stickers::MESSAGE_DETAILS],
+    &[attachments::SAVE_FILE],
     &[chat::COPY_LINK, chat::OPEN_LINK],
 ];
 
@@ -110,6 +112,16 @@ const MESSAGE_REGULATED: Table<MessageTarget> = &[
 pub(super) fn message(regulated: bool) -> Table<MessageTarget> {
     if regulated { MESSAGE_REGULATED } else { MESSAGE }
 }
+
+/// What a search result's menu offers of the official client's (847342), in
+/// its order. Copy and Search with Google (a selection), Pin Message and Mark
+/// Unread aren't here: a result's text can't be selected, and Neucord has
+/// neither of the others yet. There is no reply, reaction or edit.
+pub(super) const SEARCH_RESULT: Table<MessageTarget> = &[
+    &[chat::COPY_MESSAGE_LINK, edits::DELETE],
+    &[chat::COPY_LINK, chat::OPEN_LINK],
+    &[chat::COPY_MESSAGE_ID, chat::COPY_AUTHOR_ID],
+];
 
 /// A thread's menu, from its row in the sidebar or the browser and the box
 /// under the message that started it: what Neucord has of the client's
@@ -538,16 +550,15 @@ mod tests {
     fn message_menu_puts_the_id_before_the_links_where_media_takedown_is_regulated() {
         let ends = |regulated| {
             let names = names(message(regulated));
-            names[names.len() - 2..].to_vec()
+            names[names.len() - 3..].to_vec()
         };
-        let id = || vec!["copy-message-id", "message-details"];
-        assert_eq!(ends(false), [vec!["copy-link", "open-link"], id()]);
-        assert_eq!(ends(true), [id(), vec!["copy-link", "open-link"]]);
-        // The two groups swap and nothing else moves.
-        let mut swapped = names(message(false));
-        let n = swapped.len();
-        swapped.swap(n - 2, n - 1);
-        assert_eq!(names(message(true)), swapped);
+        let (media, links, id) =
+            (|| vec!["save-file"], || vec!["copy-link", "open-link"], || vec!["copy-message-id", "message-details"]);
+        assert_eq!(ends(false), [media(), links(), id()]);
+        assert_eq!(ends(true), [id(), media(), links()]);
+        // The last three groups rotate and nothing else moves.
+        let (plain, regulated) = (names(message(false)), names(message(true)));
+        assert_eq!(plain[..plain.len() - 3], regulated[..regulated.len() - 3]);
     }
 
     #[test]
