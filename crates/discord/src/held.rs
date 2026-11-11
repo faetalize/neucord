@@ -12,10 +12,10 @@
 //!
 //! Only DMs and group DMs are held. The client is subscribed to every server
 //! it has held channels of (`threads` stays on even when it goes idle,
-//! 661670), and we subscribe to none, so what the gateway sends a server's
-//! channels to us isn't known to match. A DM has no subscription on either
-//! side. With subscriptions (#10) the client's rule can cover servers too,
-//! with the channels we lose View Channel on marked stale (`Y` in 596344).
+//! 661670), and Neucord subscribes the same way ([`crate::subscriptions`]),
+//! so the client's rule could cover servers too, with the channels we lose
+//! View Channel on marked stale (`Y` in 596344). A DM has no subscription on
+//! either side.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};

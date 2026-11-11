@@ -55,6 +55,7 @@ impl App {
         self.set_content_title("Message Requests");
         self.rebuild_rail();
         self.rebuild_sidebar();
+        self.sync_members();
         self.rebuild_requests();
     }
 

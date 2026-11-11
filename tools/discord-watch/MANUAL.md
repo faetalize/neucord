@@ -109,6 +109,16 @@ changed for unrelated reasons only needs a note in the issue.
   (`requestGuildMembers`). Splitting into 100 users a request and sending
   nothing before the session is established are in the `GUILD_MEMBERS_REQUEST`
   handler of 225123.
+- **Member lists** (`subscriptions.rs`, `member_list.rs`, `ui/members.rs`).
+  What is subscribed to and when (`GuildSubscriptionsStore`,
+  `updateGuildSubscriptions`), how rows apply and which list a channel shows
+  (`ChannelMemberStore`) are watched. Not watched: the rows asked for as the
+  list scrolls, `NJ` in 361610 (anchor `GUILD_SUBSCRIPTIONS_CHANNEL`), the
+  first page and the five channels kept (36124), the 50 ms wait
+  (`updateSubscription` in 289287, anchor `updateMaxContentFeedRowSeen`), the
+  hash that names a list (`v3` in 181370, called by the store's `D`), and
+  which channels have a list: `renderSidebar` in 289287 (anchor
+  `private-channel-recipients`), with a group DM's order in `sS`.
 - **How much history is fetched** (`discord::history`, `Page::query`).
   `FONT_SIZES`, the page around a message (`focusMessage`) and how many
   messages stay loaded (`truncate`) are watched. The rest isn't, and its

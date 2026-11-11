@@ -178,6 +178,13 @@ pub struct Channel {
     /// Group DM icon hash.
     #[serde(default)]
     pub icon: Option<String>,
+    /// Who made a group DM, whom its member list marks.
+    #[serde(default)]
+    pub owner_id: Option<Snowflake>,
+    /// Names the member list the channel shows, where Discord says (see
+    /// [`crate::member_list::list_id`]).
+    #[serde(default)]
+    pub member_list_id: Option<String>,
     /// Newest message, used to sort DMs by recent activity. May point at a
     /// deleted message; it only ever needs to be roughly right.
     #[serde(default)]
