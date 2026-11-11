@@ -785,7 +785,7 @@ impl Viewer {
         if !hide && item.can_link() {
             section.append(Some("Copy Media Link"), Some("viewer.copy-link"));
         }
-        let developer = app.state.borrow().developer_mode;
+        let developer = app.state.borrow().settings.developer_mode;
         if developer && matches!(item.source, Source::Attachment(_)) {
             section.append(Some("Copy Attachment ID"), Some("viewer.copy-attachment-id"));
         }

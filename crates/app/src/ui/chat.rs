@@ -2019,7 +2019,7 @@ impl App {
         sticker: Option<Snowflake>,
         media: Option<usize>,
     ) {
-        let settings = self.state.borrow().media;
+        let settings = self.state.borrow().settings.media;
         let media = media.and_then(|n| {
             let shown = message.thread_starter().unwrap_or(&message);
             discord::media::items(shown, &settings).into_iter().nth(n)
