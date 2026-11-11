@@ -471,6 +471,37 @@ pub struct Found<'a> {
     pub score: u8,
 }
 
+/// Whether a channel's menus have an Apps item (173500): the client's
+/// textual channels (`TEXTUAL` in 478437), but not a media thread.
+pub fn offers_apps(kind: ChannelKind) -> bool {
+    !matches!(
+        kind,
+        ChannelKind::Category
+            | ChannelKind::Forum
+            | ChannelKind::Media
+            | ChannelKind::MediaThread
+            | ChannelKind::Other(_)
+    )
+}
+
+/// Found commands under their apps, as the Apps menu lists them when nothing
+/// is searched for: the apps by name, and each one's commands by name (`ea`
+/// in 264322 sorts a section that isn't scored).
+pub fn by_app<'a>(found: Vec<Found<'a>>) -> Vec<(&'a App, Vec<&'a Command>)> {
+    let mut apps: Vec<(&App, Vec<&Command>)> = Vec::new();
+    for Found { command, app, .. } in found {
+        match apps.iter_mut().find(|(a, _)| a.id == app.id) {
+            Some((_, commands)) => commands.push(command),
+            None => apps.push((app, vec![command])),
+        }
+    }
+    for (_, commands) in &mut apps {
+        commands.sort_by(|a, b| natural(&a.display_name, &b.display_name));
+    }
+    apps.sort_by(|(a, _), (b, _)| natural(&a.name, &b.name));
+    apps
+}
+
 /// `Intl.Collator` with `sensitivity: accent, numeric` (264322's `H`): case
 /// doesn't matter and digits count as numbers.
 fn natural(a: &str, b: &str) -> std::cmp::Ordering {
@@ -1569,6 +1600,14 @@ mod tests {
                  ]},
                 {"id": "400000000000000003", "application_id": "200000000000000002", "version": "5", "type": 2,
                  "name": "Inspect", "description": ""},
+                {"id": "400000000000000004", "application_id": APP, "version": "6", "type": 3,
+                 "name": "Reroll", "description": "", "contexts": [0, 1, 2]},
+                {"id": "400000000000000005", "application_id": "200000000000000002", "version": "7", "type": 3,
+                 "name": "Annotate", "description": ""},
+                {"id": "400000000000000006", "application_id": APP, "version": "8", "type": 3,
+                 "name": "Roll 10 times", "description": ""},
+                {"id": "400000000000000007", "application_id": APP, "version": "9", "type": 3,
+                 "name": "Roll 9 times", "description": ""},
             ]
         })
     }
@@ -1648,6 +1687,71 @@ mod tests {
         let commands = loaded(&index());
         assert!(names(&commands.find(&place(), command_type::CHAT, "inspect")).is_empty());
         assert_eq!(names(&commands.find(&place(), command_type::USER, "")), ["Inspect"]);
+    }
+
+    #[test]
+    fn apps_list_their_commands_by_name_under_their_own_names() {
+        let commands = loaded(&index());
+        let found = commands.find(&place(), command_type::MESSAGE, "");
+        let listed: Vec<(&str, Vec<&str>)> = by_app(found)
+            .into_iter()
+            .map(|(app, commands)| (app.name.as_str(), commands.iter().map(|c| c.display_name.as_str()).collect()))
+            .collect();
+        // Numbers count as numbers; the app with the first name is first.
+        assert_eq!(listed, [("Dicey", vec!["Reroll", "Roll 9 times", "Roll 10 times"]), ("Zed Bot", vec!["Annotate"])]);
+        // A search lists them flat, best first, as `find` has it.
+        assert_eq!(names(&commands.find(&place(), command_type::MESSAGE, "annot")), ["Annotate"]);
+    }
+
+    #[test]
+    fn the_apps_item_is_in_textual_channels_but_not_media_threads() {
+        for kind in [
+            ChannelKind::Text,
+            ChannelKind::Dm,
+            ChannelKind::Voice,
+            ChannelKind::GroupDm,
+            ChannelKind::Announcement,
+            ChannelKind::AnnouncementThread,
+            ChannelKind::PublicThread,
+            ChannelKind::PrivateThread,
+            ChannelKind::Stage,
+        ] {
+            assert!(offers_apps(kind), "{kind:?}");
+        }
+        for kind in [ChannelKind::Category, ChannelKind::Forum, ChannelKind::Media, ChannelKind::MediaThread] {
+            assert!(!offers_apps(kind), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_user_or_message_command_runs_on_its_target() {
+        let commands = loaded(&index());
+        let place = place();
+        let (command, app) = {
+            let found = commands.find(&place, command_type::MESSAGE, "reroll");
+            (found[0].command.clone(), found[0].app.clone())
+        };
+        let target = Snowflake(700_000_000_000_000_001);
+        let run = Run {
+            application: command.application,
+            guild: Some(GUILD_ID),
+            channel: CHANNEL,
+            session: "s",
+            data: command.data(Vec::new(), Some(target)),
+            nonce: Snowflake(5),
+        };
+        let body = run.body();
+        assert_eq!(body["application_id"], app.id.to_string());
+        let data = &body["data"];
+        assert_eq!((data["type"].as_u64(), data["name"].as_str()), (Some(3), Some("Reroll")));
+        assert_eq!(data["target_id"], target.to_string());
+        assert_eq!(data["options"], json!([]));
+        assert_eq!(data["id"], "400000000000000004");
+        assert_eq!(data["application_command"]["id"], "400000000000000004");
+        assert!(commands.find(&place, command_type::CHAT, "reroll").is_empty());
+        // A slash command has no target.
+        let (roll, _) = commands.get(&place, command_type::CHAT, "400000000000000001").unwrap();
+        assert!(roll.data(Vec::new(), None).get("target_id").is_none());
     }
 
     #[test]

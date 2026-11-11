@@ -2144,15 +2144,24 @@ impl App {
 
     /// Under an answer only we can see, with a way to dismiss it, which
     /// removes it here and nowhere else (`dismiss` is a local delete,
-    /// `deleteMessage` in 138399).
+    /// `deleteMessage` in 138399). When Discord says why it is hidden, that
+    /// follows a first line of its own (376767).
     fn ephemeral_footer(self: &Rc<Self>, message: &Message) -> gtk::Widget {
+        let reason = message.interaction_metadata.as_ref().and_then(|m| m.ephemerality_reason);
+        let dismiss = |label: &str| format!("<a href=\"dismiss\">{label}</a>");
+        let text = match reason {
+            Some(reason) => format!(
+                "Only you can see this message.\n{} • {}",
+                glib::markup_escape_text(discord::interaction::ephemerality_text(reason)),
+                dismiss("Dismiss"),
+            ),
+            None => format!("Only you can see this • {}", dismiss("Dismiss message")),
+        };
         let line = gtk::Box::builder().spacing(6).css_classes(["caption", "dimmed"]).build();
-        line.append(&gtk::Image::from_icon_name("view-reveal-symbolic"));
-        let label = gtk::Label::builder()
-            .use_markup(true)
-            .label("Only you can see this • <a href=\"dismiss\">Dismiss message</a>")
-            .xalign(0.0)
-            .build();
+        let icon = gtk::Image::from_icon_name("view-reveal-symbolic");
+        icon.set_valign(gtk::Align::Start);
+        line.append(&icon);
+        let label = gtk::Label::builder().use_markup(true).label(text).xalign(0.0).wrap(true).build();
         label.connect_activate_link({
             let this = Rc::downgrade(self);
             let (id, channel) = (message.id, message.channel_id);
