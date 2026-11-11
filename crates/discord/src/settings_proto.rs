@@ -9,9 +9,10 @@
 //! never changed is simply absent, and a patch leaves it alone.
 
 use crate::Snowflake;
-use crate::protobuf::{Message, Value, bool_value, uint_value};
+use crate::protobuf::{Message, Value, bool_value, string_value, uint_value, uint64_value};
 use crate::settings::{
-    GuildFolder, MediaPatch, NotificationsPatch, PrivacyPatch, ReactionNotifications, SettingsPatch, StickerAnimation,
+    CustomStatus, GuildFolder, MediaPatch, NotificationsPatch, PrivacyPatch, ReactionNotifications, SettingsPatch,
+    StatusSettings, StickerAnimation, UserStatus,
 };
 
 // PreloadedUserSettings.
@@ -19,6 +20,8 @@ const VERSIONS: u32 = 1;
 const TEXT_AND_IMAGES: u32 = 6;
 const NOTIFICATIONS: u32 = 7;
 const PRIVACY: u32 = 8;
+const STATUS: u32 = 11;
+const LOCALIZATION: u32 = 12;
 const APPEARANCE: u32 = 13;
 const GUILD_FOLDERS: u32 = 14;
 
@@ -44,6 +47,22 @@ const PROFILE_UPDATES_NOTIFICATIONS: u32 = 16;
 // PrivacySettings.
 const ALLOW_ACTIVITY_PARTY_FRIENDS: u32 = 1;
 const ALLOW_ACTIVITY_PARTY_VOICE_CHANNEL: u32 = 2;
+
+// StatusSettings.
+const STATUS_STATUS: u32 = 1;
+const STATUS_CUSTOM: u32 = 2;
+const STATUS_EXPIRES_AT_MS: u32 = 4;
+const STATUS_CREATED_AT_MS: u32 = 5;
+
+// CustomStatus.
+const CUSTOM_TEXT: u32 = 1;
+const CUSTOM_EMOJI_ID: u32 = 2;
+const CUSTOM_EMOJI_NAME: u32 = 3;
+const CUSTOM_EXPIRES_AT_MS: u32 = 4;
+const CUSTOM_CREATED_AT_MS: u32 = 5;
+
+// LocalizationSettings.
+const LOCALE: u32 = 1;
 
 // AppearanceSettings.
 const DEVELOPER_MODE: u32 = 2;
@@ -101,8 +120,48 @@ impl SettingsPatch {
             // A plain `bool`: `false` is not sent, so appearance without it is off.
             developer_mode: settings.message(APPEARANCE).map(|a| a.bool(DEVELOPER_MODE).unwrap_or(false)),
             message_display_compact: flag(MESSAGE_DISPLAY_COMPACT),
+            status: settings.message(STATUS).map(|status| status_settings(&status)),
+            localization: settings.message(LOCALIZATION).map(|l| l.string_value(LOCALE).map(String::from)),
         })
     }
+}
+
+/// The `status` message. A status the client's picker cannot set reads as
+/// Online (see [`UserStatus::from_wire`]); a custom status with nothing in
+/// it shows nothing, so it is none.
+fn status_settings(message: &Message) -> StatusSettings {
+    let custom = message.message(STATUS_CUSTOM).map(|c| CustomStatus {
+        text: c.string(CUSTOM_TEXT).unwrap_or_default().to_owned(),
+        emoji_id: c.fixed64(CUSTOM_EMOJI_ID).filter(|id| *id != 0).map(Snowflake),
+        emoji_name: c.string(CUSTOM_EMOJI_NAME).unwrap_or_default().to_owned(),
+        expires_at_ms: c.fixed64(CUSTOM_EXPIRES_AT_MS).unwrap_or(0),
+        created_at_ms: c.fixed64(CUSTOM_CREATED_AT_MS).unwrap_or(0),
+    });
+    StatusSettings {
+        status: message.string_value(STATUS_STATUS).map(UserStatus::from_wire).unwrap_or_default(),
+        expires_at_ms: message.fixed64(STATUS_EXPIRES_AT_MS).unwrap_or(0),
+        created_at_ms: message.int_value(STATUS_CREATED_AT_MS),
+        custom: custom.filter(|c| !c.is_empty()),
+    }
+}
+
+/// `CustomStatus` as `internalBinaryWrite` writes it: a field that holds its
+/// default is left out.
+fn custom_status_bytes(custom: &CustomStatus) -> Vec<u8> {
+    let fields = [
+        (CUSTOM_TEXT, (!custom.text.is_empty()).then(|| Value::Bytes(custom.text.clone().into_bytes()))),
+        (CUSTOM_EMOJI_ID, custom.emoji_id.filter(|id| id.0 != 0).map(|id| Value::Fixed64(id.0))),
+        (
+            CUSTOM_EMOJI_NAME,
+            (!custom.emoji_name.is_empty()).then(|| Value::Bytes(custom.emoji_name.clone().into_bytes())),
+        ),
+        (CUSTOM_EXPIRES_AT_MS, (custom.expires_at_ms != 0).then_some(Value::Fixed64(custom.expires_at_ms))),
+        (CUSTOM_CREATED_AT_MS, (custom.created_at_ms != 0).then_some(Value::Fixed64(custom.created_at_ms))),
+    ];
+    fields.into_iter().fold(Vec::new(), |out, (number, value)| match Message::parse(&out) {
+        Some(message) => message.with(number, value),
+        None => out,
+    })
 }
 
 /// The official client lays servers out from `folders` alone, and falls back
@@ -144,7 +203,7 @@ pub fn data_version(proto: &[u8]) -> u64 {
 }
 
 /// A setting the settings window writes, with the value it is set to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Setting {
     MessageDisplayCompact(bool),
     RenderEmbeds(bool),
@@ -161,40 +220,73 @@ pub enum Setting {
     ProfileUpdatesNotifications(bool),
     FriendsJoinGame(bool),
     VoiceParticipantsJoinGame(bool),
+    /// The status picker (`827827`): the status, when it goes back to
+    /// Online (0 for never) and the time now. The status keeps its creation
+    /// time when it stays what it was.
+    Status {
+        status: UserStatus,
+        expires_at_ms: u64,
+        now_ms: u64,
+    },
+    /// The custom status dialog (`431273`); none clears it.
+    CustomStatus(Option<CustomStatus>),
+    /// `updateLocale` (817281).
+    Locale(String),
 }
 
 impl Setting {
     /// Where the setting lives, as (message of `PreloadedUserSettings`, field
     /// in it) and the value as the client writes it: a wrapper holds even a
-    /// default, a plain `bool` or enum leaves its default out.
-    fn place(self) -> (u32, u32, Option<Value>) {
+    /// default, a plain `bool` or enum leaves its default out. Some settings
+    /// change several fields, or depend on what is there: `proto` is the
+    /// whole `PreloadedUserSettings` as it is now.
+    fn place(self, proto: &Message) -> (u32, Vec<(u32, Option<Value>)>) {
         let plain = |on: bool| on.then_some(Value::Varint(1));
+        let one = |group, field, value| (group, vec![(field, value)]);
         match self {
-            Setting::MessageDisplayCompact(on) => (TEXT_AND_IMAGES, MESSAGE_DISPLAY_COMPACT, Some(bool_value(on))),
-            Setting::RenderEmbeds(on) => (TEXT_AND_IMAGES, RENDER_EMBEDS, Some(bool_value(on))),
-            Setting::InlineEmbedMedia(on) => (TEXT_AND_IMAGES, INLINE_EMBED_MEDIA, Some(bool_value(on))),
-            Setting::InlineAttachmentMedia(on) => (TEXT_AND_IMAGES, INLINE_ATTACHMENT_MEDIA, Some(bool_value(on))),
-            Setting::RenderReactions(on) => (TEXT_AND_IMAGES, RENDER_REACTIONS, Some(bool_value(on))),
-            Setting::GifAutoPlay(on) => (TEXT_AND_IMAGES, GIF_AUTO_PLAY, Some(bool_value(on))),
-            Setting::AnimateEmoji(on) => (TEXT_AND_IMAGES, ANIMATE_EMOJI, Some(bool_value(on))),
-            Setting::AnimateStickers(how) => (TEXT_AND_IMAGES, ANIMATE_STICKERS, Some(uint_value(how.raw() as u32))),
-            Setting::DeveloperMode(on) => (APPEARANCE, DEVELOPER_MODE, plain(on)),
+            Setting::MessageDisplayCompact(on) => one(TEXT_AND_IMAGES, MESSAGE_DISPLAY_COMPACT, Some(bool_value(on))),
+            Setting::RenderEmbeds(on) => one(TEXT_AND_IMAGES, RENDER_EMBEDS, Some(bool_value(on))),
+            Setting::InlineEmbedMedia(on) => one(TEXT_AND_IMAGES, INLINE_EMBED_MEDIA, Some(bool_value(on))),
+            Setting::InlineAttachmentMedia(on) => one(TEXT_AND_IMAGES, INLINE_ATTACHMENT_MEDIA, Some(bool_value(on))),
+            Setting::RenderReactions(on) => one(TEXT_AND_IMAGES, RENDER_REACTIONS, Some(bool_value(on))),
+            Setting::GifAutoPlay(on) => one(TEXT_AND_IMAGES, GIF_AUTO_PLAY, Some(bool_value(on))),
+            Setting::AnimateEmoji(on) => one(TEXT_AND_IMAGES, ANIMATE_EMOJI, Some(bool_value(on))),
+            Setting::AnimateStickers(how) => one(TEXT_AND_IMAGES, ANIMATE_STICKERS, Some(uint_value(how.raw() as u32))),
+            Setting::DeveloperMode(on) => one(APPEARANCE, DEVELOPER_MODE, plain(on)),
             Setting::ReactionNotifications(which) => {
-                (NOTIFICATIONS, REACTION_NOTIFICATIONS, (which.raw() != 0).then_some(Value::Varint(which.raw())))
+                one(NOTIFICATIONS, REACTION_NOTIFICATIONS, (which.raw() != 0).then_some(Value::Varint(which.raw())))
             }
             Setting::FriendOnlineNotifications(on) => {
-                (NOTIFICATIONS, FRIEND_ONLINE_NOTIFICATIONS, Some(bool_value(on)))
+                one(NOTIFICATIONS, FRIEND_ONLINE_NOTIFICATIONS, Some(bool_value(on)))
             }
             Setting::FriendAnniversaryNotifications(on) => {
-                (NOTIFICATIONS, FRIEND_ANNIVERSARY_NOTIFICATIONS, Some(bool_value(on)))
+                one(NOTIFICATIONS, FRIEND_ANNIVERSARY_NOTIFICATIONS, Some(bool_value(on)))
             }
             Setting::ProfileUpdatesNotifications(on) => {
-                (NOTIFICATIONS, PROFILE_UPDATES_NOTIFICATIONS, Some(bool_value(on)))
+                one(NOTIFICATIONS, PROFILE_UPDATES_NOTIFICATIONS, Some(bool_value(on)))
             }
-            Setting::FriendsJoinGame(on) => (PRIVACY, ALLOW_ACTIVITY_PARTY_FRIENDS, Some(bool_value(on))),
+            Setting::FriendsJoinGame(on) => one(PRIVACY, ALLOW_ACTIVITY_PARTY_FRIENDS, Some(bool_value(on))),
             Setting::VoiceParticipantsJoinGame(on) => {
-                (PRIVACY, ALLOW_ACTIVITY_PARTY_VOICE_CHANNEL, Some(bool_value(on)))
+                one(PRIVACY, ALLOW_ACTIVITY_PARTY_VOICE_CHANNEL, Some(bool_value(on)))
             }
+            Setting::Status { status, expires_at_ms, now_ms } => {
+                let current = proto.message(STATUS).unwrap_or_default();
+                let before = current.string_value(STATUS_STATUS).map(UserStatus::from_wire).unwrap_or_default();
+                let keeps_creation = before == status && current.message(STATUS_CREATED_AT_MS).is_some();
+                let mut edits = vec![
+                    (STATUS_STATUS, Some(string_value(status.wire()))),
+                    (STATUS_EXPIRES_AT_MS, (expires_at_ms != 0).then_some(Value::Fixed64(expires_at_ms))),
+                ];
+                if !keeps_creation {
+                    edits.push((STATUS_CREATED_AT_MS, Some(uint64_value(now_ms))));
+                }
+                (STATUS, edits)
+            }
+            Setting::CustomStatus(custom) => {
+                let value = custom.filter(|c| !c.is_empty()).map(|c| Value::Bytes(custom_status_bytes(&c)));
+                one(STATUS, STATUS_CUSTOM, value)
+            }
+            Setting::Locale(locale) => one(LOCALIZATION, LOCALE, Some(string_value(&locale))),
         }
     }
 
@@ -204,9 +296,13 @@ impl Setting {
     /// setting, and keeps the fields it does not know. `None` if `proto` does
     /// not decode.
     pub fn written(self, proto: &[u8]) -> Option<(u32, Vec<u8>)> {
-        let (group, field, value) = self.place();
-        let current = Message::parse(proto)?.bytes(group).unwrap_or_default();
-        Some((group, Message::parse(current)?.with(field, value)))
+        let proto = Message::parse(proto)?;
+        let (group, edits) = self.place(&proto);
+        let mut written = proto.bytes(group).unwrap_or_default().to_vec();
+        for (field, value) in edits {
+            written = Message::parse(&written)?.with(field, value);
+        }
+        Some((group, written))
     }
 }
 
@@ -242,6 +338,14 @@ mod tests {
 
     fn patch(proto: &[u8]) -> SettingsPatch {
         SettingsPatch::from_proto_bytes(proto).expect("decodes")
+    }
+
+    fn fixed64_field(number: u32, v: u64) -> Vec<u8> {
+        [varint_bytes(u64::from(number) << 3 | 1), v.to_le_bytes().to_vec()].concat()
+    }
+
+    fn string_wrapper(number: u32, v: &str) -> Vec<u8> {
+        bytes_field(number, &if v.is_empty() { Vec::new() } else { bytes_field(1, v.as_bytes()) })
     }
 
     #[test]
@@ -390,6 +494,15 @@ mod tests {
             ProfileUpdatesNotifications(false),
             FriendsJoinGame(false),
             VoiceParticipantsJoinGame(false),
+            Status { status: UserStatus::Idle, expires_at_ms: 50, now_ms: 40 },
+            CustomStatus(Some(self::CustomStatus {
+                text: "hi".into(),
+                emoji_id: Some(Snowflake(9)),
+                emoji_name: "wave".into(),
+                expires_at_ms: 60,
+                created_at_ms: 41,
+            })),
+            Locale("fr".into()),
         ];
         let mut proto = Vec::new();
         for setting in all {
@@ -420,9 +533,145 @@ mod tests {
                     profile_updates: false,
                 },
                 privacy: Privacy { friends_join_game: false, voice_participants_join_game: false },
+                status: StatusSettings {
+                    status: UserStatus::Idle,
+                    expires_at_ms: 50,
+                    created_at_ms: Some(40),
+                    custom: Some(self::CustomStatus {
+                        text: "hi".into(),
+                        emoji_id: Some(Snowflake(9)),
+                        emoji_name: "wave".into(),
+                        expires_at_ms: 60,
+                        created_at_ms: 41,
+                    }),
+                },
+                locale: Some("fr".into()),
                 ..Settings::default()
             }
         );
+    }
+
+    #[test]
+    fn reads_status_custom_status_and_locale() {
+        let custom = [
+            bytes_field(CUSTOM_TEXT, b"out for lunch"),
+            fixed64_field(CUSTOM_EMOJI_ID, 77),
+            bytes_field(CUSTOM_EMOJI_NAME, b"taco"),
+            fixed64_field(CUSTOM_EXPIRES_AT_MS, 1_700_000_900_000),
+            fixed64_field(CUSTOM_CREATED_AT_MS, 1_700_000_000_000),
+        ]
+        .concat();
+        let status = [
+            string_wrapper(STATUS_STATUS, "dnd"),
+            bytes_field(STATUS_CUSTOM, &custom),
+            fixed64_field(STATUS_EXPIRES_AT_MS, 1_700_000_500_000),
+            bytes_field(STATUS_CREATED_AT_MS, &varint_field(1, 1_700_000_000_000)),
+        ]
+        .concat();
+        let proto = [bytes_field(STATUS, &status), bytes_field(LOCALIZATION, &string_wrapper(LOCALE, "fr"))].concat();
+        let patch = patch(&proto);
+        let status = patch.status.unwrap();
+        assert_eq!(status.status, UserStatus::DoNotDisturb);
+        assert_eq!((status.expires_at_ms, status.created_at_ms), (1_700_000_500_000, Some(1_700_000_000_000)));
+        assert_eq!(
+            status.custom,
+            Some(CustomStatus {
+                text: "out for lunch".into(),
+                emoji_id: Some(Snowflake(77)),
+                emoji_name: "taco".into(),
+                expires_at_ms: 1_700_000_900_000,
+                created_at_ms: 1_700_000_000_000,
+            })
+        );
+        assert_eq!(patch.localization, Some(Some("fr".to_owned())));
+    }
+
+    #[test]
+    fn a_status_the_picker_cannot_set_is_online() {
+        for wire in ["unknown", "offline", "", "away"] {
+            let patch = patch(&bytes_field(STATUS, &string_wrapper(STATUS_STATUS, wire)));
+            assert_eq!(patch.status.unwrap().status, UserStatus::Online, "{wire:?}");
+        }
+        // The `status` message without its status (all defaults) is still said.
+        let patch = patch(&bytes_field(STATUS, &[]));
+        assert_eq!(patch.status, Some(StatusSettings::default()));
+        assert_eq!(self::patch(&[]).status, None, "no status message, nothing said");
+        let empty = bytes_field(STATUS, &bytes_field(STATUS_CUSTOM, &[]));
+        assert_eq!(self::patch(&empty).status.unwrap().custom, None, "a custom status with nothing in it");
+    }
+
+    #[test]
+    fn the_status_picker_saves_the_whole_status_message() {
+        let proto = bytes_field(STATUS, &[string_wrapper(STATUS_STATUS, "online"), varint_field(60, 1)].concat());
+
+        // A new status: it expires, and its creation time is now.
+        let setting =
+            Setting::Status { status: UserStatus::Idle, expires_at_ms: 1_700_000_900_000, now_ms: 1_700_000_000_000 };
+        let (group, written) = setting.written(&proto).unwrap();
+        assert_eq!(group, STATUS);
+        let expected = [
+            string_wrapper(STATUS_STATUS, "idle"),
+            fixed64_field(STATUS_EXPIRES_AT_MS, 1_700_000_900_000),
+            bytes_field(STATUS_CREATED_AT_MS, &varint_field(1, 1_700_000_000_000)),
+            varint_field(60, 1),
+        ];
+        assert_eq!(written, expected.concat(), "the unknown field stays, the expiry is a fixed64");
+
+        // The same status again keeps the time it was set at and drops an expiry of never.
+        let kept = [
+            string_wrapper(STATUS_STATUS, "dnd"),
+            fixed64_field(STATUS_EXPIRES_AT_MS, 5),
+            bytes_field(STATUS_CREATED_AT_MS, &varint_field(1, 9)),
+        ]
+        .concat();
+        let proto = bytes_field(STATUS, &kept);
+        let again = Setting::Status { status: UserStatus::DoNotDisturb, expires_at_ms: 0, now_ms: 1_700_000_000_000 };
+        let (_, written) = again.written(&proto).unwrap();
+        let expected = [string_wrapper(STATUS_STATUS, "dnd"), bytes_field(STATUS_CREATED_AT_MS, &varint_field(1, 9))];
+        assert_eq!(written, expected.concat());
+
+        // Another status starts over, and one that was never set has no creation time to keep.
+        let online = Setting::Status { status: UserStatus::Online, expires_at_ms: 0, now_ms: 7 };
+        let (_, written) = online.clone().written(&proto).unwrap();
+        let expected =
+            [string_wrapper(STATUS_STATUS, "online"), bytes_field(STATUS_CREATED_AT_MS, &varint_field(1, 7))];
+        assert_eq!(written, expected.concat());
+        let (_, written) = online.written(&[]).unwrap();
+        assert_eq!(written, expected.concat());
+    }
+
+    #[test]
+    fn a_custom_status_is_written_without_its_defaults_and_cleared_by_none() {
+        let status = [string_wrapper(STATUS_STATUS, "dnd"), bytes_field(STATUS_CUSTOM, b"\x0a\x03old")].concat();
+        let proto = bytes_field(STATUS, &status);
+        let custom = CustomStatus {
+            text: "hi".into(),
+            emoji_id: None,
+            emoji_name: "👋".into(),
+            expires_at_ms: 0,
+            created_at_ms: 3,
+        };
+        let (_, written) = Setting::CustomStatus(Some(custom)).written(&proto).unwrap();
+        let wanted = [
+            bytes_field(CUSTOM_TEXT, b"hi"),
+            bytes_field(CUSTOM_EMOJI_NAME, "👋".as_bytes()),
+            fixed64_field(CUSTOM_CREATED_AT_MS, 3),
+        ];
+        assert_eq!(
+            written,
+            [string_wrapper(STATUS_STATUS, "dnd"), bytes_field(STATUS_CUSTOM, &wanted.concat())].concat()
+        );
+
+        for cleared in [None, Some(CustomStatus::default())] {
+            let (_, written) = Setting::CustomStatus(cleared).written(&proto).unwrap();
+            assert_eq!(written, string_wrapper(STATUS_STATUS, "dnd"), "the status stays");
+        }
+    }
+
+    #[test]
+    fn the_language_is_a_string_wrapper() {
+        let (group, written) = Setting::Locale("pt-BR".into()).written(&[]).unwrap();
+        assert_eq!((group, written), (LOCALIZATION, string_wrapper(LOCALE, "pt-BR")));
     }
 
     #[test]

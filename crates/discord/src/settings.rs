@@ -1,7 +1,8 @@
 //! The account's client settings that Neucord honours or edits: server
 //! folders (which also define the order of servers in the rail), how media
-//! and embeds show, Developer Mode, compact display, and the account-wide
-//! notification and privacy toggles of the settings window.
+//! and embeds show, Developer Mode, compact display, the account-wide
+//! notification and privacy toggles of the settings window, the status and
+//! custom status, and the language.
 //!
 //! They come twice: as JSON in READY's `user_settings` and
 //! USER_SETTINGS_UPDATE, and as protobuf in READY's `user_settings_proto` and
@@ -240,6 +241,160 @@ impl Privacy {
     }
 }
 
+/// What the account shows as: the `status` setting. Others see Idle too when
+/// the device is idle, which Neucord does not tell apart.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UserStatus {
+    #[default]
+    Online,
+    Idle,
+    DoNotDisturb,
+    Invisible,
+}
+
+impl UserStatus {
+    pub const ALL: [UserStatus; 4] = [Self::Online, Self::Idle, Self::DoNotDisturb, Self::Invisible];
+
+    /// The string the setting and the gateway's presence update hold.
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Online => "online",
+            Self::Idle => "idle",
+            Self::DoNotDisturb => "dnd",
+            Self::Invisible => "invisible",
+        }
+    }
+
+    /// The status a setting's string stands for. `unknown`, which the
+    /// client identifies with and an account that never set a status has,
+    /// is Online, as in `SelfPresenceStore` (894768); so is anything the
+    /// client's picker cannot set.
+    pub fn from_wire(wire: &str) -> Self {
+        Self::ALL.into_iter().find(|s| s.wire() == wire).unwrap_or_default()
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Online => "Online",
+            Self::Idle => "Idle",
+            Self::DoNotDisturb => "Do Not Disturb",
+            Self::Invisible => "Invisible",
+        }
+    }
+}
+
+/// `CustomStatus`: the text and emoji beside the name. Times are
+/// milliseconds since 1970; an expiry of 0 is never.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CustomStatus {
+    pub text: String,
+    /// A custom emoji, else the Unicode one in `emoji_name`.
+    pub emoji_id: Option<Snowflake>,
+    pub emoji_name: String,
+    pub expires_at_ms: u64,
+    pub created_at_ms: u64,
+}
+
+impl CustomStatus {
+    /// Nothing to show: the client then clears the setting instead of
+    /// saving it.
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty() && self.emoji_id.is_none() && self.emoji_name.is_empty()
+    }
+}
+
+/// The `status` message, which the client saves whole.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StatusSettings {
+    pub status: UserStatus,
+    /// When a status that is not Online goes back to it, 0 for never.
+    pub expires_at_ms: u64,
+    pub created_at_ms: Option<u64>,
+    pub custom: Option<CustomStatus>,
+}
+
+/// How long a custom status stays, as the dialog offers it (431273).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClearAfter {
+    /// A day from now, to the same time tomorrow.
+    Today,
+    Hours4,
+    Hour1,
+    Minutes30,
+    DontClear,
+}
+
+impl ClearAfter {
+    /// In the order the dialog lists them.
+    pub const ALL: [ClearAfter; 5] = [Self::Today, Self::Hours4, Self::Hour1, Self::Minutes30, Self::DontClear];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Today => "Today",
+            Self::Hours4 => "4 hours",
+            Self::Hour1 => "1 hour",
+            Self::Minutes30 => "30 minutes",
+            Self::DontClear => "Don't clear",
+        }
+    }
+
+    /// The `expires_at_ms` to save, 0 for never. `today_ms` is how long it is
+    /// until this time tomorrow, which a day with a clock change makes
+    /// something other than 24 hours.
+    pub fn expires_at_ms(self, now_ms: u64, today_ms: u64) -> u64 {
+        const MINUTE: u64 = 60_000;
+        now_ms
+            + match self {
+                Self::Today => today_ms,
+                Self::Hours4 => 240 * MINUTE,
+                Self::Hour1 => 60 * MINUTE,
+                Self::Minutes30 => 30 * MINUTE,
+                Self::DontClear => return 0,
+            }
+    }
+
+    /// What the dialog starts on, given the expiry of the custom status the
+    /// account has (`None` if it has none): never stays never, a status
+    /// ending today starts on the shortest of 30 minutes, an hour and four
+    /// hours that still covers it, and anything else on Today. `same_day`
+    /// says whether the expiry is on today's date.
+    pub fn initial(expires_at_ms: Option<u64>, now_ms: u64, same_day: bool) -> Self {
+        let Some(at) = expires_at_ms else { return Self::Today };
+        if at == 0 {
+            return Self::DontClear;
+        }
+        let left = at as i64 - now_ms as i64;
+        match same_day {
+            true => [Self::Minutes30, Self::Hour1, Self::Hours4]
+                .into_iter()
+                .find(|choice| left <= choice.expires_at_ms(0, 0) as i64)
+                .unwrap_or(Self::Today),
+            false => Self::Today,
+        }
+    }
+}
+
+/// When the status and the custom status end, as the client's custom status
+/// manager works it out (340137): how long from now, nothing for never, and
+/// no time at all for one that has ended already.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Expiries {
+    /// Until the status goes back to Online. Online has no end.
+    pub status: Option<std::time::Duration>,
+    /// Until the custom status is cleared.
+    pub custom: Option<std::time::Duration>,
+}
+
+impl StatusSettings {
+    pub fn expiries(&self, now_ms: u64) -> Expiries {
+        let until = |at: u64| (at != 0).then(|| std::time::Duration::from_millis(at.saturating_sub(now_ms)));
+        Expiries {
+            status: until(self.expires_at_ms).filter(|_| self.status != UserStatus::Online),
+            custom: self.custom.as_ref().and_then(|c| until(c.expires_at_ms)),
+        }
+    }
+}
+
 /// Everything in this module, as the account has it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
@@ -253,6 +408,10 @@ pub struct Settings {
     pub message_display_compact: bool,
     pub notifications: Notifications,
     pub privacy: Privacy,
+    pub status: StatusSettings,
+    /// The language the account is set to (`localization.locale`); `None`
+    /// until someone picks one.
+    pub locale: Option<String>,
 }
 
 /// The settings a payload mentions; the rest are `None`.
@@ -264,6 +423,10 @@ pub struct SettingsPatch {
     pub message_display_compact: Option<bool>,
     pub notifications: NotificationsPatch,
     pub privacy: PrivacyPatch,
+    /// The whole `status` message, as it is saved whole.
+    pub status: Option<StatusSettings>,
+    /// The `localization` message: its locale, if it has one.
+    pub localization: Option<Option<String>>,
 }
 
 impl SettingsPatch {
@@ -273,6 +436,7 @@ impl SettingsPatch {
             media: MediaPatch::from_settings(settings),
             developer_mode: settings.get("developer_mode").and_then(Value::as_bool),
             message_display_compact: settings.get("message_display_compact").and_then(Value::as_bool),
+            localization: settings.get("locale").and_then(Value::as_str).map(|locale| Some(locale.to_owned())),
             // Only the protobuf carries the rest.
             ..SettingsPatch::default()
         }
@@ -293,6 +457,12 @@ impl Settings {
         self.message_display_compact = patch.message_display_compact.unwrap_or(self.message_display_compact);
         self.notifications.apply(patch.notifications);
         self.privacy.apply(patch.privacy);
+        if let Some(status) = patch.status {
+            self.status = status;
+        }
+        if let Some(locale) = patch.localization {
+            self.locale = locale;
+        }
     }
 }
 
@@ -392,9 +562,59 @@ mod tests {
     }
 
     #[test]
+    fn statuses_end_when_they_say() {
+        use std::time::Duration;
+        let custom = |expires_at_ms| {
+            Some(CustomStatus { text: "brb".into(), expires_at_ms, created_at_ms: 1, ..CustomStatus::default() })
+        };
+        let status =
+            |status, expires_at_ms, custom| StatusSettings { status, expires_at_ms, created_at_ms: None, custom };
+
+        let later = status(UserStatus::Idle, 5_000, custom(9_000)).expiries(1_000);
+        assert_eq!(later, Expiries { status: Some(Duration::from_secs(4)), custom: Some(Duration::from_secs(8)) });
+
+        // Already over: now, not never.
+        let over = status(UserStatus::DoNotDisturb, 500, custom(900)).expiries(1_000);
+        assert_eq!(over, Expiries { status: Some(Duration::ZERO), custom: Some(Duration::ZERO) });
+
+        // Never is 0, and Online ends in nothing whatever the field holds.
+        let never = status(UserStatus::Idle, 0, custom(0)).expiries(1_000);
+        assert_eq!(never, Expiries::default());
+        assert_eq!(status(UserStatus::Online, 5_000, None).expiries(1_000), Expiries::default());
+    }
+
+    #[test]
+    fn custom_status_clears_after_what_was_picked() {
+        let (now, tomorrow) = (1_000_000u64, 86_400_000u64);
+        let ends = |choice: ClearAfter| choice.expires_at_ms(now, tomorrow);
+        assert_eq!(ends(ClearAfter::Today), now + tomorrow);
+        assert_eq!(ends(ClearAfter::Hours4), now + 14_400_000);
+        assert_eq!(ends(ClearAfter::Minutes30), now + 1_800_000);
+        assert_eq!(ends(ClearAfter::DontClear), 0);
+        let labels: Vec<_> = ClearAfter::ALL.iter().map(|c| c.label()).collect();
+        assert_eq!(labels, ["Today", "4 hours", "1 hour", "30 minutes", "Don't clear"]);
+    }
+
+    #[test]
+    fn the_dialog_starts_on_what_covers_the_current_expiry() {
+        let now = 10_000_000u64;
+        let initial = |at, same_day| ClearAfter::initial(at, now, same_day);
+        assert_eq!(initial(None, true), ClearAfter::Today, "no custom status");
+        assert_eq!(initial(Some(0), true), ClearAfter::DontClear);
+        assert_eq!(initial(Some(now + 600_000), true), ClearAfter::Minutes30);
+        assert_eq!(initial(Some(now + 3_000_000), true), ClearAfter::Hour1);
+        assert_eq!(initial(Some(now + 7_200_000), true), ClearAfter::Hours4);
+        assert_eq!(initial(Some(now + 20_000_000), true), ClearAfter::Today, "more than four hours");
+        assert_eq!(initial(Some(now + 600_000), false), ClearAfter::Today, "ends on another date");
+        assert_eq!(initial(Some(now - 5), true), ClearAfter::Minutes30, "already over");
+    }
+
+    #[test]
     fn json_patch_holds_what_is_mentioned() {
         let patch = SettingsPatch::from_json(&json!({"developer_mode": true, "theme": "dark"}));
         assert_eq!(patch, SettingsPatch { developer_mode: Some(true), ..SettingsPatch::default() });
+        let patch = SettingsPatch::from_json(&json!({"locale": "fr", "theme": "dark"}));
+        assert_eq!(patch.localization, Some(Some("fr".to_owned())), "READY's JSON names the language too");
         let patch = SettingsPatch::from_json(&json!({"message_display_compact": false, "gif_auto_play": false}));
         assert_eq!(patch.message_display_compact, Some(false));
         assert_eq!(patch.media.gif_auto_play, Some(false));
