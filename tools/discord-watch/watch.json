@@ -290,6 +290,10 @@
   "protos": [
     "discord_protos.discord_users.v1.AppearanceSettings",
     "discord_protos.discord_users.v1.CustomStatus",
+    "discord_protos.discord_users.v1.EmojiFrecency",
+    "discord_protos.discord_users.v1.FavoriteEmojis",
+    "discord_protos.discord_users.v1.FrecencyItem",
+    "discord_protos.discord_users.v1.FrecencyUserSettings",
     "discord_protos.discord_users.v1.GuildFolder",
     "discord_protos.discord_users.v1.GuildFolders",
     "discord_protos.discord_users.v1.LocalizationSettings",

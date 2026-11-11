@@ -391,6 +391,17 @@ changed for unrelated reasons only needs a note in the issue.
   a clear instead for text that is empty trimmed and no emoji, writes a
   server's emoji by id and a Unicode one by its character, and caps the text
   at 128.
+- **Favourite emoji and the emoji used most** (`frecency.rs`,
+  `ui/favorites.rs`, `ui/emoji.rs`). The schema, `loadIfNecessary` and
+  `UserSettingsType` are watched. Not watched: 554375 (anchor
+  `favoriteEmojis`) files an emoji under its id or, for a Unicode one, the
+  name of its base, saves the list whole and allows 250; 253925 (anchor
+  `unfavorite`) offers Favorite and Unfavorite; 283047 (anchor
+  `computeWeight`) scores a use by its whole days (100 up to 3, 70 to 15, 50
+  to 30, 30 to 45, 10 to 80, else 1) and lists 42 by
+  `ceil(total × score ÷ uses)`; the picker opening is what loads the
+  settings (920134). The usage the client sends from 416380 (anchor
+  `hasPendingUsage`) isn't copied: Neucord records none.
 - **The skin tone** (`Setting::SkinTone`, `UnicodeEmoji::toned`). 554375
   (anchor `diversitySurrogate`) saves it with `FREQUENT_USER_ACTION`, 10 s
   where most settings wait none (`Setting::delay`), and 7584 (anchor
