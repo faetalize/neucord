@@ -658,8 +658,8 @@ impl Guild {
     /// in sidebar order: uncategorised first, then each category by position,
     /// channels by position within it, with voice and stage after the rest
     /// (`getShownChannelIds` in 791513 adds 10 000 to their position).
-    /// Returns `(category name, channels)` groups.
-    pub fn sidebar(&self, me: &Account, now_unix: i64) -> Vec<(Option<&str>, Vec<&Channel>)> {
+    /// Returns `(category, channels)` groups.
+    pub fn sidebar(&self, me: &Account, now_unix: i64) -> Vec<(Option<&Channel>, Vec<&Channel>)> {
         let by_position =
             |a: &&Channel, b: &&Channel| (a.position.unwrap_or(0), a.id).cmp(&(b.position.unwrap_or(0), b.id));
         let place = |c: &&Channel| i64::from(c.position.unwrap_or(0)) + if c.kind.is_vocal() { 10_000 } else { 0 };
@@ -681,7 +681,7 @@ impl Guild {
         let mut categories: Vec<&Channel> = self.channels.iter().filter(|c| c.kind == ChannelKind::Category).collect();
         categories.sort_by(by_position);
         for category in categories {
-            groups.push((category.name.as_deref(), channels_in(Some(category.id))));
+            groups.push((Some(category), channels_in(Some(category.id))));
         }
         groups.retain(|(_, channels)| !channels.is_empty());
         groups
@@ -1538,7 +1538,9 @@ mod tests {
         let sidebar = g.sidebar(&Account { id: Snowflake(5), ..Default::default() }, 0);
         let names: Vec<(Option<&str>, Vec<&str>)> = sidebar
             .iter()
-            .map(|(cat, chans)| (*cat, chans.iter().map(|c| c.name.as_deref().unwrap()).collect()))
+            .map(|(cat, chans)| {
+                (cat.and_then(|c| c.name.as_deref()), chans.iter().map(|c| c.name.as_deref().unwrap()).collect())
+            })
             .collect();
         assert_eq!(names, vec![(None, vec!["top"]), (Some("Cat"), vec!["a", "b", "voice"])], "staff is hidden from us");
         let owner = g.sidebar(&Account { id: Snowflake(7), ..Default::default() }, 0);
@@ -1575,7 +1577,9 @@ mod tests {
         let sidebar = g.sidebar(&Account { id: Snowflake(5), ..Default::default() }, 0);
         let names: Vec<(Option<&str>, Vec<&str>)> = sidebar
             .iter()
-            .map(|(cat, chans)| (*cat, chans.iter().map(|c| c.name.as_deref().unwrap()).collect()))
+            .map(|(cat, chans)| {
+                (cat.and_then(|c| c.name.as_deref()), chans.iter().map(|c| c.name.as_deref().unwrap()).collect())
+            })
             .collect();
         assert_eq!(
             names,

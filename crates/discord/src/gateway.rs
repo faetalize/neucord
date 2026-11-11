@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use soup::prelude::*;
 
+use crate::channel_list::Collapsed;
 use crate::component::Component;
 use crate::embed::Embed;
 use crate::emoji::GuildEmoji;
@@ -71,6 +72,8 @@ pub struct Ready {
     pub relationships: Relationships,
     pub read_states: ReadStates,
     pub notification_settings: NotificationSettings,
+    /// Which categories are folded.
+    pub collapsed: Collapsed,
     pub settings: Settings,
     /// The `PreloadedUserSettings` they were read from, whole: what changing
     /// a setting starts from (see [`crate::settings_sync`]).
@@ -781,6 +784,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 relationships: Relationships::from_ready(&data),
                 read_states: ReadStates::from_ready(&data["read_state"]),
                 notification_settings: NotificationSettings::from_ready(&data["user_guild_settings"]),
+                collapsed: Collapsed::from_ready(&data["user_guild_settings"]),
                 settings: {
                     // The protobuf is what the official client reads, so it
                     // wins where both say something.
