@@ -140,6 +140,9 @@ pub struct App {
     /// Counts changes to what every message's content is drawn from (names,
     /// colours, settings), so rows know to make theirs again.
     row_epoch: Cell<u64>,
+    /// The content of messages whose rows have moved on to others, for when
+    /// they come back (see [`chat::KeptContent`]).
+    kept_content: RefCell<crate::kept::Kept<Snowflake, chat::KeptContent>>,
     /// Every row the message list has made, to fill in again when what
     /// they show changes.
     rows: RefCell<Vec<glib::WeakRef<message_row::MessageRow>>>,
@@ -289,6 +292,7 @@ impl App {
             unread_divider: glib::WeakRef::new(),
             highlight: Cell::default(),
             row_epoch: Cell::default(),
+            kept_content: RefCell::new(crate::kept::Kept::new(chat::KEPT_CONTENT)),
             rows: RefCell::default(),
             scroll_loader: RefCell::default(),
             state: RefCell::default(),
