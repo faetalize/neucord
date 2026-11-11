@@ -90,7 +90,10 @@ changed for unrelated reasons only needs a note in the issue.
   request, its error codes, the permission bits and `HAS_THREAD` are watched
   (`POST CHANNEL_THREADS` carries the body of both endpoints). Not watched:
   who is offered it, `C`, `n` and `Tb` in 406704 (anchor
-  `CREATE_PRIVATE_THREADS`); the form in 289287 (anchor
+  `CREATE_PRIVATE_THREADS`), and that the attach button outlives the message
+  box turned off for want of Send Messages, as long as either thread
+  permission holds (`canCreateThreads` in 989161, anchor
+  `requireCreateTherads`); the form in 289287 (anchor
   `useDefaultThreadName`), which wants a name unless the thread is from a
   message and caps it at 100; the default name `V` in 971389 (anchor
   `rawTitle`), the archive time `Gl` in 268761 (anchor
