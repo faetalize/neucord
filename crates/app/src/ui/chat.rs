@@ -21,7 +21,7 @@ use super::menus::{self, At, Entry, Item};
 use super::message_row::{MessageRow, Parts};
 use super::state::{Unread, now_ms, now_unix};
 use super::viewer::MediaCx;
-use super::widgets::avatar_widget;
+use super::widgets::avatar_widget_in;
 use super::{attachments, components, polls, viewer};
 use crate::kept::Made;
 use crate::render::{Context, Names, Spoilers};
@@ -335,7 +335,7 @@ impl App {
     pub(super) fn on_message(self: &Rc<Self>, message: Message) {
         // An app's response to a press carries the press's nonce.
         if let Some(nonce) = message.nonce.as_deref().and_then(|n| n.parse().ok()) {
-            self.on_interaction(Snowflake(nonce), discord::gateway::Outcome::Success);
+            self.on_interaction(Snowflake(nonce), discord::gateway::Outcome::Success, None);
         }
         let original = match &message.referenced_message {
             Referenced::Message(original) => Some(&original.author),
@@ -344,7 +344,7 @@ impl App {
         self.learn_users(std::iter::once(&message.author).chain(&message.mentions).chain(original));
         self.forum_message(&message);
         if let (Some(guild), Some(member)) = (message.guild_id, &message.member) {
-            self.state.borrow_mut().members.add(guild, vec![(message.author.id, member.roles.clone())], &[]);
+            self.state.borrow_mut().members.add(guild, vec![(message.author.id, member.known())], &[]);
         }
         let channel = message.channel_id;
         self.state.borrow_mut().typing.message(channel, message.author.id, false);
@@ -1378,7 +1378,22 @@ impl App {
             .and_then(|id| state.guilds.iter().find(|g| g.id == id))
             .map(|guild| guild.roles.iter().map(|r| (r.id.0, (r.name.clone(), guild.role_colour(r)))).collect())
             .unwrap_or_default();
-        Names { users: state.users.clone(), channels, roles }
+        // In a server people are called what they chose there, and in a DM
+        // what we call our friends.
+        let mut users = state.users.clone();
+        match state.guild {
+            Some(guild) => users.extend(state.members.nicks(guild).map(|(user, nick)| (user.0, nick.to_owned()))),
+            None => users.extend(
+                state.channel.into_iter().flat_map(|c| state.private_channels.iter().find(|p| p.id == c)).flat_map(
+                    |dm| {
+                        dm.recipients
+                            .iter()
+                            .filter_map(|u| Some((u.id.0, state.relationships.get(u.id)?.nickname.clone()?)))
+                    },
+                ),
+            ),
+        }
+        Names { users, channels, roles }
     }
 
     /// The line under a channel's name: a server channel's topic, a friend's
@@ -1842,11 +1857,19 @@ impl App {
         match system {
             Some(system) => parts.show_icon(system_icon(system.icon)),
             None if grouped => parts.hide_gutter(),
-            None => parts.show_avatar(&shown.author, || avatar_widget(&shown.author, 40, Some(&self.images))),
+            None => {
+                let state = self.state.borrow();
+                let server = state.avatar_in(shown.channel_id, shown.author.id);
+                let hash = server.map(|(_, hash)| hash).or(shown.author.avatar.as_deref());
+                parts.show_avatar(shown.author.id, hash, || {
+                    avatar_widget_in(&shown.author, 40, Some(&self.images), server)
+                })
+            }
         }
         parts.header.set_visible(system.is_none() && !grouped);
         if parts.header.is_visible() {
-            self.set_name(&parts.name, shown.channel_id, &shown.author, shown.author.display_name());
+            let name = self.state.borrow().name_in(shown.channel_id, &shown.author);
+            self.set_name(&parts.name, shown.channel_id, &shown.author, &name);
             parts.time.set_label(&parse_time(&shown.timestamp).map(|t| format_time(&t)).unwrap_or_default());
         }
         parts.edit_button.set_visible(editable);
@@ -2033,6 +2056,9 @@ impl App {
         } else if edited {
             body.append(&render::render(&[], &cx, edited));
         }
+        if message.is_loading() {
+            body.append(&Self::thinking(message));
+        }
         if let Some(poll) = &message.poll {
             body.append(&polls::poll(self, message, poll));
         }
@@ -2070,6 +2096,47 @@ impl App {
         if let Some(original) = message.forwarded() {
             body.append(&self.forward(message, &original, names));
         }
+        if message.is_ephemeral() && live {
+            body.append(&self.ephemeral_footer(message));
+        }
+    }
+
+    /// What an app's deferred answer says until it follows up
+    /// (`ApplicationCommandMessageContent`'s CREATED and TIMED_OUT, 594808).
+    fn thinking(message: &Message) -> gtk::Widget {
+        let timed_out = message.is_timed_out(now_ms());
+        let text = if timed_out {
+            "The application did not respond".to_owned()
+        } else {
+            format!("{} is thinking…", message.author.username)
+        };
+        let class = if timed_out { "error" } else { "dim-label" };
+        gtk::Label::builder().label(text).xalign(0.0).css_classes([class]).build().upcast()
+    }
+
+    /// Under an answer only we can see, with a way to dismiss it, which
+    /// removes it here and nowhere else (`dismiss` is a local delete,
+    /// `deleteMessage` in 138399).
+    fn ephemeral_footer(self: &Rc<Self>, message: &Message) -> gtk::Widget {
+        let line = gtk::Box::builder().spacing(6).css_classes(["caption", "dimmed"]).build();
+        line.append(&gtk::Image::from_icon_name("view-reveal-symbolic"));
+        let label = gtk::Label::builder()
+            .use_markup(true)
+            .label("Only you can see this • <a href=\"dismiss\">Dismiss message</a>")
+            .xalign(0.0)
+            .build();
+        label.connect_activate_link({
+            let this = Rc::downgrade(self);
+            let (id, channel) = (message.id, message.channel_id);
+            move |_, _| {
+                if let Some(this) = this.upgrade() {
+                    this.on_message_delete(id, channel);
+                }
+                glib::Propagation::Stop
+            }
+        });
+        line.append(&label);
+        line.upcast()
     }
 
     /// A forwarded message, under a bar as quotes are: what it said, and
@@ -2131,10 +2198,12 @@ impl App {
     fn message_kind(&self, message: &Message) -> Kind {
         let state = self.state.borrow();
         let channel = state.find_channel(message.channel_id);
+        let called = |user: &discord::User| state.name_in(message.channel_id, user);
         let place = system::Place {
             me: state.me(),
             guild_name: channel.and_then(|(guild, _)| guild).map(|g| g.name.as_str()),
             group: channel.is_some_and(|(_, c)| c.kind == discord::ChannelKind::GroupDm),
+            name: Some(&called),
         };
         system::kind(message, &place)
     }
@@ -2194,11 +2263,14 @@ impl App {
                 if blocked {
                     preview.append(&gtk::Image::from_icon_name("mail-reply-sender-symbolic"));
                 } else {
-                    preview.append(&avatar_widget(&original.author, 16, Some(&self.images)));
+                    let state = self.state.borrow();
+                    let server = state.avatar_in(original.channel_id, original.author.id);
+                    preview.append(&avatar_widget_in(&original.author, 16, Some(&self.images), server));
                 }
                 // Discord marks replies that pinged the author with an @.
                 let pinged = message.mentions.iter().any(|u| u.id == original.author.id);
-                let name = format!("{}{}", if pinged { "@" } else { "" }, original.author.display_name());
+                let called = self.state.borrow().name_in(original.channel_id, &original.author);
+                let name = format!("{}{}", if pinged { "@" } else { "" }, called);
                 preview.append(&self.name_label(original.channel_id, &original.author, &name));
                 let names = self.message_names(original);
                 // A forward reads as what it forwards.

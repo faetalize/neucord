@@ -144,6 +144,19 @@ changed for unrelated reasons only needs a note in the issue.
   to pick sends when chosen, several when the list closes with a change); and
   what turns components off, `v` in 911408 (anchor
   `getInteractionComponentState`) with `O` and the menu limits in 257249.
+- **Slash commands** (`commands.rs`, `ui/slash.rs`, `Rest::command_index`,
+  `run_command`, `autocomplete`). The endpoints, the gateway events, the
+  index and autocomplete stores (`ApplicationCommandIndexStore` holds how
+  commands are found and ordered) and `handleCommand`, the run's request, are
+  watched. Not watched: where a command may be used, `zl` in 46477 (anchor
+  `MISSING_BASE_PERMISSIONS`) with the place's permissions, `Bh` in 240591
+  (anchor `hasBaseAccessPermissions`), and the rule types, 1 role, 2 user, 3
+  channel (`RA` in 392054); how a command and its sub-commands are
+  listed and what is kept of them, `Lz` in 168186 (anchor `subCommandPath`);
+  what a run sends for each option, `A` in 545152 (anchor
+  `APPLICATION_COMMAND_USED`), and the checks a value passes, `J` in 300541
+  (anchor `allowEmptyValues`); which words the suggestions look up, `Yn` in
+  664929 (anchor `hasSpaceTerminator`).
 - **`ansi` code blocks** (`markup::ansi`, `render::ansi_markup`). Which codes
   read, and how: the parser in 626551 (anchor `brightMagenta`): the style
   codes it takes, in what order a sequence's resets and sets apply, that every
@@ -389,7 +402,15 @@ changed for unrelated reasons only needs a note in the issue.
   (anchor `guild_connections`) with 920268 (anchor `GUILD_APP`) picks
   `connections_role_id`. A note is asked for once a session by 612630 (anchor
   `USER_NOTE_LOAD_START`) wherever one renders, the popout (243166) and the
-  user menu (497600) included.
+  user menu (497600) included. The panel beside a DM (`ok` in 289287, anchor
+  `UserProfileSidebarRenderer`) asks for `type=sidebar` with mutual servers,
+  and for anyone but a bot either the friends or just their count, by the
+  experiment `rD` there (`2026-06-user-profile-sidebar-redesign`, variant 1,
+  read through `experiments.rs`). The list of mutual friends is asked for
+  once its section opens and the held one isn't as long as the count (229187,
+  anchor `isFetchingFriends`). A decoration's image is the shop's by `sku_id`
+  or else the preset's by `asset`, none once it lapses (`D` in 486020, with
+  `getCollectiblesItemAssetUrl` in 746002).
 
 ## Notifications and unread state
 
@@ -503,6 +524,10 @@ changed for unrelated reasons only needs a note in the issue.
   (`canCopyImage`, `canSaveImage`, `saveImage`, watched). The video controls'
   rules are 153440 (a click unmutes what began muted, `0`-`9` seek, ended
   stays paused) and 587481 (the volume and mute kept).
+- **What people are called in a server** (`State::name_in`, `Members`).
+  Client: 562153 (anchor `getNickname`): a server's nickname, in a DM what we
+  call a friend, else the name they go by. Their picture there replaces
+  their own.
 - **The user menu and who has a profile** (`USER` in `ui/menus.rs`,
   `User::non_user_bot`). Client: 841549 picks the menu by channel, the server
   variant is 107632 (`user-context`), which keeps its order. A system account

@@ -33,6 +33,7 @@ mod reactors;
 mod requests;
 mod scheduling;
 mod sidebar;
+mod slash;
 mod state;
 mod stickers;
 mod switcher;
@@ -152,6 +153,8 @@ pub struct App {
     viewer: viewer::Viewer,
     /// The voice message being recorded, or waiting to be sent.
     voice: voice::Voice,
+    /// The command being filled in, and the suggestions for it.
+    slash: slash::Slash,
     /// "Editing message" above the composer.
     edit_bar: gtk::Box,
     /// The message the composer is editing, if any.
@@ -176,6 +179,8 @@ pub struct App {
     reactors_view: RefCell<Option<Rc<reactors::View>>>,
     /// The thread browser, while it's open.
     threads_view: RefCell<Option<Rc<threads::View>>>,
+    /// The profiles on screen: the popout and the panel beside a DM.
+    profile_views: RefCell<profile::Views>,
     /// Opens the thread browser, from the chat's header.
     threads_button: gtk::Button,
     /// The quick switcher, while it's open.
@@ -337,6 +342,7 @@ impl App {
             toasts: adw::ToastOverlay::new(),
             viewer: viewer::Viewer::new(),
             voice: voice::Voice::new(),
+            slash: slash::Slash::new(),
             // Styled as the reply bar, which takes its place while editing.
             edit_bar: gtk::Box::builder().spacing(8).visible(false).css_classes(["reply-bar"]).build(),
             editing: RefCell::default(),
@@ -352,6 +358,7 @@ impl App {
             row_epoch: Cell::default(),
             reactors_view: RefCell::default(),
             threads_view: RefCell::default(),
+            profile_views: RefCell::default(),
             threads_button: gtk::Button::builder()
                 .icon_name("chat-message-new-symbolic")
                 .tooltip_text("Threads")

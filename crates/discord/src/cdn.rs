@@ -36,6 +36,16 @@ pub fn member_banner_url(guild_id: u64, user_id: u64, hash: &str, size: u16) -> 
     format!("{CDN}/guilds/{guild_id}/users/{user_id}/banners/{hash}.png?size={size}")
 }
 
+/// An avatar decoration of the collectibles shop, as a still image.
+pub fn decoration_url(sku: &str) -> String {
+    format!("{CDN}/media/v1/collectibles-shop/{sku}/static")
+}
+
+/// One of the older preset decorations, as a still image.
+pub fn decoration_preset_url(asset: &str, size: u16) -> String {
+    format!("{CDN}/avatar-decoration-presets/{asset}.png?size={size}&passthrough=false")
+}
+
 pub fn badge_icon_url(icon: &str) -> String {
     format!("{CDN}/badge-icons/{icon}.png")
 }
@@ -347,6 +357,11 @@ mod tests {
         assert_eq!(
             member_banner_url(9, 5, "b", 600),
             "https://cdn.discordapp.com/guilds/9/users/5/banners/b.png?size=600"
+        );
+        assert_eq!(decoration_url("5"), "https://cdn.discordapp.com/media/v1/collectibles-shop/5/static");
+        assert_eq!(
+            decoration_preset_url("a_x", 128),
+            "https://cdn.discordapp.com/avatar-decoration-presets/a_x.png?size=128&passthrough=false"
         );
         assert_eq!(badge_icon_url("i"), "https://cdn.discordapp.com/badge-icons/i.png");
     }
