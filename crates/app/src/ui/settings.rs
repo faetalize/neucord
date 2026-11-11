@@ -3,6 +3,9 @@
 //! (see [`discord::settings_sync`]). The official client's User Settings has
 //! far more; this is what the protobuf settings carry that a chat window
 //! uses.
+//!
+//! Neucord's own options are the last page. They aren't the account's, so they
+//! save to this computer ([`crate::config`]) and nothing is sent to Discord.
 
 use std::cell::Cell;
 use std::rc::{Rc, Weak};
@@ -15,6 +18,8 @@ use discord::settings_sync::{Save, SaveError, Schedule};
 use gtk::glib;
 
 use super::App;
+use super::state::State;
+use crate::config::{self, Key};
 
 /// Sets a row to the settings.
 type Show = Box<dyn Fn(&Settings)>;
@@ -73,6 +78,31 @@ impl Form {
         group.add(&row);
         self.shows.push(Box::new(move |settings| row.set_selected(get(settings))));
     }
+}
+
+/// A switch for one of Neucord's own options. It reads the option once, as
+/// nothing else changes it while the window is open.
+fn option_switch(
+    app: &Rc<App>,
+    group: &adw::PreferencesGroup,
+    title: &str,
+    subtitle: &str,
+    key: &'static Key,
+    changed: fn(&App, bool),
+) {
+    let row = adw::SwitchRow::builder().title(title).subtitle(subtitle).active(app.config.get(key)).build();
+    let app = Rc::downgrade(app);
+    row.connect_active_notify(move |row| {
+        let Some(app) = app.upgrade() else { return };
+        match app.config.set(key, row.is_active()) {
+            Ok(()) => changed(&app, row.is_active()),
+            Err(e) => {
+                eprintln!("config: {e}");
+                app.settings_toast("Could not save that option");
+            }
+        }
+    });
+    group.add(&row);
 }
 
 fn group(title: &str, description: &str) -> adw::PreferencesGroup {
@@ -193,10 +223,23 @@ impl App {
         );
         let privacy = page("Privacy", "channel-secure-symbolic", &[&joining]);
 
-        let dialog = adw::PreferencesDialog::builder().title("User Settings").build();
+        let typing = group("Typing", "");
+        option_switch(
+            self,
+            &typing,
+            "Let others see when I'm typing",
+            "You still see who else is typing.",
+            &config::SEND_TYPING,
+            |app, sending| app.state.borrow_mut().typing.set_sending(sending),
+        );
+        let neucord = page("Neucord", "preferences-system-symbolic", &[&typing]);
+        neucord.set_description("These are saved on this computer only, not to your Discord account.");
+
+        let dialog = adw::PreferencesDialog::builder().title("Settings").build();
         dialog.add(&chat);
         dialog.add(&notifications);
         dialog.add(&privacy);
+        dialog.add(&neucord);
         dialog.connect_closed({
             let this = Rc::downgrade(self);
             move |_| {
@@ -214,6 +257,14 @@ impl App {
         };
         show(&self.state.borrow().settings);
         Window { dialog, show: Box::new(show) }
+    }
+
+    /// The state of a session that hasn't begun, with the options and
+    /// remembered choices from disk.
+    pub(super) fn fresh_state(&self) -> State {
+        let mut state = State { members_closed: self.remembered.get(&config::MEMBERS_CLOSED), ..State::default() };
+        state.typing.set_sending(self.config.get(&config::SEND_TYPING));
+        state
     }
 
     /// Say how a save went where it's seen: the window covers the app's own

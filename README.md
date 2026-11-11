@@ -71,8 +71,10 @@ itself to Discord as Neucord instead of impersonating the official client.
 Link previews and GIFs load through Discord's media proxy, never from the
 site they link to, so those sites don't see your IP address.
 
-Your token is stored in the system keyring. Images are cached in
-`~/.cache/neucord/images/`, and the videos and sound you play in
+Your token is stored in the system keyring. Neucord's own options are in
+`~/.config/neucord/config.ini`, which you can edit by hand, and what it
+remembers between runs in `~/.local/state/neucord/state.ini`. Images are
+cached in `~/.cache/neucord/images/`, and the videos and sound you play in
 `~/.cache/neucord/videos/` (up to 256 MiB).
 
 ## Contributing
