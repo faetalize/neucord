@@ -339,6 +339,7 @@ impl App {
             relationships,
             read_states,
             notification_settings,
+            collapsed,
             guild_folders,
             media_settings,
             developer_mode,
@@ -377,6 +378,7 @@ impl App {
             state.read = read_states;
             state.guild_folders = guild_folders;
             state.notifications = notification_settings;
+            state.collapsed = collapsed;
             state.media = media_settings;
             state.developer_mode = developer_mode;
             state.media_takedown_regulated = media_takedown_regulated;

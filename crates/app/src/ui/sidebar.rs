@@ -59,6 +59,8 @@ pub(super) const COPY_CHANNEL_ID: Entry<ChannelTarget> = Entry::Item(Item {
 #[derive(Clone, Copy)]
 pub(super) enum Target {
     Channel(Snowflake),
+    /// A category's heading.
+    Category(Snowflake),
     Friends,
     Requests,
 }
@@ -104,19 +106,28 @@ impl App {
             return;
         };
         self.guild_name.set(&guild.name, None);
-        for (category, channels) in state.sidebar(guild) {
-            if let Some(category) = category {
-                let label = gtk::Label::builder()
-                    .label(category)
-                    .xalign(0.0)
-                    .ellipsize(pango::EllipsizeMode::End)
-                    .css_classes(["category", "dimmed"])
-                    .build();
-                let row = self.append_row(&label, None, false);
-                // A category's menu acts on the category's own channel, which its channels name.
-                if let Some(id) = channels.first().and_then(|c| c.parent_id) {
-                    self.menu_on(&row, menus::CATEGORY, id);
-                }
+        for section in state.sidebar(guild) {
+            let channels = section.channels;
+            if let Some(category) = section.category {
+                let heading = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                heading.append(
+                    &gtk::Label::builder()
+                        .label(category.name.as_deref().unwrap_or("unnamed"))
+                        .xalign(0.0)
+                        .hexpand(true)
+                        .ellipsize(pango::EllipsizeMode::End)
+                        .css_classes(["category", "dimmed"])
+                        .build(),
+                );
+                heading.append(&gtk::Image::from_icon_name(if section.folded {
+                    "pan-end-symbolic"
+                } else {
+                    "pan-down-symbolic"
+                }));
+                // Activating it folds or unfolds the category; it is no place to be.
+                let row = self.append_row(&heading, Some(Target::Category(category.id)), false);
+                row.set_selectable(false);
+                self.menu_on(&row, menus::CATEGORY, category.id);
             }
             for channel in channels {
                 let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -238,6 +249,10 @@ impl App {
     pub(super) fn activate_sidebar_row(self: &Rc<Self>, index: i32) {
         let target = usize::try_from(index).ok().and_then(|i| self.targets.borrow().get(i).copied().flatten());
         match target {
+            Some(Target::Category(id)) => {
+                let folded = self.state.borrow().collapsed.contains(id);
+                return self.fold_category(id, !folded);
+            }
             Some(Target::Channel(id)) => self.select_channel(id),
             Some(Target::Friends) => self.show_friends(),
             Some(Target::Requests) => self.show_requests(),

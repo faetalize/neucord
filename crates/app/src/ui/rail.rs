@@ -10,7 +10,7 @@ use gtk::prelude::*;
 
 use super::App;
 use super::menus::{self, At};
-use super::notify_menus::GuildTarget;
+use super::notify_menus::{FolderTarget, GuildTarget};
 use super::widgets::{initials, set_badge};
 use crate::images::Images;
 
@@ -101,6 +101,13 @@ impl App {
                                 this.toggle_folder(id);
                             }
                         }
+                    });
+                    // The folder's menu opens where its button is right-clicked, open or not.
+                    let servers: Vec<Snowflake> = members.iter().map(|g| g.id).collect();
+                    let (app, weak) = (Rc::downgrade(self), button.downgrade());
+                    menus::on_secondary(&button, move |x, y| {
+                        let (Some(app), Some(button)) = (app.upgrade(), weak.upgrade()) else { return };
+                        menus::popup(&app, menus::FOLDER, FolderTarget(servers.clone()), &button, At::Point(x, y));
                     });
                     if expanded {
                         button.add_css_class("expanded");
@@ -218,8 +225,12 @@ impl App {
                 // A channel with messages first, rather than a forum. Never a
                 // call's chat: the client's default channel (`getDefaultChannel`
                 // in 808728) takes the first selectable one.
-                let channels: Vec<_> =
-                    state.sidebar(g).into_iter().flat_map(|(_, c)| c).filter(|c| !c.kind.is_vocal()).collect();
+                let channels: Vec<_> = state
+                    .channels_by_category(g)
+                    .into_iter()
+                    .flat_map(|(_, c)| c)
+                    .filter(|c| !c.kind.is_vocal())
+                    .collect();
                 channels.iter().find(|c| !c.kind.is_forum_like()).or(channels.first()).map(|c| c.id)
             })
         };

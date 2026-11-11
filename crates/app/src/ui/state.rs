@@ -5,14 +5,15 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use discord::channel_icon;
+use discord::channel_list::{self, Collapsed, Facts, Row};
 use discord::cooldowns::Slowmode;
 use discord::experiments::Experiments;
 use discord::gifs::Tiles;
 use discord::limits::{Limits, Nitro};
 use discord::member_list::{self, MemberLists};
 use discord::members::{Members, RoleColour};
-use discord::notification_edit::BulkAck;
-use discord::notifications::{NotificationSettings, Place};
+use discord::notification_edit::{self, BulkAck};
+use discord::notifications::{Level, NotificationSettings, Place};
 use discord::permissions;
 use discord::read_state::ReadStates;
 use discord::relationships::Relationships;
@@ -54,6 +55,21 @@ pub(super) struct Unread {
     pub(super) acked: Snowflake,
     /// The first unread message has been in view.
     pub(super) seen: bool,
+}
+
+/// What the menu item for reading a channel is (see [`State::read_item`]).
+pub(super) enum ReadItem {
+    Read { enabled: bool },
+    Unread,
+}
+
+/// A group of the sidebar: a category and the channels it lists, or the
+/// channels that are in none.
+pub(super) struct Section<'a> {
+    pub(super) category: Option<&'a Channel>,
+    /// The category is folded, which leaves out most of its channels.
+    pub(super) folded: bool,
+    pub(super) channels: Vec<&'a Channel>,
 }
 
 #[derive(Default)]
@@ -120,6 +136,8 @@ pub(super) struct State {
     pub(super) notes: discord::notes::Notes,
     pub(super) read: ReadStates,
     pub(super) notifications: NotificationSettings,
+    /// The categories folded in the sidebar.
+    pub(super) collapsed: Collapsed,
     /// How embeds and media show.
     pub(super) media: MediaSettings,
     /// Menus offer to copy ids.
@@ -400,9 +418,49 @@ impl State {
         })
     }
 
-    /// The server's channels we can view, in sidebar order.
-    pub(super) fn sidebar<'a>(&self, guild: &'a Guild) -> Vec<(Option<&'a str>, Vec<&'a Channel>)> {
+    /// The channels we can see in a server, grouped by category in sidebar
+    /// order: where the client's default channel comes from, whatever is folded.
+    pub(super) fn channels_by_category<'a>(&self, guild: &'a Guild) -> Vec<(Option<&'a Channel>, Vec<&'a Channel>)> {
         self.account.as_ref().map(|me| guild.sidebar(me, now_unix())).unwrap_or_default()
+    }
+
+    /// What the sidebar lists of a server: its channels by category, less
+    /// the ones a folded category or Hide Muted Channels leaves out
+    /// ([`channel_list::row`]).
+    pub(super) fn sidebar<'a>(&self, guild: &'a Guild) -> Vec<Section<'a>> {
+        let now = now_unix();
+        let hide_muted = self.notifications.hide_muted_channels(guild.id);
+        let mut sections = Vec::new();
+        for (category, channels) in self.channels_by_category(guild) {
+            let folded = category.is_some_and(|c| self.collapsed.contains(c.id));
+            let rows: Vec<(Row, &Channel)> = channels
+                .into_iter()
+                .map(|c| (channel_list::row(&self.list_facts(guild, c, now), hide_muted, folded), c))
+                .collect();
+            if !channel_list::category_listed(&rows.iter().map(|&(row, _)| row).collect::<Vec<_>>()) {
+                continue;
+            }
+            let channels = rows.into_iter().filter(|&(row, _)| row == Row::Listed).map(|(_, c)| c).collect();
+            sections.push(Section { category, folded, channels });
+        }
+        sections
+    }
+
+    fn list_facts(&self, guild: &Guild, channel: &Channel, now: i64) -> Facts {
+        let open_thread = self.channel.and_then(|id| guild.thread(id)).is_some_and(|t| t.parent_id == Some(channel.id));
+        Facts {
+            selected: self.channel == Some(channel.id),
+            thread_open: open_thread,
+            has_threads: !self.sidebar_threads(guild, channel).is_empty(),
+            mentions: self.read.mentions(channel.id) > 0,
+            muted: self.notifications.channel_muted_itself(guild.id, channel.id, now),
+            category_muted: channel
+                .parent_id
+                .is_some_and(|parent| self.notifications.channel_muted_itself(guild.id, parent, now)),
+            unread: self.is_unread(channel),
+            text_like: channel.kind.is_text() || channel.kind.is_forum_like(),
+            vocal: channel.kind.is_vocal(),
+        }
     }
 
     /// The threads the sidebar lists under `parent` (see [`threads::listed`]).
@@ -414,7 +472,9 @@ impl State {
             channel: parent.id,
             parent: parent.parent_id,
         };
-        let muted = self.notifications.channel_muted(&place, now_unix());
+        // A folded category lists its threads as a muted one does: the unread ones.
+        let folded = parent.parent_id.is_some_and(|category| self.collapsed.contains(category));
+        let muted = self.notifications.channel_muted(&place, now_unix()) || folded;
         let listed = threads::listed(guild, parent, self.channel, muted, &self.read, now_ms());
         listed.into_iter().filter(|t| guild.can_view(t, me, now_unix())).collect()
     }
@@ -451,6 +511,20 @@ impl State {
         }
     }
 
+    /// Whether `thread` is a post of a forum or media channel, which the
+    /// client words some of its items for.
+    pub(super) fn is_forum_post(&self, thread: Snowflake) -> bool {
+        self.find_channel(thread).is_some_and(|(guild, t)| {
+            t.kind.is_thread()
+                && guild.zip(t.parent_id).and_then(|(g, p)| g.channel(p)).is_some_and(|p| p.kind.is_forum_like())
+        })
+    }
+
+    /// Whether our mute of `thread` is running.
+    pub(super) fn thread_is_muted(&self, thread: Snowflake) -> bool {
+        self.find_channel(thread).is_some_and(|(_, t)| Self::thread_muted(t))
+    }
+
     /// A thread we muted.
     pub(super) fn thread_muted(thread: &Channel) -> bool {
         thread.member.as_ref().is_some_and(|m| m.is_muted(now_unix()))
@@ -473,32 +547,105 @@ impl State {
     /// What "Mark As Read" on a channel or a category acks, each with its
     /// newest message (`hS` in 334738): a category's channels and the active
     /// threads we joined in them, read or not; a channel just itself. A forum
-    /// has no newest message to ack here, and is left.
+    /// has no message of its own to ack, so it gets the moment, as a snowflake
+    /// made from the clock (`fromTimestamp(Date.now())`).
     pub(super) fn ack_targets(&self, id: Snowflake) -> Vec<(Snowflake, Snowflake)> {
         let Some((guild, channel)) = self.find_channel(id) else { return Vec::new() };
         let newest = |c: &Channel| Some((c.id, c.last_message_id?));
+        if channel.kind.is_forum_like() {
+            return vec![(id, Snowflake::from_unix_ms(now_ms()))];
+        }
         if channel.kind != ChannelKind::Category {
-            return if channel.kind.is_forum_like() { Vec::new() } else { newest(channel).into_iter().collect() };
+            return newest(channel).into_iter().collect();
         }
         let Some(guild) = guild else { return Vec::new() };
-        let children: Vec<&Channel> =
-            self.visible(guild, |k| k.is_text() || k.is_vocal()).filter(|c| c.parent_id == Some(id)).collect();
+        let children = self.category_children(guild, id);
         let threads = threads::joined_active(guild).filter(|t| children.iter().any(|c| Some(c.id) == t.parent_id));
         children.iter().copied().chain(threads).filter_map(newest).collect()
     }
 
-    /// What "Mark As Read" on a server acks (`567035`): its channels and
-    /// calls we can see, and the threads we joined in them, where something is
-    /// unread or mentions us, each with its newest message.
+    /// A category's channels we can see that the client lists with it
+    /// (`getCategories` filtered by `Z_`): text, forums, voice and stages.
+    fn category_children<'a>(&'a self, guild: &'a Guild, category: Snowflake) -> Vec<&'a Channel> {
+        self.visible(guild, |k| k.is_text() || k.is_vocal() || k.is_forum_like())
+            .filter(|c| c.parent_id == Some(category))
+            .collect()
+    }
+
+    /// What "Mark As Read" on a server, or on a folder (all its servers), acks
+    /// (567035, filtered by `BULK_ACK` in 218461): every forum and media
+    /// channel we can see, with the moment, and the channels and calls and the
+    /// threads we joined in them that have something unread or a mention, each
+    /// with its newest message.
     pub(super) fn guild_acks(&self, guild: &Guild) -> Vec<BulkAck> {
-        let channels: Vec<&Channel> = self.visible(guild, |k| k.is_text() || k.is_vocal()).collect();
+        let channels: Vec<&Channel> =
+            self.visible(guild, |k| k.is_text() || k.is_vocal() || k.is_forum_like()).collect();
         let threads = threads::joined_active(guild).filter(|t| channels.iter().any(|c| Some(c.id) == t.parent_id));
         channels
             .iter()
             .copied()
             .chain(threads)
-            .filter(|c| self.has_news(c))
-            .filter_map(|c| Some(BulkAck { channel: c.id, message: c.last_message_id? }))
+            .filter_map(|c| {
+                if c.kind.is_forum_like() {
+                    Some(BulkAck { channel: c.id, message: Snowflake::from_unix_ms(now_ms()) })
+                } else {
+                    self.has_news(c).then_some(())?;
+                    Some(BulkAck { channel: c.id, message: c.last_message_id? })
+                }
+            })
+            .collect()
+    }
+
+    /// Whether a server has anything unread or a mention, even muted
+    /// (`getGuildHasUnreadIgnoreMuted` in 458294): what Mark As Read on its
+    /// icon, or on a folder, is greyed by.
+    pub(super) fn guild_has_news(&self, guild: &Guild) -> bool {
+        let channels = self.visible(guild, |k| k.is_text() || k.is_vocal() || k.is_forum_like());
+        let mut channels = channels.filter(|c| !c.kind.is_vocal() || self.read.mentions(c.id) > 0);
+        channels.any(|c| self.has_news(c)) || threads::joined_active(guild).any(|t| self.has_news(t))
+    }
+
+    /// What the one item the client shows for reading and unreading a channel
+    /// offers (511904): Mark As Read, enabled while something is unread, or
+    /// where the experiment gives it and nothing is, Mark Unread.
+    pub(super) fn read_item(&self, id: Snowflake) -> Option<ReadItem> {
+        let (guild, channel) = self.find_channel(id)?;
+        // A thread we haven't joined, or one that is archived, keeps no read mark (`canBeUnread`).
+        let trackable = !channel.kind.is_thread() || (channel.member.is_some() && channel.is_active_thread());
+        let unread = if channel.kind.is_forum_like() {
+            guild.is_some_and(|g| threads::forum_unread_posts(g, channel, &self.read) > 0)
+        } else if channel.kind == ChannelKind::Category {
+            guild.is_some_and(|g| {
+                let children = self.category_children(g, id);
+                children.iter().any(|c| self.has_news(c))
+                    || threads::joined_active(g)
+                        .filter(|t| children.iter().any(|c| Some(c.id) == t.parent_id))
+                        .any(|t| !Self::thread_muted(t) && self.has_news(t))
+            })
+        } else {
+            trackable && self.has_news(channel)
+        };
+        let can_be_unread = trackable && channel.kind != ChannelKind::Category && channel.last_message_id.is_some();
+        let offered = self
+            .account
+            .as_ref()
+            .is_some_and(|me| notification_edit::offers_mark_channel_unread(&self.experiments, me.id));
+        Some(if offered && !unread && can_be_unread { ReadItem::Unread } else { ReadItem::Read { enabled: unread } })
+    }
+
+    /// Which messages in a thread we joined notify (607508).
+    pub(super) fn thread_notification_level(&self, id: Snowflake) -> Option<Level> {
+        let (_, thread) = self.find_channel(id)?;
+        let parent = self.place(thread.parent_id?)?;
+        Some(self.notifications.thread_level(thread, &parent, now_unix()))
+    }
+
+    /// The folds Discord doesn't have yet, with each category's server.
+    pub(super) fn unsaved_folds(&self) -> Vec<(Snowflake, Snowflake, bool)> {
+        self.collapsed
+            .unsaved()
+            .into_iter()
+            .filter_map(|(category, folded)| Some((self.find_channel(category)?.0?.id, category, folded)))
             .collect()
     }
 
@@ -582,8 +729,10 @@ impl State {
         let channels: Vec<(Place, &Channel)> = match self.guild.and_then(|id| self.guilds.iter().find(|g| g.id == id)) {
             Some(guild) => {
                 let mut rows = Vec::new();
-                for (_, channels) in self.sidebar(guild) {
-                    for c in channels {
+                sig.push(self.notifications.hide_muted_channels(guild.id) as u64);
+                for section in self.sidebar(guild) {
+                    sig.extend([section.category.map_or(0, |c| c.id.0), section.folded as u64]);
+                    for c in section.channels {
                         rows.push((
                             Place { guild: Some(guild.id), guild_default: 0, channel: c.id, parent: c.parent_id },
                             c,
@@ -789,17 +938,183 @@ mod tests {
             {"id": "40", "last_message_id": "1", "mention_count": 2},
         ]));
         let ids = |targets: Vec<(Snowflake, Snowflake)>| targets.iter().map(|(c, m)| (c.0, m.0)).collect::<Vec<_>>();
-        // A category acks its channels, read or not, and the threads we joined in them: not a forum, nor a
-        // channel with nothing in it, nor a thread we haven't joined.
-        assert_eq!(ids(state.ack_targets(Snowflake(8))), [(20, 300), (21, 310), (40, 1_570_000_000_000_000_000)]);
+        // A category acks its channels, forums among them, read or not, and the threads we joined in them:
+        // not a channel with nothing in it, nor a thread we haven't joined.
+        let thread = 1_570_000_000_000_000_000;
+        assert_eq!(ids(state.ack_targets(Snowflake(8))), [(20, 300), (21, 310), (23, 320), (40, thread)]);
         assert_eq!(ids(state.ack_targets(Snowflake(20))), [(20, 300)]);
-        assert!(state.ack_targets(Snowflake(23)).is_empty(), "a forum");
         assert!(state.ack_targets(Snowflake(22)).is_empty(), "no message yet");
+        // A forum has no message of its own: it is read up to the moment.
+        let forum = state.ack_targets(Snowflake(23));
+        assert_eq!(forum.len(), 1);
+        assert_eq!(forum[0].0, Snowflake(23));
+        assert!(forum[0].1.unix_ms().abs_diff(now_ms()) < 5_000, "a snowflake of the clock");
 
-        // A server acks only what is unread or mentions us.
+        // A server acks every forum, and only what else is unread or mentions us.
         let acks: Vec<(u64, u64)> =
             state.guild_acks(&state.guilds[0]).iter().map(|a| (a.channel.0, a.message.0)).collect();
-        assert_eq!(acks, [(21, 310), (40, 1_570_000_000_000_000_000)]);
+        let channels: Vec<u64> = acks.iter().map(|a| a.0).collect();
+        assert_eq!(channels, [21, 23, 40]);
+        assert_eq!((acks[0].1, acks[2].1), (310, thread));
+    }
+
+    #[test]
+    fn mark_as_read_is_greyed_by_what_the_client_greys_it_by() {
+        let mut state = open_server(None, json!({"last_message_id": "100"}));
+        state.guilds[0].set_role(serde_json::from_value(json!({"id": "1", "permissions": "1049600"})).unwrap());
+        let mut add = |json: serde_json::Value| state.guilds[0].channels.push(serde_json::from_value(json).unwrap());
+        add(json!({"id": "8", "type": 4, "name": "Cat"}));
+        add(json!({"id": "20", "type": 0, "parent_id": "8", "last_message_id": "300"}));
+        add(json!({"id": "21", "type": 0, "parent_id": "8", "last_message_id": "310"}));
+        add(json!({"id": "23", "type": 15, "parent_id": "8", "last_message_id": "320"}));
+        state.guilds[0].threads = vec![
+            serde_json::from_value(json!({"id": "40", "type": 11, "parent_id": "23",
+                       "last_message_id": "20971520", "thread_metadata": {"archived": false, "auto_archive_duration": 60},
+                       "member": {"flags": 0, "join_timestamp": "2026-10-28T00:00:00Z"}}))
+            .unwrap(),
+        ];
+        state.read = ReadStates::from_ready(&json!([
+            {"id": "20", "last_message_id": "300", "mention_count": 0},
+            {"id": "21", "last_message_id": "300", "mention_count": 0},
+            {"id": "23", "last_message_id": "8388608", "mention_count": 0},
+            {"id": "40", "last_message_id": "4194304", "mention_count": 0},
+        ]));
+        let enabled = |state: &State, id: u64| match state.read_item(Snowflake(id)) {
+            Some(ReadItem::Read { enabled }) => Some(enabled),
+            _ => None,
+        };
+        assert_eq!(enabled(&state, 20), Some(false), "nothing unread");
+        assert_eq!(enabled(&state, 21), Some(true), "a message after what we read");
+        assert_eq!(enabled(&state, 8), Some(true), "a category with one unread");
+        assert_eq!(enabled(&state, 23), Some(true), "a forum with a post newer than its mark");
+        assert_eq!(enabled(&state, 40), Some(true), "a joined thread");
+        state.guilds[0].threads.push(
+            serde_json::from_value(json!({"id": "41", "type": 11, "parent_id": "20", "last_message_id": "20971520",
+                       "thread_metadata": {"archived": false, "auto_archive_duration": 60}}))
+            .unwrap(),
+        );
+        assert_eq!(enabled(&state, 41), Some(false), "a thread we haven't joined keeps no read mark");
+
+        // Mark Unread replaces it, where the experiment gives it, on what is read and has a message.
+        state.experiments =
+            Experiments::from_ready(&json!({"apex_experiments": {"assignments": {"1": {"5": {"assignments": [
+                [discord::experiments::murmur3("2026-08-mark-channel-unread"), 1, 0, 1]
+            ]}}}}}));
+        assert!(matches!(state.read_item(Snowflake(20)), Some(ReadItem::Unread)));
+        assert_eq!(enabled(&state, 21), Some(true), "unread stays Mark As Read");
+        assert_eq!(enabled(&state, 8), Some(true), "never on a category");
+        assert!(state.read_item(Snowflake(22)).is_none(), "not a channel");
+        state.guilds[0].channels.iter_mut().find(|c| c.id == Snowflake(20)).unwrap().last_message_id = None;
+        assert_eq!(enabled(&state, 20), Some(false), "nothing to mark unread from");
+    }
+
+    /// A server with a category of two channels and one outside it, which everyone sees.
+    fn categorised(extra: serde_json::Value) -> State {
+        let mut state = open_server(None, json!({"position": 0}));
+        state.guilds[0].set_role(serde_json::from_value(json!({"id": "1", "permissions": "1049600"})).unwrap());
+        for channel in [
+            json!({"id": "8", "type": 4, "name": "Cat", "position": 1}),
+            json!({"id": "20", "type": 0, "parent_id": "8", "name": "busy", "position": 0, "last_message_id": "300"}),
+            json!({"id": "21", "type": 0, "parent_id": "8", "name": "quiet", "position": 1, "last_message_id": "300"}),
+            json!({"id": "22", "type": 2, "parent_id": "8", "name": "call", "position": 2}),
+        ] {
+            state.guilds[0].channels.push(serde_json::from_value(channel).unwrap());
+        }
+        state.read = ReadStates::from_ready(&json!([
+            {"id": "20", "last_message_id": "100", "mention_count": 0},
+            {"id": "21", "last_message_id": "300", "mention_count": 0},
+        ]));
+        state.notifications = NotificationSettings::from_ready(&json!([extra]));
+        state
+    }
+
+    fn listed(state: &State) -> Vec<(Option<u64>, Vec<u64>)> {
+        let sections = state.sidebar(&state.guilds[0]);
+        sections.iter().map(|s| (s.category.map(|c| c.id.0), s.channels.iter().map(|c| c.id.0).collect())).collect()
+    }
+
+    #[test]
+    fn a_folded_category_lists_what_is_unread_and_hiding_muted_channels_drops_them() {
+        let mut state = categorised(json!({"guild_id": "1", "channel_overrides": [
+            {"channel_id": "21", "muted": true, "mute_config": null}
+        ]}));
+        assert_eq!(listed(&state), [(None, vec![9]), (Some(8), vec![20, 21, 22])]);
+
+        // Folded: the unread channel stays; the muted one, the read one and the call go.
+        state.collapsed.set(Snowflake(8), true);
+        assert_eq!(listed(&state), [(None, vec![9]), (Some(8), vec![20])]);
+        // The one that is open stays too, and a mention.
+        state.channel = Some(Snowflake(21));
+        assert_eq!(listed(&state)[1].1, [20, 21]);
+        state.channel = None;
+        state.read = ReadStates::from_ready(&json!([
+            {"id": "20", "last_message_id": "300", "mention_count": 0},
+            {"id": "22", "last_message_id": "300", "mention_count": 2},
+        ]));
+        assert_eq!(listed(&state)[1].1, [22], "all read but a call with a mention");
+
+        // Unfolded, with muted channels hidden: the muted channel is the one to go.
+        state.collapsed.set(Snowflake(8), false);
+        state.notifications.apply(Some(Snowflake(1)), &json!({"hide_muted_channels": true}));
+        assert_eq!(listed(&state)[1].1, [20, 22]);
+        // A category with nothing but hidden channels goes too, and a folded one keeps its heading.
+        state
+            .notifications
+            .apply(Some(Snowflake(1)), &json!({"channel_overrides": {"20": {"muted": true}, "22": {"muted": true}}}));
+        state.read = ReadStates::default();
+        assert_eq!(listed(&state), [(None, vec![9])]);
+        state.notifications.apply(Some(Snowflake(1)), &json!({"hide_muted_channels": false}));
+        state.collapsed.set(Snowflake(8), true);
+        assert_eq!(listed(&state)[1], (Some(8), vec![]), "only its heading");
+    }
+
+    #[test]
+    fn what_a_server_wants_saved_includes_folds_with_their_servers() {
+        let mut state = categorised(json!({"guild_id": "1"}));
+        assert!(state.unsaved_folds().is_empty());
+        state.collapsed.set(Snowflake(8), true);
+        state.collapsed.set(Snowflake(77), true);
+        assert_eq!(
+            state.unsaved_folds(),
+            [(Snowflake(1), Snowflake(8), true)],
+            "a category we don't know has no server"
+        );
+    }
+
+    #[test]
+    fn a_thread_is_worded_by_its_parent_and_its_level_follows_its_member() {
+        let mut state = categorised(json!({"guild_id": "1", "message_notifications": 1}));
+        state.guilds[0]
+            .channels
+            .push(serde_json::from_value(json!({"id": "30", "type": 15, "name": "ideas"})).unwrap());
+        state.guilds[0].threads = ["20", "30"]
+            .into_iter()
+            .zip([40, 41])
+            .map(|(parent, id)| {
+                serde_json::from_value(json!({"id": id.to_string(), "type": 11, "parent_id": parent,
+                    "member": {"flags": 4, "muted": false, "join_timestamp": "2026-10-28T00:00:00Z"}}))
+                .unwrap()
+            })
+            .collect();
+        assert!(!state.is_forum_post(Snowflake(40)) && state.is_forum_post(Snowflake(41)));
+        assert!(!state.is_forum_post(Snowflake(20)), "a channel is no post");
+        assert_eq!(state.thread_notification_level(Snowflake(40)), Some(Level::Mentions), "its own flags");
+        state.guilds[0].threads[0].member.as_mut().unwrap().flags = 0;
+        assert_eq!(state.thread_notification_level(Snowflake(40)), Some(Level::Mentions), "its parent's level");
+        state.guilds[0].threads[0].member.as_mut().unwrap().muted = true;
+        assert!(state.thread_is_muted(Snowflake(40)) && !state.thread_is_muted(Snowflake(41)));
+        state.guilds[0].threads[0].member = None;
+        assert_eq!(state.thread_notification_level(Snowflake(40)), Some(Level::Nothing), "not joined");
+    }
+
+    #[test]
+    fn a_server_is_greyed_by_news_in_what_we_can_see() {
+        let mut state = open_server(None, json!({"last_message_id": "100"}));
+        state.guilds[0].set_role(serde_json::from_value(json!({"id": "1", "permissions": "1049600"})).unwrap());
+        state.read = ReadStates::from_ready(&json!([{"id": "9", "last_message_id": "100", "mention_count": 0}]));
+        assert!(!state.guild_has_news(&state.guilds[0]));
+        state.read = ReadStates::from_ready(&json!([{"id": "9", "last_message_id": "50", "mention_count": 0}]));
+        assert!(state.guild_has_news(&state.guilds[0]));
     }
 
     #[test]
