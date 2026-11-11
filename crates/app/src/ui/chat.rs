@@ -111,6 +111,36 @@ pub(super) const COPY_MESSAGE_ID: Entry<MessageTarget> = Entry::Item(Item {
     }),
 });
 
+/// How many messages' content is kept. Scrolling binds each message to a row
+/// several times over, as the list guesses at the height of rows it hasn't
+/// measured, and making a message's content again means shaping its text
+/// again, which is the largest part of what binding costs. A few screens'
+/// worth catches the rebinds; it isn't tuned.
+pub(super) const KEPT_CONTENT: usize = 128;
+
+/// What a message's row showed, taken out of the row to be put back in one.
+pub(super) struct KeptContent {
+    message: Message,
+    /// The [`App`]'s `row_epoch` it was made at.
+    epoch: u64,
+    widgets: Vec<gtk::Widget>,
+}
+
+/// Selected text doesn't come back selected.
+fn clear_selections(widgets: &[gtk::Widget]) {
+    fn visit(widget: &gtk::Widget) {
+        if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+            label.select_region(0, 0);
+        }
+        let mut child = widget.first_child();
+        while let Some(c) = child {
+            visit(&c);
+            child = c.next_sibling();
+        }
+    }
+    widgets.iter().for_each(visit);
+}
+
 impl App {
     /// The chat column: the message list (with scrollback) from edge to edge,
     /// and the header bar and composer floating over it.
@@ -1306,6 +1336,7 @@ impl App {
     /// content again too, which [`Self::rebind`] alone leaves as it was.
     pub(super) fn refresh_rows(self: &Rc<Self>) {
         self.row_epoch.set(self.row_epoch.get() + 1);
+        self.kept_content.borrow_mut().clear();
         let messages = self.messages();
         self.rebind(&messages, 0, messages.n_items());
     }
@@ -1607,10 +1638,25 @@ impl App {
             return;
         }
         let content = &parts.content;
+        let old = parts.shown.take();
+        let mut widgets = Vec::new();
         while let Some(child) = content.first_child() {
             content.remove(&child);
+            widgets.push(child);
         }
-        if let Some(system) = system {
+        // What the row showed is worth keeping if it is still what that
+        // message would be drawn as.
+        if let Some((old, at)) = old.filter(|(_, at)| *at == epoch) {
+            clear_selections(&widgets);
+            self.kept_content.borrow_mut().put(old.id, KeptContent { message: old, epoch: at, widgets });
+        }
+        let kept =
+            self.kept_content.borrow_mut().take(&message.id, |kept| kept.epoch == epoch && kept.message == *message);
+        if let Some(kept) = kept {
+            for widget in &kept.widgets {
+                content.append(widget);
+            }
+        } else if let Some(system) = system {
             content.append(&self.system_line(message, system));
             if let Some(outcome) = discord::poll::outcome(message) {
                 content.append(&polls::outcome(&outcome, &self.images));
