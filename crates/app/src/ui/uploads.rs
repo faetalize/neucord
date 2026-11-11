@@ -300,7 +300,8 @@ impl App {
                 || self.voice_channel().is_some()
                 || self.poll_channel().is_some()
                 || self.schedule_channel().is_some()
-                || self.thread_channel().is_some(),
+                || self.thread_channel().is_some()
+                || self.apps_channel().is_some(),
         );
         self.refresh_schedule_bar();
         while let Some(child) = drafts.tray.first_child() {

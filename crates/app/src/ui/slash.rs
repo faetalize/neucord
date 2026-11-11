@@ -1,6 +1,8 @@
 //! Slash commands: the suggestions after a `/`, the form for a command's
-//! options, and running it. What each sends and when comes from the client's
-//! command code; see `discord::commands`.
+//! options, and running it; and the Apps item of the message and user menus,
+//! which runs a user or message command, and Use Apps in the attach menu.
+//! What each sends and when comes from the client's command code; see
+//! `discord::commands`.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -12,10 +14,13 @@ use discord::commands::{
     self, App as CommandApp, Autocomplete, Command, CommandOption, Names, Run, command_type, option_type,
 };
 use discord::{Snowflake, interaction::Failure};
-use gtk::glib;
+use gtk::{gio, glib};
 
 use super::App;
+use super::chat::MessageTarget;
 use super::composer::Completion;
+use super::menus::{Entry, Item, Kind, Live};
+use super::profile::UserTarget;
 
 /// How long typing in an option waits before asking its app for choices
 /// again (`debounce`, 500 ms leading and trailing, in 496533).
@@ -98,6 +103,218 @@ impl Slash {
         self.active.borrow().is_some()
     }
 }
+
+/// A user or message a command of the Apps menu acts on, and where.
+#[derive(Clone, Copy)]
+pub(super) struct Subject {
+    pub(super) channel: Snowflake,
+    /// [`command_type::USER`] or [`command_type::MESSAGE`].
+    pub(super) kind: u8,
+    pub(super) target: Snowflake,
+}
+
+/// What a menu is opened on, for the Apps item.
+pub(super) trait CommandTarget {
+    /// What its commands act on, if the menu has an Apps item.
+    fn subject(&self) -> Option<Subject>;
+}
+
+impl CommandTarget for MessageTarget {
+    /// The message the row shows (`commandTargetId` in 761304).
+    fn subject(&self) -> Option<Subject> {
+        let message = self.shown();
+        Some(Subject { channel: message.channel_id, kind: command_type::MESSAGE, target: message.id })
+    }
+}
+
+impl CommandTarget for UserTarget {
+    /// The person, in the channel the menu was opened in (107632). A system
+    /// account or a webhook's author has no Apps item.
+    fn subject(&self) -> Option<Subject> {
+        let channel = self.channel.filter(|_| !self.user.non_user_bot())?;
+        Some(Subject { channel, kind: command_type::USER, target: self.user.id })
+    }
+}
+
+/// Apps, in the message and user menus (173500): the commands of the apps
+/// in the channel that act on that message or person.
+pub(super) const MESSAGE_APPS: Entry<MessageTarget> = apps_item();
+pub(super) const USER_APPS: Entry<UserTarget> = apps_item();
+
+const fn apps_item<T: CommandTarget + 'static>() -> Entry<T> {
+    Entry::Item(Item { name: "apps", label: "_Apps", shows: shows_apps::<T>, kind: Kind::Live(apps_menu::<T>) })
+}
+
+/// Textual channels only (`offers_apps`), and where there is somewhere to
+/// look for commands.
+fn shows_apps<T: CommandTarget>(app: &App, target: &T) -> bool {
+    let Some(subject) = target.subject() else { return false };
+    let state = app.state.borrow();
+    state.find_channel(subject.channel).is_some_and(|(_, c)| commands::offers_apps(c.kind))
+        && state.command_place(subject.channel).is_some()
+}
+
+/// The commands under Apps, kept for the menu while it is open: a search
+/// box, and the commands by app, or the ones the search finds. The indexes
+/// are fetched as the item is made, as the client's hook does as the menu
+/// renders (`cu` in 842209 with `allowFetch`), and the list is made again
+/// when they arrive.
+struct AppsMenu {
+    app: std::rc::Weak<App>,
+    subject: Subject,
+    /// The commands, below the search box.
+    menu: gio::Menu,
+    actions: gio::SimpleActionGroup,
+    /// The actions of the commands now listed.
+    listed: RefCell<Vec<String>>,
+    /// What was typed in the search box.
+    query: RefCell<String>,
+    made: Cell<u32>,
+}
+
+fn apps_menu<T: CommandTarget + 'static>(app: &Rc<App>, target: &Rc<T>, live: Live) {
+    let Some(subject) = target.subject() else { return };
+    let search = gtk::SearchEntry::builder().placeholder_text("Search commands").build();
+    let custom = gio::MenuItem::new(None, None);
+    custom.set_attribute_value("custom", Some(&"command-search".to_variant()));
+    let top = gio::Menu::new();
+    top.append_item(&custom);
+    live.menu.append_section(None, &top);
+    let commands = gio::Menu::new();
+    live.menu.append_section(None, &commands);
+    live.widgets.borrow_mut().push(("command-search", search.clone().upcast()));
+
+    let menu = Rc::new(AppsMenu {
+        app: Rc::downgrade(app),
+        subject,
+        menu: commands,
+        actions: live.actions,
+        listed: RefCell::default(),
+        query: RefCell::default(),
+        made: Cell::default(),
+    });
+    // The box owns the list: no more of it once the menu is gone.
+    search.connect_search_changed({
+        let menu = menu.clone();
+        move |search| {
+            *menu.query.borrow_mut() = search.text().to_string();
+            menu.list();
+        }
+    });
+    let place = app.state.borrow().command_place(subject.channel);
+    if let Some(place) = place {
+        app.fetch_command_indexes(&place, {
+            let menu = Rc::downgrade(&menu);
+            Rc::new(move || {
+                if let Some(menu) = menu.upgrade() {
+                    menu.list();
+                }
+            })
+        });
+    }
+    menu.list();
+}
+
+/// What the Apps menu has to show.
+enum Listing {
+    Loading,
+    Empty,
+    /// Commands found for what was searched for, best first: id and name.
+    Found(Vec<(String, String)>),
+    /// Each app and its commands.
+    Apps(Vec<(String, Vec<(String, String)>)>),
+}
+
+impl AppsMenu {
+    /// Fill the menu with what is known now.
+    fn list(&self) {
+        let Some(app) = self.app.upgrade() else { return };
+        let listing = {
+            let state = app.state.borrow();
+            let Some(place) = state.command_place(self.subject.channel) else { return };
+            let query = self.query.borrow();
+            let found = state.commands.find(&place, self.subject.kind, &query);
+            let own = |f: &commands::Found| (f.command.id.clone(), f.command.display_name.clone());
+            if state.commands.loading(&place) {
+                Listing::Loading
+            } else if found.is_empty() {
+                Listing::Empty
+            } else if !query.is_empty() {
+                Listing::Found(found.iter().map(own).collect())
+            } else {
+                let apps = commands::by_app(found).into_iter().map(|(app, found)| {
+                    let command = |c: &Command| (c.id.clone(), c.display_name.clone());
+                    (app.name.clone(), found.into_iter().map(command).collect())
+                });
+                Listing::Apps(apps.collect())
+            }
+        };
+        for name in self.listed.take() {
+            self.actions.remove_action(&name);
+        }
+        self.menu.remove_all();
+        match listing {
+            Listing::Loading => self.placeholder("Loading…"),
+            Listing::Empty => self.placeholder("No Commands Available"),
+            Listing::Found(found) => {
+                for (id, name) in found {
+                    self.menu.append_item(&self.command(&id, &name));
+                }
+            }
+            Listing::Apps(apps) => {
+                let group = gio::Menu::new();
+                for (name, found) in apps {
+                    let commands = gio::Menu::new();
+                    for (id, name) in found {
+                        commands.append_item(&self.command(&id, &name));
+                    }
+                    group.append_submenu(Some(&name.replace('_', "__")), &commands);
+                }
+                self.menu.append_section(Some("Apps"), &group);
+            }
+        }
+    }
+
+    /// An item that does nothing.
+    fn placeholder(&self, label: &str) {
+        let action = gio::SimpleAction::new("command-none", None);
+        action.set_enabled(false);
+        self.actions.add_action(&action);
+        self.listed.borrow_mut().push("command-none".into());
+        self.menu.append(Some(label), Some("menu.command-none"));
+    }
+
+    /// An item that runs the command `id`. Names from Discord have no
+    /// mnemonics.
+    fn command(&self, id: &str, name: &str) -> gio::MenuItem {
+        let n = self.made.get();
+        self.made.set(n + 1);
+        let action_name = format!("command-{n}");
+        let action = gio::SimpleAction::new(&action_name, None);
+        let (app, subject, id) = (self.app.clone(), self.subject, id.to_owned());
+        action.connect_activate(move |_, _| {
+            if let Some(app) = app.upgrade() {
+                app.run_context_command(subject, &id);
+            }
+        });
+        self.actions.add_action(&action);
+        self.listed.borrow_mut().push(action_name.clone());
+        gio::MenuItem::new(Some(&name.replace('_', "__")), Some(&format!("menu.{action_name}")))
+    }
+}
+
+/// Use Apps, in the attach menu (`SLASH_COMMAND` in 316576): starts a command
+/// in the message box, as typing `/` does. The client's menu has an App
+/// Launcher in its place where the Apps button is turned off, a setting
+/// Neucord has no button for. The attach button on the notice that replaces
+/// the message box lacks it, as a command has nowhere to be typed there.
+/// Neucord sends no analytics for it (`CHANNEL_ATTACH_MENU_USE_APPS_CLICKED`).
+pub(super) const USE_APPS: Entry<()> = Entry::Item(Item {
+    name: "use-apps",
+    label: "Use _Apps",
+    shows: |app, _| app.apps_channel().is_some(),
+    kind: Kind::Action(|app, _| app.use_apps()),
+});
 
 /// Who and what a name in an option can mean, from what the app knows.
 struct Resolver<'a> {
@@ -197,7 +414,15 @@ impl App {
         }
         let Some(channel) = self.state.borrow().channel else { return false };
         let Some(place) = self.state.borrow().command_place(channel) else { return false };
-        self.fetch_command_indexes(&place);
+        self.fetch_command_indexes(&place, {
+            let this = Rc::downgrade(self);
+            Rc::new(move || {
+                // The box may have moved on while the index came.
+                if let Some(this) = this.upgrade() {
+                    this.update_slash_popup();
+                }
+            })
+        });
         let (query, terminated) = commands::query_of(typed);
         let suggestions: Vec<Suggestion> = {
             let state = self.state.borrow();
@@ -217,9 +442,10 @@ impl App {
         true
     }
 
-    /// Ask for the indexes the suggestions need (`query` with `allowFetch`
-    /// in 264322): each once, until Discord says it changed.
-    fn fetch_command_indexes(self: &Rc<Self>, place: &commands::Place) {
+    /// Ask for the indexes a list of commands needs (`query` with
+    /// `allowFetch` in 264322): each once, until Discord says it changed.
+    /// `loaded` runs as each arrives.
+    fn fetch_command_indexes(self: &Rc<Self>, place: &commands::Place, loaded: Rc<dyn Fn()>) {
         let (rest, me) = {
             let state = self.state.borrow();
             (state.rest.clone(), state.me())
@@ -227,7 +453,7 @@ impl App {
         let (Some(rest), Some(me)) = (rest, me) else { return };
         let targets = self.state.borrow_mut().commands.to_fetch(place, Instant::now());
         for target in targets {
-            let (this, rest) = (self.clone(), rest.clone());
+            let (this, rest, loaded) = (self.clone(), rest.clone(), loaded.clone());
             glib::spawn_future_local(async move {
                 let index = rest.command_index(target).await;
                 {
@@ -237,8 +463,7 @@ impl App {
                         None => state.commands.failed(target, Instant::now()),
                     }
                 }
-                // The box may have moved on while the index came.
-                this.update_slash_popup();
+                loaded();
             });
         }
     }
@@ -298,6 +523,31 @@ impl App {
         } else {
             slash.run.grab_focus();
         }
+    }
+
+    /// The open channel, if the client's attach menu would offer Use Apps in
+    /// it now (`canUseApplicationCommands`): the message box shows, nothing
+    /// is being edited or replied to, and commands have a place to run.
+    pub(super) fn apps_channel(&self) -> Option<Snowflake> {
+        let channel = self.state.borrow().channel?;
+        let replying = self.reply.borrow().as_ref().is_some_and(|r| r.channel == channel);
+        let allowed = self.composer_box.is_visible()
+            && self.editing().is_none()
+            && !self.has_voice_draft(channel)
+            && !replying
+            && self.state.borrow().command_place(channel).is_some();
+        allowed.then_some(channel)
+    }
+
+    /// Replace what the message box holds with a `/`, which lists the
+    /// commands (`setValue` in 316576).
+    fn use_apps(self: &Rc<Self>) {
+        if self.apps_channel().is_none() {
+            return;
+        }
+        self.cancel_command();
+        self.set_composer_text("/");
+        self.composer.grab_focus();
     }
 
     /// Put the form away without running the command.
@@ -607,9 +857,67 @@ impl App {
             Prepared::NoticeBar => return self.update_notice_bar(),
             Prepared::Go { channel, command, app, body, nonce } => (channel, command, app, body, nonce),
         };
+        if self.send_command(channel, *command, &app, body, nonce) {
+            self.cancel_command();
+        }
+    }
+
+    /// Run a user or message command from the Apps menu of `subject`'s menu
+    /// (`commandTargetId` in 545152's `A`): the command `id` on the user or
+    /// message, with no options.
+    fn run_context_command(self: &Rc<Self>, subject: Subject, id: &str) {
+        enum Prepared {
+            Nothing,
+            NoticeBar,
+            Go { command: Box<Command>, app: CommandApp, body: serde_json::Value, nonce: Snowflake },
+        }
+        let prepared = {
+            let state = self.state.borrow();
+            let found = state.command_place(subject.channel).and_then(|place| {
+                let (command, app) = state.commands.get(&place, subject.kind, id)?;
+                Some((command.clone(), app.clone()))
+            });
+            match found {
+                Some(_) if state.session_id.is_empty() => Prepared::Nothing,
+                Some(_) if !state.can_send(subject.channel) => Prepared::NoticeBar,
+                Some((command, app)) => {
+                    let guild = state.find_channel(subject.channel).and_then(|(guild, _)| guild.map(|g| g.id));
+                    let nonce = Snowflake::now();
+                    let run = Run {
+                        application: command.application,
+                        guild,
+                        channel: subject.channel,
+                        session: &state.session_id,
+                        data: command.data(Vec::new(), Some(subject.target)),
+                        nonce,
+                    };
+                    let body = run.body();
+                    Prepared::Go { command: Box::new(command), app, body, nonce }
+                }
+                None => Prepared::Nothing,
+            }
+        };
+        match prepared {
+            Prepared::Nothing => {}
+            Prepared::NoticeBar => self.update_notice_bar(),
+            Prepared::Go { command, app, body, nonce } => {
+                self.send_command(subject.channel, *command, &app, body, nonce);
+            }
+        }
+    }
+
+    /// Send the run `body` of `command` to `channel`, as the message queue
+    /// does, and show it pending until its app answers. Whether it started.
+    fn send_command(
+        self: &Rc<Self>,
+        channel: Snowflake,
+        command: Command,
+        app: &CommandApp,
+        body: serde_json::Value,
+        nonce: Snowflake,
+    ) -> bool {
         let rest = self.state.borrow().rest.clone();
-        let Some(rest) = rest else { return };
-        self.cancel_command();
+        let Some(rest) = rest else { return false };
         self.state.borrow_mut().running.insert(nonce, Running { channel, app: app.name.clone(), created: false });
         self.refresh_command_status();
         let this = self.clone();
@@ -623,16 +931,14 @@ impl App {
                 this.command_refused(nonce, &command, &failure);
             }
         });
+        true
     }
 
     /// Discord turned the request down.
     fn command_refused(self: &Rc<Self>, nonce: Snowflake, command: &Command, failure: &Failure) {
         let Some(running) = self.state.borrow_mut().running.remove(&nonce) else { return };
         if failure.stale_command {
-            let mut state = self.state.borrow_mut();
-            let context =
-                state.find_channel(running.channel).map_or(running.channel, |(g, c)| g.map_or(c.id, |g| g.id));
-            state.commands.out_of_date(command.application, context);
+            self.state.borrow_mut().commands_out_of_date(command.application, running.channel);
         }
         self.refresh_command_status();
         let text = match (&failure.message, failure.is_announced()) {
