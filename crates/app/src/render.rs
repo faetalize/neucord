@@ -278,7 +278,7 @@ fn ansi_colour(colour: discord::markup::Colour) -> Option<String> {
 fn named_colour(index: u8) -> String {
     // libadwaita's named colours: https://gnome.pages.gitlab.gnome.org/libadwaita/doc/main/named-colors.html
     const PALETTE: [&str; 16] = [
-        "#5e5c64", // black: dark_2, the grey the client's docs call 30; dark_5 vanishes on a dark window
+        "#5e5c64", // black: dark_2, as dark_5 vanishes on a dark window
         "#e01b24", // red: red_3
         "#26a269", // green: green_5
         "#e5a50a", // yellow: yellow_5
