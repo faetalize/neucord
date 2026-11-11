@@ -209,6 +209,8 @@ impl SettingsSync {
     /// ours, and a change made while it was on its way is put back and
     /// saved next, which the client's copy would lose.
     pub fn saved(&mut self, save: &Save, saved: &Saved) -> Option<Applied> {
+        // An answer that comes after logging out is for no one.
+        self.proto.as_ref()?;
         self.offline_data_version = None;
         self.rate_limited = false;
         self.to_save.retain(|number, group| save.sent.get(number) != Some(group));
@@ -238,6 +240,7 @@ impl SettingsSync {
     /// Discord refused the settings as invalid; `proto` is what it holds.
     /// Edits not saved are dropped.
     pub fn reloaded(&mut self, proto: Vec<u8>) -> Option<SettingsPatch> {
+        self.proto.as_ref()?;
         self.to_save.clear();
         self.timer = None;
         self.rate_limited = false;
@@ -415,6 +418,17 @@ mod tests {
         assert_eq!(sync.proto, Some(account()));
         sync.received(b"\x08", true);
         assert_eq!(sync.proto, Some(account()), "garbage changes nothing");
+    }
+
+    #[test]
+    fn an_answer_after_logging_out_changes_nothing() {
+        let mut sync = loaded();
+        let schedule = sync.edit(Setting::GifAutoPlay(false)).unwrap().schedule.unwrap();
+        let save = sync.save(schedule.generation).unwrap();
+        let mut sync = SettingsSync::new();
+        assert!(sync.saved(&save, &Saved { settings: Some(account()), out_of_date: false }).is_none());
+        assert!(sync.reloaded(account()).is_none());
+        assert!(sync.edit(Setting::GifAutoPlay(false)).is_none(), "still not loaded");
     }
 
     #[test]

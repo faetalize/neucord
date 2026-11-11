@@ -376,6 +376,13 @@ changed for unrelated reasons only needs a note in the issue.
   `connections_role_id`. A note is asked for once a session by 612630 (anchor
   `USER_NOTE_LOAD_START`) wherever one renders, the popout (243166) and the
   user menu (497600) included.
+- **What a settings change puts in the save** (`Setting::written`,
+  `SettingsSync::edit`). The save, its timing and the schema are watched
+  (`updateAsync`, `markDirty`, `persistChanges`, the protos). Not watched, as
+  both are unnamed: `a` in 159201 (anchor `Unknown proto field name`) copies
+  the whole message the setting lives in, unknown fields included, and `RK`
+  in 761821 (anchor `mergePartial`) replaces an edited message in the set to
+  save instead of merging into it.
 
 ## Notifications and unread state
 

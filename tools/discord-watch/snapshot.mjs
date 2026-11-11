@@ -650,8 +650,9 @@ export async function snapshot(dir) {
         if (node.type === "Property" && node.value.type === "Identifier" && methods.has(keyName(node))) {
           aliased.push([keyName(node), node.value.name]);
         }
-        // Class methods and object methods alike: `isSystemDM() { … }`.
-        if ((node.type === "MethodDefinition" || node.type === "Property") && isFunction(node.value)) {
+        // Class methods, class fields holding a function and object methods
+        // alike: `isSystemDM() { … }`, `persistChanges = async () => { … }`.
+        if (["MethodDefinition", "PropertyDefinition", "Property"].includes(node.type) && isFunction(node.value)) {
           const name = !node.computed && node.key.type === "Identifier" ? node.key.name : null;
           if (methods.has(name)) {
             methods.get(name).add(normalized(source, node.value));

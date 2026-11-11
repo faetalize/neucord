@@ -216,6 +216,15 @@ impl App {
         Window { dialog, show: Box::new(show) }
     }
 
+    /// Say how a save went where it's seen: the window covers the app's own
+    /// toasts, so it shows its own.
+    fn settings_toast(&self, text: &str) {
+        match self.settings_window.borrow().as_ref() {
+            Some(window) => window.dialog.add_toast(adw::Toast::new(text)),
+            None => self.toast(text),
+        }
+    }
+
     /// Show the settings in the window, if it's open.
     pub(super) fn settings_replaced(&self) {
         if let Some(window) = self.settings_window.borrow().as_ref() {
@@ -249,7 +258,7 @@ impl App {
         let Some(edited) = edited else {
             // Before READY there's nothing to change.
             self.settings_replaced();
-            return self.toast("Settings aren't loaded yet");
+            return self.settings_toast("Settings aren't loaded yet");
         };
         self.apply_settings(edited.patch, false);
         if let Some(schedule) = edited.schedule {
@@ -303,7 +312,7 @@ impl App {
             }
             Err(SaveError::Invalid) => {
                 // The client asks for the settings again and starts over.
-                self.toast("Discord refused those settings. Loading them again");
+                self.settings_toast("Discord refused those settings. Loading them again");
                 match rest.settings_proto().await {
                     Ok(proto) => {
                         let patch = self.state.borrow_mut().sync.reloaded(proto);
@@ -317,7 +326,7 @@ impl App {
             Err(SaveError::Other(e)) => {
                 eprintln!("settings: {e}");
                 self.state.borrow_mut().sync.failed();
-                self.toast("Could not save your settings");
+                self.settings_toast("Could not save your settings");
             }
         }
     }
