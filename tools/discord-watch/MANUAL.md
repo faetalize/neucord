@@ -127,6 +127,13 @@ changed for unrelated reasons only needs a note in the issue.
   underline, strikethrough and overline, and no dim, reverse or hidden. The
   block is `ansi` when 768947's `py` (lowercased) says so. The colours are
   Neucord's own, from libadwaita's palette, not the client's theme.
+- **A sticker's image and its details** (`Sticker::image`, `still`, `link`,
+  `stickers::MESSAGE_DETAILS`). The address is `zg` in 378058 (anchor
+  `STICKER_ASSET`): a file per format, `size` twice the shown size up to 2×
+  and a power of two, Lottie as its JSON; a preview takes a GIF as its PNG and
+  an APNG with `passthrough=false`, except on Android. An APNG in a message
+  comes animated. Right-clicking a sticker in Developer Mode shows Message
+  Details in place of Copy Message ID: 761304 (anchor `message-details`).
 - **Forum and media channels take no message** (the forum page in
   `select_channel`, `permissions::can_send`, `update_notice_bar`). Neucord
   shows no box there, loads nothing and refuses to send, whatever Send

@@ -44,6 +44,8 @@ pub(super) struct MessageTarget {
     pub(super) selection: Option<String>,
     /// Where the link the menu was opened on goes.
     pub(super) link: Option<String>,
+    /// The sticker the menu was opened on.
+    pub(super) sticker: Option<Snowflake>,
 }
 
 impl MessageTarget {
@@ -51,6 +53,12 @@ impl MessageTarget {
     /// the thread was started from.
     fn shown(&self) -> &Message {
         self.message.thread_starter().unwrap_or(&self.message)
+    }
+
+    /// The sticker the menu was opened on, if the message has it.
+    pub(super) fn sticker(&self) -> Option<&discord::Sticker> {
+        let id = self.sticker?;
+        self.shown().sticker_items.iter().find(|s| s.id == id)
     }
 }
 
@@ -100,19 +108,23 @@ pub(super) const OPEN_LINK: Entry<MessageTarget> = Entry::Item(Item {
     }),
 });
 
-/// Only in Developer Mode (50268). Shift adds the channel's id in front.
+/// Only in Developer Mode (50268), and where no sticker was clicked: the
+/// client puts it in that sticker's Message Details then. Shift adds the
+/// channel's id in front.
 pub(super) const COPY_MESSAGE_ID: Entry<MessageTarget> = Entry::Item(Item {
     name: "copy-message-id",
     label: "Copy Message _ID",
-    shows: |app, _| app.state.borrow().developer_mode,
-    kind: menus::Kind::Action(|app, target| {
-        let message = target.shown();
-        app.copy(&match app.shift_held() {
-            true => format!("{}-{}", message.channel_id, message.id),
-            false => message.id.to_string(),
-        });
-    }),
+    shows: |app, target| app.state.borrow().developer_mode && target.sticker().is_none(),
+    kind: menus::Kind::Action(copy_message_id),
 });
+
+pub(super) fn copy_message_id(app: &Rc<App>, target: &MessageTarget) {
+    let message = target.shown();
+    app.copy(&match app.shift_held() {
+        true => format!("{}-{}", message.channel_id, message.id),
+        false => message.id.to_string(),
+    });
+}
 
 /// How many messages' content is kept. Scrolling binds each message to a row
 /// several times over, as the list guesses at the height of rows it hasn't
@@ -1429,25 +1441,27 @@ fn attach_message_menu(this: &std::rc::Weak<App>, item: &gtk::ListItem, cell: &M
     let row = &cell.parts().row;
     let open = Rc::new({
         let (this, item, row) = (this.clone(), item.downgrade(), row.downgrade());
-        move |at: At, link: Option<String>| {
+        move |at: At, link: Option<String>, sticker: Option<Snowflake>| {
             let (Some(this), Some(item), Some(row)) = (this.upgrade(), item.upgrade(), row.upgrade()) else { return };
             // Hidden rows: collapsed blocked messages, and those that show nothing.
             let Some(message) = item.item().and_downcast::<glib::BoxedAnyObject>().filter(|_| row.is_visible()) else {
                 return;
             };
             let message = message.borrow::<Message>().clone();
-            this.message_menu(&row, message, at, link);
+            this.message_menu(&row, message, at, link, sticker);
         }
     });
     menus::on_secondary(row, {
         let (open, row) = (open.clone(), row.downgrade());
         move |x, y| {
-            let link = row.upgrade().and_then(|row| link_at(row.upcast_ref(), x, y));
-            open(At::Point(x, y), link);
+            let row = row.upgrade();
+            let link = row.as_ref().and_then(|row| link_at(row.upcast_ref(), x, y));
+            let sticker = row.as_ref().and_then(|row| sticker_at(row.upcast_ref(), x, y));
+            open(At::Point(x, y), link, sticker);
         }
     });
     let action = gio::SimpleAction::new("menu", None);
-    action.connect_activate(move |_, _| open(At::Point(0.0, 0.0), None));
+    action.connect_activate(move |_, _| open(At::Point(0.0, 0.0), None, None));
     let actions = gio::SimpleActionGroup::new();
     actions.add_action(&action);
     cell.insert_action_group("message", Some(&actions));
@@ -1482,7 +1496,7 @@ fn attach_message_actions(this: &std::rc::Weak<App>, cell: &MessageRow) {
             let row = &cell.parts().row;
             let Some(b) = button.compute_bounds(row) else { return };
             let rect = gdk::Rectangle::new(b.x() as i32, b.y() as i32, b.width() as i32, b.height() as i32);
-            this.message_menu(row, message, At::Below(rect), None);
+            this.message_menu(row, message, At::Below(rect), None, None);
         }
     });
 }
@@ -1514,6 +1528,19 @@ fn link_at(row: &gtk::Widget, x: f64, y: f64) -> Option<String> {
             && !label.parent().is_some_and(|p| p.is::<RichText>())
         {
             return label.current_uri().map(String::from);
+        }
+        widget = w.parent();
+    }
+    None
+}
+
+/// The sticker at `(x, y)` in `row`, by its id: drawn by
+/// [`attachments::sticker`], which names its widget for it.
+fn sticker_at(row: &gtk::Widget, x: f64, y: f64) -> Option<Snowflake> {
+    let mut widget = row.pick(x, y, gtk::PickFlags::DEFAULT);
+    while let Some(w) = widget.filter(|w| w != row) {
+        if let Some(id) = attachments::sticker_id(&w) {
+            return Some(id);
         }
         widget = w.parent();
     }
@@ -1697,9 +1724,21 @@ impl App {
     }
 
     /// Open the menu for `message`, whose row is `row`, at `at` there.
-    fn message_menu(self: &Rc<Self>, row: &gtk::Box, message: Message, at: At, link: Option<String>) {
-        let target =
-            MessageTarget { selection: selection_in(row.upcast_ref()), link, message, row: row.clone().upcast() };
+    fn message_menu(
+        self: &Rc<Self>,
+        row: &gtk::Box,
+        message: Message,
+        at: At,
+        link: Option<String>,
+        sticker: Option<Snowflake>,
+    ) {
+        let target = MessageTarget {
+            selection: selection_in(row.upcast_ref()),
+            link,
+            sticker,
+            message,
+            row: row.clone().upcast(),
+        };
         let regulated = self.state.borrow().media_takedown_regulated;
         menus::popup(self, menus::message(regulated), target, row, at);
     }

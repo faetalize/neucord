@@ -25,7 +25,7 @@ use soup::prelude::*;
 
 mod animated;
 mod lru;
-pub use animated::AnimatedPaintable;
+pub use animated::{AnimatedPaintable, FramePaintable};
 use lru::Lru;
 
 const MIB: u64 = 1024 * 1024;
@@ -105,7 +105,7 @@ impl Images {
         glib::spawn_future_local(async move {
             let Some(bytes) = this.load_bytes(&url).await else { return };
             // Fall through to a still first frame if animation decoding failed.
-            if animated && let Some(paintable) = animated_paintable(&bytes) {
+            if animated && let Some(paintable) = apng_paintable(&bytes).or_else(|| animated_paintable(&bytes)) {
                 return done(paintable);
             }
             // Another picture may have decoded it while we waited.
@@ -241,6 +241,26 @@ pub fn request_size(shown: (i32, i32), scale: i32, original: Option<(u32, u32)>)
         height = ((height as f64 * fit).round() as u32).max(1);
     }
     (width, height)
+}
+
+/// An APNG's frames, which gdk-pixbuf's loader doesn't have.
+fn apng_paintable(bytes: &glib::Bytes) -> Option<gdk::Paintable> {
+    if !discord::apng::is_apng(bytes) {
+        return None;
+    }
+    let animation = discord::apng::decode(bytes)?;
+    let (width, height) = (animation.width as i32, animation.height as i32);
+    let frames = animation
+        .frames
+        .into_iter()
+        .map(|frame| {
+            let pixels = glib::Bytes::from_owned(frame.rgba);
+            let texture =
+                gdk::MemoryTexture::new(width, height, gdk::MemoryFormat::R8g8b8a8, &pixels, width as usize * 4);
+            (texture.upcast(), std::time::Duration::from_millis(u64::from(frame.delay_ms)))
+        })
+        .collect();
+    Some(FramePaintable::new(frames, animation.plays).upcast())
 }
 
 fn animated_paintable(bytes: &glib::Bytes) -> Option<gdk::Paintable> {

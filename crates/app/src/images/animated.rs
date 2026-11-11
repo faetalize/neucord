@@ -1,6 +1,7 @@
 //! A `gdk::Paintable` that steps a `PixbufAnimation` frame by frame on a timer,
 //! so GIF/WebP images animate. GTK's `Picture` otherwise shows only the first
-//! frame of an animation.
+//! frame of an animation. [`FramePaintable`] does the same for frames already
+//! made, such as an APNG's.
 
 use std::cell::RefCell;
 use std::time::{Duration, SystemTime};
@@ -97,6 +98,90 @@ impl AnimatedPaintable {
         if advanced && let Some(iter) = self.imp().iter.borrow().as_ref() {
             self.apply_frame(iter);
         }
+        self.schedule();
+    }
+}
+
+mod frames {
+    use super::*;
+
+    #[derive(Default)]
+    pub struct FramePaintable {
+        pub frames: RefCell<Vec<(gdk::Texture, Duration)>>,
+        pub at: std::cell::Cell<usize>,
+        /// Plays still to go once this one ends; `None` is for ever.
+        pub plays_left: std::cell::Cell<Option<u32>>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for FramePaintable {
+        const NAME: &'static str = "NeucordFramePaintable";
+        type Type = super::FramePaintable;
+        type Interfaces = (gdk::Paintable,);
+    }
+
+    impl ObjectImpl for FramePaintable {}
+
+    impl PaintableImpl for FramePaintable {
+        fn intrinsic_width(&self) -> i32 {
+            self.frames.borrow().first().map_or(0, |(t, _)| t.width())
+        }
+
+        fn intrinsic_height(&self) -> i32 {
+            self.frames.borrow().first().map_or(0, |(t, _)| t.height())
+        }
+
+        fn snapshot(&self, snapshot: &gdk::Snapshot, width: f64, height: f64) {
+            if let Some((texture, _)) = self.frames.borrow().get(self.at.get()) {
+                texture.snapshot(snapshot, width, height);
+            }
+        }
+    }
+}
+
+glib::wrapper! {
+    /// Frames that are shown in turn, each for its own time.
+    pub struct FramePaintable(ObjectSubclass<frames::FramePaintable>) @implements gdk::Paintable;
+}
+
+impl FramePaintable {
+    /// `frames` in order. `plays` is how many times they go through; 0 is for
+    /// ever, and when they stop the last frame stays.
+    pub fn new(frames: Vec<(gdk::Texture, Duration)>, plays: u32) -> Self {
+        let this: Self = glib::Object::new();
+        let imp = this.imp();
+        *imp.frames.borrow_mut() = frames;
+        imp.plays_left.set((plays != 0).then(|| plays - 1));
+        this.schedule();
+        this
+    }
+
+    fn schedule(&self) {
+        let delay = self.imp().frames.borrow().get(self.imp().at.get()).map_or(Duration::ZERO, |(_, d)| *d);
+        // No fixed rate is no faster than the GIF path goes.
+        let weak = self.downgrade();
+        glib::timeout_add_local_once(delay.max(Duration::from_millis(20)), move || {
+            if let Some(this) = weak.upgrade() {
+                this.advance();
+            }
+        });
+    }
+
+    fn advance(&self) {
+        let imp = self.imp();
+        let next = imp.at.get() + 1;
+        if next >= imp.frames.borrow().len() {
+            match imp.plays_left.get() {
+                // The last frame stays.
+                Some(0) => return,
+                Some(left) => imp.plays_left.set(Some(left - 1)),
+                None => {}
+            }
+            imp.at.set(0);
+        } else {
+            imp.at.set(next);
+        }
+        self.invalidate_contents();
         self.schedule();
     }
 }
