@@ -623,16 +623,14 @@ impl App {
                 this.command_refused(nonce, &command, &failure);
             }
         });
+        true
     }
 
     /// Discord turned the request down.
     fn command_refused(self: &Rc<Self>, nonce: Snowflake, command: &Command, failure: &Failure) {
         let Some(running) = self.state.borrow_mut().running.remove(&nonce) else { return };
         if failure.stale_command {
-            let mut state = self.state.borrow_mut();
-            let context =
-                state.find_channel(running.channel).map_or(running.channel, |(g, c)| g.map_or(c.id, |g| g.id));
-            state.commands.out_of_date(command.application, context);
+            self.state.borrow_mut().commands_out_of_date(command.application, running.channel);
         }
         self.refresh_command_status();
         let text = match (&failure.message, failure.is_announced()) {
