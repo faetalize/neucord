@@ -13,6 +13,7 @@ mod edits;
 mod embeds;
 mod emoji;
 mod forum;
+mod forum_post;
 mod friends;
 mod gifs;
 mod login;
@@ -35,6 +36,7 @@ mod sidebar;
 mod slash;
 mod state;
 mod stickers;
+mod switcher;
 mod thread_line;
 mod threads;
 mod typing;
@@ -123,6 +125,8 @@ pub struct App {
     thread_waiters: RefCell<Vec<(Snowflake, async_channel::Sender<()>)>>,
     /// The post list a forum or media channel shows.
     forum: forum::Page,
+    /// The form that starts a post, while it is open.
+    post_form: RefCell<Option<Rc<forum_post::PostForm>>>,
     composer_error: gtk::Label,
     images: Images,
     /// Autocomplete for mentions and emoji, anchored to the composer.
@@ -173,6 +177,8 @@ pub struct App {
     threads_view: RefCell<Option<Rc<threads::View>>>,
     /// Opens the thread browser, from the chat's header.
     threads_button: gtk::Button,
+    /// The quick switcher, while it's open.
+    switcher: RefCell<Option<Rc<switcher::View>>>,
     /// The content of messages whose rows have moved on to others, for when
     /// they come back (see [`chat::KeptContent`]).
     kept_content: RefCell<crate::kept::Kept<Snowflake, chat::KeptContent>>,
@@ -196,6 +202,10 @@ pub struct App {
 
 impl App {
     pub fn new(app: &adw::Application) -> Rc<Self> {
+        // GTK 4 doesn't speak xdg-decoration (it never asks a compositor to
+        // draw the frame), so the window is always drawn client-side, and the
+        // title bar is the header bar every page carries, with the window
+        // controls in the order the desktop's button layout gives.
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("Neucord")
@@ -297,6 +307,7 @@ impl App {
             thread_expiry: RefCell::default(),
             thread_waiters: RefCell::default(),
             forum: forum::Page::new(),
+            post_form: RefCell::default(),
             composer_error: gtk::Label::builder()
                 .xalign(0.0)
                 .wrap(true)
@@ -345,6 +356,7 @@ impl App {
                 .tooltip_text("Threads")
                 .visible(false)
                 .build(),
+            switcher: RefCell::default(),
             kept_content: RefCell::new(crate::kept::Kept::new(chat::KEPT_CONTENT)),
             rows: RefCell::default(),
             scroll_loader: RefCell::default(),
@@ -433,9 +445,21 @@ impl App {
                 }
             })
             .build();
-        self.window.add_action_entries([logout, standing, scheduled]);
+        let switch = gio::ActionEntry::builder("quick-switcher")
+            .activate({
+                let this = Rc::downgrade(self);
+                move |_: &adw::ApplicationWindow, _, _| {
+                    if let Some(this) = this.upgrade() {
+                        this.toggle_switcher();
+                    }
+                }
+            })
+            .build();
+        self.window.add_action_entries([logout, standing, scheduled, switch]);
         if let Some(app) = self.window.application() {
             app.set_accels_for_action("win.logout", &["<Control><Shift>l"]);
+            // The client binds both (`mod+k`, `mod+t`).
+            app.set_accels_for_action("win.quick-switcher", &["<Control>k", "<Control>t"]);
             // Notification clicks arrive as an app action, with the channel id.
             let open = gio::ActionEntry::builder("open-channel")
                 .parameter_type(Some(glib::VariantTy::STRING))
