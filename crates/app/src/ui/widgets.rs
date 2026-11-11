@@ -35,6 +35,14 @@ pub(super) fn avatar_widget(user: &User, size: i32, images: Option<&Images>, row
     avatar_from(user.display_name(), size, images, picture, row)
 }
 
+/// [`avatar_widget`] for where the client asks the CDN for a still, and the
+/// avatar never moves: a voice participant in the channel list
+/// (`getAvatarURL` without `canAnimate`, in 293277, anchor `VoiceUser`).
+pub(super) fn avatar_still(user: &User, size: i32, images: Option<&Images>) -> gtk::Widget {
+    let picture = user.avatar.as_deref().map(|hash| (discord::cdn::avatar_url(user.id.0, hash, 64), hash));
+    avatar_with(user.display_name(), size, images, picture, None)
+}
+
 /// [`avatar_widget`] with the picture they set for a server (and which),
 /// where they did.
 pub(super) fn avatar_widget_in(
@@ -61,16 +69,29 @@ pub(super) fn avatar_from(
     picture: Option<(String, &str)>,
     row: Row,
 ) -> gtk::Widget {
+    avatar_with(name, size, images, picture, Some(row))
+}
+
+/// An avatar that moves under the rules for `row` if it is animated, or
+/// never with `None`.
+fn avatar_with(
+    name: &str,
+    size: i32,
+    images: Option<&Images>,
+    picture: Option<(String, &str)>,
+    row: Option<Row>,
+) -> gtk::Widget {
     let initials = adw::Avatar::new(size, Some(name), true);
     let (Some((url, hash)), Some(images)) = (picture, images) else {
         return initials.upcast();
     };
     let overlay = gtk::Overlay::builder().child(&initials).build();
     let picture = round_picture(size);
-    if discord::cdn::is_animated(hash) {
-        images.set_moving(&picture, &discord::cdn::still(&url), &url, Subject::Avatar, row);
-    } else {
-        images.set(&picture, &url);
+    match row {
+        Some(row) if discord::cdn::is_animated(hash) => {
+            images.set_moving(&picture, &discord::cdn::still(&url), &url, Subject::Avatar, row);
+        }
+        _ => images.set(&picture, &discord::cdn::still(&url)),
     }
     overlay.add_overlay(&picture);
     overlay.upcast()

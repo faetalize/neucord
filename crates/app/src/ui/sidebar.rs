@@ -13,7 +13,7 @@ use super::App;
 use super::menus::{self, At, Entry, Item, Kind};
 use super::state::{Page, now_ms, now_unix};
 use super::thread_line::ThreadLine;
-use super::widgets::{avatar_widget, badge, round_picture};
+use super::widgets::{avatar_still, avatar_widget, badge, round_picture};
 use crate::images::{Images, Row};
 
 /// What a channel row's menu acts on.
@@ -175,7 +175,7 @@ impl App {
         let name = state.voice_name(voice);
         let row = gtk::Box::builder().spacing(6).margin_start(GLYPH_WIDTH + 6).build();
         row.append(&match &voice.user {
-            Some(user) => avatar_widget(user, VOICE_AVATAR, Some(&self.images)),
+            Some(user) => avatar_still(user, VOICE_AVATAR, Some(&self.images)),
             None => adw::Avatar::new(VOICE_AVATAR, Some(&name), true).upcast(),
         });
         row.append(
