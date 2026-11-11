@@ -32,6 +32,7 @@ use crate::relationships::{Presence, Relationship, Relationships};
 use crate::settings::{self, GuildFolder, MediaPatch, MediaSettings};
 use crate::stickers::Listed;
 use crate::verification::Account;
+use crate::voice_states::{self, VoiceState, VoiceStates};
 use crate::{Channel, Error, Guild, Member, Message, MessageEdit, Role, Snowflake, ThreadMember, User, identity};
 
 /// Gateway capability bits. 0 asks for the classic payload shapes, which the
@@ -82,6 +83,8 @@ pub struct Ready {
     pub experiments: Experiments,
     /// This session's id, which interactions name.
     pub session_id: String,
+    /// Who is in the voice channels of every server READY carries.
+    pub voice_states: VoiceStates,
 }
 
 /// How an interaction of ours ended, as the events `INTERACTION_SUCCESS`,
@@ -98,6 +101,13 @@ pub enum Outcome {
 pub enum Event {
     Ready(Box<Ready>),
     GuildCreate(Guild),
+    /// A server's whole voice list, which follows its `GUILD_CREATE`.
+    GuildVoiceStates {
+        guild_id: Snowflake,
+        states: Vec<VoiceState>,
+    },
+    /// People joining, moving in and leaving voice channels.
+    VoiceStates(Vec<voice_states::Update>),
     /// A DM or group DM was opened (or reopened), or a message request
     /// arrived. Guild channels are not reported yet.
     PrivateChannelCreate(Channel),
@@ -695,6 +705,12 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 .enumerate()
                 .filter_map(|(i, g)| guild_with_member(g, &data["merged_members"][i], user.id))
                 .collect();
+            let mut voice_states = VoiceStates::default();
+            for g in raw_guilds {
+                if let Some(id) = parse_id(&g["id"]) {
+                    voice_states.replace_guild(id, VoiceState::parse_list(&g["voice_states"]));
+                }
+            }
             let experiments = Experiments::from_ready(&data);
             crate::experiments::debug_dump(&data, &experiments, user.id, &guilds);
             let mut members = Members::default();
@@ -720,6 +736,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 required_action: data["required_action"].as_str().map(str::to_owned),
                 experiments,
                 session_id: data["session_id"].as_str().unwrap_or_default().to_owned(),
+                voice_states,
                 account,
                 nitro: Nitro::from_user(&data["user"]),
                 user,
@@ -959,8 +976,23 @@ fn dispatch(state: &State, name: &str, data: Value) {
             let Some(guild) = guild_with_member(&data, &Value::Null, me) else { return };
             let members =
                 Event::Members { guild_id: guild.id, members: members_of(&data, &Value::Null), not_found: Vec::new() };
+            let voice =
+                Event::GuildVoiceStates { guild_id: guild.id, states: VoiceState::parse_list(&data["voice_states"]) };
             send_event(state, Event::GuildCreate(guild));
+            send_event(state, voice);
             members
+        }
+        "VOICE_STATE_UPDATE" => match voice_states::Update::parse(&data) {
+            Some(update) => Event::VoiceStates(vec![update]),
+            None => return,
+        },
+        "VOICE_STATE_UPDATE_BATCH" => {
+            let updates: Vec<_> =
+                data["voice_states"].as_array().into_iter().flatten().filter_map(voice_states::Update::parse).collect();
+            if updates.is_empty() {
+                return;
+            }
+            Event::VoiceStates(updates)
         }
         "MESSAGE_CREATE" => match serde_json::from_value(data) {
             Ok(message) => Event::MessageCreate(Box::new(message)),
@@ -1288,6 +1320,7 @@ mod tests {
             json!({"id": "2", "name": "B", "members": [{"user": {"id": "7"}, "roles": ["41"]}]}),
         );
         assert!(matches!(rx.try_recv(), Ok(Event::GuildCreate(_))));
+        assert!(matches!(rx.try_recv(), Ok(Event::GuildVoiceStates { .. })));
         let Ok(Event::Members { guild_id, members, .. }) = rx.try_recv() else { panic!("no members") };
         assert_eq!((guild_id, members), (Snowflake(2), vec![(Snowflake(7), vec![Snowflake(41)])]));
 
@@ -1303,6 +1336,48 @@ mod tests {
         );
         let Ok(Event::Members { members, not_found, .. }) = rx.try_recv() else { panic!("no chunk") };
         assert_eq!((members, not_found), (vec![(Snowflake(8), vec![Snowflake(40)])], vec![Snowflake(9)]));
+    }
+
+    #[test]
+    fn voice_states() {
+        let (tx, rx) = async_channel::unbounded();
+        let state = State {
+            token: String::new(),
+            me: Cell::new(None),
+            session: RefCell::new(None),
+            resuming: Cell::new(false),
+            resumable: Cell::new(true),
+            established: Cell::new(false),
+            seq: Cell::new(None),
+            acked: Cell::new(true),
+            events: tx,
+        };
+        let in_voice = |guild: &str, user: &str, channel: Value| json!({"guild_id": guild, "user_id": user, "channel_id": channel, "session_id": "s", "self_mute": true});
+        let ready = json!({
+            "user": {"id": "5", "username": "me"},
+            "guilds": [{"id": "1", "properties": {"name": "A"}, "voice_states": [in_voice("1", "6", json!("9"))]}],
+        });
+        dispatch(&state, "READY", ready);
+        let Ok(Event::Ready(ready)) = rx.try_recv() else { panic!("no READY") };
+        let names =
+            |states: &VoiceStates| states.in_channel(Snowflake(1), Snowflake(9), |s| s.user_id.0.to_string()).len();
+        assert_eq!(names(&ready.voice_states), 1);
+
+        dispatch(&state, "VOICE_STATE_UPDATE", in_voice("1", "7", json!("9")));
+        let Ok(Event::VoiceStates(updates)) = rx.try_recv() else { panic!("no update") };
+        assert_eq!((updates[0].guild, updates[0].user), (Snowflake(1), Snowflake(7)));
+        assert!(updates[0].state.as_ref().is_some_and(|s| s.self_mute && s.channel_id == Snowflake(9)));
+
+        dispatch(
+            &state,
+            "VOICE_STATE_UPDATE_BATCH",
+            json!({"voice_states": [in_voice("1", "7", Value::Null), in_voice("2", "8", json!("3"))]}),
+        );
+        let Ok(Event::VoiceStates(updates)) = rx.try_recv() else { panic!("no batch") };
+        assert_eq!(updates.iter().map(|u| (u.guild.0, u.state.is_some())).collect::<Vec<_>>(), [(1, false), (2, true)]);
+
+        dispatch(&state, "VOICE_STATE_UPDATE", json!({"guild_id": null, "user_id": "7", "channel_id": "3"}));
+        assert!(rx.try_recv().is_err(), "a DM call isn't a server's voice list");
     }
 
     #[test]

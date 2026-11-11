@@ -22,6 +22,7 @@ use discord::thread_creation;
 use discord::threads;
 use discord::typing::Typing;
 use discord::verification::Account;
+use discord::voice_states::{VoiceState, VoiceStates};
 use discord::{Channel, ChannelKind, Gateway, Guild, Message, Rest, Resume, Snowflake, User};
 use gtk::glib;
 
@@ -147,9 +148,21 @@ pub(super) struct State {
     /// The user closed the member list pane beside the chat, which is open
     /// until they do.
     pub(super) members_closed: bool,
+    /// Who is in each server's voice channels.
+    pub(super) voice: VoiceStates,
 }
 
 impl State {
+    /// What a voice channel's participants are called: their nickname in the
+    /// server, else their display name, which the update or an earlier
+    /// message told us.
+    pub(super) fn voice_name(&self, state: &VoiceState) -> String {
+        let name = state.nick.as_deref().or_else(|| state.user.as_ref().map(|u| u.display_name()));
+        name.map(str::to_owned)
+            .or_else(|| self.users.get(&state.user_id.0).cloned())
+            .unwrap_or_else(|| "...".to_owned())
+    }
+
     pub(super) fn rail_layout(&self) -> Vec<RailEntry> {
         let ids: Vec<Snowflake> = self.guilds.iter().map(|g| g.id).collect();
         discord::settings::rail_layout(&self.guild_folders, &ids)
@@ -553,6 +566,14 @@ impl State {
                         let mut icon = std::collections::hash_map::DefaultHasher::new();
                         channel_icon::of(guild, c).hash(&mut icon);
                         sig.push(icon.finish());
+                        if c.kind == ChannelKind::Voice {
+                            for v in self.voice.in_channel(guild.id, c.id, |v| self.voice_name(v)) {
+                                let mut hash = std::collections::hash_map::DefaultHasher::new();
+                                (v.user_id, v.muted(), v.deafened(), v.self_video, v.self_stream, self.voice_name(v))
+                                    .hash(&mut hash);
+                                sig.push(hash.finish());
+                            }
+                        }
                         for t in self.sidebar_threads(guild, c) {
                             // A muted thread shows as muted; its place stands for that.
                             sig.extend([t.id.0, Self::thread_muted(t) as u64]);
