@@ -169,7 +169,7 @@ pub(super) const EDIT_TAGS: Entry<ThreadTarget> = Entry::Item(Item {
 pub(super) const COPY_TAG_ID: Entry<Tagged> = Entry::Item(Item {
     name: "copy-tag-id",
     label: "Copy Tag _ID",
-    shows: |app, _| app.state.borrow().developer_mode,
+    shows: |app, _| app.state.borrow().settings.developer_mode,
     kind: Kind::Action(|app, tag| app.copy(&tag.0.to_string())),
 });
 
@@ -1012,7 +1012,7 @@ impl App {
             preview,
             media,
             reaction,
-            reactable: state.media.render_reactions && state.reacting(post).update,
+            reactable: state.settings.media.render_reactions && state.reacting(post).update,
             count: forum::message_count_text(messages, post),
             unread_count,
             time,

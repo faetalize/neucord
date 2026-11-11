@@ -37,6 +37,10 @@ names so two builds differ only where Discord changed something:
 - The values named in `watch.json` (a literal, or a list or set of them),
   wherever the client defines or exports them: how many emoji a message
   can be and still show them large, which message types people write.
+- The protobuf messages named in `watch.json`, by field number, name and
+  type, from the schema the client compiles. The account's settings reach
+  Neucord as protobuf (`user_settings_proto`), which names nothing: a field
+  number that changes meaning would be read as another setting.
 - What the client calls each Unicode emoji (`:slight_smile:`), hashed the way
   Neucord's copy of the names is: `emoji-table.mjs` writes that table from a
   build, and `compare` says when `crates/discord/src/emoji_names.txt` no
