@@ -1,5 +1,6 @@
 //! The gateway websocket: identify, heartbeat, and turning dispatches into
-//! [`Event`]s. Runs entirely on the GLib main loop via libsoup.
+//! [`Event`]s. The connection and its bookkeeping run on the GLib main loop
+//! via libsoup; the work on a payload does not (see below).
 //!
 //! A dropped connection is reported as [`Event::Closed`], carrying a
 //! [`Resume`] when the session can be resumed: the caller passes it back to
@@ -7,8 +8,18 @@
 //! Discord replays what was missed.
 //!
 //! Payloads come compressed, as for the official client: see [`Inflater`].
+//!
+//! READY is megabytes of JSON for a big account, and inflating, parsing and
+//! building its [`Event`] takes hundreds of milliseconds in which the window
+//! would not move. So every frame goes to a thread of its own, which hands
+//! back one [`Parsed`] per payload, in order. What touches the connection or
+//! the session (heartbeats, the sequence number, what may be sent) stays on
+//! the main loop, which applies each [`Parsed`] as it arrives: a close is
+//! queued behind the frames before it, so that the sequence number a resume
+//! carries counts every payload that was delivered.
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -21,6 +32,7 @@ use crate::component::Component;
 use crate::embed::Embed;
 use crate::emoji::GuildEmoji;
 use crate::experiments::Experiments;
+use crate::frecency::FrecencyPatch;
 use crate::gates::Gates;
 use crate::inflate::Inflater;
 use crate::limits::Nitro;
@@ -332,8 +344,9 @@ pub enum Event {
     },
     /// The favourites and counts of use changed (the settings proto of type
     /// 2, see [`crate::frecency`]): all of them, or with `partial` the
-    /// messages that changed in them.
+    /// messages that changed in them. `proto` is what arrived.
     FrecencyUpdate {
+        patch: FrecencyPatch,
         proto: Vec<u8>,
         partial: bool,
     },
@@ -377,8 +390,6 @@ struct Payload {
 
 struct State {
     token: String,
-    /// Our user id, known from READY on; used to find our own member.
-    me: Cell<Option<Snowflake>>,
     /// Session id and resume URL from READY (or the resume we were given).
     session: RefCell<Option<(String, String)>>,
     /// Send RESUME instead of IDENTIFY on HELLO.
@@ -390,6 +401,136 @@ struct State {
     seq: Cell<Option<u64>>,
     acked: Cell<bool>,
     events: async_channel::Sender<Event>,
+}
+
+/// What the main loop gives the worker.
+enum Input {
+    /// A websocket message: a payload, or part of one.
+    Frame(glib::Bytes),
+    /// The connection closed; whatever was received before it is still
+    /// being worked on.
+    Closed { code: u16, reason: String },
+}
+
+/// What the worker gives back, in the order the frames came.
+enum Output {
+    Parsed(Parsed),
+    /// The stream cannot be inflated, and nothing after it can be.
+    Unreadable(String),
+    Closed {
+        code: u16,
+        reason: String,
+    },
+}
+
+/// What a payload asks of the main loop.
+struct Parsed {
+    seq: Option<u64>,
+    what: What,
+}
+
+enum What {
+    /// HELLO: the heartbeat interval, in milliseconds.
+    Hello(u64),
+    Dispatch(Dispatched),
+    /// Discord asks for a heartbeat at once.
+    Heartbeat,
+    Ack,
+    Reconnect,
+    /// Whether the session can still be resumed.
+    InvalidSession {
+        resumable: bool,
+    },
+    Other,
+}
+
+struct Dispatched {
+    events: Vec<Event>,
+    /// Set when the dispatch made the session usable.
+    established: Option<Established>,
+}
+
+enum Established {
+    /// READY, with its session id and resume URL when it named them.
+    Ready(Option<(String, String)>),
+    Resumed,
+}
+
+/// Turns payloads into events, one at a time. It runs on the worker thread,
+/// so it takes nothing from the connection: what it needs to remember
+/// between payloads is here.
+#[derive(Default)]
+struct Parser {
+    /// Our user id, known from READY on; used to find our own member.
+    me: Cell<Option<Snowflake>>,
+    /// The events of the payload being parsed.
+    events: RefCell<VecDeque<Event>>,
+}
+
+impl Parser {
+    fn parse(&self, payload: Payload) -> Parsed {
+        let what = match payload.op {
+            10 => What::Hello(payload.d["heartbeat_interval"].as_u64().unwrap_or(41_250)),
+            0 => What::Dispatch(self.dispatched(payload.t.as_deref().unwrap_or(""), payload.d)),
+            1 => What::Heartbeat,
+            11 => What::Ack,
+            7 => What::Reconnect,
+            9 => What::InvalidSession { resumable: payload.d.as_bool() == Some(true) },
+            _ => What::Other,
+        };
+        Parsed { seq: payload.s, what }
+    }
+
+    fn dispatched(&self, name: &str, data: Value) -> Dispatched {
+        let session = (name == "READY")
+            .then(|| Some((data["session_id"].as_str()?.to_owned(), data["resume_gateway_url"].as_str()?.to_owned())))
+            .flatten();
+        dispatch(self, name, data);
+        let events: Vec<Event> = self.events.borrow_mut().drain(..).collect();
+        let established = events.iter().find_map(|event| match event {
+            Event::Ready(_) => Some(Established::Ready(session.clone())),
+            Event::Resumed => Some(Established::Resumed),
+            _ => None,
+        });
+        Dispatched { events, established }
+    }
+
+    fn push(&self, event: Event) {
+        self.events.borrow_mut().push_back(event);
+    }
+}
+
+/// The worker thread: inflates frames, parses payloads, and answers each in
+/// order. It ends with the connection, when nobody can send it frames.
+fn work(input: std::sync::mpsc::Receiver<Input>, output: async_channel::Sender<Output>) {
+    // The decompressor is made here and never leaves: it is not shared.
+    let mut inflater = Inflater::new();
+    let parser = Parser::default();
+    let mut unreadable = false;
+    while let Ok(input) = input.recv() {
+        let ending = matches!(input, Input::Closed { .. });
+        let answer = match input {
+            Input::Closed { code, reason } => Output::Closed { code, reason },
+            Input::Frame(_) if unreadable => continue,
+            Input::Frame(bytes) => match inflater.push(&bytes) {
+                Ok(None) => continue,
+                Ok(Some(text)) => match serde_json::from_slice::<Payload>(&text) {
+                    Ok(payload) => Output::Parsed(parser.parse(payload)),
+                    Err(e) => {
+                        eprintln!("gateway: unparseable payload: {e}");
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    unreadable = true;
+                    Output::Unreadable(e.to_string())
+                }
+            },
+        };
+        if output.send_blocking(answer).is_err() || ending {
+            break;
+        }
+    }
 }
 
 /// A live gateway connection. Dropping it closes the connection.
@@ -432,7 +573,6 @@ impl Gateway {
         let (tx, rx) = async_channel::unbounded();
         let state = Rc::new(State {
             token: token.to_owned(),
-            me: Cell::new(None),
             resuming: Cell::new(resume.is_some()),
             resumable: Cell::new(true),
             established: Cell::new(false),
@@ -442,45 +582,56 @@ impl Gateway {
             events: tx,
         });
 
+        let (frames, work_input) = std::sync::mpsc::channel();
+        let (work_output, answers) = async_channel::unbounded();
+        std::thread::Builder::new()
+            .name("gateway-parse".into())
+            .spawn(move || work(work_input, work_output))
+            .map_err(|e| Error::Protocol(format!("cannot start the gateway thread: {e}")))?;
+
         conn.connect_message({
-            let state = state.clone();
-            let inflater = RefCell::new(Inflater::new());
-            move |conn, kind, bytes| {
-                if kind != soup::ffi::SOUP_WEBSOCKET_DATA_BINARY {
-                    return;
-                }
-                let text = match inflater.borrow_mut().push(bytes) {
-                    Ok(Some(text)) => text,
-                    Ok(None) => return,
-                    Err(e) => {
-                        // Nothing after this can be read: start over on a
-                        // new connection, resuming, as the client does.
-                        eprintln!("gateway: cannot inflate: {e}");
-                        conn.close(CLOSE_RECONNECT, Some("decompression error"));
-                        return;
-                    }
-                };
-                match serde_json::from_slice::<Payload>(&text) {
-                    Ok(payload) => handle(conn, &state, payload),
-                    Err(e) => eprintln!("gateway: unparseable payload: {e}"),
+            let frames = frames.clone();
+            move |_, kind, bytes| {
+                if kind == soup::ffi::SOUP_WEBSOCKET_DATA_BINARY {
+                    let _ = frames.send(Input::Frame(bytes.clone()));
                 }
             }
         });
-        conn.connect_closed({
-            let state = state.clone();
-            move |conn| {
-                let code = conn.close_code();
-                let resume = match (&*state.session.borrow(), state.seq.get()) {
-                    (Some((session_id, url)), Some(seq)) if state.resumable.get() && !Event::ends_session(code) => {
-                        Some(Resume { session_id: session_id.clone(), url: url.clone(), seq })
+        conn.connect_closed(move |conn| {
+            let reason = conn.close_data().map(String::from).unwrap_or_default();
+            let _ = frames.send(Input::Closed { code: conn.close_code(), reason });
+        });
+        glib::spawn_future_local({
+            let (conn, state) = (conn.downgrade(), state.clone());
+            async move {
+                while let Ok(answer) = answers.recv().await {
+                    match answer {
+                        Output::Parsed(parsed) => {
+                            let Some(conn) = conn.upgrade() else { break };
+                            handle(&conn, &state, parsed);
+                        }
+                        Output::Unreadable(why) => {
+                            // Nothing after this can be read: start over on a
+                            // new connection, resuming, as the client does.
+                            eprintln!("gateway: cannot inflate: {why}");
+                            if let Some(conn) = conn.upgrade() {
+                                conn.close(CLOSE_RECONNECT, Some("decompression error"));
+                            }
+                        }
+                        Output::Closed { code, reason } => {
+                            let resume = match (&*state.session.borrow(), state.seq.get()) {
+                                (Some((session_id, url)), Some(seq))
+                                    if state.resumable.get() && !Event::ends_session(code) =>
+                                {
+                                    Some(Resume { session_id: session_id.clone(), url: url.clone(), seq })
+                                }
+                                _ => None,
+                            };
+                            let _ = state.events.try_send(Event::Closed { code, reason, resume });
+                            break;
+                        }
                     }
-                    _ => None,
-                };
-                let _ = state.events.try_send(Event::Closed {
-                    code,
-                    reason: conn.close_data().map(String::from).unwrap_or_default(),
-                    resume,
-                });
+                }
                 state.events.close();
             }
         });
@@ -613,14 +764,13 @@ fn identify(conn: &soup::WebsocketConnection, state: &State) {
     );
 }
 
-fn handle(conn: &soup::WebsocketConnection, state: &Rc<State>, payload: Payload) {
-    if let Some(seq) = payload.s {
+fn handle(conn: &soup::WebsocketConnection, state: &Rc<State>, parsed: Parsed) {
+    if let Some(seq) = parsed.seq {
         state.seq.set(Some(seq));
     }
-    match payload.op {
+    match parsed.what {
         // HELLO: start heartbeating, then identify.
-        10 => {
-            let interval = payload.d["heartbeat_interval"].as_u64().unwrap_or(41_250);
+        What::Hello(interval) => {
             spawn_heartbeat(conn, state, Duration::from_millis(interval));
             if state.resuming.get() {
                 resume(conn, state);
@@ -628,27 +778,40 @@ fn handle(conn: &soup::WebsocketConnection, state: &Rc<State>, payload: Payload)
                 identify(conn, state);
             }
         }
-        0 => {
-            let name = payload.t.as_deref().unwrap_or("");
-            if matches!(name, "READY" | "RESUMED") {
-                debug_drop(conn, name);
+        What::Dispatch(Dispatched { events, established }) => {
+            match established {
+                Some(Established::Ready(session)) => {
+                    debug_drop(conn, "READY");
+                    state.resuming.set(false);
+                    state.established.set(true);
+                    if session.is_some() {
+                        *state.session.borrow_mut() = session;
+                    }
+                }
+                Some(Established::Resumed) => {
+                    debug_drop(conn, "RESUMED");
+                    state.established.set(true);
+                }
+                None => {}
             }
-            dispatch(state, name, payload.d)
+            for event in events {
+                send_event(state, event);
+            }
         }
         // Server asks for an immediate heartbeat.
-        1 => heartbeat(conn, state),
-        11 => state.acked.set(true),
+        What::Heartbeat => heartbeat(conn, state),
+        What::Ack => state.acked.set(true),
         // RECONNECT: drop and let the caller resume.
-        7 => conn.close(CLOSE_RECONNECT, Some("reconnect requested")),
-        // INVALID SESSION: `d` says whether resuming can still work. If not,
-        // the caller has to IDENTIFY again.
-        9 => {
-            if payload.d.as_bool() != Some(true) {
+        What::Reconnect => conn.close(CLOSE_RECONNECT, Some("reconnect requested")),
+        // INVALID SESSION: if the session cannot be resumed, the caller has
+        // to IDENTIFY again.
+        What::InvalidSession { resumable } => {
+            if !resumable {
                 state.resumable.set(false);
             }
             conn.close(CLOSE_RECONNECT, Some("session invalidated"));
         }
-        _ => {}
+        What::Other => {}
     }
 }
 
@@ -702,7 +865,7 @@ fn is_me(member: &Value, me: Snowflake) -> bool {
 /// A guild with our own member applied, found in its `members` or, in
 /// READY's newer shape, in `merged`: its entry of `merged_members`.
 fn guild_with_member(value: &Value, merged: &Value, me: Snowflake) -> Option<Guild> {
-    let mut guild = Guild::deserialize(value).ok()?;
+    let mut guild = Guild::from_value(value).ok()?;
     let members = value["members"].as_array().into_iter().chain(merged.as_array()).flatten();
     if let Some(member) = members.into_iter().find(|m| is_me(m, me)) {
         guild.set_member(Member::from_value(member));
@@ -749,7 +912,7 @@ fn private_channels(ready: &Value) -> Vec<Channel> {
         .collect()
 }
 
-fn dispatch(state: &State, name: &str, data: Value) {
+fn dispatch(parser: &Parser, name: &str, data: Value) {
     if crate::shape::enabled() {
         eprintln!("gateway {name}: {}", crate::shape::describe(&data));
     }
@@ -760,12 +923,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 Err(e) => return eprintln!("gateway: READY without a usable user: {e}"),
             };
             let Some(account) = Account::from_user(&data["user"]) else { return };
-            state.me.set(Some(user.id));
-            state.resuming.set(false);
-            state.established.set(true);
-            if let (Some(id), Some(url)) = (data["session_id"].as_str(), data["resume_gateway_url"].as_str()) {
-                *state.session.borrow_mut() = Some((id.to_owned(), url.to_owned()));
-            }
+            parser.me.set(Some(user.id));
             let raw_guilds = data["guilds"].as_array().map(Vec::as_slice).unwrap_or_default();
             let guilds: Vec<Guild> = raw_guilds
                 .iter()
@@ -817,10 +975,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 members,
             }))
         }
-        "RESUMED" => {
-            state.established.set(true);
-            Event::Resumed
-        }
+        "RESUMED" => Event::Resumed,
         "USER_REQUIRED_ACTION_UPDATE" => {
             Event::RequiredActionUpdate(data["required_action"].as_str().map(str::to_owned))
         }
@@ -858,10 +1013,12 @@ fn dispatch(state: &State, name: &str, data: Value) {
                 return eprintln!("gateway: bad USER_SETTINGS_PROTO_UPDATE");
             };
             if kind == Some(2) {
-                return send_event(
-                    state,
-                    Event::FrecencyUpdate { proto, partial: data["partial"].as_bool() == Some(true) },
-                );
+                let patch = FrecencyPatch::from_proto_bytes(&proto).unwrap_or_default();
+                return parser.push(Event::FrecencyUpdate {
+                    patch,
+                    proto,
+                    partial: data["partial"].as_bool() == Some(true),
+                });
             }
             if kind != Some(1) {
                 return;
@@ -889,13 +1046,13 @@ fn dispatch(state: &State, name: &str, data: Value) {
         // Discord may send other members' too, whose roles colour their names.
         "GUILD_MEMBER_UPDATE" => {
             let Some(guild_id) = parse_id(&data["guild_id"]) else { return };
-            if !state.me.get().is_some_and(|me| is_me(&data, me)) {
+            if !parser.me.get().is_some_and(|me| is_me(&data, me)) {
                 let Some(member) = member_known(&data) else { return };
-                return send_event(state, Event::Members { guild_id, members: vec![member], not_found: Vec::new() });
+                return parser.push(Event::Members { guild_id, members: vec![member], not_found: Vec::new() });
             }
             // Our own nickname and picture show in the chat like anyone's.
             if let Some(known) = member_known(&data) {
-                send_event(state, Event::Members { guild_id, members: vec![known], not_found: Vec::new() });
+                parser.push(Event::Members { guild_id, members: vec![known], not_found: Vec::new() });
             }
             Event::MemberUpdate { guild_id, member: Member::from_value(&data) }
         }
@@ -905,7 +1062,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
             let not_found = data["not_found"].as_array().into_iter().flatten().filter_map(parse_id).collect();
             Event::Members { guild_id, members, not_found }
         }
-        "GUILD_UPDATE" => match Guild::deserialize(&data) {
+        "GUILD_UPDATE" => match Guild::from_value(&data) {
             Ok(guild) => Event::GuildUpdate(guild),
             Err(e) => return eprintln!("gateway: bad GUILD_UPDATE: {e}"),
         },
@@ -934,7 +1091,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
             _ => return,
         },
         "USER_UPDATE" => match Account::from_user(&data) {
-            Some(account) if Some(account.id) == state.me.get() => {
+            Some(account) if Some(account.id) == parser.me.get() => {
                 Event::AccountUpdate(account, Nitro::from_user(&data))
             }
             _ => return,
@@ -976,7 +1133,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
             let members = (update.members().iter())
                 .map(|m| (m.user.id, Known { roles: m.roles.clone(), nick: m.nick.clone(), avatar: m.avatar.clone() }))
                 .collect();
-            send_event(state, Event::Members { guild_id: update.guild, members, not_found: Vec::new() });
+            parser.push(Event::Members { guild_id: update.guild, members, not_found: Vec::new() });
             Event::MemberList(Box::new(update))
         }
         "THREAD_CREATE" | "THREAD_UPDATE" => match (Channel::deserialize(&data), parse_id(&data["guild_id"])) {
@@ -1027,7 +1184,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
         // Only ours: the client keeps no one else's.
         "THREAD_MEMBER_UPDATE" => {
             let (Some(guild_id), Some(thread)) = (parse_id(&data["guild_id"]), parse_id(&data["id"])) else { return };
-            if parse_id(&data["user_id"]) != state.me.get() {
+            if parse_id(&data["user_id"]) != parser.me.get() {
                 return;
             }
             match ThreadMember::deserialize(&data) {
@@ -1038,7 +1195,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
         // Who joined and left; ours, if we're among them.
         "THREAD_MEMBERS_UPDATE" => {
             let (Some(guild_id), Some(thread), Some(me)) =
-                (parse_id(&data["guild_id"]), parse_id(&data["id"]), state.me.get())
+                (parse_id(&data["guild_id"]), parse_id(&data["id"]), parser.me.get())
             else {
                 return;
             };
@@ -1064,14 +1221,14 @@ fn dispatch(state: &State, name: &str, data: Value) {
             }
         }
         "GUILD_CREATE" => {
-            let Some(me) = state.me.get() else { return };
+            let Some(me) = parser.me.get() else { return };
             let Some(guild) = guild_with_member(&data, &Value::Null, me) else { return };
             let members =
                 Event::Members { guild_id: guild.id, members: members_of(&data, &Value::Null), not_found: Vec::new() };
             let voice =
                 Event::GuildVoiceStates { guild_id: guild.id, states: VoiceState::parse_list(&data["voice_states"]) };
-            send_event(state, Event::GuildCreate(guild));
-            send_event(state, voice);
+            parser.push(Event::GuildCreate(guild));
+            parser.push(voice);
             members
         }
         "VOICE_STATE_UPDATE" => match voice_states::Update::parse(&data) {
@@ -1233,7 +1390,7 @@ fn dispatch(state: &State, name: &str, data: Value) {
         },
         _ => return,
     };
-    send_event(state, event);
+    parser.push(event);
 }
 
 fn typing_start(data: &Value) -> Option<Event> {
@@ -1251,6 +1408,131 @@ fn send_event(state: &State, event: Event) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl Parser {
+        fn try_recv(&self) -> Result<Event, ()> {
+            self.events.borrow_mut().pop_front().ok_or(())
+        }
+    }
+
+    /// A zlib-stream frame of `payload`, in stored (uncompressed) blocks
+    /// ending with a sync flush; `first` starts the stream.
+    fn frame(payload: &str, first: bool) -> glib::Bytes {
+        let mut bytes = if first { vec![0x78, 0x01] } else { Vec::new() };
+        let len = payload.len() as u16;
+        bytes.push(0x00);
+        bytes.extend_from_slice(&len.to_le_bytes());
+        bytes.extend_from_slice(&(!len).to_le_bytes());
+        bytes.extend_from_slice(payload.as_bytes());
+        bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0xff, 0xff]);
+        glib::Bytes::from_owned(bytes)
+    }
+
+    /// Runs `inputs` through the worker, as the connection would feed it.
+    fn worked(inputs: Vec<Input>) -> Vec<Output> {
+        let (frames, work_input) = std::sync::mpsc::channel();
+        let (work_output, answers) = async_channel::unbounded();
+        for input in inputs {
+            frames.send(input).unwrap();
+        }
+        // Dropping the sender ends the worker once it has answered everything.
+        drop(frames);
+        work(work_input, work_output);
+        std::iter::from_fn(|| answers.try_recv().ok()).collect()
+    }
+
+    fn closed() -> Input {
+        Input::Closed { code: 1006, reason: String::new() }
+    }
+
+    #[test]
+    fn frames_come_back_in_order_and_a_close_behind_them() {
+        let ready = r#"{"op":0,"s":1,"t":"READY","d":{"user":{"id":"5","username":"me"},"session_id":"abc","resume_gateway_url":"wss://resume.example"}}"#;
+        let answers = worked(vec![
+            Input::Frame(frame(r#"{"op":10,"d":{"heartbeat_interval":41250}}"#, true)),
+            Input::Frame(frame(ready, false)),
+            Input::Frame(frame(r#"{"op":0,"s":2,"t":"MESSAGE_DELETE","d":{"id":"7","channel_id":"3"}}"#, false)),
+            closed(),
+        ]);
+        let [Output::Parsed(hello), Output::Parsed(ready), Output::Parsed(delete), Output::Closed { code: 1006, .. }] =
+            &answers[..]
+        else {
+            panic!("expected HELLO, READY, a delete and the close, in that order")
+        };
+        assert!(matches!(hello.what, What::Hello(41250)));
+        let What::Dispatch(Dispatched { events, established: Some(Established::Ready(Some((id, url)))) }) = &ready.what
+        else {
+            panic!("READY should establish the session")
+        };
+        assert_eq!((ready.seq, id.as_str(), url.as_str()), (Some(1), "abc", "wss://resume.example"));
+        assert!(matches!(events[..], [Event::Ready(_)]));
+        let What::Dispatch(Dispatched { events, established: None }) = &delete.what else { panic!("a delete") };
+        assert!(matches!(events[..], [Event::MessageDelete { id: Snowflake(7), channel_id: Snowflake(3) }]));
+        assert_eq!(delete.seq, Some(2), "the sequence number counts every payload before the close");
+    }
+
+    #[test]
+    fn what_a_payload_remembers_is_there_for_the_next_and_its_events_keep_their_order() {
+        let ready = r#"{"op":0,"s":1,"t":"READY","d":{"user":{"id":"5","username":"me"}}}"#;
+        let guild = r#"{"op":0,"s":2,"t":"GUILD_CREATE","d":{"id":"2","name":"B","voice_states":[],"members":[{"user":{"id":"7"},"roles":[]}]}}"#;
+        let answers = worked(vec![Input::Frame(frame(ready, true)), Input::Frame(frame(guild, false))]);
+        let [_, Output::Parsed(Parsed { what: What::Dispatch(Dispatched { events, .. }), .. })] = &answers[..] else {
+            panic!("expected READY and a dispatch")
+        };
+        assert!(
+            matches!(events[..], [Event::GuildCreate(_), Event::GuildVoiceStates { .. }, Event::Members { .. }]),
+            "the guild needs our id from READY, and its voice list follows it"
+        );
+    }
+
+    #[test]
+    fn a_payload_spread_over_frames_and_one_that_is_not_json() {
+        let ack = r#"{"op":11,"d":null}"#;
+        let (first, second) = (frame(ack, true), frame(ack, false));
+        // The second half of a payload only ends it: no sync flush before.
+        let (head, tail) = first.split_at(first.len() - 4);
+        let answers = worked(vec![
+            Input::Frame(glib::Bytes::from(head)),
+            Input::Frame(glib::Bytes::from(tail)),
+            Input::Frame(frame("not json", false)),
+            Input::Frame(second),
+        ]);
+        assert!(
+            matches!(
+                &answers[..],
+                [Output::Parsed(Parsed { what: What::Ack, .. }), Output::Parsed(Parsed { what: What::Ack, .. })]
+            ),
+            "a payload that does not parse is skipped, those around it are not"
+        );
+    }
+
+    #[test]
+    fn a_stream_that_cannot_be_inflated_ends_the_reading() {
+        let answers = worked(vec![
+            Input::Frame(glib::Bytes::from(&[0x12, 0x34, 0x00, 0x00, 0xff, 0xff][..])),
+            Input::Frame(frame(r#"{"op":11,"d":null}"#, true)),
+            closed(),
+        ]);
+        assert!(
+            matches!(&answers[..], [Output::Unreadable(_), Output::Closed { .. }]),
+            "nothing after a bad frame can be read, and it is said once"
+        );
+    }
+
+    #[test]
+    fn ready_without_a_usable_user_establishes_nothing() {
+        let parser = Parser::default();
+        let payload = |d| Payload { op: 0, d, s: Some(1), t: Some("READY".into()) };
+        let What::Dispatch(unusable) = parser.parse(payload(json!({"session_id": "abc"}))).what else { panic!() };
+        assert!(unusable.events.is_empty() && unusable.established.is_none());
+        let usable = json!({"user": {"id": "5", "username": "me"}, "session_id": "abc"});
+        let What::Dispatch(usable) = parser.parse(payload(usable)).what else { panic!() };
+        assert!(
+            matches!(usable.established, Some(Established::Ready(None))),
+            "without a resume URL, the session we had stays"
+        );
+        assert_eq!(parser.me.get(), Some(Snowflake(5)), "later payloads find our own member by it");
+    }
 
     #[test]
     fn ready_dms_inline_recipients() {
@@ -1294,20 +1576,10 @@ mod tests {
                 [{"user_id": "5", "roles": []}]
             ]
         });
-        let (tx, rx) = async_channel::unbounded();
-        let state = State {
-            token: String::new(),
-            me: Cell::new(None),
-            session: RefCell::new(None),
-            resuming: Cell::new(false),
-            resumable: Cell::new(true),
-            established: Cell::new(false),
-            seq: Cell::new(None),
-            acked: Cell::new(true),
-            events: tx,
-        };
+        let state = Parser::default();
+        state.me.set(None);
         dispatch(&state, "READY", ready);
-        let Ok(Event::Ready(ready)) = rx.try_recv() else { panic!("no READY") };
+        let Ok(Event::Ready(ready)) = state.try_recv() else { panic!("no READY") };
         let noon = glib::DateTime::from_iso8601("2026-10-28T12:00:00Z", None).unwrap().to_unix();
         let a = &ready.guilds[0];
         assert_eq!((a.my_roles.as_slice(), a.timed_out_until), (&[Snowflake(40)][..], Some(noon + 1)));
@@ -1323,9 +1595,9 @@ mod tests {
                 json!({"guild_id": "1", "user": {"id": user}, "roles": ["40"], "communication_disabled_until": until}),
             );
             // Our own nickname and picture come first, as theirs do.
-            let first = rx.try_recv().ok();
+            let first = state.try_recv().ok();
             match first {
-                Some(Event::Members { .. }) if user == "5" => rx.try_recv().ok(),
+                Some(Event::Members { .. }) if user == "5" => state.try_recv().ok(),
                 first => first,
             }
         };
@@ -1346,7 +1618,7 @@ mod tests {
             json!({"id": "1", "name": "A", "owner_id": "8", "verification_level": 3, "mfa_level": 1,
                    "premium_tier": 1, "roles": [{"id": "1", "permissions": "1024"}]}),
         );
-        let Ok(Event::GuildUpdate(update)) = rx.try_recv() else { panic!("no guild update") };
+        let Ok(Event::GuildUpdate(update)) = state.try_recv() else { panic!("no guild update") };
         assert_eq!(update.premium_tier, 1);
         assert_eq!(
             (update.id, update.owner_id, update.verification.level, update.requires_mfa, update.roles.len()),
@@ -1359,7 +1631,7 @@ mod tests {
             "GUILD_EMOJIS_UPDATE",
             json!({"guild_id": "1", "emojis": [{"id": "9", "name": "blob", "available": true, "roles": ["40"]}]}),
         );
-        let Ok(Event::GuildEmojisUpdate { guild_id, emojis }) = rx.try_recv() else { panic!("no emoji update") };
+        let Ok(Event::GuildEmojisUpdate { guild_id, emojis }) = state.try_recv() else { panic!("no emoji update") };
         assert_eq!((guild_id, emojis.len(), emojis[0].roles.clone()), (Snowflake(1), 1, vec![Snowflake(40)]));
 
         dispatch(
@@ -1367,10 +1639,12 @@ mod tests {
             "GUILD_STICKERS_UPDATE",
             json!({"guild_id": "1", "stickers": [{"id": "8", "name": "wave", "format_type": 1, "available": true}]}),
         );
-        let Ok(Event::GuildStickersUpdate { guild_id, stickers }) = rx.try_recv() else { panic!("no sticker update") };
+        let Ok(Event::GuildStickersUpdate { guild_id, stickers }) = state.try_recv() else {
+            panic!("no sticker update")
+        };
         assert_eq!((guild_id, stickers.len(), stickers[0].sticker.name.as_str()), (Snowflake(1), 1, "wave"));
         dispatch(&state, "GUILD_STICKERS_UPDATE", json!({"guild_id": "1", "stickers": []}));
-        let Ok(Event::GuildStickersUpdate { stickers, .. }) = rx.try_recv() else { panic!("no sticker update") };
+        let Ok(Event::GuildStickersUpdate { stickers, .. }) = state.try_recv() else { panic!("no sticker update") };
         assert!(stickers.is_empty(), "a server that lost its last sticker");
 
         dispatch(
@@ -1378,73 +1652,62 @@ mod tests {
             "GUILD_ROLE_UPDATE",
             json!({"guild_id": "1", "role": {"id": "40", "name": "Mod", "permissions": "8192"}}),
         );
-        let Ok(Event::RoleUpdate { guild_id, role }) = rx.try_recv() else { panic!("no role update") };
+        let Ok(Event::RoleUpdate { guild_id, role }) = state.try_recv() else { panic!("no role update") };
         assert_eq!((guild_id, role.id, role.permissions.0), (Snowflake(1), Snowflake(40), 8192));
         dispatch(&state, "GUILD_ROLE_DELETE", json!({"guild_id": "1", "role_id": "40"}));
-        let Ok(Event::RoleDelete { role_id, .. }) = rx.try_recv() else { panic!("no role delete") };
+        let Ok(Event::RoleDelete { role_id, .. }) = state.try_recv() else { panic!("no role delete") };
         assert_eq!(role_id, Snowflake(40));
         dispatch(&state, "USER_UPDATE", json!({"id": "8", "verified": true}));
-        assert!(rx.try_recv().is_err(), "someone else");
+        assert!(state.try_recv().is_err(), "someone else");
         dispatch(
             &state,
             "USER_UPDATE",
             json!({"id": "5", "verified": true, "email": "a@example.org", "mfa_enabled": true, "premium_type": 2}),
         );
-        let Ok(Event::AccountUpdate(account, nitro)) = rx.try_recv() else { panic!("no account update") };
+        let Ok(Event::AccountUpdate(account, nitro)) = state.try_recv() else { panic!("no account update") };
         assert!(account.verified && account.email && !account.phone && account.mfa);
         assert_eq!(nitro.premium_type, Some(crate::limits::PremiumType::Tier2));
 
         dispatch(&state, "CHANNEL_UPDATE", json!({"id": "9", "type": 0, "guild_id": "1", "rate_limit_per_user": 30}));
-        let Ok(Event::GuildChannelUpdate { guild_id, channel }) = rx.try_recv() else { panic!("no channel update") };
+        let Ok(Event::GuildChannelUpdate { guild_id, channel }) = state.try_recv() else { panic!("no channel update") };
         assert_eq!((guild_id, channel.rate_limit_per_user), (Snowflake(1), 30));
     }
 
     #[test]
     fn other_members() {
-        let (tx, rx) = async_channel::unbounded();
-        let state = State {
-            token: String::new(),
-            me: Cell::new(None),
-            session: RefCell::new(None),
-            resuming: Cell::new(false),
-            resumable: Cell::new(true),
-            established: Cell::new(false),
-            seq: Cell::new(None),
-            acked: Cell::new(true),
-            events: tx,
-        };
+        let state = Parser::default();
+        state.me.set(None);
         let ready = json!({
             "user": {"id": "5", "username": "me", "premium_type": 3},
             "guilds": [{"id": "1", "properties": {"name": "A", "premium_tier": 2}}],
             "merged_members": [[{"user_id": "5", "roles": []}, {"user_id": "6", "roles": ["40"]}]]
         });
         dispatch(&state, "READY", ready);
-        let Ok(Event::Ready(ready)) = rx.try_recv() else { panic!("no READY") };
+        let Ok(Event::Ready(ready)) = state.try_recv() else { panic!("no READY") };
         assert_eq!(ready.nitro.premium_type, Some(crate::limits::PremiumType::Tier0));
         assert_eq!(ready.guilds[0].premium_tier, 2);
         assert_eq!(ready.members.roles(Snowflake(1), Snowflake(6)), Some(&[Snowflake(40)][..]));
-        assert!(state.established.get());
 
         dispatch(
             &state,
             "GUILD_CREATE",
             json!({"id": "2", "name": "B", "members": [{"user": {"id": "7"}, "roles": ["41"]}]}),
         );
-        assert!(matches!(rx.try_recv(), Ok(Event::GuildCreate(_))));
-        assert!(matches!(rx.try_recv(), Ok(Event::GuildVoiceStates { .. })));
-        let Ok(Event::Members { guild_id, members, .. }) = rx.try_recv() else { panic!("no members") };
+        assert!(matches!(state.try_recv(), Ok(Event::GuildCreate(_))));
+        assert!(matches!(state.try_recv(), Ok(Event::GuildVoiceStates { .. })));
+        let Ok(Event::Members { guild_id, members, .. }) = state.try_recv() else { panic!("no members") };
         let roles = |ids: &[u64]| Known { roles: ids.iter().map(|&id| Snowflake(id)).collect(), ..Known::default() };
         assert_eq!((guild_id, members), (Snowflake(2), vec![(Snowflake(7), roles(&[41]))]));
 
         dispatch(&state, "GUILD_MEMBER_UPDATE", json!({"guild_id": "1", "user": {"id": "6"}, "roles": []}));
-        let Ok(Event::Members { members, .. }) = rx.try_recv() else { panic!("someone else's update") };
+        let Ok(Event::Members { members, .. }) = state.try_recv() else { panic!("someone else's update") };
         assert_eq!(members, vec![(Snowflake(6), Known::default())]);
         dispatch(
             &state,
             "GUILD_MEMBER_UPDATE",
             json!({"guild_id": "1", "user": {"id": "6"}, "roles": [], "nick": "Six", "avatar": "av"}),
         );
-        let Ok(Event::Members { members, .. }) = rx.try_recv() else { panic!("someone else's update") };
+        let Ok(Event::Members { members, .. }) = state.try_recv() else { panic!("someone else's update") };
         assert_eq!(members[0].1.nick.as_deref(), Some("Six"));
         assert_eq!(members[0].1.avatar.as_deref(), Some("av"));
 
@@ -1454,37 +1717,26 @@ mod tests {
             json!({"guild_id": "1", "members": [{"user": {"id": "8"}, "roles": ["40"]}], "not_found": ["9"],
                    "chunk_index": 0, "chunk_count": 1}),
         );
-        let Ok(Event::Members { members, not_found, .. }) = rx.try_recv() else { panic!("no chunk") };
+        let Ok(Event::Members { members, not_found, .. }) = state.try_recv() else { panic!("no chunk") };
         assert_eq!((members, not_found), (vec![(Snowflake(8), roles(&[40]))], vec![Snowflake(9)]));
     }
 
     #[test]
     fn voice_states() {
-        let (tx, rx) = async_channel::unbounded();
-        let state = State {
-            token: String::new(),
-            me: Cell::new(None),
-            session: RefCell::new(None),
-            resuming: Cell::new(false),
-            resumable: Cell::new(true),
-            established: Cell::new(false),
-            seq: Cell::new(None),
-            acked: Cell::new(true),
-            events: tx,
-        };
+        let state = Parser::default();
         let in_voice = |guild: &str, user: &str, channel: Value| json!({"guild_id": guild, "user_id": user, "channel_id": channel, "session_id": "s", "self_mute": true});
         let ready = json!({
             "user": {"id": "5", "username": "me"},
             "guilds": [{"id": "1", "properties": {"name": "A"}, "voice_states": [in_voice("1", "6", json!("9"))]}],
         });
         dispatch(&state, "READY", ready);
-        let Ok(Event::Ready(ready)) = rx.try_recv() else { panic!("no READY") };
+        let Ok(Event::Ready(ready)) = state.try_recv() else { panic!("no READY") };
         let names =
             |states: &VoiceStates| states.in_channel(Snowflake(1), Snowflake(9), |s| s.user_id.0.to_string()).len();
         assert_eq!(names(&ready.voice_states), 1);
 
         dispatch(&state, "VOICE_STATE_UPDATE", in_voice("1", "7", json!("9")));
-        let Ok(Event::VoiceStates(updates)) = rx.try_recv() else { panic!("no update") };
+        let Ok(Event::VoiceStates(updates)) = state.try_recv() else { panic!("no update") };
         assert_eq!((updates[0].guild, updates[0].user), (Snowflake(1), Snowflake(7)));
         assert!(updates[0].state.as_ref().is_some_and(|s| s.self_mute && s.channel_id == Snowflake(9)));
 
@@ -1493,44 +1745,34 @@ mod tests {
             "VOICE_STATE_UPDATE_BATCH",
             json!({"voice_states": [in_voice("1", "7", Value::Null), in_voice("2", "8", json!("3"))]}),
         );
-        let Ok(Event::VoiceStates(updates)) = rx.try_recv() else { panic!("no batch") };
+        let Ok(Event::VoiceStates(updates)) = state.try_recv() else { panic!("no batch") };
         assert_eq!(updates.iter().map(|u| (u.guild.0, u.state.is_some())).collect::<Vec<_>>(), [(1, false), (2, true)]);
 
         dispatch(&state, "VOICE_STATE_UPDATE", json!({"guild_id": null, "user_id": "7", "channel_id": "3"}));
-        assert!(rx.try_recv().is_err(), "a DM call isn't a server's voice list");
+        assert!(state.try_recv().is_err(), "a DM call isn't a server's voice list");
     }
 
     #[test]
     fn threads() {
-        let (tx, rx) = async_channel::unbounded();
-        let state = State {
-            token: String::new(),
-            me: Cell::new(Some(Snowflake(5))),
-            session: RefCell::new(None),
-            resuming: Cell::new(false),
-            resumable: Cell::new(true),
-            established: Cell::new(true),
-            seq: Cell::new(None),
-            acked: Cell::new(true),
-            events: tx,
-        };
+        let state = Parser::default();
+        state.me.set(Some(Snowflake(5)));
         let member = json!({"flags": 2, "muted": false, "mute_config": null, "join_timestamp": "2026-10-28T00:00:00Z"});
         let thread = json!({"id": "20", "guild_id": "1", "parent_id": "9", "type": 11, "name": "t",
                             "thread_metadata": {"archived": false, "locked": true, "auto_archive_duration": 1440,
                                                 "archive_timestamp": "2026-10-27T00:00:00Z"},
                             "member": member, "newly_created": true});
         dispatch(&state, "THREAD_CREATE", thread);
-        let Ok(Event::ThreadCreate { guild_id, thread, newly_created }) = rx.try_recv() else { panic!("no thread") };
+        let Ok(Event::ThreadCreate { guild_id, thread, newly_created }) = state.try_recv() else { panic!("no thread") };
         assert_eq!((guild_id, thread.parent_id, newly_created), (Snowflake(1), Some(Snowflake(9)), true));
         assert!(thread.is_locked() && thread.is_active_thread());
         assert_eq!(thread.member.map(|m| (m.flags, m.join_timestamp)), Some((2, Some(1_793_145_600_000))));
 
         dispatch(&state, "THREAD_UPDATE", json!({"id": "9", "guild_id": "1", "type": 0}));
-        assert!(rx.try_recv().is_err(), "not a thread");
+        assert!(state.try_recv().is_err(), "not a thread");
         dispatch(&state, "THREAD_UPDATE", json!({"id": "20", "guild_id": "1", "parent_id": "9", "type": 11}));
-        assert!(matches!(rx.try_recv(), Ok(Event::ThreadUpdate { .. })), "an update isn't a creation");
+        assert!(matches!(state.try_recv(), Ok(Event::ThreadUpdate { .. })), "an update isn't a creation");
         dispatch(&state, "THREAD_DELETE", json!({"id": "20", "guild_id": "1", "parent_id": "9", "type": 11}));
-        assert!(matches!(rx.try_recv(), Ok(Event::ThreadDelete { id: Snowflake(20), .. })));
+        assert!(matches!(state.try_recv(), Ok(Event::ThreadDelete { id: Snowflake(20), .. })));
 
         dispatch(
             &state,
@@ -1538,14 +1780,14 @@ mod tests {
             json!({"guild_id": "1", "threads": [{"id": "21", "type": 12, "parent_id": "9"}],
                    "members": [{"id": "21", "user_id": "5", "flags": 0, "join_timestamp": "2026-10-28T00:00:00Z"}]}),
         );
-        let Ok(Event::ThreadListSync { threads, members, complete, .. }) = rx.try_recv() else { panic!("no sync") };
+        let Ok(Event::ThreadListSync { threads, members, complete, .. }) = state.try_recv() else { panic!("no sync") };
         assert_eq!((threads.len(), members[0].0, complete), (1, Snowflake(21), true));
         dispatch(
             &state,
             "THREAD_LIST_SYNC",
             json!({"guild_id": "1", "channel_ids": ["9"], "threads": [], "members": []}),
         );
-        let Ok(Event::ThreadListSync { complete, .. }) = rx.try_recv() else { panic!("no sync") };
+        let Ok(Event::ThreadListSync { complete, .. }) = state.try_recv() else { panic!("no sync") };
         assert!(!complete, "some channels' threads");
 
         dispatch(
@@ -1554,18 +1796,18 @@ mod tests {
             json!({"guild_id": "1", "channel_id": "15", "threads": [
                 {"thread_id": "20", "count": 3}, {"thread_id": "21", "missing": true}]}),
         );
-        let Ok(Event::ForumUnreads { channel_id, threads }) = rx.try_recv() else { panic!("no unreads") };
+        let Ok(Event::ForumUnreads { channel_id, threads }) = state.try_recv() else { panic!("no unreads") };
         assert_eq!((channel_id, threads), (Snowflake(15), vec![(Snowflake(20), Some(3)), (Snowflake(21), None)]));
         dispatch(&state, "FORUM_UNREADS", json!({"channel_id": "15", "permission_denied": true, "threads": []}));
-        assert!(rx.try_recv().is_err(), "denied");
+        assert!(state.try_recv().is_err(), "denied");
 
         let ours = json!({"id": "20", "guild_id": "1", "user_id": "5", "flags": 8, "muted": true,
                           "mute_config": {"end_time": null}, "join_timestamp": "2026-10-28T00:00:00Z"});
         dispatch(&state, "THREAD_MEMBER_UPDATE", ours);
-        let Ok(Event::ThreadMember { member: Some(member), .. }) = rx.try_recv() else { panic!("our member") };
+        let Ok(Event::ThreadMember { member: Some(member), .. }) = state.try_recv() else { panic!("our member") };
         assert!(member.flags == 8 && member.is_muted(0));
         dispatch(&state, "THREAD_MEMBER_UPDATE", json!({"id": "20", "guild_id": "1", "user_id": "6", "flags": 0}));
-        assert!(rx.try_recv().is_err(), "someone else's");
+        assert!(state.try_recv().is_err(), "someone else's");
 
         let members = |added: &str, removed: &str| {
             dispatch(
@@ -1575,7 +1817,7 @@ mod tests {
                        "added_members": [{"id": "20", "user_id": added, "flags": 0, "join_timestamp": "2026-10-28T00:00:00Z"}],
                        "removed_member_ids": [removed]}),
             );
-            rx.try_recv().ok()
+            state.try_recv().ok()
         };
         assert!(matches!(members("5", "7"), Some(Event::ThreadMember { member: Some(_), .. })), "we joined");
         assert!(matches!(members("6", "5"), Some(Event::ThreadMember { member: None, .. })), "we left");
@@ -1584,7 +1826,7 @@ mod tests {
 
     #[test]
     fn member_lists_and_presences_of_a_server() {
-        let (state, rx) = fresh_state();
+        let state = fresh_state();
         dispatch(
             &state,
             "GUILD_MEMBER_LIST_UPDATE",
@@ -1598,34 +1840,34 @@ mod tests {
             }),
         );
         // Their roles colour names in the chat, as the client's member store takes them.
-        let Ok(Event::Members { guild_id, members, .. }) = rx.try_recv() else { panic!("no members") };
+        let Ok(Event::Members { guild_id, members, .. }) = state.try_recv() else { panic!("no members") };
         assert_eq!(
             (guild_id, members),
             (Snowflake(1), vec![(Snowflake(6), Known { roles: vec![Snowflake(40)], ..Known::default() })])
         );
-        let Ok(Event::MemberList(update)) = rx.try_recv() else { panic!("no list") };
+        let Ok(Event::MemberList(update)) = state.try_recv() else { panic!("no list") };
         assert_eq!((update.guild, update.list.as_str(), update.ops.len()), (Snowflake(1), "everyone", 1));
 
         dispatch(&state, "PRESENCE_UPDATE", json!({"user": {"id": "6"}, "guild_id": "1", "status": "idle"}));
-        let Ok(Event::PresenceUpdate { user_id, guild_id, presence }) = rx.try_recv() else { panic!("no presence") };
+        let Ok(Event::PresenceUpdate { user_id, guild_id, presence }) = state.try_recv() else { panic!("no presence") };
         assert_eq!(
             (user_id, guild_id, presence.status),
             (Snowflake(6), Some(Snowflake(1)), crate::relationships::Status::Idle)
         );
         dispatch(&state, "PRESENCE_UPDATE", json!({"user": {"id": "6"}, "status": "online"}));
-        let Ok(Event::PresenceUpdate { guild_id, .. }) = rx.try_recv() else { panic!("no presence") };
+        let Ok(Event::PresenceUpdate { guild_id, .. }) = state.try_recv() else { panic!("no presence") };
         assert_eq!(guild_id, None);
     }
 
     #[test]
     fn a_note_changed_elsewhere() {
-        let (state, rx) = fresh_state();
+        let state = fresh_state();
         dispatch(&state, "USER_NOTE_UPDATE", json!({"id": "6", "note": "met at a meetup"}));
-        let Ok(Event::UserNoteUpdate { user_id, note }) = rx.try_recv() else { panic!("no note") };
+        let Ok(Event::UserNoteUpdate { user_id, note }) = state.try_recv() else { panic!("no note") };
         assert_eq!((user_id, note.as_deref()), (Snowflake(6), Some("met at a meetup")));
         // The client stores what is missing as no note.
         dispatch(&state, "USER_NOTE_UPDATE", json!({"id": "6"}));
-        let Ok(Event::UserNoteUpdate { note, .. }) = rx.try_recv() else { panic!("no note") };
+        let Ok(Event::UserNoteUpdate { note, .. }) = state.try_recv() else { panic!("no note") };
         assert_eq!(note, None);
     }
 
@@ -1637,15 +1879,16 @@ mod tests {
 
     #[test]
     fn an_update_of_the_favourites_is_told_apart_from_the_settings() {
-        let (state, rx) = fresh_state();
+        let state = fresh_state();
         let update = |kind: u64, partial: bool| json!({"settings": {"type": kind, "proto": settings_proto::encode(&[0x2a, 0x00])}, "partial": partial});
         dispatch(&state, "USER_SETTINGS_PROTO_UPDATE", update(2, true));
-        let Ok(Event::FrecencyUpdate { proto, partial }) = rx.try_recv() else { panic!("no update") };
+        let Ok(Event::FrecencyUpdate { patch, proto, partial }) = state.try_recv() else { panic!("no update") };
         assert_eq!((proto, partial), (vec![0x2a, 0x00], true));
+        assert_eq!(patch.favorite_emojis, Some(Vec::new()), "read where the payload is, not by the app");
         dispatch(&state, "USER_SETTINGS_PROTO_UPDATE", update(2, false));
-        assert!(matches!(rx.try_recv(), Ok(Event::FrecencyUpdate { partial: false, .. })));
+        assert!(matches!(state.try_recv(), Ok(Event::FrecencyUpdate { partial: false, .. })));
         dispatch(&state, "USER_SETTINGS_PROTO_UPDATE", update(3, false));
-        assert!(rx.try_recv().is_err(), "a type nobody reads");
+        assert!(state.try_recv().is_err(), "a type nobody reads");
     }
 
     #[test]
@@ -1696,53 +1939,43 @@ mod tests {
         assert_eq!(system, [true, false, false]);
     }
 
-    fn fresh_state() -> (State, async_channel::Receiver<Event>) {
-        let (tx, rx) = async_channel::unbounded();
-        let state = State {
-            token: String::new(),
-            me: Cell::new(Some(Snowflake(5))),
-            session: RefCell::new(None),
-            resuming: Cell::new(false),
-            resumable: Cell::new(true),
-            established: Cell::new(true),
-            seq: Cell::new(None),
-            acked: Cell::new(true),
-            events: tx,
-        };
-        (state, rx)
+    fn fresh_state() -> Parser {
+        let state = Parser::default();
+        state.me.set(Some(Snowflake(5)));
+        state
     }
 
     #[test]
     fn a_bulk_delete_names_every_message_it_removes() {
         // `MESSAGE_DELETE_BULK` in 596344 removes `ids` from the channel's messages.
-        let (state, rx) = fresh_state();
+        let state = fresh_state();
         dispatch(&state, "MESSAGE_DELETE_BULK", json!({"ids": ["7", "9", "x"], "channel_id": "3", "guild_id": "1"}));
-        let Ok(Event::MessageDeleteBulk { ids, channel_id }) = rx.try_recv() else { panic!("no bulk delete") };
+        let Ok(Event::MessageDeleteBulk { ids, channel_id }) = state.try_recv() else { panic!("no bulk delete") };
         assert_eq!((ids, channel_id), (vec![Snowflake(7), Snowflake(9)], Snowflake(3)));
         dispatch(&state, "MESSAGE_DELETE_BULK", json!({"ids": ["7"]}));
-        assert!(rx.try_recv().is_err(), "no channel, nothing to remove from");
+        assert!(state.try_recv().is_err(), "no channel, nothing to remove from");
     }
 
     #[test]
     fn an_update_carries_the_poll_it_ended() {
-        let (state, rx) = fresh_state();
+        let state = fresh_state();
         let poll = json!({"question": {"text": "?"}, "answers": [], "expiry": "2026-01-01T00:00:00+00:00",
                           "results": {"is_finalized": true, "answer_counts": []}});
         dispatch(&state, "MESSAGE_UPDATE", json!({"id": "9", "channel_id": "3", "poll": poll}));
-        let Ok(Event::MessageUpdate(edit)) = rx.try_recv() else { panic!("no update") };
+        let Ok(Event::MessageUpdate(edit)) = state.try_recv() else { panic!("no update") };
         assert!(edit.poll.is_some_and(|p| p.results.is_some_and(|r| r.is_finalized)));
         dispatch(&state, "MESSAGE_UPDATE", json!({"id": "9", "channel_id": "3", "content": "x"}));
-        let Ok(Event::MessageUpdate(edit)) = rx.try_recv() else { panic!("no update") };
+        let Ok(Event::MessageUpdate(edit)) = state.try_recv() else { panic!("no update") };
         assert!(edit.poll.is_none());
     }
 
     #[test]
     fn poll_votes_arrive_one_or_many() {
         // 225123 turns these into reactions of the vote type.
-        let (state, rx) = fresh_state();
+        let state = fresh_state();
         let one = json!({"channel_id": "3", "message_id": "9", "user_id": "5", "answer_id": 2, "guild_id": "1"});
         dispatch(&state, "MESSAGE_POLL_VOTE_ADD", one.clone());
-        let Ok(Event::PollVote { channel_id, message_id, votes, added, many }) = rx.try_recv() else {
+        let Ok(Event::PollVote { channel_id, message_id, votes, added, many }) = state.try_recv() else {
             panic!("no vote")
         };
         assert_eq!(
@@ -1750,7 +1983,7 @@ mod tests {
             (Snowflake(3), Snowflake(9), vec![(2, Snowflake(5))], true, false)
         );
         dispatch(&state, "MESSAGE_POLL_VOTE_REMOVE", one);
-        let Ok(Event::PollVote { added, .. }) = rx.try_recv() else { panic!("no vote taken back") };
+        let Ok(Event::PollVote { added, .. }) = state.try_recv() else { panic!("no vote taken back") };
         assert!(!added);
         dispatch(
             &state,
@@ -1758,26 +1991,26 @@ mod tests {
             json!({"channel_id": "3", "message_id": "9", "votes": [
                 {"answer_id": 1, "users": ["5", "6"]}, {"answer_id": 2, "users": ["7"]}]}),
         );
-        let Ok(Event::PollVote { votes, added, many, .. }) = rx.try_recv() else { panic!("no votes") };
+        let Ok(Event::PollVote { votes, added, many, .. }) = state.try_recv() else { panic!("no votes") };
         let all = [(1, Snowflake(5)), (1, Snowflake(6)), (2, Snowflake(7))];
         assert_eq!((votes, added, many), (all.to_vec(), true, true));
     }
     #[test]
     fn reactions_arrive_added_or_taken_back() {
         // 225123 passes `type` and `burst_colors` on with the rest.
-        let (state, rx) = fresh_state();
+        let state = fresh_state();
         let fire = json!({"id": null, "name": "🔥"});
         let one = json!({"channel_id": "3", "message_id": "9", "user_id": "5", "emoji": fire, "guild_id": "1"});
         dispatch(&state, "MESSAGE_REACTION_ADD", one.clone());
         let Ok(Event::Reaction(reactions::Reacted { channel_id, message_id, user_id, emoji, kind, colors, added })) =
-            rx.try_recv()
+            state.try_recv()
         else {
             panic!("no reaction")
         };
         assert_eq!((channel_id, message_id, user_id), (Snowflake(3), Snowflake(9), Snowflake(5)));
         assert_eq!((emoji.name.as_deref(), kind, colors.len(), added), (Some("🔥"), Kind::Normal, 0, true));
         dispatch(&state, "MESSAGE_REACTION_REMOVE", one);
-        let Ok(Event::Reaction(reactions::Reacted { added, .. })) = rx.try_recv() else {
+        let Ok(Event::Reaction(reactions::Reacted { added, .. })) = state.try_recv() else {
             panic!("no reaction taken back")
         };
         assert!(!added);
@@ -1785,7 +2018,7 @@ mod tests {
         let burst = json!({"channel_id": "3", "message_id": "9", "user_id": "5", "emoji": {"id": "12", "name": "blob"},
                            "type": 1, "burst_colors": ["#ff0000", "#00ff00"]});
         dispatch(&state, "MESSAGE_REACTION_ADD", burst);
-        let Ok(Event::Reaction(reactions::Reacted { emoji, kind, colors, .. })) = rx.try_recv() else {
+        let Ok(Event::Reaction(reactions::Reacted { emoji, kind, colors, .. })) = state.try_recv() else {
             panic!("no super reaction")
         };
         assert_eq!(
@@ -1796,7 +2029,7 @@ mod tests {
 
     #[test]
     fn reactions_that_are_poll_votes_or_unreadable_are_dropped() {
-        let (state, rx) = fresh_state();
+        let state = fresh_state();
         let base = json!({"channel_id": "3", "message_id": "9", "user_id": "5", "emoji": {"name": "🔥"}});
         let with = |key: &str, value: Value| {
             let mut event = base.clone();
@@ -1806,12 +2039,12 @@ mod tests {
         dispatch(&state, "MESSAGE_REACTION_ADD", with("type", json!(2)));
         dispatch(&state, "MESSAGE_REACTION_ADD", with("emoji", json!("🔥")));
         dispatch(&state, "MESSAGE_REACTION_ADD", with("user_id", json!(null)));
-        assert!(rx.try_recv().is_err());
+        assert!(state.try_recv().is_err());
     }
 
     #[test]
     fn many_reactions_arrive_at_once() {
-        let (state, rx) = fresh_state();
+        let state = fresh_state();
         dispatch(
             &state,
             "MESSAGE_REACTION_ADD_MANY",
@@ -1820,7 +2053,7 @@ mod tests {
                 {"emoji": {"id": "12", "name": "blob"}, "users": ["7"]},
                 {"users": ["8"]}]}),
         );
-        let Ok(Event::ReactionsAdded { channel_id, message_id, reactions }) = rx.try_recv() else {
+        let Ok(Event::ReactionsAdded { channel_id, message_id, reactions }) = state.try_recv() else {
             panic!("no reactions")
         };
         assert_eq!((channel_id, message_id), (Snowflake(3), Snowflake(9)));
@@ -1834,19 +2067,19 @@ mod tests {
 
     #[test]
     fn reactions_removed_in_bulk() {
-        let (state, rx) = fresh_state();
+        let state = fresh_state();
         dispatch(&state, "MESSAGE_REACTION_REMOVE_ALL", json!({"channel_id": "3", "message_id": "9"}));
-        let Ok(Event::ReactionsCleared { channel_id, message_id }) = rx.try_recv() else { panic!("no clear") };
+        let Ok(Event::ReactionsCleared { channel_id, message_id }) = state.try_recv() else { panic!("no clear") };
         assert_eq!((channel_id, message_id), (Snowflake(3), Snowflake(9)));
         dispatch(
             &state,
             "MESSAGE_REACTION_REMOVE_EMOJI",
             json!({"channel_id": "3", "message_id": "9", "emoji": {"id": "12", "name": "blob"}}),
         );
-        let Ok(Event::EmojiReactionsCleared { emoji, .. }) = rx.try_recv() else { panic!("no emoji clear") };
+        let Ok(Event::EmojiReactionsCleared { emoji, .. }) = state.try_recv() else { panic!("no emoji clear") };
         assert_eq!(emoji.id, Some(Snowflake(12)));
         dispatch(&state, "MESSAGE_REACTION_REMOVE_EMOJI", json!({"channel_id": "3", "message_id": "9"}));
         dispatch(&state, "MESSAGE_REACTION_REMOVE_ALL", json!({"channel_id": "3"}));
-        assert!(rx.try_recv().is_err());
+        assert!(state.try_recv().is_err());
     }
 }

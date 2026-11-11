@@ -698,6 +698,15 @@ impl Guild {
 /// neither and are rejected here; they arrive later via GUILD_CREATE.
 impl<'de> Deserialize<'de> for Guild {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Guild::from_value(&Value::deserialize(d)?).map_err(serde::de::Error::custom)
+    }
+}
+
+impl Guild {
+    /// A guild from its JSON as it is. Deserializing from a `&Value` would
+    /// copy all of it first, which READY, with a guild for each server, can't
+    /// afford.
+    pub(crate) fn from_value(value: &Value) -> Result<Guild, serde_json::Error> {
         #[derive(Deserialize)]
         struct Properties {
             name: String,
@@ -729,14 +738,13 @@ impl<'de> Deserialize<'de> for Guild {
             mfa_level: Option<u8>,
         }
 
-        let value = Value::deserialize(d)?;
-        let raw = Raw::deserialize(&value).map_err(serde::de::Error::custom)?;
+        let raw = Raw::deserialize(value)?;
         let (name, icon, default, owner_id, mfa_level) = match (raw.name, raw.properties) {
             (Some(name), _) => (name, raw.icon, raw.default_message_notifications, raw.owner_id, raw.mfa_level),
             (None, Some(p)) => (p.name, p.icon, p.default_message_notifications, p.owner_id, p.mfa_level),
             (None, None) => return Err(serde::de::Error::custom("guild has no name (unavailable)")),
         };
-        let props = if value["properties"].is_object() { &value["properties"] } else { &value };
+        let props = if value["properties"].is_object() { &value["properties"] } else { value };
         let features: Vec<String> =
             props["features"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
         // Roles stay at the top level in both shapes. One we can't read is
@@ -762,7 +770,7 @@ impl<'de> Deserialize<'de> for Guild {
             gradient_roles: features.iter().any(|f| f == "ENHANCED_ROLE_COLORS"),
             my_roles: Vec::new(),
             timed_out_until: None,
-            verification: Rules::from_guild(&value),
+            verification: Rules::from_guild(value),
             joined_at: unix_rounded_up(&value["joined_at"]),
             pending: false,
             member_flags: 0,

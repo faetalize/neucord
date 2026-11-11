@@ -16,6 +16,18 @@ Anything that can be decided without GTK (parsing, rules, ordering, merging)
 belongs in `crates/discord` or another plain-Rust module, with unit tests.
 Keep UI code thin.
 
+## Threads
+
+The GLib main loop does everything that touches GTK or shared state, and
+never blocks: a frame is 8 ms. Work that can (disk, parsing a payload of
+megabytes, converting an image) runs off it and comes back as plain owned
+data, applied on the main loop in one go. Nothing that is a GObject or an
+`Rc` crosses. A task with a result is `gio::spawn_blocking`, called from the
+main loop and awaited there; a thread of its own is for what has to stay in
+order, as the gateway's frames do (`gateway.rs`). Decoding a texture stays on
+the main loop for now: gtk4-rs only lets `gdk::Texture::from_bytes` run
+there.
+
 ## Checks
 
 CI runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
