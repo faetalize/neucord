@@ -215,6 +215,10 @@ impl App {
         voice.bar.set_visible(shown.is_some());
         self.composer.set_visible(shown.is_none());
         self.emoji_button.set_visible(shown.is_none());
+        // `refresh_stickers` shows its button again when the draft is gone.
+        if shown.is_some() {
+            self.sticker_button.set_visible(false);
+        }
         if shown.is_some() {
             self.length.show(None);
         } else {
