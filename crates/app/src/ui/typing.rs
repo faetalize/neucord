@@ -98,8 +98,12 @@ impl App {
             state.typing.prune(now);
             let Some((channel, me)) = state.channel.zip(state.me()) else { return self.show_typing(&[]) };
             let typers = state.typing.typers(channel, now);
-            let names =
-                shown(&typers, me, |id| state.relationships.is_blocked(id), |id| state.users.get(&id.0).cloned());
+            let names = shown(
+                &typers,
+                me,
+                |id| state.relationships.is_blocked(id),
+                |id| state.nick_in(channel, id).or_else(|| state.users.get(&id.0).cloned()),
+            );
             (names, state.typing.next_lapse(channel, now))
         };
         self.show_typing(&names);

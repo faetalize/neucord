@@ -3,6 +3,9 @@
 //! (see [`discord::settings_sync`]). The official client's User Settings has
 //! far more; this is what the protobuf settings carry that a chat window
 //! uses.
+//!
+//! Neucord's own options are the last page. They aren't the account's, so they
+//! save to this computer ([`crate::config`]) and nothing is sent to Discord.
 
 use std::cell::Cell;
 use std::rc::{Rc, Weak};
@@ -16,6 +19,8 @@ use discord::settings_sync::{Save, SaveError, Schedule};
 use gtk::glib;
 
 use super::App;
+use super::state::State;
+use crate::config::{self, Key};
 
 /// Sets a row to the settings.
 pub(super) type Show = Box<dyn Fn(&Settings)>;
@@ -74,6 +79,31 @@ impl Form {
         group.add(&row);
         self.shows.push(Box::new(move |settings| row.set_selected(get(settings))));
     }
+}
+
+/// A switch for one of Neucord's own options. It reads the option once, as
+/// nothing else changes it while the window is open.
+fn option_switch(
+    app: &Rc<App>,
+    group: &adw::PreferencesGroup,
+    title: &str,
+    subtitle: &str,
+    key: &'static Key,
+    changed: fn(&Rc<App>, bool),
+) {
+    let row = adw::SwitchRow::builder().title(title).subtitle(subtitle).active(app.config.get(key)).build();
+    let app = Rc::downgrade(app);
+    row.connect_active_notify(move |row| {
+        let Some(app) = app.upgrade() else { return };
+        match app.config.set(key, row.is_active()) {
+            Ok(()) => changed(&app, row.is_active()),
+            Err(e) => {
+                eprintln!("config: {e}");
+                app.settings_toast("Could not save that option");
+            }
+        }
+    });
+    group.add(&row);
 }
 
 pub(super) fn group(title: &str, description: &str) -> adw::PreferencesGroup {
@@ -230,11 +260,66 @@ impl App {
         );
         let language = page("Language", "preferences-desktop-locale-symbolic", &[&language]);
 
-        let dialog = adw::PreferencesDialog::builder().title("User Settings").build();
+        let typing = group("Typing", "");
+        option_switch(
+            self,
+            &typing,
+            "Let others see when I'm typing",
+            "You still see who else is typing.",
+            &config::SEND_TYPING,
+            |app, sending| app.state.borrow_mut().typing.set_sending(sending),
+        );
+        let appearance = group(
+            "Appearance",
+            &format!(
+                "Colours follow your system's light or dark preference and accent colour. \
+                 Put your own stylesheet in {}.",
+                glib::markup_escape_text(&config::stylesheet_path().display().to_string())
+            ),
+        );
+        option_switch(
+            self,
+            &appearance,
+            "Translucent bars and panels",
+            "Let the chat show through, blurred, behind the headers, composer and sliding sidebar.",
+            &config::TRANSLUCENT,
+            |app, on| app.theme.set_translucent(on),
+        );
+        let background = group("Background", "");
+        option_switch(
+            self,
+            &background,
+            "Minimize Neucord to the system tray",
+            "Clicking X minimizes Neucord instead of closing it. Needs a panel with tray icons (on GNOME, the \
+             AppIndicator extension); without one, closing quits.",
+            &config::MINIMIZE_TO_TRAY,
+            |app, _| app.sync_background(false),
+        );
+        option_switch(
+            self,
+            &background,
+            "Open Neucord when your computer starts up",
+            "It starts hidden, behind the tray icon.",
+            &config::OPEN_ON_STARTUP,
+            |app, _| app.sync_background(false),
+        );
+        option_switch(
+            self,
+            &background,
+            "Show unread messages on the tray icon",
+            "Adds a badge when you have unread messages or mentions.",
+            &config::UNREAD_BADGE,
+            |app, _| app.refresh_tray(),
+        );
+        let neucord = page("Neucord", "preferences-system-symbolic", &[&appearance, &typing, &background]);
+        neucord.set_description("These are saved on this computer only, not to your Discord account.");
+
+        let dialog = adw::PreferencesDialog::builder().title("Settings").build();
         dialog.add(&chat);
         dialog.add(&notifications);
         dialog.add(&privacy);
         dialog.add(&language);
+        dialog.add(&neucord);
         dialog.connect_closed({
             let this = Rc::downgrade(self);
             move |_| {
@@ -263,6 +348,14 @@ impl App {
         }
     }
 
+    /// The state of a session that hasn't begun, with the options and
+    /// remembered choices from disk.
+    pub(super) fn fresh_state(&self) -> State {
+        let mut state = State { members_closed: self.remembered.get(&config::MEMBERS_CLOSED), ..State::default() };
+        state.typing.set_sending(self.config.get(&config::SEND_TYPING));
+        state
+    }
+
     /// Say how a save went where it's seen: the window covers the app's own
     /// toasts, so it shows its own.
     pub(super) fn settings_toast(&self, text: &str) {
@@ -285,9 +378,10 @@ impl App {
             let mut state = self.state.borrow_mut();
             let before = (state.settings.media, state.settings.guild_folders.clone(), state.settings.status.clone());
             if replace {
-                state.settings = Settings::default();
+                state.settings.replace(patch);
+            } else {
+                state.settings.apply(patch);
             }
-            state.settings.apply(patch);
             (
                 before.0 != state.settings.media,
                 before.1 != state.settings.guild_folders,
@@ -298,6 +392,7 @@ impl App {
             self.rebuild_rail();
         }
         if media {
+            self.images.motion().set_media(self.state.borrow().settings.media);
             self.refresh_rows();
         }
         if status {

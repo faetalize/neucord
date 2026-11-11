@@ -84,6 +84,15 @@ impl ReadStates {
         }
     }
 
+    /// Read up to `message` and no further, even after reading beyond it, with
+    /// `mentions` still to read: what a manual ack ("Mark Unread") does
+    /// (`rebuildChannelState` in 218461).
+    pub fn mark_unread(&mut self, channel: Snowflake, message: Snowflake, mentions: u32) {
+        let entry = self.channels.entry(channel).or_default();
+        entry.acked = Some(message);
+        entry.mentions = mentions;
+    }
+
     /// Everything up to `message` is read (we opened the channel, sent a
     /// message, or another client of ours acked it). Never moves backwards.
     pub fn ack(&mut self, channel: Snowflake, message: Snowflake) {
@@ -149,6 +158,16 @@ mod tests {
     fn versioned_shape() {
         let s = ReadStates::from_ready(&json!({"entries": [{"id": "7", "last_message_id": "9"}], "version": 1}));
         assert!(s.is_unread(Snowflake(7), Some(Snowflake(10))));
+    }
+
+    #[test]
+    fn marking_unread_moves_the_read_point_back() {
+        let mut s = states();
+        s.mark_unread(Snowflake(1), Snowflake(60), 3);
+        assert!(s.is_unread(Snowflake(1), Some(Snowflake(100))));
+        assert_eq!((s.acked(Snowflake(1)), s.mentions(Snowflake(1))), (Some(Snowflake(60)), 3));
+        s.ack(Snowflake(1), Snowflake(50));
+        assert_eq!(s.acked(Snowflake(1)), Some(Snowflake(60)), "an older ack still changes nothing");
     }
 
     #[test]

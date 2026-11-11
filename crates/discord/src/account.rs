@@ -127,6 +127,16 @@ impl Rest {
         let value: Value = self.request(call!(SAFETY_HUB), None).await?;
         Ok(Standing::from_value(&value))
     }
+
+    /// The same page for an account that can't log in: Discord answers a
+    /// suspended login with a token that stands in for the session
+    /// (`SAFETY_HUB_SUSPENDED` in 308645, which the client opens on that
+    /// answer).
+    pub async fn suspended_standing(&self, token: &str) -> Result<Standing, Error> {
+        let value: Value =
+            self.request(call!(SAFETY_HUB_SUSPENDED), Some(serde_json::json!({ "token": token }))).await?;
+        Ok(Standing::from_value(&value))
+    }
 }
 
 #[cfg(test)]

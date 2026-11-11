@@ -264,7 +264,7 @@ impl App {
         if let Some(listed) = waiting {
             self.waiting.name.set_label(&listed.sticker.name);
             match listed.sticker.still(request(self)) {
-                Some(url) => self.images.set(&self.waiting.image, &url, false),
+                Some(url) => self.images.set(&self.waiting.image, &url),
                 None => self.waiting.image.set_paintable(None::<&gtk::gdk::Paintable>),
             }
         }
@@ -425,7 +425,7 @@ fn cell_button(app: &Rc<App>, entry: &Entry, picked: &Rc<dyn Fn(&Entry)>) -> gtk
                 .build();
             // A still, even for an animated sticker: a screenful of them
             // moving would be a lot of drawing.
-            app.images.set(&picture, &url, false);
+            app.images.set(&picture, &url);
             picture.upcast()
         }
         None => gtk::Label::builder()
