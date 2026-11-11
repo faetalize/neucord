@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use discord::settings::MediaSettings;
-use discord::{Attachment, Sticker};
+use discord::{Attachment, Snowflake, Sticker};
 use gtk::glib;
 use gtk::prelude::*;
 
@@ -69,6 +69,7 @@ pub(super) fn sticker(sticker: &Sticker, images: &Images, autoplay: bool) -> gtk
             .label(format!("Sticker: {}", sticker.name))
             .xalign(0.0)
             .css_classes(["dimmed"])
+            .name(format!("{STICKER_NAME}{}", sticker.id))
             .build()
             .upcast();
     };
@@ -78,7 +79,17 @@ pub(super) fn sticker(sticker: &Sticker, images: &Images, autoplay: bool) -> gtk
     fitted.picture.set_tooltip_text(Some(&sticker.name));
     fitted.picture.set_alternative_text(Some(&sticker.name));
     images.set(&fitted.picture, &url, animated && autoplay);
+    // So a right-click on it can say which one.
+    fitted.frame.set_widget_name(&format!("{STICKER_NAME}{}", sticker.id));
     fitted.frame.upcast()
+}
+
+/// What a sticker's widget is named before its id.
+const STICKER_NAME: &str = "sticker-";
+
+/// The id of the sticker `widget` shows, if it is one [`sticker`] made.
+pub(super) fn sticker_id(widget: &gtk::Widget) -> Option<Snowflake> {
+    widget.widget_name().strip_prefix(STICKER_NAME)?.parse().ok().map(Snowflake)
 }
 
 /// An inline image, scaled to fit a reasonable box.

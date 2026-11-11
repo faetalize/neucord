@@ -1076,19 +1076,26 @@ impl Sticker {
     /// animated. `None` for Lottie stickers, which are vector animations.
     pub fn image(&self, size: u32) -> Option<(String, bool)> {
         let (ext, animated) = match self.format_type {
-            // PNG, and APNG (which shows its first frame).
-            1 | 2 => ("png", false),
+            1 => ("png", false),
+            // An APNG comes animated unless asked for a still.
+            2 => ("png", true),
             4 => ("gif", true),
             _ => return None,
         };
         Some((format!("https://media.discordapp.net/stickers/{}.{ext}?size={size}", self.id), animated))
     }
 
-    /// The picker's image, which the client asks for as a preview: a still,
-    /// so an animated GIF sticker comes as its PNG. `None` for Lottie.
+    /// The picker's image, which the client asks for as a preview (`zg` in
+    /// 378058): a still, so an animated GIF sticker comes as its PNG and an
+    /// APNG is asked not to animate, which every client but Android's does.
+    /// `None` for Lottie.
     pub fn still(&self, size: u32) -> Option<String> {
         let (url, animated) = self.image(size)?;
-        Some(if animated { url.replace(".gif?", ".png?") } else { url })
+        Some(match self.format_type {
+            2 => format!("{url}&passthrough=false"),
+            _ if animated => url.replace(".gif?", ".png?"),
+            _ => url,
+        })
     }
 
     /// Where the sticker file is, as Copy Sticker Image Link gives it
@@ -1559,7 +1566,13 @@ mod tests {
         };
         assert_eq!(sticker(1).image(160), Some(("https://media.discordapp.net/stickers/7.png?size=160".into(), false)));
         assert_eq!(sticker(4).image(320), Some(("https://media.discordapp.net/stickers/7.gif?size=320".into(), true)));
+        assert_eq!(sticker(2).image(160), Some(("https://media.discordapp.net/stickers/7.png?size=160".into(), true)));
         assert_eq!(sticker(3).image(160), None, "Lottie");
+        assert_eq!(
+            sticker(2).still(160),
+            Some("https://media.discordapp.net/stickers/7.png?size=160&passthrough=false".into()),
+            "a preview of an APNG is asked to stand still"
+        );
         assert_eq!(sticker(4).still(160), Some("https://media.discordapp.net/stickers/7.png?size=160".into()));
         assert_eq!(sticker(1).still(80), Some("https://media.discordapp.net/stickers/7.png?size=80".into()));
         assert_eq!(sticker(3).still(160), None);

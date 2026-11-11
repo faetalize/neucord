@@ -88,7 +88,7 @@ const MESSAGE: Table<MessageTarget> = &[
     &[chat::COPY_TEXT, chat::COPY_MESSAGE_LINK, polls::END_POLL],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
     &[chat::COPY_LINK, chat::OPEN_LINK],
-    &[chat::COPY_MESSAGE_ID],
+    &[chat::COPY_MESSAGE_ID, stickers::MESSAGE_DETAILS],
 ];
 
 /// [`MESSAGE`] where the media takedown regulation is TIDA: the client (761304)
@@ -100,7 +100,7 @@ const MESSAGE_REGULATED: Table<MessageTarget> = &[
     &[edits::EDIT, composer::REPLY],
     &[chat::COPY_TEXT, chat::COPY_MESSAGE_LINK, polls::END_POLL],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
-    &[chat::COPY_MESSAGE_ID],
+    &[chat::COPY_MESSAGE_ID, stickers::MESSAGE_DETAILS],
     &[chat::COPY_LINK, chat::OPEN_LINK],
 ];
 
@@ -498,8 +498,9 @@ mod tests {
             let names = names(message(regulated));
             names[names.len() - 2..].to_vec()
         };
-        assert_eq!(ends(false), [vec!["copy-link", "open-link"], vec!["copy-message-id"]]);
-        assert_eq!(ends(true), [vec!["copy-message-id"], vec!["copy-link", "open-link"]]);
+        let id = || vec!["copy-message-id", "message-details"];
+        assert_eq!(ends(false), [vec!["copy-link", "open-link"], id()]);
+        assert_eq!(ends(true), [id(), vec!["copy-link", "open-link"]]);
         // The two groups swap and nothing else moves.
         let mut swapped = names(message(false));
         let n = swapped.len();
