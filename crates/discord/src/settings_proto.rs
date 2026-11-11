@@ -56,7 +56,8 @@ impl SettingsPatch {
                 gif_auto_play: flag(GIF_AUTO_PLAY),
                 render_reactions: flag(RENDER_REACTIONS),
             },
-            developer_mode: settings.message(APPEARANCE).and_then(|a| a.bool(DEVELOPER_MODE)),
+            // A plain `bool`: `false` is not sent, so appearance without it is off.
+            developer_mode: settings.message(APPEARANCE).map(|a| a.bool(DEVELOPER_MODE).unwrap_or(false)),
             message_display_compact: flag(MESSAGE_DISPLAY_COMPACT),
         })
     }
@@ -130,8 +131,16 @@ mod tests {
     fn reads_developer_mode_from_appearance() {
         let patch = patch(&bytes_field(APPEARANCE, &varint_field(DEVELOPER_MODE, 1)));
         assert_eq!(patch.developer_mode, Some(true));
-        let patch = SettingsPatch::from_proto_bytes(&bytes_field(APPEARANCE, &[])).unwrap();
-        assert_eq!(patch.developer_mode, None, "appearance without it");
+    }
+
+    /// Developer Mode is a plain `bool`, not a wrapper: proto3 leaves `false`
+    /// out, so appearance without it is how another client turns it off.
+    #[test]
+    fn appearance_without_developer_mode_turns_it_off() {
+        let patch = patch(&bytes_field(APPEARANCE, &[]));
+        assert_eq!(patch.developer_mode, Some(false));
+        let patch = self::patch(&bytes_field(TEXT_AND_IMAGES, &[]));
+        assert_eq!(patch.developer_mode, None, "no appearance, nothing said");
     }
 
     #[test]
