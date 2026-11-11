@@ -425,6 +425,15 @@ changed for unrelated reasons only needs a note in the issue.
   channels, and threads outside forums. A box under a message shows only for
   a known thread of a message with `HAS_THREAD` (`r8` in 679636).
 
+- **The quick switcher** (`switcher.rs`, `ui/switcher.rs`). The empty
+  state (`QuickSwitcherStore`), the channel, server and group DM queries,
+  the single-kind refetch and the unread, mention and speaker lists are
+  watched by name. Not watched: the prefixes and what each result opens (`k`
+  and `H` in 793322, anchor `USER_GLOBAL`), `mod+k` and `mod+t` (161388,
+  anchor `QUICKSWITCHER_SHOW`), the scoring (`eT` and `eC` in 997625, anchor
+  `isFullMatch`, with `ep`'s boosters), and how people rank (the worker,
+  787578, anchor `USER_RESULTS`).
+
 - **Channels we can't view** (`Guild::sidebar`, `permissions::access`).
   Neucord lists, counts unread, opens and posts only where it has a
   channel's `accessPermissions`: View Channel, and Connect too in voice and

@@ -147,6 +147,8 @@ pub(super) struct State {
     /// The user closed the member list pane beside the chat, which is open
     /// until they do.
     pub(super) members_closed: bool,
+    /// Channels opened this session, newest first, for the quick switcher.
+    pub(super) quick_history: Vec<Snowflake>,
 }
 
 impl State {
