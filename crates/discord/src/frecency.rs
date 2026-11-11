@@ -264,6 +264,23 @@ pub fn toggled(favorites: &[String], key: &str, favorite: bool) -> Result<Option
     }
 }
 
+/// How many favourite stickers there can be (`uK`, 631576).
+pub const MAX_FAVORITE_STICKERS: usize = 250;
+
+/// The favourite stickers after `id` is favourited or not (`uK` and `vr` in
+/// 631576), or `None` when that changes nothing. A new one goes at the end.
+/// The client also drops the stickers it can no longer find when it saves
+/// one; those stay here until it does.
+pub fn toggled_sticker(favorites: &[u64], id: u64, favorite: bool) -> Result<Option<Vec<u64>>, TooMany> {
+    let present = favorites.contains(&id);
+    match (favorite, present) {
+        (false, false) | (true, true) => Ok(None),
+        (false, true) => Ok(Some(favorites.iter().copied().filter(|&s| s != id).collect())),
+        (true, false) if favorites.len() >= MAX_FAVORITE_STICKERS => Err(TooMany),
+        (true, false) => Ok(Some(favorites.iter().copied().chain([id]).collect())),
+    }
+}
+
 /// `FavoriteEmojis`: a repeated string is a field for each, one after another.
 fn favorites_message(emojis: &[String]) -> Vec<u8> {
     let empty = Message::parse(&[]).unwrap_or_default();
@@ -391,6 +408,17 @@ mod tests {
     }
 
     #[test]
+    fn favouriting_a_sticker_adds_to_the_end_removes_and_stops_at_250() {
+        assert_eq!(toggled_sticker(&[1, 2], 3, true), Ok(Some(vec![1, 2, 3])));
+        assert_eq!(toggled_sticker(&[1, 2], 2, true), Ok(None));
+        assert_eq!(toggled_sticker(&[1, 2], 1, false), Ok(Some(vec![2])));
+        assert_eq!(toggled_sticker(&[1], 9, false), Ok(None));
+        let full: Vec<u64> = (0..250).collect();
+        assert_eq!(toggled_sticker(&full, 999, true), Err(TooMany));
+        assert!(toggled_sticker(&full, 5, false).unwrap().is_some());
+    }
+
+    #[test]
     fn reads_the_other_usage_and_the_favourite_media() {
         let id_entry = |id: u64, total: u64| {
             let item = varint_field(TOTAL_USES, total);
@@ -445,8 +473,7 @@ mod tests {
 
     #[test]
     fn loading_empties_what_the_settings_leave_out_and_seeds_the_account_with_no_use() {
-        let mut frecency = Frecency::default();
-        frecency.favorite_emojis = vec!["x".into()];
+        let mut frecency = Frecency { favorite_emojis: vec!["x".into()], ..Default::default() };
         frecency.load(FrecencyPatch::default(), 1_000_000_000_000);
         assert!(frecency.favorite_emojis.is_empty());
         let now = 1_000_000_000_000;

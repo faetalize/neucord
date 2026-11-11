@@ -9,6 +9,7 @@
 use serde_json::Value;
 
 use crate::cdn;
+use crate::frecency::{FavoriteGif, GifFormat, MAX_FAVORITE_GIFS_BYTES, favorite_gifs_size};
 use crate::identity::LOCALE;
 
 /// The format every request names (`getSelectedFormat`, 821102): an animated
@@ -66,13 +67,21 @@ impl Request {
     }
 }
 
-/// A GIF of the results.
+/// A GIF of the results, or a favourite.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Gif {
+    /// The provider's id; none for a favourite.
     pub id: String,
-    /// The link a pick sends as the message, and Copy Link copies.
+    /// The link a pick sends as the message, and Copy Link copies. A
+    /// favourite is filed under it.
     pub url: String,
     src: String,
+    /// The still-animated GIF file, as the answer names it.
+    gif_src: Option<String>,
+    pub width: u32,
+    pub height: u32,
+    /// What the preview is: a video, which Neucord has no use for.
+    pub video: bool,
 }
 
 impl Gif {
@@ -82,7 +91,17 @@ impl Gif {
             Value::Number(id) => id.to_string(),
             _ => return None,
         };
-        Some(Gif { id, url: value["url"].as_str()?.to_owned(), src: value["src"].as_str()?.to_owned() })
+        let size = |field: &str| value[field].as_u64().unwrap_or(0) as u32;
+        let src = value["src"].as_str()?.to_owned();
+        Some(Gif {
+            id,
+            url: value["url"].as_str()?.to_owned(),
+            video: has_extension(&src, &["mp4", "webm"]),
+            src,
+            gif_src: value["gif_src"].as_str().map(str::to_owned),
+            width: size("width"),
+            height: size("height"),
+        })
     }
 
     /// What an answer lists: a plain array.
@@ -90,10 +109,111 @@ impl Gif {
         value.as_array().into_iter().flatten().filter_map(Gif::from_value).collect()
     }
 
+    /// A favourite, as the favourites list shows it.
+    fn from_favorite(favorite: &FavoriteGif) -> Gif {
+        Gif {
+            id: String::new(),
+            url: favorite.url.clone(),
+            video: favorite.format == GifFormat::Video || has_extension(&favorite.src, &["mp4", "webm"]),
+            src: favorite.src.clone(),
+            gif_src: None,
+            width: favorite.width,
+            height: favorite.height,
+        }
+    }
+
     /// Where the animated preview comes from.
     pub fn preview(&self) -> String {
         preview_url(&self.src)
     }
+
+    /// Whether the account has it as a favourite.
+    pub fn is_favorite(&self, favorites: &[FavoriteGif]) -> bool {
+        favorites.iter().any(|f| f.url == self.url)
+    }
+
+    /// The favourite this result makes (`wg`, 497685), after those held. The
+    /// client stores what the picker's store listed (`GIF_PICKER_QUERY_SUCCESS`,
+    /// 821102): the link under which it is filed (`T`, which leaves the
+    /// provider's links as they are), the source without its scheme and
+    /// then with `https:` put back, and the size. The picture is the GIF file where the source is a
+    /// video and there is one, which is never for `tinywebp` results. The
+    /// client's rewrite of Discord's own hosts and its check for them don't
+    /// apply: the source has no scheme, so it is never one. The format is an image: the one asked
+    /// for is, and what is named `webp`, `avif` or `gif` is too.
+    pub fn favorite(&self, held: &[FavoriteGif]) -> FavoriteGif {
+        let src = without_scheme(&self.src);
+        let gif_src = self.gif_src.as_deref().map(without_scheme).unwrap_or_default();
+        let chosen =
+            if has_extension(&src, &["mp4", "webm"]) && !gif_src.is_empty() && gif_src != src { gif_src } else { src };
+        let src = if chosen.starts_with("//") { format!("https:{chosen}") } else { chosen };
+        FavoriteGif {
+            url: self.url.clone(),
+            format: GifFormat::Image,
+            src,
+            width: self.width,
+            height: self.height,
+            order: held.iter().map(|f| f.order).max().unwrap_or(0) + 1,
+        }
+    }
+}
+
+/// Why a GIF could not be favourited.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TooBig;
+
+/// The favourites after `gif` is added, or why not (`wg`): the settings
+/// message can only be so big.
+pub fn favorited(gif: &Gif, held: &[FavoriteGif], hide_tooltip: bool) -> Result<(Vec<FavoriteGif>, bool), TooBig> {
+    // One filed under the same link is replaced where it was.
+    let mut gifs = held.to_vec();
+    match gifs.iter_mut().find(|f| f.url == gif.url) {
+        Some(same) => *same = gif.favorite(held),
+        None => gifs.push(gif.favorite(held)),
+    }
+    if favorite_gifs_size(&gifs, hide_tooltip) > MAX_FAVORITE_GIFS_BYTES {
+        return Err(TooBig);
+    }
+    // The hint to favourite one goes away once there are three.
+    Ok((gifs.clone(), hide_tooltip || gifs.len() > 2))
+}
+
+/// The favourites after `url` is taken out (`Tr`).
+pub fn unfavorited(held: &[FavoriteGif], url: &str) -> Vec<FavoriteGif> {
+    held.iter().filter(|f| f.url != url).cloned().collect()
+}
+
+/// The favourites the Favorites page lists for `query`, newest first (`IE`,
+/// 996566): the ones whose link holds the query, ignoring case, `-`, `_` and
+/// spaces of the query (and `-` and `_` of the link).
+pub fn favorites_for(favorites: &[FavoriteGif], query: &str) -> Vec<Gif> {
+    let mut sorted: Vec<&FavoriteGif> = favorites.iter().collect();
+    // `sortBy("order").reverse()`: equal orders come out the other way round.
+    sorted.sort_by_key(|f| f.order);
+    sorted.reverse();
+    let needle: String = query.to_lowercase().chars().filter(|c| !matches!(c, '-' | '_' | ' ')).collect();
+    sorted
+        .into_iter()
+        .filter(|f| needle.is_empty() || f.url.to_lowercase().replace(['-', '_'], "").contains(&needle))
+        .map(Gif::from_favorite)
+        .collect()
+}
+
+/// `g` in 821102: the source loads over the page's own scheme.
+fn without_scheme(src: &str) -> String {
+    src.strip_prefix("https:").or_else(|| src.strip_prefix("http:")).unwrap_or(src).to_owned()
+}
+
+/// Whether `url` has one of `extensions` before a `?` or its end, wherever
+/// (`/\.(a|b)(\?|$)/i`).
+fn has_extension(url: &str, extensions: &[&str]) -> bool {
+    let lower = url.to_ascii_lowercase();
+    extensions.iter().any(|e| {
+        let dotted = format!(".{e}");
+        lower
+            .match_indices(&dotted)
+            .any(|(at, _)| matches!(lower[at + dotted.len()..].chars().next(), None | Some('?')))
+    })
 }
 
 /// An image the client shows from an answer: the store strips the scheme
@@ -108,6 +228,8 @@ fn preview_url(src: &str) -> String {
 /// What a front page tile opens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
+    /// The account's favourites.
+    Favorites,
     /// What's trending.
     TrendingGifs,
     /// A category, which is a search for its name.
@@ -125,16 +247,26 @@ pub struct Tile {
 }
 
 impl Tile {
+    /// The tile of the favourites, in front of the others (`favoritesTile`,
+    /// 649529): the picture is one of the favourites. The client shows a
+    /// stock GIF from a third party when there is none, which Neucord leaves
+    /// out, and the tile has no picture.
+    pub fn favorites(sample: Option<&FavoriteGif>) -> Tile {
+        let src = sample.map(|f| f.src.clone()).unwrap_or_default();
+        Tile { kind: Kind::Favorites, name: FAVORITES_NAME.to_owned(), src }
+    }
+
     /// The tile's picture, unless it is a video, which Neucord has no use for
     /// here: the client plays those as a looping video (`p`, 821102).
     pub fn preview(&self) -> Option<String> {
         let path = self.src.split(['?', '#']).next().unwrap_or_default().to_ascii_lowercase();
-        (!path.ends_with(".mp4") && !path.ends_with(".webm")).then(|| preview_url(&self.src))
+        (!self.src.is_empty() && !path.ends_with(".mp4") && !path.ends_with(".webm")).then(|| preview_url(&self.src))
     }
 }
 
 /// What the client calls the first tile.
 const TRENDING_NAME: &str = "Trending GIFs";
+const FAVORITES_NAME: &str = "Favorites";
 
 /// The front page: a tile of what's trending, using the first of the GIFs the
 /// answer carries, then the categories (`GIF_PICKER_TRENDING_FETCH_SUCCESS`).
@@ -192,6 +324,8 @@ pub enum Screen<'a> {
     Loading,
     /// The answer had none.
     Empty,
+    /// The favourites, filtered by what is typed.
+    Favorites,
     Results {
         gifs: &'a [Gif],
         suggestions: &'a [String],
@@ -206,6 +340,8 @@ pub enum Typed {
     /// A search, after [`SEARCH_DEBOUNCE_MS`] of no more typing. Emptying the
     /// box meanwhile doesn't call it off, as in the client.
     Search(String),
+    /// The favourites are filtered by it, with nothing asked.
+    Filter,
 }
 
 /// One opening of the picker, as `GIFPickerViewStore` keeps it. Everything
@@ -229,6 +365,7 @@ impl Picker {
     pub fn screen(&self) -> Screen<'_> {
         match (self.page, &self.gifs) {
             (None, _) => Screen::Front,
+            (Some(Kind::Favorites), _) => Screen::Favorites,
             (Some(_), None) => Screen::Loading,
             (Some(_), Some(gifs)) if gifs.is_empty() => Screen::Empty,
             (Some(_), Some(gifs)) => Screen::Results { gifs, suggestions: &self.suggestions },
@@ -245,9 +382,26 @@ impl Picker {
         self.page.is_some()
     }
 
-    /// Whether the search box shows (the trending page has none).
-    pub fn shows_search(&self) -> bool {
-        self.page != Some(Kind::TrendingGifs)
+    /// Whether the search box shows: the trending page has none, nor the
+    /// favourites when there are none (`favorites`).
+    pub fn shows_search(&self, favorites: usize) -> bool {
+        match self.page {
+            Some(Kind::TrendingGifs) => false,
+            Some(Kind::Favorites) => favorites > 0,
+            _ => true,
+        }
+    }
+
+    /// What the search box holds.
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// The favourites page was chosen.
+    pub fn favorites(&mut self) {
+        self.page = Some(Kind::Favorites);
+        self.query.clear();
+        self.gifs = None;
     }
 
     /// Start over: the front page, nothing searched.
@@ -257,6 +411,11 @@ impl Picker {
 
     /// Something was typed into the search box.
     pub fn typed(&mut self, text: &str) -> Typed {
+        // The favourites page filters, and an empty box keeps it.
+        if self.page == Some(Kind::Favorites) {
+            self.query = text.to_owned();
+            return Typed::Filter;
+        }
         if text.is_empty() {
             self.clear();
             return Typed::Front;
@@ -279,11 +438,16 @@ impl Picker {
         Request::TrendingGifs
     }
 
-    /// What a tile opens.
-    pub fn open(&mut self, tile: &Tile) -> Request {
+    /// What a tile opens: the request it makes, if it does. The favourites
+    /// make none.
+    pub fn open(&mut self, tile: &Tile) -> Option<Request> {
         match tile.kind {
-            Kind::TrendingGifs => self.trending(),
-            _ => self.searched(&tile.name, Kind::Category),
+            Kind::Favorites => {
+                self.favorites();
+                None
+            }
+            Kind::TrendingGifs => Some(self.trending()),
+            _ => Some(self.searched(&tile.name, Kind::Category)),
         }
     }
 
@@ -432,12 +596,12 @@ mod tests {
             "categories": [{"name": "happy", "src": "//example.test/h.webp"}],
             "gifs": [{"id": "1", "url": "u", "src": "//example.test/t.webp"}],
         }));
-        assert_eq!(picker.open(&tiles[1]), Request::Search("happy".into()));
-        assert!(picker.has_back() && picker.shows_search());
+        assert_eq!(picker.open(&tiles[1]), Some(Request::Search("happy".into())));
+        assert!(picker.has_back() && picker.shows_search(0));
         picker.answered("happy", Some(vec![gif("1")]));
         picker.clear();
-        assert_eq!(picker.open(&tiles[0]), Request::TrendingGifs);
-        assert!(!picker.shows_search());
+        assert_eq!(picker.open(&tiles[0]), Some(Request::TrendingGifs));
+        assert!(!picker.shows_search(0));
         picker.answered_trending(Some(vec![gif("2")]));
         assert!(matches!(picker.screen(), Screen::Results { .. }));
     }
@@ -475,5 +639,101 @@ mod tests {
         picker.typed("cat");
         picker.answered("cat", Some(vec![gif("1")]));
         assert!(matches!(picker.screen(), Screen::Results { suggestions, .. } if suggestions.is_empty()));
+    }
+
+    fn result(src: &str, gif_src: &str) -> Gif {
+        Gif::from_value(&json!({"id": "1", "url": "https://example.test/view/1", "src": src, "gif_src": gif_src, "width": 320, "height": 240}))
+            .unwrap()
+    }
+
+    fn held(url: &str, order: u32) -> FavoriteGif {
+        FavoriteGif {
+            url: url.into(),
+            format: GifFormat::Image,
+            src: format!("https://media.example/{url}.webp"),
+            width: 1,
+            height: 1,
+            order,
+        }
+    }
+
+    #[test]
+    fn a_result_is_favorited_as_the_client_stores_it() {
+        let favorite =
+            result("//media.example/a/1.webp", "//media.example/a/1.gif").favorite(&[held("a", 4), held("b", 2)]);
+        assert_eq!(
+            favorite,
+            FavoriteGif {
+                url: "https://example.test/view/1".into(),
+                format: GifFormat::Image,
+                src: "https://media.example/a/1.webp".into(),
+                width: 320,
+                height: 240,
+                order: 5,
+            },
+            "the link it is filed under, the source with its scheme back, the size, after the newest"
+        );
+        assert_eq!(result("//m.example/1.webp", "").favorite(&[]).order, 1, "the first is 1");
+        // A video source gives way to the GIF file, if there is one that differs.
+        assert_eq!(result("//m.example/1.mp4", "//m.example/1.gif").favorite(&[]).src, "https://m.example/1.gif");
+        assert_eq!(result("//m.example/1.mp4?x=1", "//m.example/1.gif").favorite(&[]).src, "https://m.example/1.gif");
+        assert_eq!(result("//m.example/1.mp4", "//m.example/1.mp4").favorite(&[]).src, "https://m.example/1.mp4");
+        assert_eq!(result("//m.example/1.mp4", "").favorite(&[]).src, "https://m.example/1.mp4");
+        assert_eq!(
+            result("//m.example/1.mp4#x.gif", "//m.example/g.gif").favorite(&[]).src,
+            "https://m.example/1.mp4#x.gif"
+        );
+    }
+
+    #[test]
+    fn favouriting_adds_in_place_hides_the_hint_at_three_and_stops_at_the_size() {
+        let gif = result("//m.example/1.webp", "");
+        let (one, hide) = favorited(&gif, &[], false).unwrap();
+        assert_eq!((one.len(), hide), (1, false));
+        let (two, _) = favorited(&gif, &[held("a", 1), held("b", 2)], false).unwrap();
+        assert!(
+            two.len() == 3 && favorited(&gif, &[held("a", 1), held("b", 2)], false).unwrap().1,
+            "the third hides it"
+        );
+        // The same link again replaces itself.
+        let (same, _) = favorited(&gif, &one, false).unwrap();
+        assert_eq!(same.len(), 1);
+        assert_eq!(same[0].order, 2);
+        // Past what the client allows nothing more is added.
+        let big: Vec<FavoriteGif> =
+            (0..3000).map(|n| FavoriteGif { src: "x".repeat(300), ..held(&format!("{n}"), n) }).collect();
+        assert_eq!(favorited(&gif, &big, false), Err(TooBig));
+        assert_eq!(unfavorited(&two, &two[0].url).len(), 2);
+    }
+
+    #[test]
+    fn the_favorites_list_newest_first_and_filter_by_link() {
+        let mut list = vec![held("Funny-Cat", 1), held("dog_run", 3), held("cat nap", 2)];
+        list[2].url = "cat-nap".into();
+        let urls = |query: &str| favorites_for(&list, query).iter().map(|g| g.url.clone()).collect::<Vec<_>>();
+        assert_eq!(urls(""), ["dog_run", "cat-nap", "Funny-Cat"]);
+        assert_eq!(urls("CAT"), ["cat-nap", "Funny-Cat"], "whatever the case");
+        assert_eq!(urls("funny cat"), ["Funny-Cat"], "spaces and dashes of the query go");
+        assert_eq!(urls("dogrun"), ["dog_run"], "and underscores");
+        assert!(urls("zebra").is_empty());
+        assert!(favorites_for(&list, "")[0].is_favorite(&list));
+    }
+
+    #[test]
+    fn the_favorites_page_filters_what_is_typed_and_keeps_an_emptied_box() {
+        let mut picker = Picker::default();
+        let tile = Tile::favorites(None);
+        assert_eq!(picker.open(&tile), None, "nothing is asked for them");
+        assert_eq!(picker.screen(), Screen::Favorites);
+        assert!(picker.has_back());
+        assert!(!picker.shows_search(0) && picker.shows_search(1));
+        assert_eq!(picker.typed("cat"), Typed::Filter);
+        assert_eq!(picker.query(), "cat");
+        assert_eq!(picker.typed(""), Typed::Filter);
+        assert_eq!(picker.screen(), Screen::Favorites, "emptying the box stays on the page");
+        picker.clear();
+        assert_eq!(picker.screen(), Screen::Front);
+        assert_eq!(Tile::favorites(None).preview(), None, "no stock picture for no favourites");
+        assert_eq!(Tile::favorites(Some(&held("a", 1))).preview().as_deref(), Some("https://media.example/a.webp"));
     }
 }

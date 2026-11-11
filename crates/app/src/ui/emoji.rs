@@ -45,7 +45,7 @@ fn item(target: &Target) -> Option<&Item> {
 /// Mode is on (253925).
 pub(super) const FAVORITE: Entry<Target> = Entry::Item(MenuItem {
     name: "favorite-emoji",
-    label: "_Favorite",
+    label: "_Favorite Emoji",
     shows: |app, target| item(target).is_some_and(|item| !app.is_favorite_emoji(item)),
     kind: Kind::Action(|app, target| {
         if let Some(item) = item(target) {
@@ -56,7 +56,7 @@ pub(super) const FAVORITE: Entry<Target> = Entry::Item(MenuItem {
 
 pub(super) const UNFAVORITE: Entry<Target> = Entry::Item(MenuItem {
     name: "unfavorite-emoji",
-    label: "_Unfavorite",
+    label: "_Unfavorite Emoji",
     shows: |app, target| item(target).is_some_and(|item| app.is_favorite_emoji(item)),
     kind: Kind::Action(|app, target| {
         if let Some(item) = item(target) {
@@ -198,7 +198,7 @@ impl App {
 
     /// The emoji the picker lists first: the favourites, then those used
     /// most (reactions for a reaction picker), as far as `library` has them.
-    fn emoji_shortcuts(&self, library: &Library, intention: Intention) -> Shortcuts {
+    pub(super) fn emoji_shortcuts(&self, library: &Library, intention: Intention) -> Shortcuts {
         let mut state = self.state.borrow_mut();
         let favorites = state.frecency.favorite_emojis.iter().filter_map(|key| library.item(key)).collect();
         let stores = &mut state.frecency.stores;
@@ -268,9 +268,9 @@ impl App {
 /// groups, or what a search finds.
 /// The emoji the picker lists before the servers and groups.
 #[derive(Default)]
-struct Shortcuts {
-    favorites: Vec<Item>,
-    frequent: Vec<Item>,
+pub(super) struct Shortcuts {
+    pub(super) favorites: Vec<Item>,
+    pub(super) frequent: Vec<Item>,
 }
 
 fn rows(library: &Library, query: &str, tone: Option<Tone>, shortcuts: Shortcuts, scores: &Scores) -> Vec<Row<Item>> {

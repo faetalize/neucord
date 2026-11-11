@@ -8,7 +8,11 @@
 //!
 //! Left out: the client's `POST /gifs/select` after each pick (`g4`, 497685),
 //! which only reports which result was chosen for which search, and Neucord
-//! sends no analytics (#92); and favourites, which are protobuf settings (#2).
+//! sends no analytics (#92).
+//!
+//! A star on each GIF favourites it, or takes it back out, and the front
+//! page leads with the Favorites (`439401`, `649529`); a favourite whose
+//! preview is a video, which another client saved, shows as a button.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -69,6 +73,9 @@ struct Session {
     handle: RefCell<Option<Handle>>,
     /// The search waiting out its debounce.
     debounce: RefCell<Option<glib::SourceId>>,
+    /// The favourite whose picture the front page's tile shows, chosen once
+    /// a time the front page shows (`favoritesTile`, 649529).
+    tile_sample: std::cell::Cell<Option<usize>>,
 }
 
 impl App {
@@ -93,6 +100,7 @@ impl App {
             view: RefCell::default(),
             handle: RefCell::default(),
             debounce: RefCell::default(),
+            tile_sample: std::cell::Cell::default(),
         });
         let spec = Spec {
             placeholder: "Search GIFs",
@@ -127,6 +135,11 @@ impl App {
         let handle = picker::open_with(self, parent, spec, hooks, |_, _| ());
         *session.handle.borrow_mut() = Some(handle);
         session.fetch_tiles();
+        // The favourites come from Discord the first time (`IE`, 996566), and fill in then.
+        self.load_frecency({
+            let session = session.clone();
+            move || session.reload()
+        });
     }
 
     /// What picking `gif` does: send its link as a message, or with Shift
@@ -207,11 +220,41 @@ impl Session {
         match view.screen() {
             Screen::Front => {
                 let state = app.state.borrow();
+                let favorites = &state.frecency.favorite_gifs;
+                let sample = match self.tile_sample.get() {
+                    Some(at) if at < favorites.len() => Some(at),
+                    _ if favorites.is_empty() => None,
+                    _ => {
+                        let at = glib::random_int_range(0, favorites.len() as i32) as usize;
+                        self.tile_sample.set(Some(at));
+                        Some(at)
+                    }
+                };
+                let first = Tile::favorites(sample.and_then(|at| favorites.get(at)));
                 let tiles = state.gif_tiles.all();
+                let mut rows =
+                    cells(TILE_COLUMNS, std::iter::once(first).chain(tiles.iter().cloned()).map(Item::Tile).collect());
                 if tiles.is_empty() {
-                    return note("Loading…");
+                    rows.extend(note("Loading…"));
                 }
-                cells(TILE_COLUMNS, tiles.iter().cloned().map(Item::Tile).collect())
+                rows
+            }
+            Screen::Favorites => {
+                let state = app.state.borrow();
+                let held = &state.frecency.favorite_gifs;
+                let mut rows = note("Favorites");
+                if held.is_empty() {
+                    rows.extend(note("Favorites will show up here!"));
+                    rows.extend(note("Click the star in the corner of a gif to favorite it"));
+                    return rows;
+                }
+                let listed = discord::gifs::favorites_for(held, view.query());
+                if listed.is_empty() {
+                    rows.extend(note("No favorite GIFs match your search."));
+                } else {
+                    rows.extend(cells(COLUMNS, listed.into_iter().map(Item::Gif).collect()));
+                }
+                rows
             }
             Screen::Loading => note("Loading…"),
             Screen::Empty => note("No GIFs found"),
@@ -244,15 +287,28 @@ impl Session {
     }
 
     /// A GIF of the results: its animated preview, which picks it, and the
-    /// picker's menu on a right click.
+    /// picker's menu on a right click, with a star in the corner that
+    /// favourites it.
     fn gif_cell(self: &Rc<Self>, app: &Rc<App>, found: &Gif) -> gtk::Widget {
-        let picture = gtk::Picture::builder()
-            .width_request(GIF.0)
-            .height_request(GIF.1)
-            .content_fit(gtk::ContentFit::Cover)
-            .build();
-        app.images.set(&picture, &found.preview(), true);
-        let button = gtk::Button::builder().child(&picture).css_classes(["flat"]).build();
+        let face: gtk::Widget = if found.video {
+            // What another client saved as a video, which Neucord can't play here.
+            gtk::Image::builder()
+                .icon_name("media-playback-start-symbolic")
+                .pixel_size(32)
+                .width_request(GIF.0)
+                .height_request(GIF.1)
+                .build()
+                .upcast()
+        } else {
+            let picture = gtk::Picture::builder()
+                .width_request(GIF.0)
+                .height_request(GIF.1)
+                .content_fit(gtk::ContentFit::Cover)
+                .build();
+            app.images.set(&picture, &found.preview(), true);
+            picture.upcast()
+        };
+        let button = gtk::Button::builder().child(&face).css_classes(["flat"]).build();
         button.connect_clicked({
             let (this, found) = (self.clone(), found.clone());
             move |_| {
@@ -271,7 +327,36 @@ impl Session {
                 menus::popup(&app, menus::GIF_PICKER, Target::Gif(found.clone()), &button, menus::At::Point(x, y));
             }
         });
-        button.upcast()
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(&button));
+        overlay.add_overlay(&self.star(app, found));
+        overlay.upcast()
+    }
+
+    /// The star that favourites `found`, or takes it back out. Its state is the
+    /// account's, so it is drawn again when that changes: the Favorites page
+    /// lists again, which drops a GIF no longer a favourite.
+    fn star(self: &Rc<Self>, app: &Rc<App>, found: &Gif) -> gtk::Button {
+        let favorite = app.is_favorite_gif(found);
+        let star = gtk::Button::builder()
+            .icon_name(if favorite { "starred-symbolic" } else { "non-starred-symbolic" })
+            .tooltip_text(if favorite { "Remove from Favorites" } else { "Add to Favorites" })
+            .halign(gtk::Align::End)
+            .valign(gtk::Align::Start)
+            .margin_top(4)
+            .margin_end(4)
+            .css_classes(["osd", "circular"])
+            .build();
+        star.connect_clicked({
+            let (this, found) = (self.clone(), found.clone());
+            move |_| {
+                let Some(app) = this.app.upgrade() else { return };
+                let favorite = app.is_favorite_gif(&found);
+                app.favorite_gif(&found, !favorite);
+                this.reload();
+            }
+        });
+        star
     }
 
     /// A tile of the front page: its preview under its name.
@@ -314,7 +399,12 @@ impl Session {
         if let Some(handle) = &*self.handle.borrow() {
             let view = self.view.borrow();
             handle.set_search(text);
-            handle.set_chrome(view.shows_search(), view.has_back());
+            handle.set_placeholder(if view.page() == Some(Kind::Favorites) {
+                "Search Favorites"
+            } else {
+                "Search GIFs"
+            });
+            handle.set_chrome(view.shows_search(self.favorites()), view.has_back());
         }
         self.reload();
     }
@@ -334,10 +424,12 @@ impl Session {
             Typed::Front => {
                 if let Some(handle) = &*self.handle.borrow() {
                     let view = self.view.borrow();
-                    handle.set_chrome(view.shows_search(), view.has_back());
+                    handle.set_chrome(view.shows_search(self.favorites()), view.has_back());
                 }
                 self.fetch_tiles();
             }
+            // The page lists again for what is typed.
+            Typed::Filter => self.reload(),
             Typed::Search(query) => {
                 if let Some(handle) = &*self.handle.borrow() {
                     handle.set_chrome(true, true);
@@ -357,9 +449,16 @@ impl Session {
 
     fn open_tile(self: &Rc<Self>, tile: &Tile) {
         let request = self.view.borrow_mut().open(tile);
-        let text = if tile.kind == Kind::TrendingGifs { "" } else { tile.name.as_str() };
+        let text = if matches!(tile.kind, Kind::TrendingGifs | Kind::Favorites) { "" } else { tile.name.as_str() };
         self.sync(text);
-        self.send(request);
+        if let Some(request) = request {
+            self.send(request);
+        }
+    }
+
+    /// How many favourites the account has.
+    fn favorites(&self) -> usize {
+        self.app.upgrade().map_or(0, |app| app.state.borrow().frecency.favorite_gifs.len())
     }
 
     fn suggestion(self: &Rc<Self>, text: &str) {
@@ -374,6 +473,7 @@ impl Session {
 
     fn back(self: &Rc<Self>) {
         self.view.borrow_mut().clear();
+        self.tile_sample.set(None);
         self.sync("");
         self.fetch_tiles();
     }
