@@ -68,6 +68,7 @@ pub mod typing;
 pub mod uploads;
 pub mod verification;
 pub mod voice;
+pub mod voice_states;
 
 pub use gateway::{Event, Gateway, Ready, Resume};
 pub use model::{

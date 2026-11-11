@@ -109,6 +109,22 @@ impl App {
             match event {
                 Event::Ready(ready) => self.on_ready(*ready),
                 Event::GuildCreate(guild) => self.on_guild(guild),
+                Event::GuildVoiceStates { guild_id, states } => {
+                    self.state.borrow_mut().voice.replace_guild(guild_id, states);
+                    self.refresh_badges();
+                }
+                Event::VoiceStates(updates) => {
+                    let mut changed = false;
+                    {
+                        let mut state = self.state.borrow_mut();
+                        for update in updates {
+                            changed |= state.voice.apply(update);
+                        }
+                    }
+                    if changed {
+                        self.refresh_badges();
+                    }
+                }
                 Event::PrivateChannelCreate(channel) | Event::PrivateChannelUpdate(channel) => {
                     self.on_private_channel(channel)
                 }
@@ -350,6 +366,7 @@ impl App {
             required_action,
             experiments,
             session_id,
+            voice_states,
         } = ready;
         self.learn_users(private_channels.iter().flat_map(|c| &c.recipients));
         self.learn_users(
@@ -387,6 +404,7 @@ impl App {
             state.nitro = nitro;
             state.experiments = experiments;
             state.session_id = session_id;
+            state.voice = voice_states;
             // A new session: every index is out of date, and no command is waiting on this one.
             state.commands.session_started();
             state.running.clear();
