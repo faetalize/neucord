@@ -294,6 +294,13 @@ pub enum Event {
         replace: bool,
         proto: Option<Vec<u8>>,
     },
+    /// The favourites and counts of use changed (the settings proto of type
+    /// 2, see [`crate::frecency`]): all of them, or with `partial` the
+    /// messages that changed in them.
+    FrecencyUpdate {
+        proto: Vec<u8>,
+        partial: bool,
+    },
     /// Discord started or stopped requiring a step (see [`crate::account`]).
     RequiredActionUpdate(Option<String>),
     /// A resume succeeded; everything missed has been replayed before this.
@@ -797,15 +804,22 @@ fn dispatch(state: &State, name: &str, data: Value) {
             }
             Event::SettingsUpdate { patch, replace: false, proto: None }
         }
-        // `type` 1 is the account's settings; 2 (frecency and favourites) is
-        // not read yet.
+        // `type` 1 is the account's settings, 2 its favourites and what it
+        // uses most.
         "USER_SETTINGS_PROTO_UPDATE" => {
-            if data["settings"]["type"].as_u64() != Some(1) {
-                return;
-            }
+            let kind = data["settings"]["type"].as_u64();
             let Some(proto) = data["settings"]["proto"].as_str().map(settings_proto::decode) else {
                 return eprintln!("gateway: bad USER_SETTINGS_PROTO_UPDATE");
             };
+            if kind == Some(2) {
+                return send_event(
+                    state,
+                    Event::FrecencyUpdate { proto, partial: data["partial"].as_bool() == Some(true) },
+                );
+            }
+            if kind != Some(1) {
+                return;
+            }
             let Some(patch) = SettingsPatch::from_proto_bytes(&proto) else {
                 return eprintln!("gateway: bad USER_SETTINGS_PROTO_UPDATE");
             };
@@ -1478,6 +1492,19 @@ mod tests {
     fn member_request_as_the_client_sends_it() {
         let d = MemberRequest::new(Snowflake(1), &[Snowflake(6), Snowflake(7)]);
         assert_eq!(request_text(8, &d), r#"{"op":8,"d":{"guild_id":["1"],"user_ids":["6","7"],"presences":false}}"#);
+    }
+
+    #[test]
+    fn an_update_of_the_favourites_is_told_apart_from_the_settings() {
+        let (state, rx) = fresh_state();
+        let update = |kind: u64, partial: bool| json!({"settings": {"type": kind, "proto": settings_proto::encode(&[0x2a, 0x00])}, "partial": partial});
+        dispatch(&state, "USER_SETTINGS_PROTO_UPDATE", update(2, true));
+        let Ok(Event::FrecencyUpdate { proto, partial }) = rx.try_recv() else { panic!("no update") };
+        assert_eq!((proto, partial), (vec![0x2a, 0x00], true));
+        dispatch(&state, "USER_SETTINGS_PROTO_UPDATE", update(2, false));
+        assert!(matches!(rx.try_recv(), Ok(Event::FrecencyUpdate { partial: false, .. })));
+        dispatch(&state, "USER_SETTINGS_PROTO_UPDATE", update(3, false));
+        assert!(rx.try_recv().is_err(), "a type nobody reads");
     }
 
     #[test]

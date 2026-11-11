@@ -93,6 +93,8 @@ pub struct UnicodeEmoji {
     /// Where the variant for each [`Tone`] is in the catalog, for the emoji
     /// that have one (a hand, a person).
     tones: [Option<usize>; 5],
+    /// The emoji a skin tone variant is of.
+    base: Option<usize>,
 }
 
 /// A skin tone, the account's default one being a setting
@@ -132,6 +134,15 @@ impl Tone {
 }
 
 impl UnicodeEmoji {
+    /// What the client keeps a favourite or a count of use under: the name of
+    /// the emoji without its skin tone (`convertSurrogateToBase`, 7584).
+    pub fn base_name(&self) -> &'static str {
+        match self.base {
+            Some(index) => catalog().emoji[index].names[0],
+            None => self.names[0],
+        }
+    }
+
     /// This emoji in `tone`, or itself if it has no skin tones: what the
     /// client shows and sends for it once a default tone is set
     /// (`defaultDiversityChild`, 7584).
@@ -239,7 +250,7 @@ fn catalog() -> &'static Catalog {
                 _ => {}
             }
             let category = if variant.is_some() { None } else { category };
-            emoji.push(UnicodeEmoji { glyph, names, category, tones: [None; 5] });
+            emoji.push(UnicodeEmoji { glyph, names, category, tones: [None; 5], base: variant.and(parent) });
         }
         Catalog { emoji, by_name }
     })
@@ -377,6 +388,27 @@ impl Library {
         Library { servers, place: *place }
     }
 
+    /// The key the client files an emoji under in the favourites and the
+    /// counts of use: a custom emoji's id, a Unicode one's base name (`C` in
+    /// 554375).
+    pub fn key(item: &Item) -> String {
+        match item {
+            Item::Unicode(e) => e.base_name().to_owned(),
+            Item::Custom(n) => n.emoji.id.0.to_string(),
+        }
+    }
+
+    /// The emoji a key names, if we know it: a Unicode emoji's name first,
+    /// as the client looks (`getByName` before the custom ones, 121681), and
+    /// then a custom emoji's id.
+    pub fn item(&self, key: &str) -> Option<Item> {
+        if let Some(emoji) = unicode(key) {
+            return Some(Item::Unicode(emoji));
+        }
+        let id = key.parse::<u64>().ok()?;
+        self.custom().find(|n| n.emoji.id.0 == id).cloned().map(Item::Custom)
+    }
+
     fn custom(&self) -> impl Iterator<Item = &Named> {
         self.servers.iter().flat_map(|s| &s.emoji)
     }
@@ -402,8 +434,8 @@ impl Library {
     /// Emoji matching `query`, best first: what we may send (at most `max`),
     /// and what Nitro would unlock. Matching ignores case, `_` and spaces,
     /// and finds the query anywhere in a name. The client also ranks by how
-    /// often an emoji was used, which a setting only the protobuf settings
-    /// carry.
+    /// often an emoji was used (see [`crate::frecency`]), which Neucord's
+    /// search does not.
     pub fn search(&self, query: &str, max: usize) -> Found {
         let needle: String = query.to_lowercase().chars().filter(|c| !matches!(c, ' ' | '_')).collect();
         let plain = query.to_lowercase();
@@ -775,6 +807,20 @@ mod tests {
         // A pair of hands has tones of its own for each, which no single tone picks.
         let handshake = unicode("handshake").unwrap();
         assert_eq!(handshake.toned(Some(Tone::Light)).glyph, "🤝🏻");
+    }
+
+    #[test]
+    fn a_favourite_is_filed_under_the_emoji_without_its_tone() {
+        let thumbs = unicode("thumbsup").unwrap();
+        let toned = thumbs.toned(Some(Tone::Dark));
+        assert_eq!(Library::key(&Item::Unicode(toned)), "thumbsup");
+        assert_eq!(Library::key(&Item::Unicode(thumbs)), "thumbsup");
+        let library = Library { servers: vec![], place: Place { guild: None, external: true } };
+        assert!(matches!(library.item("thumbsup"), Some(Item::Unicode(e)) if e.glyph == "👍"));
+        assert!(library.item("no_such_emoji_at_all").is_none());
+        assert!(library.item("12345").is_none(), "an id nobody has");
+        // A name that is all digits is still a name.
+        assert!(matches!(library.item("100"), Some(Item::Unicode(e)) if e.glyph == "💯"));
     }
 
     #[test]
