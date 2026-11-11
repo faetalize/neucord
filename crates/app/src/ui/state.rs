@@ -120,6 +120,10 @@ pub(super) struct State {
     /// The account's client settings: server folders (which also order the
     /// rail), how media shows, Developer Mode, compact display.
     pub(super) settings: Settings,
+    /// What holds privacy settings back for the account.
+    pub(super) gates: discord::gates::Gates,
+    /// Servers READY could not give; see [`discord::settings::live_servers`].
+    pub(super) unavailable_guilds: usize,
     /// Saving changes to `settings`.
     pub(super) sync: discord::settings_sync::SettingsSync,
     /// What the gateway was last told we show as.

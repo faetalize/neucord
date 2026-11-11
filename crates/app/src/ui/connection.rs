@@ -341,6 +341,8 @@ impl App {
             required_action,
             experiments,
             session_id,
+            gates,
+            unavailable_guilds,
         } = ready;
         self.learn_users(private_channels.iter().flat_map(|c| &c.recipients));
         self.learn_users(
@@ -378,6 +380,8 @@ impl App {
             state.nitro = nitro;
             state.experiments = experiments;
             state.session_id = session_id;
+            state.gates = gates;
+            state.unavailable_guilds = unavailable_guilds;
             let store = (!state.persisted).then(|| (state.token.clone(), user.username.clone()));
             state.persisted = true;
             state.users.insert(user.id.0, user.display_name().to_string());

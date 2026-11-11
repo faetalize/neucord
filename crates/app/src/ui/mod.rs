@@ -26,6 +26,7 @@ mod panes;
 mod picker;
 mod poll_composer;
 mod polls;
+mod privacy;
 mod profile;
 mod rail;
 mod reactions;
