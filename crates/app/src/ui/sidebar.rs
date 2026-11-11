@@ -51,7 +51,7 @@ pub(super) const OPEN_CHAT: Entry<ChannelTarget> = Entry::Item(Item {
 pub(super) const COPY_CHANNEL_ID: Entry<ChannelTarget> = Entry::Item(Item {
     name: "copy-channel-id",
     label: "Copy Channel _ID",
-    shows: |app, _| app.state.borrow().developer_mode,
+    shows: |app, _| app.state.borrow().settings.developer_mode,
     kind: Kind::Action(|app, target| app.copy(&target.0.to_string())),
 });
 
@@ -248,7 +248,7 @@ const GLYPH_WIDTH: i32 = 16;
 /// The kind of channel, in front of its name. Text channels show a `#`, which
 /// the theme has no icon for. Every glyph is as wide as an icon, so the names
 /// line up; a size group would measure every row on each rebuild.
-fn glyph_widget(glyph: Glyph) -> gtk::Widget {
+pub(super) fn glyph_widget(glyph: Glyph) -> gtk::Widget {
     let (icon, tooltip) = match glyph {
         Glyph::Text => {
             return gtk::Label::builder()

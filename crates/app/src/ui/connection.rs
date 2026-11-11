@@ -4,6 +4,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
+use discord::settings::Settings;
 use discord::{Channel, Event, Gateway, Guild, Member, Ready, Rest, Snowflake, session};
 use gtk::glib;
 use gtk::prelude::*;
@@ -235,12 +236,23 @@ impl App {
                     self.state.borrow_mut().required_action = action;
                     self.apply_required_action();
                 }
-                Event::MediaSettingsUpdate(patch) => {
-                    self.state.borrow_mut().media.apply(patch);
-                    self.refresh_rows();
+                Event::SettingsUpdate { patch, replace } => {
+                    let (media, folders) = {
+                        let mut state = self.state.borrow_mut();
+                        let before = (state.settings.media, state.settings.guild_folders.clone());
+                        if replace {
+                            state.settings = Settings::default();
+                        }
+                        state.settings.apply(patch);
+                        (before.0 != state.settings.media, before.1 != state.settings.guild_folders)
+                    };
+                    if folders {
+                        self.rebuild_rail();
+                    }
+                    if media {
+                        self.refresh_rows();
+                    }
                 }
-                Event::DeveloperModeUpdate(on) => self.state.borrow_mut().developer_mode = on,
-                Event::MessageDisplayCompactUpdate(on) => self.state.borrow_mut().message_display_compact = on,
                 Event::RelationshipAdd { relationship, notify } => {
                     self.learn_users(std::iter::once(&relationship.user));
                     let blocked = relationship.kind == discord::relationships::Kind::Blocked;
@@ -261,6 +273,8 @@ impl App {
                     self.state.borrow_mut().profiles.doubt(user_id);
                     self.state.borrow_mut().relationships.update(user_id, nickname);
                     self.relationships_changed(false);
+                    // What we call them shows in DMs.
+                    self.refresh_rows();
                 }
                 Event::RelationshipRemove(user_id) => {
                     self.withdraw_friend_request(user_id);
@@ -276,11 +290,8 @@ impl App {
                         self.queue_friends_refresh();
                         // A group DM's friends.
                         self.refresh_member_rows();
+                        self.refresh_profile_views();
                     }
-                }
-                Event::GuildFoldersUpdate(folders) => {
-                    self.state.borrow_mut().guild_folders = folders;
-                    self.rebuild_rail();
                 }
                 Event::NotificationSettingsUpdate(settings) => {
                     self.state.borrow_mut().notifications.update(settings);
@@ -340,11 +351,8 @@ impl App {
             relationships,
             read_states,
             notification_settings,
-            guild_folders,
-            media_settings,
-            developer_mode,
+            settings,
             media_takedown_regulated,
-            message_display_compact,
             required_action,
             experiments,
             session_id,
@@ -376,12 +384,9 @@ impl App {
             state.notes.clear();
             state.typing.clear();
             state.read = read_states;
-            state.guild_folders = guild_folders;
             state.notifications = notification_settings;
-            state.media = media_settings;
-            state.developer_mode = developer_mode;
+            state.settings = settings;
             state.media_takedown_regulated = media_takedown_regulated;
-            state.message_display_compact = message_display_compact;
             state.required_action = required_action;
             state.account = Some(account);
             state.nitro = nitro;
@@ -510,6 +515,7 @@ impl App {
     fn relationships_changed(self: &Rc<Self>, blocks_changed: bool) {
         self.refresh_badges();
         self.queue_friends_refresh();
+        self.refresh_profile_views();
         if blocks_changed {
             self.refresh_typing();
             self.refresh_rows();

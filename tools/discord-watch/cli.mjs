@@ -63,6 +63,9 @@ switch (command) {
     for (const [name, values] of Object.entries(cur.constants ?? {})) {
       if (values.length === 0) log(`no constant ${name} in the client`);
     }
+    for (const [name, definitions] of Object.entries(cur.protos ?? {})) {
+      if (definitions.length === 0) log(`no protobuf message ${name} in the client`);
+    }
     for (const name of uses.experiments) {
       if (!cur.experiments?.[name]) log(`no experiment ${name} in the client`);
     }

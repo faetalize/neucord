@@ -10,6 +10,8 @@
 use std::fmt::Display;
 
 pub(crate) const MESSAGES: Endpoint = Endpoint::get("/channels/{channel}/messages");
+pub(crate) const SEARCH_GUILD_MESSAGES: Endpoint = Endpoint::get("/guilds/{guild}/messages/search");
+pub(crate) const SEARCH_CHANNEL_MESSAGES: Endpoint = Endpoint::get("/channels/{channel}/messages/search");
 pub(crate) const SEND_MESSAGE: Endpoint = Endpoint::post("/channels/{channel}/messages");
 pub(crate) const EDIT_MESSAGE: Endpoint = Endpoint::patch("/channels/{channel}/messages/{message}");
 pub(crate) const DELETE_MESSAGE: Endpoint = Endpoint::delete("/channels/{channel}/messages/{message}");
@@ -48,6 +50,7 @@ pub(crate) const LEAVE_THREAD: Endpoint = Endpoint::delete("/channels/{channel}/
 pub(crate) const POST_DATA: Endpoint = Endpoint::post("/channels/{channel}/post-data");
 pub(crate) const USER: Endpoint = Endpoint::get("/users/{user}");
 pub(crate) const USER_PROFILE: Endpoint = Endpoint::get("/users/{user}/profile");
+pub(crate) const MUTUAL_FRIENDS: Endpoint = Endpoint::get("/users/{user}/relationships");
 pub(crate) const NOTE: Endpoint = Endpoint::get("/users/@me/notes/{user}");
 pub(crate) const SET_NOTE: Endpoint = Endpoint::put("/users/@me/notes/{user}");
 pub(crate) const OPEN_DM: Endpoint = Endpoint::post("/users/@me/channels");
@@ -60,6 +63,7 @@ pub(crate) const LOGIN: Endpoint = Endpoint::post("/auth/login");
 pub(crate) const LOGOUT: Endpoint = Endpoint::post("/auth/logout");
 pub(crate) const SEND_MFA_SMS: Endpoint = Endpoint::post("/auth/mfa/sms/send");
 pub(crate) const VERIFY_MFA: Endpoint = Endpoint::post("/auth/mfa/{method}");
+pub(crate) const FORGOT_PASSWORD: Endpoint = Endpoint::post("/auth/forgot");
 pub(crate) const REMOTE_AUTH_LOGIN: Endpoint = Endpoint::post("/users/@me/remote-auth/login");
 pub(crate) const STICKER_PACKS: Endpoint = Endpoint::get("/sticker-packs");
 pub(crate) const GIFS_SEARCH: Endpoint = Endpoint::get("/gifs/search");
@@ -67,6 +71,7 @@ pub(crate) const GIFS_TRENDING: Endpoint = Endpoint::get("/gifs/trending");
 pub(crate) const GIFS_TRENDING_GIFS: Endpoint = Endpoint::get("/gifs/trending-gifs");
 pub(crate) const GIFS_SUGGEST: Endpoint = Endpoint::get("/gifs/suggest");
 pub(crate) const SAFETY_HUB: Endpoint = Endpoint::get("/safety-hub/@me");
+pub(crate) const SAFETY_HUB_SUSPENDED: Endpoint = Endpoint::post("/safety-hub/suspended/@me");
 
 /// An HTTP method and a path template.
 #[derive(Clone, Copy, Debug)]
@@ -266,6 +271,8 @@ mod tests {
     #[should_panic(expected = "doesn't have")]
     fn extra_parameter() {
         OPEN_DM.check(&["user"]);
+        SEARCH_GUILD_MESSAGES.check(&["guild"]);
+        SEARCH_CHANNEL_MESSAGES.check(&["channel"]);
     }
 
     /// discord-watch reads the table as text, so a row written any other way

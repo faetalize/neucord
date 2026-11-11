@@ -306,8 +306,9 @@ impl AppsMenu {
 /// Use Apps, in the attach menu (`SLASH_COMMAND` in 316576): starts a command
 /// in the message box, as typing `/` does. The client's menu has an App
 /// Launcher in its place where the Apps button is turned off, a setting
-/// Neucord has no button for. Neucord sends no analytics for it
-/// (`CHANNEL_ATTACH_MENU_USE_APPS_CLICKED`).
+/// Neucord has no button for. The attach button on the notice that replaces
+/// the message box lacks it, as a command has nowhere to be typed there.
+/// Neucord sends no analytics for it (`CHANNEL_ATTACH_MENU_USE_APPS_CLICKED`).
 pub(super) const USE_APPS: Entry<()> = Entry::Item(Item {
     name: "use-apps",
     label: "Use _Apps",
@@ -527,7 +528,7 @@ impl App {
     /// The open channel, if the client's attach menu would offer Use Apps in
     /// it now (`canUseApplicationCommands`): the message box shows, nothing
     /// is being edited or replied to, and commands have a place to run.
-    fn apps_channel(&self) -> Option<Snowflake> {
+    pub(super) fn apps_channel(&self) -> Option<Snowflake> {
         let channel = self.state.borrow().channel?;
         let replying = self.reply.borrow().as_ref().is_some_and(|r| r.channel == channel);
         let allowed = self.composer_box.is_visible()
