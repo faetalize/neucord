@@ -106,6 +106,10 @@ pub(super) struct State {
     /// Where each interaction of ours that Discord hasn't answered belongs:
     /// its channel and message, by nonce.
     pub(super) interactions: HashMap<Snowflake, (Snowflake, Snowflake)>,
+    /// The apps and commands fetched for slash commands.
+    pub(super) commands: discord::commands::CommandIndex,
+    /// Commands we ran that their app hasn't answered, by nonce.
+    pub(super) running: HashMap<Snowflake, super::slash::Running>,
     /// Display names by user id, accumulated from every user we see plus lazy
     /// `GET /users/{id}` lookups, so mentions resolve even for people no longer
     /// in the server.
@@ -199,6 +203,12 @@ impl State {
 
     pub(super) fn me(&self) -> Option<Snowflake> {
         self.me.as_ref().map(|u| u.id)
+    }
+
+    /// Where commands would run if `channel` is open, for what they may be.
+    pub(super) fn command_place(&self, channel: Snowflake) -> Option<discord::commands::Place> {
+        let (guild, channel) = self.find_channel(channel)?;
+        Some(discord::commands::Place::of(guild, channel, self.account.as_ref()?, now_unix()))
     }
 
     /// The guild a channel or thread belongs to and the channel itself;

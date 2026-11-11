@@ -78,6 +78,8 @@ impl LengthIndicator {
 pub(super) enum Completion {
     Mention(u64, String),
     Emoji(Emoji),
+    /// A command to fill in the form of, not text to insert.
+    Command(super::slash::Suggestion),
 }
 
 impl Completion {
@@ -86,6 +88,7 @@ impl Completion {
         match self {
             Completion::Mention(id, _) => format!("<@{id}> "),
             Completion::Emoji(item) => format!("{} ", item.text()),
+            Completion::Command(_) => String::new(),
         }
     }
 
@@ -98,6 +101,23 @@ impl Completion {
                 let line = gtk::Box::builder().spacing(8).build();
                 line.append(&super::emoji::glyph(item, images));
                 line.append(&gtk::Label::builder().label(format!(":{}:", item.name())).xalign(0.0).build());
+                line.upcast()
+            }
+            Completion::Command(suggestion) => {
+                let line = gtk::Box::builder().spacing(12).build();
+                line.append(&gtk::Label::builder().label(&suggestion.name).xalign(0.0).build());
+                line.append(
+                    &gtk::Label::builder()
+                        .label(&suggestion.description)
+                        .xalign(0.0)
+                        .hexpand(true)
+                        .ellipsize(gtk::pango::EllipsizeMode::End)
+                        .width_chars(30)
+                        .max_width_chars(48)
+                        .css_classes(["dim-label"])
+                        .build(),
+                );
+                line.append(&gtk::Label::builder().label(&suggestion.app).css_classes(["dim-label"]).build());
                 line.upcast()
             }
         }
@@ -144,6 +164,7 @@ impl App {
         area.append(&self.reply_bar);
         self.build_schedule_bar(area);
         self.build_edit_bar(area);
+        self.build_slash(area);
         self.build_attach(area);
         self.build_stickers(area);
         self.build_gifs();
@@ -487,15 +508,27 @@ impl App {
     /// Show or hide the autocomplete popup for the `@word` or `:word` at the
     /// cursor.
     pub(super) fn update_mention_popup(self: &Rc<Self>) {
+        // A `/` at the start asks for a command instead.
+        if self.update_slash_popup() {
+            return;
+        }
         let buffer = self.composer.buffer();
         let found = match mention_token(&buffer) {
             Some((start, prefix)) => Some((start, self.mention_candidates(&prefix))),
             None => emoji_token(&buffer).map(|(start, query)| (start, self.emoji_candidates(&query))),
         };
-        let Some((start, candidates)) = found.filter(|(_, candidates)| !candidates.is_empty()) else {
+        match found {
+            Some((start, candidates)) => self.show_completions(start, candidates),
+            None => self.mention_popover.popdown(),
+        }
+    }
+
+    /// Show `candidates` in the popup, for the token starting at `start`.
+    pub(super) fn show_completions(self: &Rc<Self>, start: i32, candidates: Vec<Completion>) {
+        if candidates.is_empty() {
             self.mention_popover.popdown();
             return;
-        };
+        }
 
         while let Some(child) = self.mention_list.first_child() {
             self.mention_list.remove(&child);
@@ -576,6 +609,13 @@ impl App {
     }
 
     pub(super) fn accept_mention(self: &Rc<Self>, index: i32) {
+        let command = match self.mention.borrow().candidates.get(index.max(0) as usize) {
+            Some(Completion::Command(suggestion)) => Some(suggestion.id.clone()),
+            _ => None,
+        };
+        if let Some(id) = command {
+            return self.start_command(&id);
+        }
         let (start, text) = {
             let ctx = self.mention.borrow();
             match ctx.candidates.get(index.max(0) as usize) {

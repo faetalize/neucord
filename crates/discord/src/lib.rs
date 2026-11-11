@@ -9,6 +9,7 @@ pub mod apng;
 pub mod auth;
 pub mod cdn;
 pub mod channel_icon;
+pub mod commands;
 pub mod component;
 pub mod cooldowns;
 pub mod edits;

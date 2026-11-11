@@ -130,6 +130,19 @@ changed for unrelated reasons only needs a note in the issue.
   to pick sends when chosen, several when the list closes with a change); and
   what turns components off, `v` in 911408 (anchor
   `getInteractionComponentState`) with `O` and the menu limits in 257249.
+- **Slash commands** (`commands.rs`, `ui/slash.rs`, `Rest::command_index`,
+  `run_command`, `autocomplete`). The endpoints, the gateway events, the
+  index and autocomplete stores (`ApplicationCommandIndexStore` holds how
+  commands are found and ordered) and `handleCommand`, the run's request, are
+  watched. Not watched: where a command may be used, `zl` in 46477 (anchor
+  `MISSING_BASE_PERMISSIONS`) with the place's permissions, `Bh` in 240591
+  (anchor `hasBaseAccessPermissions`), and the rule types, 1 role, 2 user, 3
+  channel (`RA` in 392054); how a command and its sub-commands are
+  listed and what is kept of them, `Lz` in 168186 (anchor `subCommandPath`);
+  what a run sends for each option, `A` in 545152 (anchor
+  `APPLICATION_COMMAND_USED`), and the checks a value passes, `J` in 300541
+  (anchor `allowEmptyValues`); which words the suggestions look up, `Yn` in
+  664929 (anchor `hasSpaceTerminator`).
 - **`ansi` code blocks** (`markup::ansi`, `render::ansi_markup`). Which codes
   read, and how: the parser in 626551 (anchor `brightMagenta`): the style
   codes it takes, in what order a sequence's resets and sets apply, that every
