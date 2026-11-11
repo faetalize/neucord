@@ -32,6 +32,7 @@ use discord::{Channel, ChannelKind, Gateway, Guild, Message, Rest, Resume, Snowf
 use gtk::glib;
 
 use super::friends::Tab;
+use crate::tray::Alert;
 
 /// A press of ours on a message's component, until it is answered.
 pub(super) struct Pending {
@@ -681,6 +682,18 @@ impl State {
         (unread, mentions)
     }
 
+    /// What the tray icon says: the rail's badges added up. Servers count
+    /// as the rail counts them, so a muted one adds mentions but no dot.
+    pub(super) fn tray_alert(&self) -> Alert {
+        let (mut unread, mut mentions) = (false, self.home_badge());
+        for guild in &self.guilds {
+            let (guild_unread, guild_mentions) = self.guild_badge(guild);
+            unread |= guild_unread;
+            mentions += guild_mentions;
+        }
+        Alert::new(unread, mentions)
+    }
+
     /// Everything the rail shows that can change without the guild list changing.
     /// What the rail is built from: its servers and folders, in order, with
     /// their names and icons. Markers aside, it changes rarely.
@@ -1065,6 +1078,19 @@ mod tests {
         // The same chat in a text channel lights the dot.
         state.guilds[0].channels[0].kind = ChannelKind::Text;
         assert_eq!(state.guild_badge(&state.guilds[0]), (true, 2));
+    }
+
+    #[test]
+    fn the_tray_adds_up_what_the_rail_shows() {
+        let mut state = open_server(None, json!({"last_message_id": "200"}));
+        state.guilds[0].set_role(serde_json::from_value(json!({"id": "1", "permissions": "1049600"})).unwrap());
+        assert_eq!(state.tray_alert(), Alert::Quiet, "a channel we never opened counts as read");
+        state.read = ReadStates::from_ready(&json!([{"id": "9", "last_message_id": "200", "mention_count": 0}]));
+        assert_eq!(state.tray_alert(), Alert::Quiet, "everything is read");
+        state.read = ReadStates::from_ready(&json!([{"id": "9", "last_message_id": "100", "mention_count": 0}]));
+        assert_eq!(state.tray_alert(), Alert::Unread);
+        state.read = ReadStates::from_ready(&json!([{"id": "9", "last_message_id": "100", "mention_count": 2}]));
+        assert_eq!(state.tray_alert(), Alert::Mentions(2));
     }
 
     #[test]
