@@ -464,6 +464,19 @@ changed for unrelated reasons only needs a note in the issue.
   channels, and threads outside forums. A box under a message shows only for
   a known thread of a message with `HAS_THREAD` (`r8` in 679636).
 
+- **Searching messages** (`search.rs`, `Rest::search_messages`,
+  `ui/search.rs`). The two endpoints and every field they send are
+  snapshotted, `fetchMessages` and `SearchMessageStore` are watched. Not
+  watched: the 202 retry and its `attempts` field (`fetch` in 177068, anchor
+  `retry-after`), the filters and their patterns (224467, anchor
+  `attachment_extension`; the offered ones in 5990), how tokens become the
+  query (`Zf` in 822382, anchor `min_id`), when it sends (`te` in 586944,
+  anchor `PERFORM_SEARCH`: Enter, 500 ms, and not while one is under way),
+  the sort and page requests (`E`, `N` in 252715), the 10 000 results of 400
+  pages (477654), where a DM or a server is searched
+  (775427, anchor `isCrossDmSearchEnabled`) and the result menu (847342).
+  The setting that searches every DM at once is a POST to
+  `/users/@me/messages/search/tabs` (956467), which Neucord doesn't send.
 - **The quick switcher** (`switcher.rs`, `ui/switcher.rs`). The empty
   state (`QuickSwitcherStore`), the channel, server and group DM queries,
   the single-kind refetch and the unread, mention and speaker lists are
