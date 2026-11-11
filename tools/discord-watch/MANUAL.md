@@ -435,17 +435,42 @@ changed for unrelated reasons only needs a note in the issue.
   a clear instead for text that is empty trimmed and no emoji, writes a
   server's emoji by id and a Unicode one by its character, and caps the text
   at 128.
-- **Favourite emoji and the emoji used most** (`frecency.rs`,
-  `ui/favorites.rs`, `ui/emoji.rs`). The schema, `loadIfNecessary` and
-  `UserSettingsType` are watched. Not watched: 554375 (anchor
-  `favoriteEmojis`) files an emoji under its id or, for a Unicode one, the
-  name of its base, saves the list whole and allows 250; 253925 (anchor
-  `unfavorite`) offers Favorite and Unfavorite; 283047 (anchor
-  `computeWeight`) scores a use by its whole days (100 up to 3, 70 to 15, 50
-  to 30, 30 to 45, 10 to 80, else 1) and lists 42 by
-  `ceil(total × score ÷ uses)`; the picker opening is what loads the
-  settings (920134). The usage the client sends from 416380 (anchor
-  `hasPendingUsage`) isn't copied: Neucord records none.
+- **Favourites and what is used** (`frecency.rs`, `usage.rs`, `gifs.rs`,
+  `ui/favorites.rs`, `ui/usage.rs`, `ui/emoji.rs`, `ui/gifs.rs`,
+  `ui/stickers.rs`, `ui/reactions.rs`). The schema (a map's key type is not
+  in the snapshot: emoji are by string, stickers and servers or channels by
+  `fixed64` id), `loadIfNecessary`, `markDirtyIfHasPendingChange`,
+  `UserSettingsType`, `queryEmojiResults`, `queryStickers`, and the stores
+  holding each kind's weights, count and seeds (`EmojiStore`, `FrecencyStore`,
+  `StickersPersistedStore`, `GIFPickerViewStore`) are watched. Not watched,
+  all unnamed:
+  - 554375 (anchor `favoriteEmojis`) files an emoji under its id or, for a
+    Unicode one, the name of its base, saves the list whole and allows 250;
+    631576 (anchor `favoriteStickers`) the same for stickers; 253925 (anchor
+    `unfavorite`) offers Favorite and Unfavorite.
+  - 283047 (anchor `computeWeight`) keeps the last 10 times of a use, sorts
+    them when a time is given, drops what scores nothing, and ranks by
+    `ceil(total × score ÷ uses)`; 761821 (anchor `recentUses`) keeps the 100
+    used last, with `frecency` and the rounded `score`.
+  - 416380 (anchor `hasPendingUsage`) looks 10 ms to 10 s after connecting,
+    every 2 h plus up to 10 min and when the connection closes; it loads the
+    proto if a use waits (servers and channels alone not on the first look)
+    and saves at once, adding each kind's whole history; usage it counts
+    that Neucord has no surface for (commands, apps, sounds) isn't sent.
+  - What is counted: 138399 (anchor `EMOJI_TRACK_USAGE`) once Discord took a
+    message that isn't scheduled, the emoji 451909 finds in it (anchor
+    `validNonShortcutEmojis`: each written, not in code, not Nitro-locked,
+    under `id ?? uniqueName`) and its sticker.
+  - 497685 (anchor `favoriteGifs`): what a favourite GIF stores (`wg`: the
+    link as key, the source, `https:` put back, the size, `order` after the
+    newest, 762880 bytes at most, the hint hidden past two), which is what
+    `GIFPickerViewStore` lists; 649529 (anchor `favoritesTile`) the Favorites
+    tile and its search, 996566 the order, 439401 the star.
+  - 761304 (anchor `quickreact-`) offers up to four quick reactions from 822123
+    (`getEmojiInPriorityOrder`), without Nitro-locked emoji and five faces,
+    sent with the location "Message Context Menu".
+  - The picker opening loads the settings (920134), and so does the GIF
+    picker (683973), a sticker search and an emoji search (997625).
 - **The skin tone** (`Setting::SkinTone`, `UnicodeEmoji::toned`). 554375
   (anchor `diversitySurrogate`) saves it with `FREQUENT_USER_ACTION`, 10 s
   where most settings wait none (`Setting::delay`), and 7584 (anchor

@@ -13,6 +13,7 @@ use super::state::{Page, now_ms};
 
 impl App {
     pub(super) fn logout(self: &Rc<Self>) {
+        self.forget_usage();
         let rest = std::mem::take(&mut *self.state.borrow_mut()).rest;
         self.show_blank();
         self.refresh_typing();
@@ -311,6 +312,7 @@ impl App {
                         state.sync.disconnected();
                         state.frecency_sync.disconnected();
                     }
+                    self.usage_connected();
                     self.timelines.borrow_mut().held.resumed();
                     self.state.borrow_mut().members.resumed();
                     self.send_member_requests();
@@ -325,6 +327,10 @@ impl App {
                     // Replayed messages have already updated the open channel.
                 }
                 Event::Closed { code, reason, resume } => {
+                    // A rejected token has nothing to save to.
+                    if !Event::is_fatal_close(code) {
+                        self.usage_closed();
+                    }
                     {
                         let mut state = self.state.borrow_mut();
                         state.sync.disconnected();
@@ -444,6 +450,13 @@ impl App {
         if let Some(schedule) = offline_save {
             self.save_settings_after(schedule);
         }
+        // What was used and not saved: a closed app's, and a lost connection's edit.
+        self.restore_usage();
+        let offline_frecency = self.state.borrow_mut().frecency_sync.reconnected();
+        if let Some(schedule) = offline_frecency {
+            self.save_frecency_after(schedule);
+        }
+        self.usage_connected();
         let me = self.state.borrow().me.as_ref().map(|u| u.display_name().to_owned()).unwrap_or_default();
         self.me_label.set_label(&me);
         // READY may bring other Nitro, which changes the length limit.

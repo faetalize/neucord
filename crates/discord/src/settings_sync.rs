@@ -161,6 +161,9 @@ pub struct SettingsSync<K: Kind = Preloaded> {
     timer_delay: Duration,
     rate_limited: bool,
     offline_data_version: Option<u64>,
+    /// A save was asked for with nothing edited (see [`Self::touch`]): the
+    /// client's `protoToSave` is then an empty message, not none.
+    touched: bool,
     generation: u64,
     kind: PhantomData<K>,
 }
@@ -174,6 +177,7 @@ impl<K: Kind> Default for SettingsSync<K> {
             timer_delay: Duration::ZERO,
             rate_limited: false,
             offline_data_version: None,
+            touched: false,
             generation: 0,
             kind: PhantomData,
         }
@@ -213,8 +217,15 @@ impl<K: Kind> SettingsSync<K> {
     /// READY carried `proto`. An offline edit is sent a few seconds on.
     pub fn connected(&mut self, proto: Vec<u8>) -> Option<Schedule> {
         self.proto = Some(proto);
+        self.reconnected()
+    }
+
+    /// The connection opened again, with the settings we hold as they are
+    /// (a proto READY does not carry): an offline edit is sent a few seconds
+    /// on.
+    pub fn reconnected(&mut self) -> Option<Schedule> {
         self.park();
-        if self.offline_data_version.is_some() && !self.to_save.is_empty() {
+        if self.offline_data_version.is_some() && (!self.to_save.is_empty() || self.touched) {
             let after = Duration::from_millis((OFFLINE_DELAY_MS + glib::random_int_range(0, OFFLINE_DELAY_MS)) as u64);
             return Some(self.schedule(after));
         }
@@ -249,24 +260,51 @@ impl<K: Kind> SettingsSync<K> {
         let patch = K::patch(&settings_proto::replace_groups(&[], &[(group, &written)])?)?;
         self.proto = Some(merged);
         self.to_save.insert(group, written);
+        let schedule = self.mark_dirty(delay);
+        Some(Edited { patch, schedule })
+    }
+
+    /// Start the timer of a save for `delay`, unless one is waiting that is
+    /// not for longer (`markDirty`).
+    fn mark_dirty(&mut self, delay: Duration) -> Option<Schedule> {
         // A change with no wait always starts the timer over, which makes no
         // difference where the timer is for no wait too.
         let sooner = delay < self.timer_delay || delay.is_zero();
-        let schedule = match self.timer {
+        match self.timer {
             Some(_) if self.rate_limited || !sooner => None,
             _ => Some(self.schedule(delay)),
-        };
-        Some(Edited { patch, schedule })
+        }
+    }
+
+    /// A save is due at once with nothing edited, only what the caller adds
+    /// when it fires (`markDirtyIfHasPendingChange`, which the client asks
+    /// for when something it counts is waiting). Nothing before the
+    /// settings are loaded.
+    pub fn touch(&mut self) -> Option<Schedule> {
+        self.proto.as_ref()?;
+        self.touched = true;
+        self.mark_dirty(Duration::ZERO)
     }
 
     /// The timer of `generation` fired: what to send, if anything.
     pub fn save(&mut self, generation: u64) -> Option<Save> {
+        self.save_with(generation, Vec::new())
+    }
+
+    /// [`Self::save`], with `added` messages (field number → message) put
+    /// into what is saved, as the client's `beforeSendCallbacks` do just
+    /// before it sends. They count as edits: they stay until a save carrying
+    /// them is answered.
+    pub fn save_with(&mut self, generation: u64, added: Vec<(u32, Vec<u8>)>) -> Option<Save> {
         if self.timer != Some(generation) {
             return None;
         }
         self.timer = None;
         self.rate_limited = false;
+        self.to_save.extend(added);
         if self.to_save.is_empty() {
+            // Nothing is owed to Discord any more, which the client's empty `protoToSave` leaves open.
+            self.touched = false;
             return None;
         }
         let groups: Vec<(u32, &[u8])> = self.to_save.iter().map(|(n, g)| (*n, g.as_slice())).collect();
@@ -287,6 +325,7 @@ impl<K: Kind> SettingsSync<K> {
         self.proto.as_ref()?;
         self.offline_data_version = None;
         self.rate_limited = false;
+        self.touched = false;
         self.to_save.retain(|number, group| save.sent.get(number) != Some(group));
         let proto = saved.settings.as_deref()?;
         let groups: Vec<(u32, &[u8])> = self.to_save.iter().map(|(n, g)| (*n, g.as_slice())).collect();
@@ -316,6 +355,7 @@ impl<K: Kind> SettingsSync<K> {
     pub fn reloaded(&mut self, proto: Vec<u8>) -> Option<K::Patch> {
         self.proto.as_ref()?;
         self.to_save.clear();
+        self.touched = false;
         self.timer = None;
         self.rate_limited = false;
         self.offline_data_version = None;

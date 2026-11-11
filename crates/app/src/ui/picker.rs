@@ -102,6 +102,13 @@ impl Handle {
         }
     }
 
+    /// What the search box asks for while it is empty.
+    pub(super) fn set_placeholder(&self, text: &str) {
+        if let Some(search) = self.search.upgrade() {
+            search.set_placeholder_text(Some(text));
+        }
+    }
+
     /// Show or hide the search box and the back button.
     pub(super) fn set_chrome(&self, search: bool, back: bool) {
         if let Some(entry) = self.search.upgrade() {

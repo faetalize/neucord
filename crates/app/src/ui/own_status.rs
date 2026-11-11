@@ -350,13 +350,18 @@ impl App {
             move |button| {
                 let Some(this) = this.upgrade() else { return };
                 let (emoji, show_emoji) = (emoji.clone(), show_emoji.clone());
-                this.open_library_picker(this.status_emoji_library(), button, move |_, item| {
-                    *emoji.borrow_mut() = Some(match item {
-                        discord::emoji::Item::Unicode(e) => (None, e.glyph.to_owned()),
-                        discord::emoji::Item::Custom(named) => (Some(named.emoji.id), named.emoji.name.clone()),
-                    });
-                    show_emoji();
-                });
+                this.open_library_picker(
+                    this.status_emoji_library(),
+                    button,
+                    discord::emoji::Intention::Chat,
+                    move |_, item| {
+                        *emoji.borrow_mut() = Some(match item {
+                            discord::emoji::Item::Unicode(e) => (None, e.glyph.to_owned()),
+                            discord::emoji::Item::Custom(named) => (Some(named.emoji.id), named.emoji.name.clone()),
+                        });
+                        show_emoji();
+                    },
+                );
             }
         });
 
