@@ -267,6 +267,13 @@ impl Rest {
         self.request(call!(SEND_MESSAGE, channel), Some(body)).await
     }
 
+    /// Post `poll` (a [`crate::poll_draft::Draft::body`]) on its own: the
+    /// editor's `createPoll` (180662) sends no text, reply or files with it.
+    pub async fn send_poll(&self, channel: Snowflake, poll: Value) -> Result<Message, Error> {
+        let body = poll_body(channel, &Snowflake::now().to_string(), poll);
+        self.request(call!(SEND_MESSAGE, channel), Some(body)).await
+    }
+
     /// Change the text of `message`, ours, to `content`.
     pub async fn edit_message(&self, message: &Message, content: &str) -> Result<Message, Error> {
         let call = call!(EDIT_MESSAGE, channel = message.channel_id, message = message.id);
@@ -666,6 +673,13 @@ fn message_body(
     body
 }
 
+/// What posting a poll sends: an empty message with the `poll`.
+fn poll_body(channel: Snowflake, nonce: &str, poll: Value) -> Value {
+    let mut body = message_body(channel, "", nonce, 0, None, &[], None);
+    body["poll"] = poll;
+    body
+}
+
 /// What editing `message` to say `content` sends, as `editMessage` in 138399
 /// builds it.
 fn edit_body(message: &Message, content: &str) -> Value {
@@ -717,7 +731,7 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        Captcha, Page, Reply, ReplyPing, add_reaction_call, base_headers, edit_body, is_md5, message_body,
+        Captcha, Page, Reply, ReplyPing, add_reaction_call, base_headers, edit_body, is_md5, message_body, poll_body,
         rate_limit_wait, reactors_call, remove_reaction_call,
     };
     use crate::model::Emoji;
@@ -864,6 +878,15 @@ mod tests {
         assert_eq!(body["attachments"][0]["duration_secs"], 3.0);
         assert_eq!(body["attachments"][0]["waveform"], "AAEC");
         assert_eq!(message_body(Snowflake(9), "hi", "1", 0, None, &[], None)["flags"], 0);
+    }
+
+    #[test]
+    fn a_poll_is_a_message_of_nothing_else() {
+        let poll = json!({ "question": { "text": "Q?" }, "answers": [], "duration": 24 });
+        assert_eq!(
+            poll_body(Snowflake(9), "1", poll.clone()),
+            json!({ "content": "", "nonce": "1", "tts": false, "flags": 0, "poll": poll }),
+        );
     }
 
     #[test]

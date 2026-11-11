@@ -234,6 +234,14 @@ impl State {
         }
     }
 
+    /// Whether Create Poll is offered in the channel (see [`permissions::can_post_polls`]).
+    pub(super) fn can_post_polls(&self, id: Snowflake) -> bool {
+        match (self.find_channel(id), &self.account) {
+            (Some((guild, channel)), Some(me)) => permissions::can_post_polls(guild, channel, me, now_unix()),
+            _ => false,
+        }
+    }
+
     /// Whether Record Voice Message is offered in the channel: our experiment
     /// and permissions (see [`discord::voice::enabled`] and
     /// [`permissions::can_record_voice_message`]).

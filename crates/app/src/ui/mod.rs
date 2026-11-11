@@ -21,6 +21,7 @@ mod message_row;
 mod notify;
 mod panes;
 mod picker;
+mod poll_composer;
 mod polls;
 mod rail;
 mod reactions;
