@@ -9,6 +9,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parse, walk, isFunction, keyName, modulesOf } from "./js.mjs";
+import { emojiData, emojiTable, tableHash } from "./emoji-table.mjs";
 
 const WATCH = JSON.parse(await readFile(new URL("./watch.json", import.meta.url), "utf8"));
 // The modules MANUAL.md has people check by hand, by id.
@@ -482,6 +483,8 @@ export async function snapshot(dir) {
   const copied = new Map();
   let modules = 0;
   let unparsed = 0;
+  // What the client calls each Unicode emoji, hashed as Neucord's table is.
+  let emoji = null;
 
   for (const file of (await readdir(join(dir, "assets"))).sort()) {
     const source = await readFile(join(dir, "assets", file), "utf8");
@@ -492,6 +495,8 @@ export async function snapshot(dir) {
       unparsed++;
       continue;
     }
+    const data = emojiData(source);
+    if (data) emoji = tableHash(emojiTable(data));
     for (const { id, property } of modulesOf(ast)) {
       modules++;
       const body = property.value;
@@ -690,5 +695,6 @@ export async function snapshot(dir) {
     constants: Object.fromEntries([...constants].map(([k, v]) => [k, [...v].sort().map((s) => JSON.parse(s))])),
     experiments: Object.fromEntries([...experiments].map(([k, v]) => [k, JSON.parse(v)])),
     reached,
+    emoji,
   });
 }

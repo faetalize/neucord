@@ -121,6 +121,15 @@ export function compare(old, cur, uses) {
     affects.push(`- ${code(name)}: ${change}\n  - was: ${value(before)}\n  - now: ${value(after)}`);
   }
 
+  // Neucord keeps the client's names for Unicode emoji, for `:name:` to
+  // write them. Snapshots from before they were recorded have none.
+  if (cur.emoji && uses.emoji !== cur.emoji) {
+    affects.push(
+      "- The client's Unicode emoji names changed from what `crates/discord/src/emoji_names.txt` holds: " +
+        "regenerate it with `node tools/discord-watch/emoji-table.mjs <build dir>` and look at the diff",
+    );
+  }
+
   // Experiments Neucord reads: a variant that means something else now, or
   // an experiment gone, which leaves every account on one behaviour.
   // Snapshots from before experiments were recorded have none to compare.
