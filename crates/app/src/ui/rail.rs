@@ -9,6 +9,8 @@ use discord::{Guild, Snowflake};
 use gtk::prelude::*;
 
 use super::App;
+use super::menus::{self, At};
+use super::notify_menus::GuildTarget;
 use super::widgets::{initials, set_badge};
 use crate::images::Images;
 
@@ -188,6 +190,12 @@ impl App {
             if let Some(this) = this.upgrade() {
                 this.select_guild(id);
             }
+        });
+        // The server's menu opens where its icon is right-clicked.
+        let (app, weak) = (Rc::downgrade(self), button.downgrade());
+        menus::on_secondary(&button, move |x, y| {
+            let (Some(app), Some(button)) = (app.upgrade(), weak.upgrade()) else { return };
+            menus::popup(&app, menus::GUILD, GuildTarget(id), &button, At::Point(x, y));
         });
         rail_item(&button, Mark::Guild(id), items)
     }

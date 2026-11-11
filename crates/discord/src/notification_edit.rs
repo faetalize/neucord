@@ -69,6 +69,17 @@ pub fn bulk_ack_bodies(acks: &[BulkAck]) -> Vec<Value> {
         .collect()
 }
 
+/// Where the ack that marks `target` unread goes: the newest message we have
+/// loaded before it, else the millisecond before it (439147).
+pub fn unread_before(loaded: &[Snowflake], target: Snowflake) -> Snowflake {
+    loaded
+        .iter()
+        .copied()
+        .filter(|&id| id < target)
+        .max()
+        .unwrap_or_else(|| Snowflake::from_unix_ms(target.unix_ms().saturating_sub(1)))
+}
+
 /// The body of an ack that marks a message unread: the ack goes to the message
 /// before it, `manual`, with the mentions after it (439147).
 pub fn unread_body(mention_count: u32) -> Value {
@@ -120,6 +131,15 @@ mod tests {
         assert_eq!(sizes, [100, 100, 50]);
         assert_eq!(bodies[0]["read_states"][0], json!({"channel_id": "1", "message_id": "10", "read_state_type": 0}));
         assert!(bulk_ack_bodies(&[]).is_empty());
+    }
+
+    #[test]
+    fn marking_unread_acks_the_message_before_or_the_millisecond_before() {
+        let ids = [10, 20, 30].map(|n| Snowflake(n << 22));
+        assert_eq!(unread_before(&ids, ids[2]), ids[1]);
+        assert_eq!(unread_before(&ids, Snowflake(25 << 22)), ids[1], "a message we don't hold");
+        let first = Snowflake((1_800_000_000_000 - 1_420_070_400_000) << 22);
+        assert_eq!(unread_before(&[first], first).unix_ms(), first.unix_ms() - 1, "nothing before it");
     }
 
     #[test]

@@ -22,6 +22,11 @@ impl Snowflake {
         ((self.0 >> 22) + Self::DISCORD_EPOCH_MS) as i64
     }
 
+    /// The snowflake of a time, in milliseconds since 1970, with nothing else in it.
+    pub fn from_unix_ms(unix_ms: i64) -> Self {
+        Snowflake((unix_ms.max(Self::DISCORD_EPOCH_MS as i64) as u64 - Self::DISCORD_EPOCH_MS) << 22)
+    }
+
     /// A snowflake for "now", used as a message nonce.
     pub fn now() -> Self {
         let unix_ms = (glib::real_time() / 1000) as u64;
