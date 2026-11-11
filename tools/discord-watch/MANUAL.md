@@ -413,3 +413,15 @@ changed for unrelated reasons only needs a note in the issue.
 - **Poll vote counts and shares** (`poll.rs`). Client: 432005 and 969632
   count the votes, and 951727 works out shares, the leader and when counts
   show.
+- **Scheduled messages** (`scheduled.rs`, `Limits::scheduled_messages`,
+  `ui/scheduling.rs`). The five requests with their fields, the state enum,
+  `TOO_MANY_SCHEDULED_MESSAGES` and `SUPPRESS_NOTIFICATIONS` are watched.
+  Not watched, all in 566908 (anchor the `Scheduled Messages` logger): the
+  10 minutes and 8 days (`S`, `N`; 853297 for the 30 days a waiting message
+  may be moved within), the presets (`FF`), where the picker starts (`US`),
+  25 for Tier 2 and 1 otherwise (`C`), `@silent` (`UF`, `zs`), and where it
+  is offered (`vK`). The attach submenu is `s` in 970244. The list is asked
+  for when the inbox's Scheduled tab opens and sorted furthest off first
+  (`sQ` in 713024, anchor `getScheduledMessagesForInbox`). A refused create
+  with the over-the-limit code opens a dialog, or Nitro's upsell, in
+  `vh` of 859403.

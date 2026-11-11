@@ -40,6 +40,7 @@ pub mod regional;
 pub mod relationships;
 pub mod remote_auth;
 pub mod rest;
+pub mod scheduled;
 pub mod session;
 pub mod settings;
 pub mod shape;

@@ -16,6 +16,7 @@ use crate::interaction::{Failure, Press};
 use crate::invalid::{Change, InvalidRequests};
 use crate::model::Emoji;
 use crate::reactions::{Location, Refusal};
+use crate::scheduled::{self, Scheduled};
 use crate::stickers::Pack;
 use crate::uploads::Sent;
 use crate::{Channel, Error, Message, Snowflake, identity};
@@ -276,6 +277,63 @@ impl Rest {
     pub async fn send_poll(&self, channel: Snowflake, poll: Value) -> Result<Message, Error> {
         let body = poll_body(channel, &Snowflake::now().to_string(), poll);
         self.request(call!(SEND_MESSAGE, channel), Some(body)).await
+    }
+
+    /// Our scheduled messages, which the client asks for when the inbox's
+    /// Scheduled tab opens, and not before (713024).
+    pub async fn scheduled_messages(&self) -> Result<Vec<Scheduled>, Error> {
+        let list: Value = self.request(call!(LIST_SCHEDULED_MESSAGES), None).await?;
+        Ok(Scheduled::parse_list(&list))
+    }
+
+    /// Have Discord post `content`, the uploaded `attachments`, a `sticker`
+    /// or a `poll` (a [`crate::poll_draft::Draft::body`], which then stands
+    /// alone) in `channel` at `at`, an ISO 8601 time in UTC.
+    #[expect(clippy::too_many_arguments, reason = "the fields of one request")]
+    pub async fn schedule_message(
+        &self,
+        channel: Snowflake,
+        at: &str,
+        content: &str,
+        reply: Option<Reply>,
+        attachments: &[Sent<'_>],
+        sticker: Option<Snowflake>,
+        poll: Option<Value>,
+    ) -> Result<(), Error> {
+        let body = schedule_body(channel, at, content, reply, attachments, sticker, poll);
+        let _: Value = self.request(call!(SCHEDULE_MESSAGE), Some(body)).await?;
+        Ok(())
+    }
+
+    /// Move scheduled message `scheduled` to `at`, an ISO 8601 time in UTC.
+    pub async fn move_scheduled_message(&self, scheduled: Snowflake, at: &str) -> Result<Scheduled, Error> {
+        let body = json!({ "scheduled_timestamp": at });
+        self.change_scheduled_message(scheduled, body).await
+    }
+
+    /// Change the text of scheduled message `scheduled`, whose flags are `flags`.
+    pub async fn edit_scheduled_message(
+        &self,
+        scheduled: Snowflake,
+        content: &str,
+        flags: u64,
+    ) -> Result<Scheduled, Error> {
+        self.change_scheduled_message(scheduled, edit_scheduled_body(content, flags)).await
+    }
+
+    async fn change_scheduled_message(&self, scheduled: Snowflake, body: Value) -> Result<Scheduled, Error> {
+        let sent: Value = self.request(call!(EDIT_SCHEDULED_MESSAGE, scheduled), Some(body)).await?;
+        Scheduled::parse(&sent).ok_or_else(|| Error::Protocol("a scheduled message without its id or channel".into()))
+    }
+
+    /// Take scheduled message `scheduled` back, unsent.
+    pub async fn cancel_scheduled_message(&self, scheduled: Snowflake) -> Result<(), Error> {
+        self.request(call!(CANCEL_SCHEDULED_MESSAGE, scheduled), None).await
+    }
+
+    /// Have Discord post scheduled message `scheduled` now.
+    pub async fn send_scheduled_message_now(&self, scheduled: Snowflake) -> Result<(), Error> {
+        self.request(call!(SEND_SCHEDULED_MESSAGE, scheduled), None).await
     }
 
     /// Change the text of `message`, ours, to `content`.
@@ -692,15 +750,7 @@ fn message_body(
         "flags": flags,
     });
     if let Some(reply) = reply {
-        // The same body the official client sends.
-        body["message_reference"] = json!({ "message_id": reply.to, "channel_id": channel });
-        if let Some(guild) = reply.guild {
-            body["message_reference"]["guild_id"] = json!(guild);
-        }
-        if !reply.ping {
-            // Mentions in the text still ping; only the reply itself doesn't.
-            body["allowed_mentions"] = json!({ "parse": ["users", "roles", "everyone"], "replied_user": false });
-        }
+        add_reply(&mut body, channel, reply);
     }
     if !attachments.is_empty() {
         body["attachments"] = attachments.iter().enumerate().map(|(index, a)| a.body(index)).collect();
@@ -710,6 +760,59 @@ fn message_body(
         body["sticker_ids"] = json!([sticker]);
     }
     body
+}
+
+/// The fields a reply adds, as the official client sends them.
+fn add_reply(body: &mut Value, channel: Snowflake, reply: Reply) {
+    body["message_reference"] = json!({ "message_id": reply.to, "channel_id": channel });
+    if let Some(guild) = reply.guild {
+        body["message_reference"]["guild_id"] = json!(guild);
+    }
+    if !reply.ping {
+        // Mentions in the text still ping; only the reply itself doesn't.
+        body["allowed_mentions"] = json!({ "parse": ["users", "roles", "everyone"], "replied_user": false });
+    }
+}
+
+/// What scheduling a message sends, as `pr` in 151282 builds it from what
+/// `_sendMessage` made of the message. Of its fields, only the message's own
+/// go along (no nonce, `tts` or analytics), and `attachments` is always
+/// there. A leading `@silent` becomes the flag, as for any message.
+fn schedule_body(
+    channel: Snowflake,
+    at: &str,
+    content: &str,
+    reply: Option<Reply>,
+    attachments: &[Sent<'_>],
+    sticker: Option<Snowflake>,
+    poll: Option<Value>,
+) -> Value {
+    let (content, flags) = scheduled::split_silent(content, 0);
+    let mut body = json!({
+        "channel_id": channel,
+        "content": content,
+        "scheduled_timestamp": at,
+        "flags": flags,
+        "attachments": attachments.iter().enumerate().map(|(index, a)| a.body(index)).collect::<Vec<_>>(),
+    });
+    if let Some(reply) = reply {
+        add_reply(&mut body, channel, reply);
+    }
+    if let Some(sticker) = sticker {
+        body["sticker_ids"] = json!([sticker]);
+    }
+    if let Some(poll) = poll {
+        body["poll"] = poll;
+    }
+    body
+}
+
+/// What editing a scheduled message's text sends: the box's text, with the
+/// flags it already had, `@silent` set or unset by what was written
+/// (`Eg` in 151282).
+fn edit_scheduled_body(content: &str, flags: u64) -> Value {
+    let (content, flags) = scheduled::split_silent(content, flags & !scheduled::SUPPRESS_NOTIFICATIONS);
+    json!({ "content": content, "flags": flags })
 }
 
 /// What posting a poll sends: an empty message with the `poll`.
@@ -770,8 +873,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        Captcha, Page, Reply, ReplyPing, add_reaction_call, base_headers, edit_body, is_md5, message_body, poll_body,
-        rate_limit_wait, reactors_call, remove_reaction_call, vote_body,
+        Captcha, Page, Reply, ReplyPing, add_reaction_call, base_headers, edit_body, edit_scheduled_body, is_md5,
+        message_body, poll_body, rate_limit_wait, reactors_call, remove_reaction_call, schedule_body, vote_body,
     };
     use crate::model::Emoji;
     use crate::reactions::Location;
@@ -933,6 +1036,50 @@ mod tests {
             poll_body(Snowflake(9), "1", poll.clone()),
             json!({ "content": "", "nonce": "1", "tts": false, "flags": 0, "poll": poll }),
         );
+    }
+
+    #[test]
+    fn scheduling_sends_the_messages_own_fields_and_the_time() {
+        let at = "2027-01-15T09:00:00.000Z";
+        // Nothing but what the box held: no nonce or tts, and `attachments` even when empty.
+        assert_eq!(
+            schedule_body(Snowflake(9), at, "hi", None, &[], None, None),
+            json!({ "channel_id": "9", "content": "hi", "scheduled_timestamp": at, "flags": 0, "attachments": [] }),
+        );
+        let reply = Reply { to: Snowflake(3), guild: Some(Snowflake(2)), ping: false };
+        let sent = Sent {
+            filename: "a.png",
+            uploaded_filename: "u/f",
+            description: Some("alt"),
+            spoiler: false,
+            content_type: "image/png",
+            voice: None,
+        };
+        let body = schedule_body(Snowflake(9), at, "hi", Some(reply), &[sent], Some(Snowflake(5)), None);
+        assert_eq!(body["message_reference"], json!({ "message_id": "3", "channel_id": "9", "guild_id": "2" }));
+        assert_eq!(body["allowed_mentions"]["replied_user"], false);
+        assert_eq!(body["sticker_ids"], json!(["5"]));
+        assert_eq!(body["attachments"][0]["uploaded_filename"], "u/f");
+        assert_eq!(body["attachments"][0]["description"], "alt");
+        let poll = json!({ "question": { "text": "Q?" } });
+        let body = schedule_body(Snowflake(9), at, "", None, &[], None, Some(poll.clone()));
+        assert_eq!((body["poll"].clone(), body["content"].as_str()), (poll, Some("")));
+    }
+
+    #[test]
+    fn a_quiet_message_is_scheduled_with_the_flag() {
+        let at = "2027-01-15T09:00:00.000Z";
+        let body = schedule_body(Snowflake(9), at, "@silent hi", None, &[], None, None);
+        assert_eq!((body["content"].as_str(), body["flags"].as_u64()), (Some("hi"), Some(4096)));
+    }
+
+    #[test]
+    fn editing_a_scheduled_message_sets_the_flag_from_the_text() {
+        assert_eq!(edit_scheduled_body("hi", 0), json!({ "content": "hi", "flags": 0 }));
+        assert_eq!(edit_scheduled_body("@silent hi", 0), json!({ "content": "hi", "flags": 4096 }));
+        // Written out of the text, it's off; other flags stay.
+        assert_eq!(edit_scheduled_body("hi", 4096 | 64), json!({ "content": "hi", "flags": 64 }));
+        assert_eq!(edit_scheduled_body("@silent hi", 4096 | 64), json!({ "content": "hi", "flags": 4096 | 64 }));
     }
 
     #[test]

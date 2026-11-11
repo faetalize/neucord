@@ -7,7 +7,8 @@
       "RELATIONSHIP_INVALID_NO_CONFIRMATION",
       "SLOWMODE_RATE_LIMITED",
       "TOO_MANY_REACTIONS",
-      "REACTION_BLOCKED"
+      "REACTION_BLOCKED",
+      "TOO_MANY_SCHEDULED_MESSAGES"
     ],
     "ApplicationIntegrationType": ["GUILD_INSTALL", "USER_INSTALL"],
     "ButtonStyle": ["PRIMARY", "SECONDARY", "SUCCESS", "DESTRUCTIVE", "LINK", "PREMIUM"],
@@ -42,7 +43,14 @@
     "LoginRequiredAction": ["UPDATE_PASSWORD"],
     "MFALevel": ["NONE", "ELEVATED"],
     "MediaTakedownRegulation": ["TIDA", "UK_STOPNCII", "BRAZIL_ONLINE_SAFETY_OF_WOMEN"],
-    "MessageFlags": ["CROSSPOSTED", "SUPPRESS_EMBEDS", "EPHEMERAL", "IS_VOICE_MESSAGE", "IS_COMPONENTS_V2"],
+    "MessageFlags": [
+      "CROSSPOSTED",
+      "SUPPRESS_EMBEDS",
+      "SUPPRESS_NOTIFICATIONS",
+      "EPHEMERAL",
+      "IS_VOICE_MESSAGE",
+      "IS_COMPONENTS_V2"
+    ],
     "MessageReferenceType": ["DEFAULT", "FORWARD"],
     "MessageType": [
       "DEFAULT",
@@ -84,6 +92,14 @@
       "REQUIRE_VERIFIED_EMAIL",
       "REQUIRE_VERIFIED_PHONE",
       "REQUIRE_SAFETY_FLOWS"
+    ],
+    "ScheduledMessageState": [
+      "SCHEDULED",
+      "ERROR_SCHEDULED_MESSAGES_DISABLED",
+      "ERROR_USER_NOT_FOUND",
+      "ERROR_USER_CANNOT_USE_SCHEDULED_MESSAGES",
+      "ERROR_CHANNEL_NOT_FOUND",
+      "ERROR_SEND_FAILED"
     ],
     "StatusType": ["ONLINE", "IDLE", "DND", "INVISIBLE", "OFFLINE"],
     "StickerFormat": ["PNG", "APNG", "LOTTIE", "GIF"],
@@ -132,6 +148,7 @@
     "getMaxTotalAttachmentSize",
     "getResumePosition",
     "getSendMessageOptionsForReply",
+    "getSendMessageOptionsForScheduledMessage",
     "getSendMessageOptionsForStickers",
     "getSystemMessageUserJoin",
     "getUploadPayload",

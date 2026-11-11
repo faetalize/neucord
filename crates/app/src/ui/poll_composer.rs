@@ -16,7 +16,8 @@ use gtk::{gdk, glib};
 use super::App;
 use super::emoji;
 use super::menus::{Entry, Item as MenuItem, Kind};
-use super::state::now_ms;
+use super::scheduling::{self, Picker};
+use super::state::{now_ms, now_unix};
 
 /// Create Poll, in the attach menu.
 pub(super) const CREATE_POLL: Entry<()> = Entry::Item(MenuItem {
@@ -57,6 +58,9 @@ struct Editor {
     add: gtk::Button,
     post: gtk::Button,
     sending: Cell<bool>,
+    /// Opens the time picker, and says when the poll goes out if it has one.
+    schedule: gtk::Button,
+    at: Cell<Option<i64>>,
 }
 
 fn error_label() -> gtk::Label {
@@ -274,6 +278,31 @@ impl Editor {
         self.sending.set(false);
     }
 
+    /// Have Discord post the poll at `at`, which `scheduled::check` has to
+    /// allow still. The editor closes once it is scheduled.
+    async fn schedule(self: &Rc<Self>, app: &Rc<App>, rest: &Rest, body: serde_json::Value, at: i64) {
+        if let Err(refusal) = discord::scheduled::check(at, now_unix(), None) {
+            return self.fail(refusal.text());
+        }
+        let result =
+            rest.schedule_message(self.channel, &discord::scheduled::iso(at), "", None, &[], None, Some(body)).await;
+        match result {
+            Ok(()) => {
+                app.toast_scheduled(at);
+                if let Some(dialog) = self.dialog.upgrade() {
+                    dialog.force_close();
+                }
+            }
+            Err(e) if e.code() == Some(discord::scheduled::TOO_MANY) => {
+                self.fail(&format!("Failed to schedule message. {e}"));
+                if let Some(dialog) = self.dialog.upgrade() {
+                    app.show_limit_reached(&dialog);
+                }
+            }
+            Err(e) => self.fail(&format!("Failed to schedule message. {e}")),
+        }
+    }
+
     /// Check the poll and post it. The editor closes once it is posted.
     fn submit(self: &Rc<Self>, app: &Rc<App>, question: &gtk::Entry) {
         if self.sending.get() {
@@ -297,13 +326,51 @@ impl Editor {
         self.sending.set(true);
         self.post.set_sensitive(false);
         let body = self.draft.borrow().body();
-        app.record_slowmode(channel, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
+        // Discord posts a scheduled poll later, so it starts no cooldown.
+        if self.at.get().is_none() {
+            app.record_slowmode(channel, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
+        }
         let (this, app) = (self.clone(), app.clone());
         glib::spawn_future_local(async move { this.send(&app, &rest, body).await });
     }
 
+    /// The time picker, for a poll that goes out later, and back to a poll
+    /// that goes out now with Clear.
+    fn pick_time(self: &Rc<Self>, app: &Rc<App>) {
+        let Some(dialog) = self.dialog.upgrade() else { return };
+        let start = self.at.get().unwrap_or_else(scheduling::default_start);
+        let clear: Option<Box<dyn Fn()>> = self.at.get().map(|_| {
+            let editor = Rc::downgrade(self);
+            Box::new(move || {
+                if let Some(editor) = editor.upgrade() {
+                    editor.set_time(None);
+                }
+            }) as Box<dyn Fn()>
+        });
+        let editor = Rc::downgrade(self);
+        app.pick_time(&dialog, Picker::NEW, start, None, clear, move |at| {
+            if let Some(editor) = editor.upgrade() {
+                editor.set_time(Some(at));
+            }
+        });
+    }
+
+    fn set_time(&self, at: Option<i64>) {
+        self.at.set(at);
+        let tip = at.map_or_else(|| "Schedule Poll".to_owned(), scheduling::scheduling_for);
+        self.schedule.set_tooltip_text(Some(&tip));
+        if at.is_some() {
+            self.schedule.add_css_class("suggested-action");
+        } else {
+            self.schedule.remove_css_class("suggested-action");
+        }
+    }
+
     async fn send(self: &Rc<Self>, app: &Rc<App>, rest: &Rest, body: serde_json::Value) {
         let channel = self.channel;
+        if let Some(at) = self.at.get() {
+            return self.schedule(app, rest, body, at).await;
+        }
         // The gateway echoes our own message back, which is what adds it to the list.
         match rest.send_poll(channel, body).await {
             Ok(_) => {
@@ -395,9 +462,11 @@ impl App {
 
         let multiselect = gtk::CheckButton::with_label("Allow Multiple Answers");
         let post = gtk::Button::builder().label("Post").css_classes(["suggested-action"]).build();
+        let schedule = gtk::Button::builder().icon_name("alarm-symbolic").tooltip_text("Schedule Poll").build();
         let actions = gtk::ActionBar::new();
         actions.pack_start(&multiselect);
         actions.pack_end(&post);
+        actions.pack_end(&schedule);
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&adw::HeaderBar::new());
         toolbar.set_content(Some(&scroller));
@@ -416,6 +485,8 @@ impl App {
             add: add.clone(),
             post: post.clone(),
             sending: Cell::new(false),
+            schedule: schedule.clone(),
+            at: Cell::new(None),
         });
         for _ in 0..Draft::default().answers.len() {
             editor.add_answer(self);
@@ -456,6 +527,14 @@ impl App {
             move |check| {
                 if let Some(editor) = editor.upgrade() {
                     editor.draft.borrow_mut().multiselect = check.is_active();
+                }
+            }
+        });
+        schedule.connect_clicked({
+            let (app, editor) = (Rc::downgrade(self), Rc::downgrade(&editor));
+            move |_| {
+                if let (Some(app), Some(editor)) = (app.upgrade(), editor.upgrade()) {
+                    editor.pick_time(&app);
                 }
             }
         });

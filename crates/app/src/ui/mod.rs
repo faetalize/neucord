@@ -27,6 +27,7 @@ mod rail;
 mod reactions;
 mod reactors;
 mod requests;
+mod scheduling;
 mod sidebar;
 mod state;
 mod stickers;
@@ -132,6 +133,10 @@ pub struct App {
     reply: RefCell<Option<composer::ReplyCtx>>,
     /// The files attached to messages being written, and their tray.
     drafts: uploads::Drafts,
+    /// When the messages being written go out, if they are scheduled.
+    scheduling: scheduling::Scheduling,
+    /// Says how a request went, for the ones with nothing else to show it.
+    toasts: adw::ToastOverlay,
     /// The voice message being recorded, or waiting to be sent.
     voice: voice::Voice,
     /// "Editing message" above the composer.
@@ -308,6 +313,8 @@ impl App {
                 .build(),
             reply: RefCell::default(),
             drafts: uploads::Drafts::new(),
+            scheduling: scheduling::Scheduling::new(),
+            toasts: adw::ToastOverlay::new(),
             voice: voice::Voice::new(),
             // Styled as the reply bar, which takes its place while editing.
             edit_bar: gtk::Box::builder().spacing(8).visible(false).css_classes(["reply-bar"]).build(),
@@ -378,7 +385,8 @@ impl App {
         self.stack.add_named(&self.build_login(), Some("login"));
         self.stack.add_named(&self.build_main(), Some("main"));
         self.stack.add_named(&self.build_blocked(), Some("blocked"));
-        self.window.set_content(Some(&self.stack));
+        self.toasts.set_child(Some(&self.stack));
+        self.window.set_content(Some(&self.toasts));
 
         let logout = gio::ActionEntry::builder("logout")
             .activate({
@@ -400,7 +408,17 @@ impl App {
                 }
             })
             .build();
-        self.window.add_action_entries([logout, standing]);
+        let scheduled = gio::ActionEntry::builder("scheduled-messages")
+            .activate({
+                let this = Rc::downgrade(self);
+                move |_: &adw::ApplicationWindow, _, _| {
+                    if let Some(this) = this.upgrade() {
+                        this.show_scheduled_messages();
+                    }
+                }
+            })
+            .build();
+        self.window.add_action_entries([logout, standing, scheduled]);
         if let Some(app) = self.window.application() {
             app.set_accels_for_action("win.logout", &["<Control><Shift>l"]);
             // Notification clicks arrive as an app action, with the channel id.
@@ -562,6 +580,7 @@ impl App {
         row.append(&self.me_label);
         // The app's menu too, as Discord's settings live here.
         let menu = gio::Menu::new();
+        menu.append(Some("_Scheduled Messages"), Some("win.scheduled-messages"));
         menu.append(Some("Account _Standing"), Some("win.account-standing"));
         menu.append(Some("_About Neucord"), Some("app.about"));
         menu.append(Some("_Log Out"), Some("win.logout"));

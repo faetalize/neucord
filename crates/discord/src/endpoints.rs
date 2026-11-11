@@ -22,6 +22,11 @@ pub(crate) const REMOVE_REACTION: Endpoint = Endpoint::delete("/channels/{channe
 #[rustfmt::skip]
 pub(crate) const REMOVE_EMOJI_REACTIONS: Endpoint = Endpoint::delete("/channels/{channel}/messages/{message}/reactions/{+emoji}");
 pub(crate) const REMOVE_REACTIONS: Endpoint = Endpoint::delete("/channels/{channel}/messages/{message}/reactions");
+pub(crate) const LIST_SCHEDULED_MESSAGES: Endpoint = Endpoint::get("/users/@me/scheduled-messages");
+pub(crate) const SCHEDULE_MESSAGE: Endpoint = Endpoint::post("/users/@me/scheduled-messages");
+pub(crate) const EDIT_SCHEDULED_MESSAGE: Endpoint = Endpoint::patch("/users/@me/scheduled-messages/{scheduled}");
+pub(crate) const CANCEL_SCHEDULED_MESSAGE: Endpoint = Endpoint::delete("/users/@me/scheduled-messages/{scheduled}");
+pub(crate) const SEND_SCHEDULED_MESSAGE: Endpoint = Endpoint::post("/users/@me/scheduled-messages/{scheduled}/send");
 pub(crate) const CREATE_ATTACHMENT: Endpoint = Endpoint::post("/channels/{channel}/attachments");
 pub(crate) const DELETE_UPLOAD: Endpoint = Endpoint::delete("/attachments/{+uploaded_filename}");
 pub(crate) const VOTE: Endpoint = Endpoint::put("/channels/{channel}/polls/{message}/answers/@me");
