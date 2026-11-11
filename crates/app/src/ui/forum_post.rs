@@ -217,7 +217,8 @@ impl App {
                 .propagate_natural_height(true)
                 .build(),
         ));
-        let dialog = adw::Dialog::builder().title("Create Post").content_width(520).child(&toolbar).build();
+        let dialog =
+            adw::Dialog::builder().title("Create Post").content_width(520).content_height(640).child(&toolbar).build();
         PostForm {
             forum,
             dialog,

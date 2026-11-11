@@ -79,6 +79,8 @@ pub(super) struct Page {
     chips: adw::WrapBox,
     sort_button: gtk::MenuButton,
     new_posts: gtk::Button,
+    /// Opens the form that starts a post, where we may.
+    post_button: gtk::Button,
     stack: gtk::Stack,
     model: gio::ListStore,
     list: gtk::ListView,
@@ -105,6 +107,12 @@ impl Page {
                 .valign(gtk::Align::Start)
                 .build(),
             new_posts: gtk::Button::builder().visible(false).valign(gtk::Align::Start).build(),
+            post_button: gtk::Button::builder()
+                .label("New Post")
+                .visible(false)
+                .valign(gtk::Align::Start)
+                .css_classes(["suggested-action"])
+                .build(),
             stack: gtk::Stack::new(),
             list: gtk::ListView::builder().model(&selection).single_click_activate(true).build(),
             grid: gtk::GridView::builder()
@@ -232,6 +240,16 @@ impl App {
         page.sort_button.set_popover(Some(&gtk::PopoverMenu::from_model(None::<&gio::MenuModel>)));
         page.sort_button.insert_action_group("forum", Some(&page.actions));
         self.forum_actions();
+        page.post_button.connect_clicked({
+            let this = Rc::downgrade(self);
+            move |_| {
+                if let Some(this) = this.upgrade()
+                    && let Some(id) = this.forum_shown()
+                {
+                    this.open_post_form(id);
+                }
+            }
+        });
         page.new_posts.connect_clicked({
             let this = Rc::downgrade(self);
             move |_| {
@@ -244,6 +262,7 @@ impl App {
         let bar = gtk::Box::builder().spacing(6).margin_top(6).margin_bottom(6).margin_start(12).margin_end(12).build();
         bar.append(&page.chips);
         bar.append(&page.new_posts);
+        bar.append(&page.post_button);
         bar.append(&page.sort_button);
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
         column.append(&bar);
@@ -402,6 +421,8 @@ impl App {
         set("sort", if view.sort == Sort::CreationDate { "created" } else { "active" });
         set("layout", if view.layout == Layout::Grid { "grid" } else { "list" });
         set("match", if view.tag_match == TagMatch::All { "all" } else { "some" });
+
+        page.post_button.set_visible(state.can_post(id));
 
         // The tags, each a toggle that filters by it.
         while let Some(child) = page.chips.first_child() {
