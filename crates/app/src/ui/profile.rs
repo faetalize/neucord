@@ -1,7 +1,7 @@
 //! A user's profile, in the popout the client opens from a name, an avatar,
 //! a mention or a member list row (`342296`, drawn by `348434`), in the panel
 //! beside a DM (`ok` in 289287), and the menu on those places
-//! (`user-context`, 841549). Asking for the profile and keeping it is
+//! (`user-context`, 107632). Asking for the profile and keeping it is
 //! [`discord::profile`]'s; this draws what it holds.
 
 use std::cell::RefCell;

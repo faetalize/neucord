@@ -284,7 +284,7 @@ pub(super) const DIRECT_MESSAGE: Table<sidebar::ChannelTarget> = &[
 
 /// A person's menu, opened from a message's author, a mention and a member
 /// list row: what Neucord has of the official client's (`user-context`,
-/// 841549, the server variant's groups). The client's also has call, voice,
+/// 107632, the server variant's groups). The client's also has call, voice,
 /// role and moderation items, which Neucord has no surface for, and Add
 /// Friend, Block and Ignore, whose requests Neucord has never sent. Apps is
 /// in the group of Invite to Server and Remove Friend, and shows in the
