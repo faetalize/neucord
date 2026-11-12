@@ -330,7 +330,14 @@ impl App {
                     self.refresh_badges();
                 }
                 Event::ExperimentsUpdate(update) => {
-                    self.account.state.borrow_mut().experiments.apply_update(update);
+                    let me = {
+                        let mut state = self.account.state.borrow_mut();
+                        state.experiments.apply_update(update);
+                        state.me.as_ref().map(|me| me.id)
+                    };
+                    if let Some(me) = me {
+                        super::identity::assignments_changed(me, &self.account.state.borrow().experiments);
+                    }
                     self.refresh_attach();
                 }
                 Event::RequiredActionUpdate(action) => {
@@ -543,6 +550,9 @@ impl App {
         }
         // A token Discord sends replaces ours, as in the client (`UPDATE_TOKEN`).
         let new_token = auth_token.and_then(|token| self.replace_token(token));
+        if new_token.is_some() {
+            super::identity::token_replaced();
+        }
         self.remember_account(&user, new_token.or(store.0), store.1);
 
         self.settings_replaced();

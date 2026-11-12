@@ -63,6 +63,10 @@ pub struct Resume {
     pub url: String,
     /// The last sequence number we received.
     pub seq: u64,
+    /// The token of the last IDENTIFY: the client's socket takes its token
+    /// when it identifies and resumes with that, whatever the account holds
+    /// by then (`_doIdentify` and `_doResume` in 868).
+    pub token: String,
 }
 
 /// Everything READY gives us to start from.
@@ -394,7 +398,10 @@ struct Payload {
 }
 
 struct State {
+    /// The account's token now, which IDENTIFY sends.
     token: String,
+    /// The token of the last IDENTIFY on this session, which RESUME sends.
+    identified: RefCell<String>,
     /// Session id and resume URL from READY (or the resume we were given).
     session: RefCell<Option<(String, String)>>,
     /// Send RESUME instead of IDENTIFY on HELLO.
@@ -578,6 +585,7 @@ impl Gateway {
         let (tx, rx) = async_channel::unbounded();
         let state = Rc::new(State {
             token: token.to_owned(),
+            identified: RefCell::new(resume.as_ref().map_or_else(|| token.to_owned(), |r| r.token.clone())),
             resuming: Cell::new(resume.is_some()),
             resumable: Cell::new(true),
             established: Cell::new(false),
@@ -628,7 +636,12 @@ impl Gateway {
                                 (Some((session_id, url)), Some(seq))
                                     if state.resumable.get() && !Event::ends_session(code) =>
                                 {
-                                    Some(Resume { session_id: session_id.clone(), url: url.clone(), seq })
+                                    Some(Resume {
+                                        session_id: session_id.clone(),
+                                        url: url.clone(),
+                                        seq,
+                                        token: state.identified.borrow().clone(),
+                                    })
                                 }
                                 _ => None,
                             };
@@ -741,15 +754,20 @@ fn heartbeat(conn: &soup::WebsocketConnection, state: &State) {
     send(conn, json!({ "op": 1, "d": state.seq.get() }));
 }
 
-fn resume(conn: &soup::WebsocketConnection, state: &State) {
+fn resume_text(state: &State) -> String {
     let session_id = state.session.borrow().as_ref().map(|(id, _)| id.clone());
-    send(
-        conn,
-        json!({
-            "op": 6,
-            "d": { "token": state.token, "session_id": session_id, "seq": state.seq.get() }
-        }),
-    );
+    request_text(6, &ResumeRequest { token: &state.identified.borrow(), session_id, seq: state.seq.get() })
+}
+
+#[derive(serde::Serialize)]
+struct ResumeRequest<'a> {
+    token: &'a str,
+    session_id: Option<String>,
+    seq: Option<u64>,
+}
+
+fn resume(conn: &soup::WebsocketConnection, state: &State) {
+    send_text(conn, &resume_text(state));
 }
 
 /// IDENTIFY's `d`, in the order `_doIdentify` (868) builds it. The client
@@ -774,6 +792,7 @@ struct ClientState {
 }
 
 fn identify(conn: &soup::WebsocketConnection, state: &State) {
+    *state.identified.borrow_mut() = state.token.clone();
     let identify = Identify {
         token: &state.token,
         capabilities: obfuscation::capabilities(identity::obfuscation()),
@@ -1682,6 +1701,28 @@ mod tests {
         assert_eq!(token(ready(json!("new"))), Some("new".to_owned()));
         assert_eq!(token(ready(Value::Null)), None);
         assert_eq!(token(ready(json!(""))), None);
+    }
+
+    fn state_with(token: &str, identified: &str) -> State {
+        State {
+            token: token.to_owned(),
+            identified: RefCell::new(identified.to_owned()),
+            session: RefCell::new(Some(("sess".into(), "wss://r".into()))),
+            resuming: Cell::new(true),
+            resumable: Cell::new(true),
+            established: Cell::new(false),
+            seq: Cell::new(Some(7)),
+            acked: Cell::new(true),
+            events: async_channel::unbounded().0,
+        }
+    }
+
+    #[test]
+    fn resume_carries_the_token_of_the_last_identify() {
+        // READY swapped the token after the IDENTIFY: the client's socket still
+        // holds the old one, and resumes with it.
+        let state = state_with("new", "old");
+        assert_eq!(resume_text(&state), r#"{"op":6,"d":{"token":"old","session_id":"sess","seq":7}}"#);
     }
 
     #[test]

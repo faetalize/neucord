@@ -58,6 +58,32 @@ fn locale_tag<S: AsRef<str>>(names: &[S]) -> String {
         .map_or_else(|| LOCALE.to_owned(), |name| name.replace('_', "-"))
 }
 
+/// The system's IANA time zone, which the client sends as `X-Discord-Timezone`
+/// (`Intl.DateTimeFormat().resolvedOptions().timeZone`, 472229).
+pub fn timezone() -> Option<String> {
+    timezone_from(
+        std::env::var("TZ").ok().as_deref(),
+        std::fs::read_link("/etc/localtime").ok().as_deref().and_then(std::path::Path::to_str),
+        std::fs::read_to_string("/etc/timezone").ok().as_deref(),
+    )
+}
+
+/// What `TZ`, where `/etc/localtime` points and `/etc/timezone` say, in that
+/// order: a name such as `Europe/Berlin`. A POSIX rule or a file path in `TZ`
+/// names no zone.
+fn timezone_from(tz: Option<&str>, localtime: Option<&str>, etc_timezone: Option<&str>) -> Option<String> {
+    let named = |name: &str| {
+        let name = name.trim().trim_start_matches(':');
+        let valid = !name.is_empty()
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '+'))
+            && !name.starts_with('/');
+        valid.then(|| name.to_owned())
+    };
+    tz.and_then(named)
+        .or_else(|| localtime.and_then(|path| path.split_once("zoneinfo/")).and_then(|(_, name)| named(name)))
+        .or_else(|| etc_timezone.and_then(named))
+}
+
 /// A JavaScript object's keys keep the order they were first assigned in;
 /// assigning again changes the value, not the place. A property set to
 /// `undefined` (a heartbeat session that lapsed) stays in its place and is
@@ -159,14 +185,11 @@ pub fn beat_delay_ms(since_last_beat_ms: Option<i64>) -> i64 {
     since_last_beat_ms.map_or(0, |since| (BEAT_INTERVAL_MS - since).max(0))
 }
 
-/// What Neucord keeps of its identity between launches, for each account: the
-/// client keeps the same in its storage (`LAST_CLIENT_HEARTBEAT_SESSION` in
-/// 903063, and the Apex store's assignments, 50258).
+/// The Apex assignments of an account, which the client keeps between
+/// launches in its store, by user id (50258). One for each account.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Cache {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub heartbeat: Option<HeartbeatSession>,
-    /// The account's own Apex assignments as READY sent them
+    /// The account's own, as READY sent them
     /// (`[hash, variant, flags, revision, tracked variant, config]`). Only
     /// the gateway's choice of capabilities reads them before READY, so
     /// only the account's own are kept (see [`crate::obfuscation`]).
@@ -186,7 +209,29 @@ impl Cache {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.heartbeat.is_none() && self.assignments.is_empty()
+        self.assignments.is_empty()
+    }
+}
+
+/// The one heartbeat session the client stores (`LAST_CLIENT_HEARTBEAT_SESSION`
+/// in 903063), with the account whose token it was opened under. The client
+/// drops it whenever its token changes, so it is only ever brought back by
+/// the same account on the next launch. A window of its own, as a browser
+/// profile is, would keep a slot of its own.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Slot {
+    account: Snowflake,
+    session: HeartbeatSession,
+}
+
+impl Slot {
+    /// Reads what [`Self::to_json`] wrote; anything else is no slot.
+    pub fn from_json(json: &str) -> Option<Self> {
+        serde_json::from_str(json).ok()
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("a slot is plain data")
     }
 }
 
@@ -201,6 +246,9 @@ struct State {
     /// Whether a token is in use: the heartbeat runs only then.
     signed_in: bool,
     heartbeat: Option<HeartbeatSession>,
+    /// Nobody has signed in yet in this run: the stored slot may be the one
+    /// this run continues.
+    launching: bool,
     /// The account's own Apex assignments, see [`Cache`].
     assignments: Vec<Value>,
     /// Whether they put the account in the experiment that hides channels,
@@ -224,6 +272,7 @@ impl State {
             account: None,
             signed_in: false,
             heartbeat: None,
+            launching: true,
             assignments: Vec::new(),
             obfuscation: false,
         }
@@ -255,6 +304,9 @@ impl State {
         props.set("client_build_number", CLIENT_BUILD_NUMBER);
         props.set("client_event_source", Value::Null);
         props.set("client_launch_id", glib::uuid_string_random().as_str());
+        // 129230 always adds the key: a string from libdiscore's WASM where it
+        // is loaded, else null. Neucord has none, and forges none.
+        props.set("launch_signature", Value::Null);
         props
     }
 
@@ -321,19 +373,29 @@ pub fn is_active() -> bool {
     STATE.with_borrow(State::active)
 }
 
-/// A token is in use for `account`, whose stored `cache` is read now. The
-/// same account again (a reconnect) changes nothing; another's token ends
-/// the session of the one before (`Q` in 903063).
-pub fn sign_in(account: Option<Snowflake>, cache: Cache) {
+/// A token is in use for `account`, with what was stored for it: the heartbeat
+/// `slot` and its `cache` of assignments. The same account again (a
+/// reconnect) changes nothing. Any other token ends the session (`Q` in
+/// 903063), so the stored slot is the one this run continues only for the
+/// account it was opened for, on the first sign-in of a run.
+pub fn sign_in(account: Option<Snowflake>, slot: Option<Slot>, cache: Cache) {
     STATE.with_borrow_mut(|s| {
         if !(s.signed_in && s.account == account) {
-            s.heartbeat = cache.heartbeat;
+            let continued = slot.filter(|slot| s.launching && Some(slot.account) == account);
+            s.heartbeat = continued.map(|slot| slot.session);
             s.obfuscation = crate::obfuscation::assigned(&cache.assignments);
             s.assignments = cache.assignments;
             s.account = account;
         }
+        s.launching = false;
         s.signed_in = true;
     });
+}
+
+/// READY gave the account a new token (`UPDATE_TOKEN`): the session of the
+/// old one ends.
+pub fn token_replaced() {
+    STATE.with_borrow_mut(|s| s.heartbeat = None);
 }
 
 /// READY named the account a first login belongs to.
@@ -343,6 +405,7 @@ pub fn signed_in_as(account: Snowflake) {
 
 pub fn sign_out() {
     STATE.with_borrow_mut(|s| {
+        s.launching = false;
         s.signed_in = false;
         s.account = None;
         s.heartbeat = None;
@@ -372,9 +435,14 @@ pub fn learn_assignments(assignments: Vec<Value>) {
     });
 }
 
-/// What is worth keeping for the account between launches.
+/// The account's assignments, to keep for the next launch.
 pub fn cache() -> Cache {
-    STATE.with_borrow(|s| Cache { heartbeat: s.heartbeat.clone(), assignments: s.assignments.clone() })
+    STATE.with_borrow(|s| Cache { assignments: s.assignments.clone() })
+}
+
+/// The session, to keep for the next launch: none until the account is known.
+pub fn slot() -> Option<Slot> {
+    STATE.with_borrow(|s| Some(Slot { account: s.account?, session: s.heartbeat.clone()? }))
 }
 
 /// Whether IDENTIFY asks for hidden channels.
@@ -401,6 +469,24 @@ mod tests {
         assert_eq!(locale_tag(&["C"]), LOCALE);
         assert_eq!(locale_tag(&["POSIX", "C"]), LOCALE);
         assert_eq!(locale_tag::<&str>(&[]), LOCALE);
+    }
+
+    #[test]
+    fn the_timezone_is_the_systems_iana_name() {
+        let zone = timezone_from;
+        assert_eq!(zone(Some("Asia/Tokyo"), None, None).as_deref(), Some("Asia/Tokyo"));
+        assert_eq!(zone(Some(":America/Sao_Paulo"), None, None).as_deref(), Some("America/Sao_Paulo"));
+        assert_eq!(zone(None, Some("/usr/share/zoneinfo/Europe/Berlin"), None).as_deref(), Some("Europe/Berlin"));
+        assert_eq!(zone(None, Some("../usr/share/zoneinfo/Etc/GMT+3"), None).as_deref(), Some("Etc/GMT+3"));
+        assert_eq!(zone(None, None, Some("Europe/Lisbon\n")).as_deref(), Some("Europe/Lisbon"));
+        // TZ wins; what is no name is passed over.
+        assert_eq!(zone(Some("UTC"), Some("/usr/share/zoneinfo/Asia/Tokyo"), None).as_deref(), Some("UTC"));
+        assert_eq!(
+            zone(Some("EST5EDT,M3.2.0,M11.1.0"), Some("/usr/share/zoneinfo/Asia/Tokyo"), None).as_deref(),
+            Some("Asia/Tokyo")
+        );
+        assert_eq!(zone(Some("/etc/localtime"), None, None), None);
+        assert_eq!(zone(Some(""), Some("/etc/other"), Some("")), None);
     }
 
     fn keys(json: &str) -> Vec<String> {
@@ -433,6 +519,7 @@ mod tests {
             account: None,
             signed_in: true,
             heartbeat: None,
+            launching: true,
             assignments: Vec::new(),
             obfuscation: false,
         }
@@ -463,6 +550,7 @@ mod tests {
                 "client_build_number",
                 "client_event_source",
                 "client_launch_id",
+                "launch_signature",
                 "client_app_state",
             ]
         );
@@ -476,9 +564,10 @@ mod tests {
         assert_eq!(value["release_channel"], "stable");
         assert_eq!(value["client_build_number"], CLIENT_BUILD_NUMBER);
         assert_eq!(value["client_event_source"], Value::Null);
+        assert_eq!(value["launch_signature"], Value::Null, "the key, never a value");
         assert_eq!(value["client_app_state"], "focused");
-        // Nothing claims a browser, the desktop app or a launch signature.
-        for claim in ["Chrome", "Discord Client", "launch_signature", "native_build_number", "window_manager"] {
+        // Nothing claims a browser or the desktop app.
+        for claim in ["Chrome", "Discord Client", "native_build_number", "window_manager"] {
             assert!(!json.contains(claim), "{claim}");
         }
     }
@@ -552,39 +641,45 @@ mod tests {
     }
 
     #[test]
-    fn the_cache_round_trips_and_forgets_what_it_cannot_read() {
-        let cache = Cache {
-            heartbeat: Some(HeartbeatSession { uuid: "u".into(), created_at: 1, last_used: 2 }),
-            assignments: vec![json!([1, 1, 0, 1])],
-        };
+    fn the_cache_and_the_slot_round_trip_and_forget_what_they_cannot_read() {
+        let cache = Cache { assignments: vec![json!([1, 1, 0, 1])] };
         assert_eq!(Cache::from_json(&cache.to_json()), cache);
         assert!(Cache::from_json("not json").is_empty());
         assert!(Cache::from_json("{}").is_empty());
+        let slot = slot_of(1, "u");
+        assert_eq!(Slot::from_json(&slot.to_json()), Some(slot));
+        assert_eq!(Slot::from_json("not json"), None);
+        assert_eq!(Slot::from_json("{}"), None);
     }
 
-    fn kept(uuid: &str) -> Cache {
-        Cache {
-            heartbeat: Some(HeartbeatSession { uuid: uuid.into(), created_at: 1, last_used: 2 }),
-            assignments: vec![json!([murmur3_of_hiding(), 1, 0, 1])],
+    fn slot_of(account: u64, uuid: &str) -> Slot {
+        Slot {
+            account: Snowflake(account),
+            session: HeartbeatSession { uuid: uuid.into(), created_at: 1, last_used: 2 },
         }
     }
 
-    fn murmur3_of_hiding() -> u32 {
-        crate::experiments::murmur3("2026-02-private-channel-hiding")
+    fn assigned() -> Cache {
+        Cache { assignments: vec![json!([crate::experiments::murmur3("2026-02-private-channel-hiding"), 1, 0, 1])] }
+    }
+
+    fn session() -> Option<String> {
+        slot().map(|slot| slot.session.uuid)
     }
 
     #[test]
     fn a_reconnect_keeps_what_the_account_had_and_another_account_has_its_own() {
         let (alice, bob) = (Snowflake(1), Snowflake(2));
-        sign_in(Some(alice), kept("alice"));
+        sign_in(Some(alice), Some(slot_of(1, "alice")), assigned());
         assert!(obfuscation(), "its stored assignments are what IDENTIFY goes by");
+        assert_eq!(session().as_deref(), Some("alice"), "a relaunch continues the session");
         // The same account connecting again reads nothing over what it holds.
-        sign_in(Some(alice), Cache::default());
-        assert_eq!(cache().heartbeat.map(|h| h.uuid), Some("alice".to_owned()));
+        sign_in(Some(alice), None, Cache::default());
+        assert_eq!(session().as_deref(), Some("alice"));
         assert!(obfuscation());
-        // Another account's token starts from that account's own.
-        sign_in(Some(bob), Cache::default());
-        assert_eq!(cache(), Cache::default());
+        // Another account's token starts from that account's own assignments.
+        sign_in(Some(bob), None, Cache::default());
+        assert_eq!(slot(), None);
         assert!(!obfuscation());
         sign_out();
         assert_eq!(account(), None);
@@ -592,13 +687,13 @@ mod tests {
 
     #[test]
     fn a_first_login_learns_its_account_from_ready_and_what_it_is_assigned() {
-        sign_in(None, Cache::default());
+        sign_in(None, None, Cache::default());
         assert!(!obfuscation(), "nothing stored on a first launch");
         signed_in_as(Snowflake(7));
-        learn_assignments(kept("x").assignments);
+        learn_assignments(assigned().assignments);
         assert_eq!((account(), obfuscation()), (Some(Snowflake(7)), true));
         // A reconnect of the same login finds the account known.
-        sign_in(Some(Snowflake(7)), Cache::default());
+        sign_in(Some(Snowflake(7)), None, Cache::default());
         assert!(obfuscation());
         learn_assignments(vec![]);
         assert!(!obfuscation(), "the next IDENTIFY goes by the new assignment");
@@ -606,23 +701,22 @@ mod tests {
 
     #[test]
     fn the_session_is_made_only_while_the_app_is_in_use() {
-        sign_in(Some(Snowflake(1)), Cache::default());
+        sign_in(Some(Snowflake(1)), None, Cache::default());
         set_focused(false);
         heartbeat();
-        assert_eq!(cache().heartbeat, None, "unfocused: nothing is opened");
+        assert_eq!(slot(), None, "unfocused: nothing is opened");
         set_focused(true);
         heartbeat();
-        assert!(cache().heartbeat.is_some());
-        let uuid = cache().heartbeat.unwrap().uuid;
+        let uuid = session().expect("opened");
         heartbeat();
-        assert_eq!(cache().heartbeat.unwrap().uuid, uuid, "the same session, used again");
+        assert_eq!(session(), Some(uuid), "the same session, used again");
     }
 
     #[test]
     fn identify_adds_what_only_the_gateway_sends() {
         let now = now_ms();
         let live = HeartbeatSession { uuid: "live".into(), created_at: now, last_used: now };
-        sign_in(Some(Snowflake(1)), Cache { heartbeat: Some(live), assignments: vec![] });
+        sign_in(Some(Snowflake(1)), Some(Slot { account: Snowflake(1), session: live }), Cache::default());
         set_focused(false);
         let json = serde_json::to_string(&identify_properties()).unwrap();
         let keys = keys(&json);
@@ -642,5 +736,35 @@ mod tests {
         set_focused(true);
         let value: Value = serde_json::from_str(&serde_json::to_string(&identify_properties()).unwrap()).unwrap();
         assert_eq!(value["client_app_state"], "focused");
+    }
+
+    #[test]
+    fn going_back_to_an_account_does_not_bring_its_session_back() {
+        // The client keeps one session and drops it when the token changes.
+        let (alice, bob) = (Snowflake(1), Snowflake(2));
+        sign_in(Some(alice), Some(slot_of(1, "alice")), Cache::default());
+        sign_in(Some(bob), None, Cache::default());
+        sign_in(Some(alice), Some(slot_of(1, "alice")), Cache::default());
+        assert_eq!(slot(), None);
+    }
+
+    #[test]
+    fn only_the_account_a_slot_was_opened_for_continues_it() {
+        sign_in(Some(Snowflake(2)), Some(slot_of(1, "alice")), Cache::default());
+        assert_eq!(slot(), None, "another account's token opened it");
+        sign_out();
+        // Nor does a later sign-in of the same run read the file again.
+        sign_in(Some(Snowflake(1)), Some(slot_of(1, "alice")), Cache::default());
+        assert_eq!(slot(), None);
+    }
+
+    #[test]
+    fn a_new_token_ends_the_session() {
+        sign_in(Some(Snowflake(1)), Some(slot_of(1, "alice")), Cache::default());
+        assert!(slot().is_some());
+        token_replaced();
+        assert_eq!(slot(), None);
+        heartbeat();
+        assert_ne!(session().as_deref(), Some("alice"), "the next heartbeat opens another");
     }
 }

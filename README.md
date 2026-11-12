@@ -111,6 +111,7 @@ when Discord asks for a captcha. Captchas run in a private web view that
 keeps nothing once it closes. There are no analytics, no crash reporting,
 and none of the tracking calls the official client makes. It identifies
 itself to Discord as Neucord instead of impersonating the official client.
+What it says about itself, and why: [IDENTITY.md](IDENTITY.md).
 
 Link previews and GIFs load through Discord's media proxy, never from the
 site they link to, so those sites don't see your IP address.

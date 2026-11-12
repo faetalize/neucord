@@ -382,6 +382,8 @@
   "modules": {
     "super properties": ["device_model_name", "client_event_source"],
     "super properties refresh": ["client_app_state", "client_heartbeat_session_id"],
+    "launch signature": ["extendSuperProperties", "launch_signature"],
+    "timezone": ["null==Intl.DateTimeFormat", "resolvedOptions().timeZone"],
     "heartbeat session": ["LAST_CLIENT_HEARTBEAT_SESSION"],
     "app focus": ["canUIRequestGatewaySocket"],
     "gateway connect reasons": ["COLD_START"],
