@@ -31,10 +31,7 @@ there.
 ## Checks
 
 CI runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
-`cargo test` on every pull request, on Rust 1.99 in an Arch container. Run
-them before you push; a newer local toolchain lints differently, so run
-clippy on 1.99 too (`cargo +1.99.1 clippy --all-targets -- -D warnings`). JS in
-`tools/discord-watch` is checked with `prettier --print-width 120`.
+`cargo test` on every pull request. Run them before you push.
 
 Keep extra build directories (a second toolchain, a scratch copy) under
 `target/`, which git ignores, and look at `git status` before committing: a
