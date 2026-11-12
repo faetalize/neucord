@@ -457,12 +457,12 @@ impl Experiments {
     }
 }
 
-/// Debug aid for the weekly check: with `NEUCORD_DEBUG_EXPERIMENTS=<dir>`,
+/// Debug aid: with `NEUCORD_DEBUG_EXPERIMENTS=<dir>`,
 /// READY writes `<dir>/experiments.txt`, every assignment and rollout with the
 /// names listed in `<dir>/names.txt` (one a line, from the client's
 /// definitions) put to their hashes, and `<dir>/ready-shape.txt`, READY's
 /// [`outline`](crate::shape::outline). Neither holds our user id; the first
-/// names our servers by id, for a local diff week to week.
+/// names our servers by id.
 pub(crate) fn debug_dump(ready: &Value, experiments: &Experiments, me: Snowflake, guilds: &[Guild]) {
     let Some(dir) = std::env::var_os("NEUCORD_DEBUG_EXPERIMENTS").map(std::path::PathBuf::from) else { return };
     let names: Vec<String> = std::fs::read_to_string(dir.join("names.txt"))
