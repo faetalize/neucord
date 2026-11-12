@@ -12,7 +12,7 @@ use gtk::{glib, pango};
 
 use super::favorites::Stars;
 use super::media_frame::MediaFrame;
-use super::video::{Options, Player};
+use super::video::{Options, Player, media_file};
 use super::viewer::MediaCx;
 use crate::images::{Images, Row, Update};
 use crate::render::{self, Context, Names};
@@ -164,7 +164,7 @@ fn gifv(video: &Media, still: &Media, images: &Images) -> gtk::Widget {
                         let path = images.file(&url).await;
                         loading.set(false);
                         let (Some(player), Some(path)) = (player.upgrade(), path) else { return };
-                        let stream = gtk::MediaFile::for_filename(&path);
+                        let stream = media_file(&path);
                         stream.set_loop(true);
                         stream.set_muted(true);
                         player.set_paintable(Some(&stream));

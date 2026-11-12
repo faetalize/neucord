@@ -17,7 +17,7 @@ use super::chat::MessageTarget;
 use super::embeds::{behind_spoiler, fitted_picture};
 use super::favorites::Stars;
 use super::menus::{Entry, Item, Kind};
-use super::video::{Options, Player};
+use super::video::{Options, Player, media_file};
 use super::viewer::MediaCx;
 use crate::images::{Images, Row};
 
@@ -197,7 +197,7 @@ fn audio(attachment: &Attachment, images: &Images) -> gtk::Widget {
                 let path = images.file(&url).await;
                 let (Some(row), Some(button)) = (row.upgrade(), button.upgrade()) else { return };
                 let Some(path) = path else { return button.set_sensitive(true) };
-                let stream = gtk::MediaFile::for_filename(&path);
+                let stream = media_file(&path);
                 stream.play();
                 let controls = gtk::MediaControls::builder().media_stream(&stream).width_request(300).build();
                 row.remove(&button);
@@ -258,7 +258,7 @@ fn voice_message(attachment: &Attachment, images: &Images) -> gtk::Widget {
                 let Some(button) = button.upgrade() else { return };
                 button.set_sensitive(true);
                 let Some(path) = path else { return };
-                let file = gtk::MediaFile::for_filename(&path);
+                let file = media_file(&path);
                 // Only weak references here: the widgets own the stream.
                 file.connect_timestamp_notify(move |file| {
                     let (Some(wave), Some(time)) = (wave.upgrade(), time.upgrade()) else { return };
