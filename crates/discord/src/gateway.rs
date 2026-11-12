@@ -352,6 +352,9 @@ pub enum Event {
         proto: Vec<u8>,
         partial: bool,
     },
+    /// Assignments Discord sent after READY (`STATE_UPDATE`), in an
+    /// [`Experiments`] holding only them.
+    ExperimentsUpdate(Experiments),
     /// Discord started or stopped requiring a step (see [`crate::account`]).
     RequiredActionUpdate(Option<String>),
     /// A resume succeeded; everything missed has been replayed before this.
@@ -1038,6 +1041,12 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
             Event::LazyPrivateChannels(lazy)
         }
         "RESUMED" => Event::Resumed,
+        "STATE_UPDATE" => {
+            if data["apex_experiments"].is_null() {
+                return;
+            }
+            Event::ExperimentsUpdate(Experiments::from_ready(&data))
+        }
         "USER_REQUIRED_ACTION_UPDATE" => {
             Event::RequiredActionUpdate(data["required_action"].as_str().map(str::to_owned))
         }
@@ -1876,6 +1885,20 @@ mod tests {
 
         dispatch(&state, "VOICE_STATE_UPDATE", json!({"guild_id": null, "user_id": "7", "channel_id": "3"}));
         assert!(state.try_recv().is_err(), "a DM call isn't a server's voice list");
+    }
+
+    #[test]
+    fn state_update_carries_assignments_after_ready() {
+        let state = Parser::default();
+        let assignments = json!({ "apex_experiments": { "assignments": { "1": { "5": { "assignments": [
+            [crate::experiments::murmur3("2026-09-desktop-voice-message-recording"), 1, 0, 1]
+        ] } } } } });
+        dispatch(&state, "STATE_UPDATE", assignments);
+        let Ok(Event::ExperimentsUpdate(update)) = state.try_recv() else { panic!("STATE_UPDATE was dropped") };
+        assert!(crate::voice::enabled(&update, Snowflake(5)));
+
+        dispatch(&state, "STATE_UPDATE", json!({}));
+        assert!(state.try_recv().is_err(), "nothing to apply, as in the client");
     }
 
     #[test]
