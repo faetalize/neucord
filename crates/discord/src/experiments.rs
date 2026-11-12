@@ -7,7 +7,8 @@
 //! Discord per user, install or server, keyed by murmur3 of the name. Older
 //! user experiments (343446) are assigned buckets. Older server experiments
 //! (343446) arrive as rollout rules, which the client evaluates itself for
-//! each server; so does this.
+//! each server; so does this. Apex assignments can also arrive after READY,
+//! in a `STATE_UPDATE` ([`Experiments::apply_update`]).
 
 use crate::model::{Guild, Snowflake};
 use serde_json::Value;
@@ -366,6 +367,13 @@ impl Experiments {
         let guild =
             ready["guild_experiments"].as_array().into_iter().flatten().filter_map(Rollout::from_value).collect();
         Experiments { apex, user, guild }
+    }
+
+    /// Fold in the assignments of a `STATE_UPDATE`: each unit's entry is
+    /// replaced whole and the rest stays, as the client's
+    /// `setExperimentAssignments` does (50258).
+    pub fn apply_update(&mut self, update: Experiments) {
+        self.apex.extend(update.apex);
     }
 
     /// Our Apex assignment for a user experiment, or `None` for its default
