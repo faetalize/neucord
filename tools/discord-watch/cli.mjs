@@ -22,7 +22,10 @@ const USAGE = `usage:
   cli.mjs unpack <dir> <out>                           one formatted file per module
   cli.mjs update <decomp> [--channel …] [--force]      fetch, unpack and commit into a git repo
   cli.mjs account <decomp> <neucord>                   run Neucord logged in until READY, commit what
-                                                       it was sent about experiments into <decomp>/account`;
+                                                       it was sent about experiments into <decomp>/account
+  cli.mjs raise-build [<decomp>|<build>] [--repo …]    after a week's changes are handled: raise the build
+                                                       Neucord checked itself against and names to Discord
+                                                       (the decomp's build when no number is given)`;
 
 const log = (message) => console.error(message);
 const { positionals, values } = parseArgs({
@@ -59,6 +62,9 @@ switch (command) {
     for (const { method, path } of unmatched(cur, uses)) log(`no client endpoint matches ${method} ${path}`);
     for (const [name, bodies] of Object.entries(cur.methods ?? {})) {
       if (bodies.length === 0) log(`no method ${name} in the client`);
+    }
+    for (const [name, sources] of Object.entries(cur.modules ?? {})) {
+      if (sources.length === 0) log(`no module ${name} in the client`);
     }
     for (const [name, values] of Object.entries(cur.constants ?? {})) {
       if (values.length === 0) log(`no constant ${name} in the client`);
@@ -149,6 +155,25 @@ switch (command) {
       );
     }
     log(`${decomp}/account is up to date`);
+    break;
+  }
+  case "raise-build": {
+    const arg = args[0] ?? "";
+    const build = /^\d+$/.test(arg)
+      ? Number(arg)
+      : Number((await readFile(join(resolve(arg || "."), "BUILD"), "utf8")).match(/\d+/)?.[0]);
+    if (!build) throw new Error("no build: pass a number, or a decomp with a BUILD file");
+    const named = (await neucordUses(values.repo)).buildNumber;
+    if (build < named) throw new Error(`build ${build} is older than the ${named} Neucord names`);
+    const edit = async (file, from, to) => {
+      const path = join(values.repo, file);
+      const text = await readFile(path, "utf8");
+      if (!from.test(text)) throw new Error(`${file}: nothing to raise`);
+      await writeFile(path, text.replace(from, to));
+    };
+    await edit("crates/discord/src/identity.rs", /(CLIENT_BUILD_NUMBER: u32 = )\d+;/, `$1${build};`);
+    await edit("tools/discord-watch/MANUAL.md", /(Last checked against: \w+ )\d+\./, `$1${build}.`);
+    log(`Neucord names build ${build} (was ${named})`);
     break;
   }
   default:

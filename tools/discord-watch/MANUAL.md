@@ -30,8 +30,10 @@ Last checked against: stable 668923.
    ~/Source/Discord-Decomp target/debug/neucord`. It prints what Discord
    sends the account that moved since the last check.
 5. Say in the issue what changed and whether Neucord now acts differently
-   from the client. Open an issue for each real difference, then commit the
-   new build number above and close the check.
+   from the client. Open an issue for each real difference, then run
+   `node tools/discord-watch/cli.mjs raise-build ~/Source/Discord-Decomp`
+   (the build above, and the one Neucord names to Discord), commit it and
+   close the check.
 
 Anchors are names and strings that survive minification. A module that
 changed for unrelated reasons only needs a note in the issue.

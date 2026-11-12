@@ -1,8 +1,8 @@
 // Distil a build into what a third-party client depends on: REST endpoint
 // paths, the fields each REST call sends, the headers added to every
 // request, the gateway events the client handles and the payload fields it
-// reads, the enums, methods, stores, constants and protobuf messages named in
-// watch.json, and every experiment the client defines.
+// reads, the enums, methods, stores, modules, constants and protobuf messages
+// named in watch.json, and every experiment the client defines.
 // Minified names are dropped, so snapshots of two builds differ only where
 // Discord changed something.
 
@@ -511,6 +511,7 @@ export async function snapshot(dir) {
   const enums = new Map(Object.keys(WATCH.enums).map((name) => [name, new Set()]));
   const methods = new Map(WATCH.methods.map((name) => [name, new Set()]));
   const stores = new Map(WATCH.stores.map((name) => [name, new Set()]));
+  const anchored = new Map(Object.keys(WATCH.modules).map((name) => [name, new Set()]));
   const constants = new Map(WATCH.constants.map((name) => [name, new Set()]));
   const experiments = new Map();
   // The protobuf messages in watch.json, and what resolves the types of their
@@ -559,6 +560,13 @@ export async function snapshot(dir) {
       };
       if (MANUAL.has(id)) copy(body, `module ${id}`);
       const text = source.slice(body.start, body.end);
+      // Modules found by strings, for rules that sit in no named function.
+      for (const [name, anchors] of Object.entries(WATCH.modules)) {
+        if (anchors.every((anchor) => text.includes(anchor))) {
+          anchored.get(name).add(normalized(source, body, { module: true }));
+          copy(body, name);
+        }
+      }
       const hasMessages = /"(?:discord_protos|google\.protobuf)\./.test(text);
       const isGatewayModule = text.includes('"READY_SUPPLEMENTAL"') && text.includes('"INITIAL_GUILD"');
       // Constants are named where they are used or exported, and often
@@ -774,6 +782,7 @@ export async function snapshot(dir) {
     enums: Object.fromEntries([...enums].map(([k, v]) => [k, [...v].sort().map((s) => JSON.parse(s))])),
     methods: Object.fromEntries([...methods].map(([k, v]) => [k, [...v].sort()])),
     stores: Object.fromEntries([...stores].map(([k, v]) => [k, [...v].sort()])),
+    modules: Object.fromEntries([...anchored].map(([k, v]) => [k, [...v].sort()])),
     constants: Object.fromEntries([...constants].map(([k, v]) => [k, [...v].sort().map((s) => JSON.parse(s))])),
     protos: Object.fromEntries(
       [...protos].map(([k, v]) => [
