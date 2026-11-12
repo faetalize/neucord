@@ -19,6 +19,7 @@ mod forum;
 mod forum_post;
 mod friends;
 mod gifs;
+mod identity;
 mod login;
 mod media_frame;
 mod members;
@@ -516,6 +517,7 @@ impl App {
                 let covered =
                     state.is_some_and(|s| s.intersects(gdk::ToplevelState::MINIMIZED | gdk::ToplevelState::SUSPENDED));
                 motion.set_focused(focused && window.is_visible() && !covered);
+                identity::focus_changed(focused);
             }
         };
         self.window.connect_visible_notify({

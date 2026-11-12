@@ -596,7 +596,14 @@ impl Viewer {
     fn src_for(&self, images: &Images, item: &Item, fitted: (u32, u32)) -> String {
         let src = item.file_url();
         match item.size {
-            Some(size) => discord::cdn::modal_url(src, size, fitted, images.scale() as u32, item.animated),
+            Some(size) => discord::cdn::modal_url(
+                src,
+                size,
+                fitted,
+                images.scale() as u32,
+                item.animated,
+                images.ladder().as_ref(),
+            ),
             None => src.to_owned(),
         }
     }

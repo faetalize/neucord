@@ -807,7 +807,7 @@ impl App {
             super::switcher::visited(&mut state, id);
             state.page = None;
             let found = state.find_channel(id).map(|(_, c)| c);
-            let name = found.and_then(|c| c.name.clone()).unwrap_or_default();
+            let name = found.and_then(|c| c.shown_name()).unwrap_or_default().to_owned();
             let title = match found {
                 Some(dm) if dm.kind == discord::ChannelKind::Dm => format!("@ {}", dm.title()),
                 Some(group) if group.kind == discord::ChannelKind::GroupDm => group.title(),
@@ -1417,7 +1417,7 @@ impl App {
             .and_then(|id| state.guilds.iter().find(|g| g.id == id))
             .map(|guild| {
                 (guild.channels.iter().chain(&guild.threads))
-                    .filter_map(|c| c.name.as_ref().map(|name| (c.id.0, name.clone())))
+                    .filter_map(|c| c.shown_name().map(|name| (c.id.0, name.to_owned())))
                     .collect()
             })
             .unwrap_or_default();
@@ -2259,7 +2259,7 @@ impl App {
             let here = state.find_channel(message.channel_id).and_then(|(guild, _)| guild.map(|g| g.id));
             match state.find_channel(original.channel_id) {
                 Some((Some(guild), channel)) if Some(guild.id) == here => {
-                    channel.name.as_ref().map(|name| format!("#{name}"))
+                    channel.shown_name().map(|name| format!("#{name}"))
                 }
                 Some((Some(guild), _)) => Some(guild.name.clone()),
                 Some((None, dm)) => Some(dm.title()),

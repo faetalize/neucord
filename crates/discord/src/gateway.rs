@@ -40,6 +40,7 @@ use crate::member_list::Update as MemberListUpdate;
 use crate::members::{Known, Members};
 use crate::model::Emoji;
 use crate::notifications::{GuildSettings, NotificationSettings};
+use crate::obfuscation;
 use crate::reactions::{self, Kind};
 use crate::read_state::ReadStates;
 use crate::relationships::{Presence, Relationship, Relationships};
@@ -49,10 +50,6 @@ use crate::stickers::Listed;
 use crate::verification::Account;
 use crate::voice_states::{self, VoiceState, VoiceStates};
 use crate::{Channel, Error, Guild, Member, Message, MessageEdit, Role, Snowflake, ThreadMember, User, identity};
-
-/// Gateway capability bits. 0 asks for the classic payload shapes, which the
-/// model parses directly; the guild parser also accepts the newer shape.
-const CAPABILITIES: u64 = 0;
 
 /// Close code used when we drop a connection ourselves (zombied or told to
 /// reconnect). 4000 lets the session be resumed once RESUME exists.
@@ -106,6 +103,8 @@ pub struct Ready {
     pub unavailable_guilds: usize,
     /// Who is in the voice channels of every server READY carries.
     pub voice_states: VoiceStates,
+    /// A new token for the account, which the client switches to (`UPDATE_TOKEN`).
+    pub auth_token: Option<String>,
 }
 
 /// How an interaction of ours ended, as the events `INTERACTION_SUCCESS`,
@@ -129,6 +128,9 @@ pub enum Event {
     },
     /// People joining, moving in and leaving voice channels.
     VoiceStates(Vec<voice_states::Update>),
+    /// The DMs READY left for later (`lazy_private_channels` of
+    /// `READY_SUPPLEMENTAL`).
+    LazyPrivateChannels(Vec<Channel>),
     /// A DM or group DM was opened (or reopened), or a message request
     /// arrived. Guild channels are not reported yet.
     PrivateChannelCreate(Channel),
@@ -747,21 +749,45 @@ fn resume(conn: &soup::WebsocketConnection, state: &State) {
     );
 }
 
+/// IDENTIFY's `d`, in the order `_doIdentify` (868) builds it. The client
+/// adds `qos_token`, which tells the gateway whether the user is active; its
+/// heartbeats carry the same (op 40), which Neucord does not send.
+#[derive(serde::Serialize)]
+struct Identify<'a> {
+    token: &'a str,
+    capabilities: u64,
+    properties: identity::Properties,
+    presence: PresenceUpdate,
+    /// `usesLegacyCompression`, false for `zlib-stream`.
+    compress: bool,
+    client_state: ClientState,
+}
+
+/// What the client holds of its cache, which it sends only from an intact
+/// one (`canUseGuildVersions`, 958824). Neucord keeps none.
+#[derive(serde::Serialize)]
+struct ClientState {
+    guild_versions: serde_json::Map<String, Value>,
+}
+
 fn identify(conn: &soup::WebsocketConnection, state: &State) {
-    send(
-        conn,
-        json!({
-            "op": 2,
-            "d": {
-                "token": state.token,
-                "capabilities": CAPABILITIES,
-                "properties": identity::client_properties(),
-                "presence": { "status": "unknown", "since": 0, "activities": [], "afk": false },
-                "compress": false,
-                "client_state": { "guild_versions": {} },
-            }
-        }),
-    );
+    let identify = Identify {
+        token: &state.token,
+        capabilities: obfuscation::capabilities(identity::obfuscation()),
+        properties: identity::identify_properties(),
+        presence: PresenceUpdate { status: "unknown", since: 0, activities: [], afk: false },
+        compress: false,
+        client_state: ClientState { guild_versions: Default::default() },
+    };
+    if crate::shape::enabled() {
+        // Names and the capabilities number only, as for what arrives.
+        eprintln!(
+            "gateway IDENTIFY sent: capabilities {}, properties [{}]",
+            identify.capabilities,
+            identify.properties.names().join(", ")
+        );
+    }
+    send_text(conn, &request_text(2, &identify));
 }
 
 fn handle(conn: &soup::WebsocketConnection, state: &Rc<State>, parsed: Parsed) {
@@ -968,12 +994,48 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
                 gates: Gates::from_ready(&data),
                 unavailable_guilds: raw_guilds.iter().filter(|g| g["unavailable"] == true).count(),
                 voice_states,
+                auth_token: data["auth_token"].as_str().filter(|t| !t.is_empty()).map(str::to_owned),
                 account,
                 nitro: Nitro::from_user(&data["user"]),
                 user,
                 guilds,
                 members,
             }))
+        }
+        // What the capabilities IDENTIFY sends leave out of READY, which comes
+        // right after it: other people's members and presences, who is in
+        // voice, and the DMs there was no room for. Servers are matched to
+        // their entries by position, as in the client's `hydrateReadySupplemental`
+        // (225123), and one without `voice_states` is unavailable.
+        "READY_SUPPLEMENTAL" => {
+            for (i, guild) in data["guilds"].as_array().into_iter().flatten().enumerate() {
+                let (Some(guild_id), true) = (parse_id(&guild["id"]), guild["voice_states"].is_array()) else {
+                    continue;
+                };
+                parser
+                    .push(Event::GuildVoiceStates { guild_id, states: VoiceState::parse_list(&guild["voice_states"]) });
+                let members = members_of(&Value::Null, &data["merged_members"][i]);
+                if !members.is_empty() {
+                    parser.push(Event::Members { guild_id, members, not_found: Vec::new() });
+                }
+            }
+            for raw in data["merged_presences"]["friends"].as_array().into_iter().flatten() {
+                let Some(user_id) = parse_id(&raw["user_id"]).or_else(|| parse_id(&raw["user"]["id"])) else {
+                    continue;
+                };
+                parser.push(Event::PresenceUpdate { user_id, guild_id: None, presence: Presence::from_value(raw) });
+            }
+            let lazy: Vec<Channel> = data["lazy_private_channels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|value| Channel::deserialize(value).ok())
+                .filter(|channel| channel.kind.is_private())
+                .collect();
+            if lazy.is_empty() {
+                return;
+            }
+            Event::LazyPrivateChannels(lazy)
         }
         "RESUMED" => Event::Resumed,
         "USER_REQUIRED_ACTION_UPDATE" => {
@@ -1547,6 +1609,70 @@ mod tests {
         assert_eq!(dms[0].title(), "alice");
         assert!(!dms[0].is_request());
         assert!(dms[1].message_request && dms[2].spam);
+    }
+
+    #[test]
+    fn what_ready_leaves_for_ready_supplemental() {
+        // A server's entries are found by position; one without
+        // `voice_states` is unavailable and gives nothing.
+        let supplemental = json!({
+            "guilds": [
+                {"id": "1", "voice_states": [{"user_id": "6", "channel_id": "9", "session_id": "s"}]},
+                {"id": "2"},
+                {"id": "3", "voice_states": []}
+            ],
+            "merged_members": [
+                [{"user_id": "6", "roles": ["40"], "nick": "six"}],
+                [{"user_id": "7", "roles": []}],
+                []
+            ],
+            "merged_presences": {
+                "friends": [{"user_id": "6", "status": "online", "activities": []}, {"user_id": "8", "status": "idle"}],
+                "guilds": [[], [], []]
+            },
+            "lazy_private_channels": [
+                {"id": "20", "type": 1, "recipients": [{"id": "6", "username": "six"}]},
+                {"id": "21", "type": 0}
+            ]
+        });
+        let state = Parser::default();
+        dispatch(&state, "READY_SUPPLEMENTAL", supplemental);
+        let mut events = Vec::new();
+        while let Ok(event) = state.try_recv() {
+            events.push(event);
+        }
+        let Event::GuildVoiceStates { guild_id, states } = &events[0] else { panic!("voice of the first server") };
+        assert_eq!((*guild_id, states.len()), (Snowflake(1), 1));
+        let Event::Members { guild_id, members, .. } = &events[1] else { panic!("members of the first server") };
+        assert_eq!((*guild_id, members.len()), (Snowflake(1), 1));
+        assert_eq!(members[0].0, Snowflake(6));
+        let Event::GuildVoiceStates { guild_id, .. } = &events[2] else { panic!("an empty voice list is a list") };
+        assert_eq!(*guild_id, Snowflake(3));
+        let presences: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::PresenceUpdate { user_id, guild_id: None, presence } => Some((user_id.0, presence.status)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(presences, [(6, crate::relationships::Status::Online), (8, crate::relationships::Status::Idle)]);
+        let Some(Event::LazyPrivateChannels(dms)) = events.last() else { panic!("the DMs left for later") };
+        assert_eq!(dms.iter().map(|c| c.id.0).collect::<Vec<_>>(), [20], "only DMs");
+        assert_eq!(events.len(), 6, "nothing for the unavailable server");
+    }
+
+    #[test]
+    fn ready_names_a_new_token_when_discord_sends_one() {
+        let ready = |auth_token: Value| json!({"user": {"id": "5", "username": "me"}, "auth_token": auth_token});
+        let token = |value: Value| {
+            let state = Parser::default();
+            dispatch(&state, "READY", value);
+            let Ok(Event::Ready(ready)) = state.try_recv() else { panic!("no READY") };
+            ready.auth_token
+        };
+        assert_eq!(token(ready(json!("new"))), Some("new".to_owned()));
+        assert_eq!(token(ready(Value::Null)), None);
+        assert_eq!(token(ready(json!(""))), None);
     }
 
     #[test]

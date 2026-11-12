@@ -1216,17 +1216,17 @@ fn is_md5(hash: &str) -> bool {
 
 fn base_headers(token: Option<&str>, beside: Option<&str>, blank: bool) -> Vec<(&'static str, String)> {
     let mut headers = vec![("X-Discord-Locale", identity::LOCALE.to_owned())];
+    // Every request to the API carries the properties, signed in or not
+    // (`prepareRequest` in 852799). Without them, logging in turns down valid
+    // two-factor codes.
+    headers.push(("X-Super-Properties", identity::super_properties()));
     match token {
         Some(token) => headers.push(("Authorization", token.to_owned())),
-        None => {
-            // Without it, logging in turns down valid two-factor codes.
-            headers.push(("X-Super-Properties", identity::super_properties()));
-            match beside {
-                Some(_) if blank => headers.push(("Authorization", String::new())),
-                Some(signed_in) => headers.push(("Authorization", signed_in.to_owned())),
-                None => {}
-            }
-        }
+        None => match beside {
+            Some(_) if blank => headers.push(("Authorization", String::new())),
+            Some(signed_in) => headers.push(("Authorization", signed_in.to_owned())),
+            None => {}
+        },
     }
     headers
 }
@@ -1497,16 +1497,18 @@ mod tests {
     }
 
     #[test]
-    fn logging_in_sends_neucords_properties() {
+    fn every_request_carries_the_properties() {
         let header =
             |token, name| base_headers(token, None, false).into_iter().find(|(n, _)| *n == name).map(|(_, v)| v);
-        let properties = header(None, "X-Super-Properties").expect("sent without a token");
-        let decoded = openssl::base64::decode_block(&properties).unwrap();
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&decoded).unwrap(), identity::client_properties());
+        for token in [None, Some("t")] {
+            let properties = header(token, "X-Super-Properties").expect("sent with or without a token");
+            let decoded = openssl::base64::decode_block(&properties).unwrap();
+            let decoded = serde_json::from_slice::<serde_json::Value>(&decoded).unwrap();
+            assert_eq!(decoded["browser"], "Neucord");
+            assert_eq!(decoded["client_build_number"], identity::CLIENT_BUILD_NUMBER);
+        }
         assert_eq!(header(None, "Authorization"), None);
-
         assert_eq!(header(Some("t"), "Authorization").as_deref(), Some("t"));
-        assert_eq!(header(Some("t"), "X-Super-Properties"), None);
     }
 
     #[test]

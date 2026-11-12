@@ -267,6 +267,100 @@ fn ratio(size: (u32, u32), max: (u32, u32)) -> f64 {
     (by_width * by_height).min(1.0)
 }
 
+/// The sizes the client's image requests snap to while
+/// `2026-07-attachment-image-ladder` is on for the account (`getSrc…` in
+/// 776231, over `v7` in 459830): a request for a size between two rungs asks
+/// for a rung instead, so the proxy sees few distinct sizes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ladder {
+    rungs: Vec<u32>,
+    max_upscale: f64,
+    min_snap_down_dpr: f64,
+}
+
+impl Ladder {
+    const RUNGS: [u32; 14] = [128, 192, 256, 320, 384, 512, 640, 768, 1024, 1280, 1536, 2048, 3072, 4096];
+
+    /// The experiment's variant 1 carries its settings as JSON, each one
+    /// optional. A config out of range is no config: the client's check
+    /// throws, and an experiment that fails to read gives its default
+    /// (`E` in 400845), which is no ladder.
+    pub fn from_config(config: &str) -> Option<Ladder> {
+        let value: serde_json::Value = serde_json::from_str(config).ok()?;
+        let number = |key: &str, default: f64, range: std::ops::RangeInclusive<f64>| {
+            let n = match value.get(key) {
+                None | Some(serde_json::Value::Null) => default,
+                Some(n) => n.as_f64()?,
+            };
+            range.contains(&n).then_some(n)
+        };
+        let max_upscale = number("maxUpscale", 1.1, 1.0..=1.5)?;
+        let min_snap_down_dpr = number("minSnapDownDpr", 2.0, 1.0..=4.0)?;
+        let mut rungs: Vec<u32> = match value.get("ladder") {
+            None | Some(serde_json::Value::Null) => Self::RUNGS.to_vec(),
+            Some(serde_json::Value::Array(rungs)) if (1..=32).contains(&rungs.len()) => rungs
+                .iter()
+                .map(|rung| rung.as_f64().filter(|n| n.fract() == 0.0 && (16.0..=4096.0).contains(n)).map(|n| n as u32))
+                .collect::<Option<_>>()?,
+            Some(_) => return None,
+        };
+        rungs.sort_unstable();
+        Some(Ladder { rungs, max_upscale, min_snap_down_dpr })
+    }
+
+    /// `v7`: `target` is the size wanted, in device pixels, of an image of
+    /// `source` size when it is known.
+    fn snap(&self, target: (u32, u32), source: Option<(u32, u32)>, dpr: u32) -> (u32, u32) {
+        let (width, height) = target;
+        let longest = width.max(height);
+        if longest == 0 {
+            return target;
+        }
+        let rung = self.rungs.iter().copied().find(|&r| longest <= r).unwrap_or(self.rungs[self.rungs.len() - 1]);
+        let source_fits = |size: u32| source.is_some_and(|(w, h)| w.max(h) <= size);
+        // A screen sharp enough to tell takes the rung below, if the image is
+        // only a little larger than it.
+        let upscale = (f64::from(dpr) >= self.min_snap_down_dpr).then_some(self.max_upscale);
+        let mut size = rung;
+        if upscale.is_some_and(|up| up > 1.0) && !source_fits(rung) {
+            let below = self.rungs.iter().copied().take_while(|&r| r <= longest).last();
+            if let (Some(below), Some(up)) = (below, upscale)
+                && f64::from(longest) <= f64::from(below) * up
+            {
+                size = below;
+            }
+        }
+        if let Some(source) = source.filter(|_| source_fits(size)) {
+            return source;
+        }
+        let scale = f64::from(size) / f64::from(longest);
+        let (w, h) =
+            ((f64::from(width) * scale).round().max(1.0) as u32, (f64::from(height) * scale).round().max(1.0) as u32);
+        match source {
+            Some((sw, sh)) => (w.min(sw), h.min(sh)),
+            None => (w, h),
+        }
+    }
+}
+
+/// What the client asks the proxy for an image of `source` size (when known)
+/// shown at `target` device pixels: nothing, when that is the size it has
+/// already, else the size to ask for, up to 4096 a side and snapped to the
+/// `ladder` if the account has one (`AE` in 776231).
+pub fn requested_size(
+    target: (u32, u32),
+    source: Option<(u32, u32)>,
+    ladder: Option<&Ladder>,
+    dpr: u32,
+) -> Option<(u32, u32)> {
+    let target = fit(target, (MAX_SIDE, MAX_SIDE));
+    if source == Some(target) {
+        return None;
+    }
+    let asked = ladder.map_or(target, |ladder| ladder.snap(target, source, dpr));
+    (source != Some(asked)).then_some(asked)
+}
+
 /// The largest side the client asks the proxy for.
 const MAX_SIDE: u32 = 4096;
 
@@ -275,25 +369,32 @@ const MAX_SIDE: u32 = 4096;
 /// `size` scaled down to what fits `fit`, at the screen's `scale`, up to
 /// 4096 a side, and only if that is not its size already. The CDN's own
 /// links are never sized, nor is anything else but the proxy's.
-pub fn modal_url(src: &str, size: (u32, u32), fit_in: (u32, u32), scale: u32, animated: bool) -> String {
+pub fn modal_url(
+    src: &str,
+    size: (u32, u32),
+    fit_in: (u32, u32),
+    scale: u32,
+    animated: bool,
+    ladder: Option<&Ladder>,
+) -> String {
     if parse(src).is_none_or(|url| url.host == CDN_HOST) {
         return src.to_owned();
     }
     let ratio = ratio(size, fit_in);
-    let mut target = size;
+    let mut shown = size;
     if ratio < 1.0 {
-        target = ((f64::from(size.0) * ratio).round() as u32, (f64::from(size.1) * ratio).round() as u32);
+        shown = ((f64::from(size.0) * ratio).round() as u32, (f64::from(size.1) * ratio).round() as u32);
     }
     let scale = scale.max(1);
-    let target = fit((target.0 * scale, target.1 * scale), (MAX_SIDE, MAX_SIDE));
+    let target = (shown.0 * scale, shown.1 * scale);
     let mut url = src.to_owned();
     // An animated WebP or AVIF is asked to stay animated.
     let path = parse(src).map(|url| url.path.to_ascii_lowercase()).unwrap_or_default();
     if animated && (path.ends_with(".webp") || path.ends_with(".avif")) {
         url = with_params(&url, &[("animated", "true")]);
     }
-    if target != size {
-        url = with_params(&url, &[("width", &target.0.to_string()), ("height", &target.1.to_string())]);
+    if let Some((width, height)) = requested_size(target, Some(size), ladder, scale) {
+        url = with_params(&url, &[("width", &width.to_string()), ("height", &height.to_string())]);
     }
     url
 }
@@ -695,20 +796,87 @@ mod tests {
         let proxy = "https://media.discordapp.net/attachments/1/2/a.png?ex=1&is=2&hm=3&";
         // Shown at 1000x500 of 4000x2000 on a screen at twice the scale.
         assert_eq!(
-            modal_url(proxy, (4000, 2000), (1000, 500), 2, false),
+            modal_url(proxy, (4000, 2000), (1000, 500), 2, false, None),
             "https://media.discordapp.net/attachments/1/2/a.png?ex=1&is=2&hm=3&width=2000&height=1000"
         );
         // At its own size the proxy is not asked to resize.
-        assert_eq!(modal_url(proxy, (1000, 500), (1000, 500), 1, false), proxy);
+        assert_eq!(modal_url(proxy, (1000, 500), (1000, 500), 1, false, None), proxy);
         // Never above 4096 a side.
-        let huge = modal_url(proxy, (9000, 4500), (9000, 4500), 1, false);
+        let huge = modal_url(proxy, (9000, 4500), (9000, 4500), 1, false, None);
         assert!(huge.ends_with("width=4096&height=2048"), "{huge}");
         // The CDN's own links, and anything not a link, are loaded as they are.
         let cdn = "https://cdn.discordapp.com/attachments/1/2/a.png?ex=1";
-        assert_eq!(modal_url(cdn, (4000, 2000), (1000, 500), 2, false), cdn);
+        assert_eq!(modal_url(cdn, (4000, 2000), (1000, 500), 2, false, None), cdn);
         // An animated WebP stays animated.
         let webp = "https://media.discordapp.net/attachments/1/2/a.webp?ex=1";
-        assert_eq!(modal_url(webp, (10, 10), (10, 10), 1, true), format!("{webp}&animated=true"));
-        assert_eq!(modal_url(webp, (10, 10), (10, 10), 1, false), webp);
+        assert_eq!(modal_url(webp, (10, 10), (10, 10), 1, true, None), format!("{webp}&animated=true"));
+        assert_eq!(modal_url(webp, (10, 10), (10, 10), 1, false, None), webp);
+    }
+
+    /// `v7` (459830) run on these inputs gave these sizes.
+    #[test]
+    fn the_ladder_snaps_sizes_as_the_clients_does() {
+        let ladder = Ladder::from_config("{}").unwrap();
+        let snap = |target, source, dpr| ladder.snap(target, source, dpr);
+        // dpr 2 can take the rung below (1.1 above it at most) ...
+        assert_eq!(snap((300, 200), Some((4000, 3000)), 2), (320, 213));
+        assert_eq!(snap((330, 200), Some((4000, 3000)), 2), (320, 194));
+        assert_eq!(snap((340, 200), Some((4000, 3000)), 2), (320, 188));
+        // ... and dpr 1 never does.
+        assert_eq!(snap((330, 200), Some((4000, 3000)), 1), (384, 233));
+        // An image smaller than its rung is asked for whole.
+        assert_eq!(snap((500, 500), Some((400, 300)), 2), (400, 300));
+        assert_eq!(snap((100, 60), Some((90, 50)), 2), (90, 50));
+        // Unknown size: the rung below, up to the last rung.
+        assert_eq!(snap((5000, 100), None, 2), (4096, 82));
+        assert_eq!(snap((700, 350), None, 2), (640, 320));
+        assert_eq!(snap((0, 0), Some((10, 10)), 2), (0, 0));
+        assert_eq!(snap((1000, 563), Some((1920, 1080)), 2), (1024, 577));
+        // A ladder of its own.
+        let own = Ladder::from_config(r#"{"ladder":[2000,100,1000],"maxUpscale":1.4}"#).unwrap();
+        assert_eq!(own.snap((1000, 563), Some((1920, 1080)), 2), (1000, 563));
+        let tiny = Ladder::from_config(r#"{"ladder":[32,16]}"#).unwrap();
+        assert_eq!(tiny.snap((1, 1), Some((1920, 1080)), 2), (16, 16));
+        assert_eq!(tiny.snap((5000, 5000), Some((6000, 6000)), 2), (32, 32));
+    }
+
+    #[test]
+    fn a_ladder_config_out_of_range_is_no_ladder() {
+        assert!(Ladder::from_config(r#"{"maxUpscale":1.5,"minSnapDownDpr":4}"#).is_some());
+        for bad in [
+            "not json",
+            r#"{"maxUpscale":0.9}"#,
+            r#"{"maxUpscale":1.6}"#,
+            r#"{"minSnapDownDpr":0.5}"#,
+            r#"{"minSnapDownDpr":"2"}"#,
+            r#"{"ladder":[]}"#,
+            r#"{"ladder":[15]}"#,
+            r#"{"ladder":[4097]}"#,
+            r#"{"ladder":[100.5]}"#,
+            r#"{"ladder":"128"}"#,
+        ] {
+            assert_eq!(Ladder::from_config(bad), None, "{bad}");
+        }
+        let thirty_three = format!("{{\"ladder\":{:?}}}", (0..33).map(|n| 16 + n).collect::<Vec<u32>>());
+        assert_eq!(Ladder::from_config(&thirty_three), None, "at most 32 rungs");
+        assert_eq!(Ladder::from_config(r#"{"ladder":[128.0, 16]}"#).map(|l| l.rungs), Some(vec![16, 128]));
+    }
+
+    #[test]
+    fn no_size_is_asked_for_an_image_at_its_own() {
+        assert_eq!(requested_size((400, 300), Some((400, 300)), None, 1), None);
+        assert_eq!(requested_size((200, 150), Some((400, 300)), None, 1), Some((200, 150)));
+        assert_eq!(requested_size((200, 150), None, None, 1), Some((200, 150)));
+        assert_eq!(requested_size((9000, 4500), None, None, 1), Some((4096, 2048)));
+        let ladder = Ladder::from_config("{}").unwrap();
+        // The ladder may land on the image's own size: nothing to ask for.
+        assert_eq!(requested_size((500, 500), Some((400, 300)), Some(&ladder), 2), None);
+        assert_eq!(requested_size((300, 200), Some((4000, 3000)), Some(&ladder), 2), Some((320, 213)));
+        // The viewer names it all the same.
+        let proxy = "https://media.discordapp.net/attachments/1/2/a.png?ex=1";
+        assert_eq!(
+            modal_url(proxy, (4000, 3000), (330, 248), 2, false, Some(&ladder)),
+            format!("{proxy}&width=640&height=481")
+        );
     }
 }

@@ -37,7 +37,8 @@ CI runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
 
 - `NEUCORD_DEBUG_SHAPES=1` prints the structure of every gateway event
   (field names and value types, never values), for checking parsers against
-  what Discord actually sends.
+  what Discord actually sends, and what IDENTIFY sent: its capabilities and
+  the names of its properties.
 - `NEUCORD_DEBUG_DROP=<seconds>` drops the gateway connection that long after
   each connect, to exercise reconnecting and resuming.
 - `NEUCORD_DEBUG_EXPERIMENTS=<dir>` writes, on READY, the account's

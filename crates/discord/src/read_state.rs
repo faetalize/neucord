@@ -36,6 +36,10 @@ impl ReadStates {
             last_message_id: Option<Value>,
             #[serde(default)]
             mention_count: u32,
+            /// Absent for a channel's, as the client reads it
+            /// (`read_state_type ?? CHANNEL`, 218461; `CHANNEL` is 0).
+            #[serde(default)]
+            read_state_type: Option<u8>,
         }
         let entries = value.get("entries").unwrap_or(value);
         let channels = entries
@@ -43,6 +47,7 @@ impl ReadStates {
             .into_iter()
             .flatten()
             .filter_map(|raw| Raw::deserialize(raw).ok())
+            .filter(|raw| raw.read_state_type.is_none_or(|kind| kind == 0))
             .map(|raw| {
                 // Sent as a string id, or 0 / "0" for "never acked".
                 let acked = raw
@@ -152,6 +157,22 @@ mod tests {
         assert_eq!(unread_count(&ids[2..], acked), (2, true), "there may be more");
         assert_eq!(states().acked(Snowflake(1)), Some(Snowflake(100)));
         assert_eq!(states().acked(Snowflake(2)), None);
+    }
+
+    #[test]
+    fn only_channels_have_a_channel_read_state() {
+        // With the capabilities the client sends, entries of other kinds come
+        // too (`read_state_type`): a server's home, its events, onboarding.
+        // They are named by a server's id, not a channel's.
+        let s = ReadStates::from_ready(&json!({"entries": [
+            {"id": "7", "last_message_id": "9", "mention_count": 1, "read_state_type": 0},
+            {"id": "8", "last_message_id": "9", "mention_count": 2},
+            {"id": "5", "last_message_id": "9", "mention_count": 3, "read_state_type": 3},
+            {"id": "6", "last_message_id": "9", "mention_count": 4, "read_state_type": 1},
+            {"id": "4", "last_message_id": "9", "mention_count": 5, "read_state_type": null},
+        ], "partial": false, "version": 1}));
+        assert_eq!([7, 8, 4].map(|id| s.mentions(Snowflake(id))), [1, 2, 5]);
+        assert_eq!([5, 6].map(|id| s.mentions(Snowflake(id))), [0, 0]);
     }
 
     #[test]

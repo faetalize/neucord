@@ -28,6 +28,7 @@ use gtk::prelude::*;
 use soup::prelude::*;
 
 mod animated;
+mod lazy;
 mod lru;
 mod play;
 pub use animated::Lease;
@@ -60,6 +61,10 @@ struct Inner {
     textures: RefCell<Lru<gdk::Texture>>,
     /// The window's scale factor, for asking the proxy for enough pixels.
     scale: Cell<i32>,
+    /// The sizes the account's images snap to (`2026-07-attachment-image-ladder`).
+    ladder: RefCell<Option<discord::cdn::Ladder>>,
+    /// Images wait until they are near the screen (`2026-02-lazy-load-all-images`).
+    lazy: Cell<bool>,
     /// Decoded animations by URL, while some widget still holds one.
     moving: RefCell<HashMap<String, glib::WeakRef<gdk::Paintable>>>,
     motion: Motion,
@@ -82,6 +87,8 @@ impl Images {
             memory: RefCell::new(Lru::new(BYTES_BUDGET)),
             textures: RefCell::new(Lru::new(TEXTURE_BUDGET)),
             scale: Cell::new(1),
+            ladder: RefCell::default(),
+            lazy: Cell::new(false),
             moving: RefCell::default(),
             motion: Motion::new(),
             pending: RefCell::new(HashMap::new()),
@@ -95,6 +102,18 @@ impl Images {
     /// The window's scale factor.
     pub fn scale(&self) -> i32 {
         self.0.scale.get()
+    }
+
+    /// What the account's experiments say about requesting and loading
+    /// images (see [`discord::limits::Limits::image_ladder`]).
+    pub fn set_rules(&self, ladder: Option<discord::cdn::Ladder>, lazy: bool) {
+        *self.0.ladder.borrow_mut() = ladder;
+        self.0.lazy.set(lazy);
+    }
+
+    /// The ladder the account's images are asked for by, if it has one.
+    pub fn ladder(&self) -> Option<discord::cdn::Ladder> {
+        self.0.ladder.borrow().clone()
     }
 
     /// Fetch and set an image onto `picture`, as a still: the first frame of
@@ -155,7 +174,14 @@ impl Images {
     /// at the size it is `shown` at most, never above `original`. Other URLs
     /// load as they are.
     pub fn set_sized(&self, picture: &gtk::Picture, url: &str, shown: (i32, i32), original: Option<(u32, u32)>) {
-        self.set(picture, &self.sized(url, shown, original));
+        let (this, picture_ref, url) = (self.clone(), picture.clone(), self.sized(url, shown, original));
+        self.when_wanted(picture, move || this.set(&picture_ref, &url));
+    }
+
+    /// Run `load` when the image is made, or once it is near the screen for
+    /// the accounts that load images lazily.
+    fn when_wanted(&self, picture: &gtk::Picture, load: impl FnOnce() + 'static) {
+        if self.0.lazy.get() { lazy::when_near(picture, load) } else { load() }
     }
 
     /// [`set_moving`](Self::set_moving) for an image whose still is its own
@@ -169,13 +195,21 @@ impl Images {
         subject: Subject,
         row: Row,
     ) {
-        let url = self.sized(url, shown, original);
-        self.set_moving(picture, &url, &url, subject, row);
+        let (this, picture_ref, url) = (self.clone(), picture.clone(), self.sized(url, shown, original));
+        self.when_wanted(picture, move || this.set_moving(&picture_ref, &url, &url, subject, row));
     }
 
+    /// The proxy's version of `url` at the size to request: the one shown, at
+    /// the screen's scale, snapped to the account's ladder, and none at all
+    /// for an image that size already (`AE` in 776231).
     fn sized(&self, url: &str, shown: (i32, i32), original: Option<(u32, u32)>) -> String {
-        let (width, height) = request_size(shown, self.0.scale.get(), original);
-        discord::cdn::proxy_sized(url, width, height)
+        let scale = self.0.scale.get();
+        let target = request_size(shown, scale, original);
+        let ladder = self.0.ladder.borrow();
+        match discord::cdn::requested_size(target, original, ladder.as_ref(), scale.max(1) as u32) {
+            Some((width, height)) => discord::cdn::proxy_sized(url, width, height),
+            None => url.to_owned(),
+        }
     }
 
     /// Call `on_update` with where `widget`'s media stands under the rules

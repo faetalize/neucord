@@ -20,6 +20,7 @@ impl App {
     /// answered its requests.
     pub(super) fn leave_account(self: &Rc<Self>) -> Option<Rest> {
         let (rest, notified) = self.account.leave();
+        super::identity::end();
         self.withdraw_notifications(notified);
         // Folds it hadn't saved are not the next account's to send.
         if let Some(timer) = self.fold_save.take() {
@@ -71,6 +72,7 @@ impl App {
             self.roster.borrow_mut().remove(id);
             self.refresh_account_views();
             super::usage::forget_usage(id);
+            super::identity::forget(id);
             if let Err(e) = session::clear_token(id).await {
                 eprintln!("logout: {e}");
             }
@@ -81,18 +83,37 @@ impl App {
         }
     }
 
+    /// The client's requests for an account's `token`.
+    fn rest_for(self: &Rc<Self>, token: &str) -> Rest {
+        let this = Rc::downgrade(self);
+        let pauses = Rc::new(move |wait| {
+            if let Some(this) = this.upgrade() {
+                this.show_paused(wait);
+            }
+        });
+        Rest::new(token).solving_captchas(super::captcha::solver(&self.window)).reporting_pauses(pauses)
+    }
+
+    /// READY gave the account a new token: from now on it is the one used, as
+    /// the client does at once (`UPDATE_TOKEN`). Gives it back to be kept
+    /// where the old one was, unless it is the token already in use.
+    fn replace_token(self: &Rc<Self>, token: String) -> Option<String> {
+        if self.account.state.borrow().token.as_ref() == Some(&token) {
+            return None;
+        }
+        let rest = self.rest_for(&token);
+        let mut state = self.account.state.borrow_mut();
+        state.rest = Some(rest);
+        state.token = Some(token.clone());
+        Some(token)
+    }
+
     pub(super) fn connect(self: &Rc<Self>, token: String, persisted: bool) {
         self.login.stop_qr();
         {
+            let rest = self.rest_for(&token);
             let mut state = self.account.state.borrow_mut();
-            let this = Rc::downgrade(self);
-            let pauses = Rc::new(move |wait| {
-                if let Some(this) = this.upgrade() {
-                    this.show_paused(wait);
-                }
-            });
-            let rest = Rest::new(token.clone()).solving_captchas(super::captcha::solver(&self.window));
-            state.rest = Some(rest.reporting_pauses(pauses));
+            state.rest = Some(rest);
             state.token = Some(token.clone());
             state.persisted = persisted;
             state.gateway = None;
@@ -102,6 +123,8 @@ impl App {
         }
         let resume = self.account.state.borrow().resume.clone();
         let epoch = self.account.epoch.get();
+        // IDENTIFY goes by what was kept for the account, as the client's does.
+        super::identity::begin(self.account.state.borrow().known_id());
         let this = self.clone();
         glib::spawn_future_local(async move {
             let connected = Gateway::connect(&token, resume).await;
@@ -178,6 +201,7 @@ impl App {
                         self.refresh_badges();
                     }
                 }
+                Event::LazyPrivateChannels(channels) => self.on_lazy_private_channels(channels),
                 Event::PrivateChannelCreate(channel) | Event::PrivateChannelUpdate(channel) => {
                     self.on_private_channel(channel)
                 }
@@ -453,6 +477,7 @@ impl App {
             gates,
             unavailable_guilds,
             voice_states,
+            auth_token,
         } = ready;
         self.learn_users(private_channels.iter().flat_map(|c| &c.recipients));
         self.learn_users(
@@ -506,7 +531,15 @@ impl App {
             state.me = Some(user.clone());
             ((store.flatten(), migrated), was_ready, offline_save)
         };
-        self.remember_account(&user, store.0, store.1);
+        {
+            let state = self.account.state.borrow();
+            super::identity::ready(user.id, &state.experiments);
+            let limits = state.limits();
+            self.images.set_rules(limits.image_ladder(), limits.lazy_images());
+        }
+        // A token Discord sends replaces ours, as in the client (`UPDATE_TOKEN`).
+        let new_token = auth_token.and_then(|token| self.replace_token(token));
+        self.remember_account(&user, new_token.or(store.0), store.1);
 
         self.settings_replaced();
         self.status_ready();
@@ -591,6 +624,23 @@ impl App {
         if open {
             self.refresh_member_rows();
         }
+    }
+
+    /// The DMs READY left for `READY_SUPPLEMENTAL`: they join the ones there
+    /// are (which they don't replace, as the client's store keeps both lists,
+    /// 734057), all drawn once.
+    pub(super) fn on_lazy_private_channels(self: &Rc<Self>, channels: Vec<Channel>) {
+        self.learn_users(channels.iter().flat_map(|c| &c.recipients));
+        let home = {
+            let mut state = self.account.state.borrow_mut();
+            for channel in channels {
+                if !state.private_channels.iter().any(|c| c.id == channel.id) {
+                    state.private_channels.push(channel);
+                }
+            }
+            state.guild.is_none()
+        };
+        self.refresh_home(home, false);
     }
 
     pub(super) fn on_private_channel_delete(self: &Rc<Self>, id: Snowflake) {

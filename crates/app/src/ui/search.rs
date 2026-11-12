@@ -160,7 +160,7 @@ impl App {
             text.sort_by_key(|c| c.position.unwrap_or(0));
             let mut taken: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
             for c in text {
-                let name = c.name.clone().unwrap_or_default();
+                let name = c.shown_name().unwrap_or_default().to_owned();
                 let count = taken.entry(name.clone()).or_insert(0);
                 channels.push((if *count == 0 { name } else { format!("{name}~{}", *count - 1) }, c.id));
                 *count += 1;
@@ -711,7 +711,7 @@ impl App {
             let state = self.account.state.borrow();
             match (context, state.find_channel(message.channel_id)) {
                 (Context::Guild(_), Some((_, channel))) => {
-                    let name = channel.name.clone().unwrap_or_default();
+                    let name = channel.shown_name().unwrap_or_default().to_owned();
                     Some(if channel.kind.is_thread() { name } else { format!("#{name}") })
                 }
                 _ => None,

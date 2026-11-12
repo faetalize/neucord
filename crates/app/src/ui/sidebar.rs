@@ -138,7 +138,7 @@ impl App {
                 row.append(&glyph);
                 row.append(
                     &gtk::Label::builder()
-                        .label(channel.name.as_deref().unwrap_or("unnamed"))
+                        .label(channel.shown_name().unwrap_or("unnamed"))
                         .xalign(0.0)
                         .hexpand(true)
                         .ellipsize(pango::EllipsizeMode::End)
