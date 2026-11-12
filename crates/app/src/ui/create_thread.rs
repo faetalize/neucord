@@ -18,6 +18,7 @@ use gtk::glib;
 use super::App;
 use super::chat::MessageTarget;
 use super::menus::{Entry, Item, Kind};
+use super::state::now_ms;
 use super::uploads::Stopped;
 use crate::render;
 
@@ -368,9 +369,19 @@ impl App {
                 Ok(thread) => thread,
                 Err(error) => {
                     form.set_busy(false);
-                    return this.thread_refused(&form, &discord::thread_creation::Refused::from(&error), &error);
+                    return this.thread_refused(
+                        &form,
+                        parent,
+                        from_composer,
+                        &discord::thread_creation::Refused::from(&error),
+                        &error,
+                    );
                 }
             };
+            // Discord's wait starts when the thread is made.
+            if from_composer {
+                this.record_slowmode(parent, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
+            }
             // The client waits for the gateway to bring the thread, and sends
             // the first message into it once it's there.
             if !this.thread_arrived(thread.id).await {
@@ -403,8 +414,16 @@ impl App {
     }
 
     /// Say why Discord turned a thread down, as the client does: an alert for
-    /// most, next to the name for the name's own refusals.
-    fn thread_refused(self: &Rc<Self>, form: &Form, refused: &Refused, error: &discord::Error) {
+    /// most, next to the name for the name's own refusals, and slowmode
+    /// recorded without a word.
+    fn thread_refused(
+        self: &Rc<Self>,
+        form: &Form,
+        parent: Snowflake,
+        from_composer: bool,
+        refused: &Refused,
+        error: &discord::Error,
+    ) {
         let alert = |heading: &str, body: &str| {
             let dialog = adw::AlertDialog::new(Some(heading), Some(body));
             dialog.add_response("okay", "_Okay");
@@ -421,9 +440,12 @@ impl App {
                 "This server has reached the maximum number of active announcement threads. Free up space by archiving a thread.",
             ),
             Refused::RateLimited => alert(CANNOT, "You are being rate limited."),
-            Refused::Slowmode(seconds) => {
-                alert(CANNOT, &format!("Slowmode is on in this channel. Try again in {seconds} seconds."))
+            // The client records the wait and says nothing.
+            Refused::Slowmode(_) if from_composer => {
+                let wait = error.slowmode_wait().unwrap_or_default();
+                self.record_slowmode(parent, |slowmode, c, _| slowmode.refused(c, wait, now_ms()));
             }
+            Refused::Slowmode(_) => {}
             Refused::AutoMod { reason: Some(reason), .. } => form.show_errors(Some(reason), None),
             Refused::Name => form.show_errors(Some("Thread Name is required"), None),
             Refused::AutoMod { reason: None, .. } | Refused::Other => match error {
