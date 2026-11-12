@@ -422,6 +422,24 @@ impl Limits<'_> {
         }
     }
 
+    /// The sizes images are asked for in, if the account has
+    /// `2026-07-attachment-image-ladder` (502571): variant 1 carries its
+    /// settings as JSON, and without them, or with ones out of range, the
+    /// client has none.
+    pub fn image_ladder(&self) -> Option<crate::cdn::Ladder> {
+        let assignment = self.experiments.apex_user(self.me, "2026-07-attachment-image-ladder")?;
+        if assignment.variant != 1 {
+            return None;
+        }
+        crate::cdn::Ladder::from_config(assignment.config.as_ref()?.as_str()?)
+    }
+
+    /// Whether images wait to load until they are near the screen, which
+    /// `2026-02-lazy-load-all-images` (619517) does for variant 1.
+    pub fn lazy_images(&self) -> bool {
+        self.experiments.apex_user(self.me, "2026-02-lazy-load-all-images").is_some_and(|a| a.variant == 1)
+    }
+
     /// Variant 1 raises Nitro's file size to 1 GiB, and everyone's total
     /// per message to 1 GiB (219882).
     fn upload_rollout(&self) -> bool {
@@ -578,6 +596,33 @@ mod tests {
         assert_eq!(webp(&experiments(&[(name, 2)])), Some(256 * 1024));
         assert_eq!(webp(&experiments(&[(name, 3)])), None, "a variant it doesn't define");
         assert_eq!(webp(&experiments(&[(name, -1)])), None, "not eligible");
+    }
+
+    #[test]
+    fn images_follow_the_ladder_and_load_lazily_for_the_accounts_that_have_them() {
+        let with = |ladder: Option<&str>, lazy: i64| {
+            let ladder_hash = murmur3("2026-07-attachment-image-ladder");
+            let mut entry = vec![json!(ladder_hash), json!(1), json!(0), json!(1)];
+            if let Some(config) = ladder {
+                entry.extend([Value::Null, json!(config)]);
+            }
+            Experiments::from_ready(&json!({
+                "apex_experiments": { "assignments": { "1": { "10": { "assignments": [
+                    entry, [murmur3("2026-02-lazy-load-all-images"), lazy, 0, 1]
+                ] } } } }
+            }))
+        };
+        let nitro = Nitro::default();
+        let limits = |e| Limits { nitro: &nitro, experiments: e, me: ME };
+        let none = Experiments::default();
+        assert_eq!((limits(&none).image_ladder(), limits(&none).lazy_images()), (None, false));
+        let on = with(Some(r#"{"ladder":[64,128]}"#), 1);
+        assert!(limits(&on).image_ladder().is_some() && limits(&on).lazy_images());
+        // The variant without its settings, or with bad ones, has no ladder.
+        let (unset, bad, other) = (with(None, 0), with(Some(r#"{"ladder":[]}"#), 0), with(None, 2));
+        assert_eq!(limits(&unset).image_ladder(), None);
+        assert_eq!(limits(&bad).image_ladder(), None);
+        assert!(!limits(&other).lazy_images(), "only variant 1");
     }
 
     #[test]

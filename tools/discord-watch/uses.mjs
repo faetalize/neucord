@@ -1,8 +1,9 @@
 // What Neucord depends on, read from its own source so there is no list to
 // keep: REST calls are the table in crates/discord/src/endpoints.rs, which
 // every request goes through; gateway events are the event names gateway.rs
-// matches on; the API version is identity.rs's API_BASE; experiments are the
-// names written out in crates/discord outside its tests.
+// matches on; the API version is identity.rs's API_BASE and the client build
+// it names to Discord its CLIENT_BUILD_NUMBER; experiments are the names
+// written out in crates/discord outside its tests.
 
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -32,6 +33,10 @@ export async function neucordUses(repo) {
   const apiVersion = Number(identity.match(/API_BASE: &str = "https:\/\/discord\.com\/api\/v(\d+)"/)?.[1]) || null;
   if (!apiVersion) unread.push("no API version in identity.rs");
 
+  // The client build Neucord names: `pub const CLIENT_BUILD_NUMBER: u32 = 668923;`
+  const buildNumber = Number(identity.match(/CLIENT_BUILD_NUMBER: u32 = (\d+);/)?.[1]) || null;
+  if (!buildNumber) unread.push("no CLIENT_BUILD_NUMBER in identity.rs");
+
   const events = new Set();
   const gateway = await readFile(join(src, "gateway.rs"), "utf8");
   // Match arms: `"MESSAGE_CREATE" =>` and `"READY" | "RESUMED"`.
@@ -54,6 +59,7 @@ export async function neucordUses(repo) {
     events: [...events].sort(),
     experiments: [...experiments].sort(),
     apiVersion,
+    buildNumber,
     unread,
   };
 }

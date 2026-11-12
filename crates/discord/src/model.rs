@@ -417,10 +417,22 @@ pub struct RoleColors {
 }
 
 impl Channel {
+    /// A server channel Discord hides from an account that may not see it
+    /// (see [`crate::obfuscation`]).
+    pub fn is_obfuscated(&self) -> bool {
+        self.flags & crate::obfuscation::FLAG != 0
+    }
+
+    /// The name the client shows for the channel (`m1` in 47167): a hidden
+    /// channel is "No Access" whatever it is called.
+    pub fn shown_name(&self) -> Option<&str> {
+        if self.is_obfuscated() { Some(crate::obfuscation::NO_ACCESS) } else { self.name.as_deref() }
+    }
+
     /// What the sidebar and header call this channel: its name if it has one,
     /// else (DMs, unnamed group DMs) the recipients' names.
     pub fn title(&self) -> String {
-        if let Some(name) = self.name.as_deref().filter(|n| !n.is_empty()) {
+        if let Some(name) = self.shown_name().filter(|n| !n.is_empty()) {
             return name.to_owned();
         }
         let names: Vec<&str> = self.recipients.iter().map(User::display_name).collect();
@@ -2012,5 +2024,19 @@ mod tests {
                                                "attachments": attachments}}]
         }));
         assert_eq!(forward.voice_audio().map(|a| a.id), Some(Snowflake(1)), "a forward saves what it forwards");
+    }
+
+    #[test]
+    fn a_hidden_channel_is_called_no_access() {
+        let channel = |flags: u64| -> Channel {
+            serde_json::from_value(serde_json::json!({"id": "1", "type": 0, "name": "secret-plans", "flags": flags}))
+                .unwrap()
+        };
+        assert_eq!(channel(0).title(), "secret-plans");
+        assert!(!channel(1 << 16).is_obfuscated());
+        let hidden = channel(1 << 17 | 1 << 4);
+        assert!(hidden.is_obfuscated());
+        assert_eq!((hidden.title().as_str(), hidden.shown_name()), ("No Access", Some("No Access")));
+        assert_eq!(hidden.name.as_deref(), Some("secret-plans"), "the name stays as sent");
     }
 }

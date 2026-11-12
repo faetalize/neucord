@@ -68,6 +68,11 @@ impl Assignment {
         Some((hash, assignment))
     }
 
+    /// As READY sends it, for keeping.
+    fn to_value(&self, hash: u32) -> Value {
+        serde_json::json!([hash, self.variant, self.flags, self.revision, null, self.config])
+    }
+
     fn is_override(&self) -> bool {
         self.flags & Self::IS_OVERRIDE != 0
     }
@@ -367,6 +372,23 @@ impl Experiments {
         let guild =
             ready["guild_experiments"].as_array().into_iter().flatten().filter_map(Rollout::from_value).collect();
         Experiments { apex, user, guild }
+    }
+
+    /// Our own Apex assignments, as the client keeps them between launches
+    /// (the persisted `ApexExperimentStore`, 50258), in READY's layout.
+    pub fn user_cache(&self, me: Snowflake) -> Vec<Value> {
+        let Some(assignments) = self.apex.get(&(Self::USER, me.0.to_string())) else { return Vec::new() };
+        let mut cached: Vec<_> = assignments.iter().map(|(hash, a)| (*hash, a.to_value(*hash))).collect();
+        cached.sort_by_key(|(hash, _)| *hash);
+        cached.into_iter().map(|(_, value)| value).collect()
+    }
+
+    /// [`Self::user_cache`] read back: what [`Self::apex_user`] says for `me`.
+    pub fn from_user_cache(me: Snowflake, cached: &[Value]) -> Experiments {
+        let assignments: HashMap<u32, Assignment> = cached.iter().filter_map(Assignment::from_value).collect();
+        let mut apex = HashMap::new();
+        apex.insert((Self::USER, me.0.to_string()), assignments);
+        Experiments { apex, ..Default::default() }
     }
 
     /// Fold in the assignments of a `STATE_UPDATE`: each unit's entry is

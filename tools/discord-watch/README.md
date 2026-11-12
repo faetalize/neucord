@@ -30,6 +30,10 @@ names so two builds differ only where Discord changed something:
   `isSystemDM` is where the client shows no message box, and posting there
   anyway got an account flagged (#51). `getAlgorithm` is the gateway
   compression the client asks for, which Neucord asks for too (#75).
+- The modules in `watch.json`'s `modules`, found by strings in them and
+  reduced the same way: the code that builds Neucord's properties, its
+  heartbeat session, the channel hiding and the image rules sit in no
+  function of their own.
 - The modules of the stores named in `watch.json`, reduced the same way. A
   store names itself (`static displayName`), the functions holding its
   rules don't: `GuildVerificationStore` decides where the client shows a
@@ -54,8 +58,14 @@ names so two builds differ only where Discord changed something:
 
 What Neucord uses is read from `crates/discord`: the endpoint table in
 `endpoints.rs`, which every REST request goes through, the event names
-`gateway.rs` matches on, the API version in `identity.rs`, and the
-experiments named in `crates/discord`. Only `watch.json` is kept by hand.
+`gateway.rs` matches on, the API version and the client build it names to
+Discord in `identity.rs`, and the experiments named in `crates/discord`. Only
+`watch.json` is kept by hand.
+
+A report says which build Neucord names next to the one the client is at.
+That number is the build Neucord was last checked against, so it moves once a
+week's changes are handled: `cli.mjs raise-build` raises it, and the line in
+MANUAL.md, together.
 
 What can't be snapshotted is in [MANUAL.md](MANUAL.md): another weekly
 workflow opens an issue to check it by hand.

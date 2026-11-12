@@ -943,9 +943,12 @@ impl Rest {
             let msg = soup::Message::new(call.method(), &format!("{}{}", identity::API_BASE, call.path()))
                 .expect("API URL is valid");
             let headers = msg.request_headers().expect("request has headers");
-            for (name, value) in
-                base_headers(self.token.as_deref(), self.beside.as_deref(), options.blank_authorization)
-            {
+            for (name, value) in base_headers(
+                self.token.as_deref(),
+                self.beside.as_deref(),
+                options.blank_authorization,
+                identity::timezone().as_deref(),
+            ) {
                 headers.replace(name, &value);
             }
             if options.failed > 0 {
@@ -1214,19 +1217,28 @@ fn is_md5(hash: &str) -> bool {
     hash.len() == 32 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-fn base_headers(token: Option<&str>, beside: Option<&str>, blank: bool) -> Vec<(&'static str, String)> {
+fn base_headers(
+    token: Option<&str>,
+    beside: Option<&str>,
+    blank: bool,
+    zone: Option<&str>,
+) -> Vec<(&'static str, String)> {
     let mut headers = vec![("X-Discord-Locale", identity::LOCALE.to_owned())];
+    // Every request to the API carries the properties, signed in or not
+    // (`prepareRequest` in 852799). Without them, logging in turns down valid
+    // two-factor codes.
+    headers.push(("X-Super-Properties", identity::super_properties()));
+    // As the client's `prepareRequest` sets it, when it finds a zone.
+    if let Some(zone) = zone {
+        headers.push(("X-Discord-Timezone", zone.to_owned()));
+    }
     match token {
         Some(token) => headers.push(("Authorization", token.to_owned())),
-        None => {
-            // Without it, logging in turns down valid two-factor codes.
-            headers.push(("X-Super-Properties", identity::super_properties()));
-            match beside {
-                Some(_) if blank => headers.push(("Authorization", String::new())),
-                Some(signed_in) => headers.push(("Authorization", signed_in.to_owned())),
-                None => {}
-            }
-        }
+        None => match beside {
+            Some(_) if blank => headers.push(("Authorization", String::new())),
+            Some(signed_in) => headers.push(("Authorization", signed_in.to_owned())),
+            None => {}
+        },
     }
     headers
 }
@@ -1497,29 +1509,43 @@ mod tests {
     }
 
     #[test]
-    fn logging_in_sends_neucords_properties() {
+    fn every_request_carries_the_properties() {
         let header =
-            |token, name| base_headers(token, None, false).into_iter().find(|(n, _)| *n == name).map(|(_, v)| v);
-        let properties = header(None, "X-Super-Properties").expect("sent without a token");
-        let decoded = openssl::base64::decode_block(&properties).unwrap();
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&decoded).unwrap(), identity::client_properties());
+            |token, name| base_headers(token, None, false, None).into_iter().find(|(n, _)| *n == name).map(|(_, v)| v);
+        for token in [None, Some("t")] {
+            let properties = header(token, "X-Super-Properties").expect("sent with or without a token");
+            let decoded = openssl::base64::decode_block(&properties).unwrap();
+            let decoded = serde_json::from_slice::<serde_json::Value>(&decoded).unwrap();
+            assert_eq!(decoded["browser"], "Neucord");
+            assert_eq!(decoded["client_build_number"], identity::CLIENT_BUILD_NUMBER);
+        }
         assert_eq!(header(None, "Authorization"), None);
-
         assert_eq!(header(Some("t"), "Authorization").as_deref(), Some("t"));
-        assert_eq!(header(Some("t"), "X-Super-Properties"), None);
+    }
+
+    #[test]
+    fn every_request_names_the_timezone_when_there_is_one() {
+        let zone = |token, zone| {
+            base_headers(token, None, false, zone).into_iter().find(|(n, _)| *n == "X-Discord-Timezone").map(|(_, v)| v)
+        };
+        for token in [None, Some("t")] {
+            assert_eq!(zone(token, Some("Europe/Berlin")).as_deref(), Some("Europe/Berlin"));
+            // The client leaves the header out where it finds no zone.
+            assert_eq!(zone(token, None), None);
+        }
     }
 
     #[test]
     fn adding_an_account_while_signed_in() {
         let header = |blank, name| {
-            base_headers(None, Some("signed-in"), blank).into_iter().find(|(n, _)| *n == name).map(|(_, v)| v)
+            base_headers(None, Some("signed-in"), blank, None).into_iter().find(|(n, _)| *n == name).map(|(_, v)| v)
         };
         // The password login sets Authorization empty; the rest carry the signed-in token.
         assert_eq!(header(true, "Authorization").as_deref(), Some(""));
         assert_eq!(header(false, "Authorization").as_deref(), Some("signed-in"));
         assert!(header(false, "X-Super-Properties").is_some());
         // An account's own requests never carry the other's token.
-        let own = base_headers(Some("own"), Some("signed-in"), false);
+        let own = base_headers(Some("own"), Some("signed-in"), false, None);
         assert_eq!(
             own.iter().filter(|(n, _)| *n == "Authorization").map(|(_, v)| v.as_str()).collect::<Vec<_>>(),
             ["own"]

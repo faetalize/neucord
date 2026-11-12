@@ -111,6 +111,15 @@ export function compare(old, cur, uses) {
     affects.push(`- ${code(name)}: ${after?.length ? "the client's rule changed" : "not found"}`);
   }
 
+  // The modules in watch.json are found by strings in them: the code that
+  // builds what Neucord sends as its identity, whole, since the rules are in
+  // no function of their own.
+  for (const name of Object.keys({ ...old.modules, ...cur.modules }).sort()) {
+    const [before, after] = [old.modules?.[name], cur.modules?.[name]];
+    if (!old.modules || same(before, after) || newlyWatched(before, after)) continue;
+    affects.push(`- ${code(name)}: ${after?.length ? "the client's rule changed" : "not found"}`);
+  }
+
   // The constants in watch.json are values Neucord copies, such as how
   // many emoji a message can be and still show them large.
   const value = (values) => (values?.length ? values.map((v) => code(JSON.stringify(v))).join(" | ") : "not found");
@@ -247,14 +256,20 @@ export function compare(old, cur, uses) {
     );
   }
 
-  return { affects, other };
+  return { affects, other, named: uses.buildNumber };
 }
 
 /** The issue body for a comparison. */
-export function report(old, cur, { affects, other }) {
+export function report(old, cur, { affects, other, named }) {
   const lines = [
     `Discord's ${cur.channel} client went from build ${old.build} to ${cur.build}.`,
     "",
+    ...(named
+      ? [
+          `Neucord names build ${named} to Discord (\`CLIENT_BUILD_NUMBER\`). Once this report is handled, raise it with \`node tools/discord-watch/cli.mjs raise-build\`.`,
+          "",
+        ]
+      : []),
     "## What Neucord uses",
     "",
     ...(affects.length > 0 ? affects : ["Nothing Neucord calls or handles changed."]),

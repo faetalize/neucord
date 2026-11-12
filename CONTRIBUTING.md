@@ -37,7 +37,8 @@ CI runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
 
 - `NEUCORD_DEBUG_SHAPES=1` prints the structure of every gateway event
   (field names and value types, never values), for checking parsers against
-  what Discord actually sends.
+  what Discord actually sends, and what IDENTIFY sent: its capabilities and
+  the names of its properties.
 - `NEUCORD_DEBUG_DROP=<seconds>` drops the gateway connection that long after
   each connect, to exercise reconnecting and resuming.
 - `NEUCORD_DEBUG_EXPERIMENTS=<dir>` writes, on READY, the account's
@@ -56,7 +57,7 @@ real IDs, names or payloads: use made-up test data.
 ## What every issue and pull request looks at
 
 Neucord follows the official client, so each issue and pull request checks
-it for four things:
+it for five things:
 
 - **Account safety.** Neucord sends nothing the official client wouldn't,
   and holds back where it does: a request no official client makes is how
@@ -73,6 +74,9 @@ it for four things:
   LLMs tend to be trigger happy and always find a reason to add something to
   a file. Make sure any addition to MANUAL.md has to fight for its right to
   exist.
+- **Identity.** Anything that changes what Neucord says about itself (the
+  properties, a header, a field of IDENTIFY, a gateway op tied to who the
+  client is) updates [IDENTITY.md](IDENTITY.md) in the same pull request.
 - **Limits.** Nitro, a server's boost level and Discord's experiments decide
   much of what an account may do: how long a message may be, how large an
   upload, which emoji and stickers work outside their server, how well it

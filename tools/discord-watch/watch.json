@@ -155,6 +155,7 @@
     ],
     "ProfileVisibility": ["UNSET", "FRIENDS_ONLY", "FRIENDS_AND_SMALL_GUILDS", "FRIENDS_AND_ALL_GUILDS"],
     "ReactionType": ["NORMAL", "BURST", "VOTE"],
+    "ReadStateType": ["CHANNEL", "GUILD_EVENT", "NOTIFICATION_CENTER", "GUILD_HOME", "GUILD_ONBOARDING_QUESTION"],
     "ReactionNotifications": ["NOTIFICATIONS_ENABLED", "ONLY_DMS", "NOTIFICATIONS_DISABLED"],
     "RelationshipType": ["FRIEND", "BLOCKED", "PENDING_INCOMING", "PENDING_OUTGOING"],
     "RegionalSetting": ["MESSAGE_REQUEST_RESTRICTIONS", "GUILD_ACTIVITY_STATUS"],
@@ -184,6 +185,7 @@
     "VerificationLevel": ["NONE", "LOW", "MEDIUM", "HIGH", "VERY_HIGH"]
   },
   "methods": [
+    "_doIdentify",
     "addReaction",
     "addReactionBatch",
     "allowAllMessages",
@@ -377,6 +379,19 @@
     "UserSettingsProtoStore",
     "VoiceStateStore"
   ],
+  "modules": {
+    "super properties": ["device_model_name", "client_event_source"],
+    "super properties refresh": ["client_app_state", "client_heartbeat_session_id"],
+    "launch signature": ["extendSuperProperties", "launch_signature"],
+    "timezone": ["null==Intl.DateTimeFormat", "resolvedOptions().timeZone"],
+    "heartbeat session": ["LAST_CLIENT_HEARTBEAT_SESSION"],
+    "app focus": ["canUIRequestGatewaySocket"],
+    "gateway connect reasons": ["COLD_START"],
+    "private channel hiding": ["2026-02-private-channel-hiding"],
+    "attachment image ladder": ["2026-07-attachment-image-ladder"],
+    "image sizes": ["targetWidth", "maxUpscale", "ladder"],
+    "lazy images": ["_lazyLoadIO", "rootMargin"]
+  },
   "constants": ["ACCOUNT_AGE", "FONT_SIZES", "MEMBER_AGE", "POLLS", "REPLYABLE", "UNDELETABLE", "USER_MESSAGE", "bannerHeight", "bannerWidth"],
   "protos": [
     "discord_protos.discord_users.v1.AppearanceSettings",
