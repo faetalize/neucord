@@ -612,4 +612,21 @@ mod tests {
         assert!(!enabled(&assign(0), me), "the control group has it off");
         assert!(!enabled(&Experiments::default(), me), "not assigned: the default config is off");
     }
+
+    #[test]
+    fn offered_once_a_later_update_assigns_it() {
+        use serde_json::json;
+        let update = |variant: i64| {
+            Experiments::from_ready(&json!({ "apex_experiments": { "assignments": { "1": { "10": { "assignments": [
+                [crate::experiments::murmur3("2026-09-desktop-voice-message-recording"), variant, 0, 1]
+            ] } } } } }))
+        };
+        let me = Snowflake(10);
+        let mut experiments = Experiments::default();
+        assert!(!enabled(&experiments, me), "READY assigned nothing");
+        experiments.apply_update(update(1));
+        assert!(enabled(&experiments, me));
+        experiments.apply_update(update(0));
+        assert!(!enabled(&experiments, me), "a later assignment replaces the earlier one");
+    }
 }
