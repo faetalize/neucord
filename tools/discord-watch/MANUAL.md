@@ -685,8 +685,9 @@ changed for unrelated reasons only needs a note in the issue.
 - **The media viewer** (`media.rs`, `cdn::modal_url`, `ui/viewer.rs`,
   `ui/video.rs`). Client: the modal is 2323 (anchor `MediaViewerModal`).
   Its box is `A` in 967758 (the 24, 76, 176, 544, 88 and 36 around it), the
-  picture's size is `AE` in 776231 (anchor `getAttachmentImageLadderConfig`,
-  an experiment: with it on, sizes snap to a ladder Neucord doesn't know) fed
+  picture's size is `AE` in 776231 (anchor `getAttachmentImageLadderConfig`;
+  under `2026-07-attachment-image-ladder` sizes snap to its ladder,
+  `cdn::Ladder` and `requested_size`) fed
   by `getRatio` in 619517, zoom is 2.5 and the original it loads is `XW` in
   803316. What opens together, and as what, is `renderAttachments` in 679636
   (anchor `Media Mosaic`: only with several; an extension decides, 273185,
