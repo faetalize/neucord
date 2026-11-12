@@ -305,7 +305,10 @@ impl App {
                     }
                     self.refresh_badges();
                 }
-                Event::ExperimentsUpdate(update) => self.account.state.borrow_mut().experiments.apply_update(update),
+                Event::ExperimentsUpdate(update) => {
+                    self.account.state.borrow_mut().experiments.apply_update(update);
+                    self.refresh_attach();
+                }
                 Event::RequiredActionUpdate(action) => {
                     self.account.state.borrow_mut().required_action = action;
                     self.apply_required_action();
