@@ -25,11 +25,7 @@ Last checked against: stable 668923.
    `git -C ~/Source/Discord-Decomp diff <old> <new> -- modules/<id>.js`.
 3. If a module is gone or the anchors no longer find the code, search the new
    build for the anchors and update the entry.
-4. With Neucord built from master and logged in, and no other instance
-   running, run `node tools/discord-watch/cli.mjs account
-   ~/Source/Discord-Decomp target/debug/neucord`. It prints what Discord
-   sends the account that moved since the last check.
-5. Say in the issue what changed and whether Neucord now acts differently
+4. Say in the issue what changed and whether Neucord now acts differently
    from the client. Open an issue for each real difference, then run
    `node tools/discord-watch/cli.mjs raise-build ~/Source/Discord-Decomp`
    (the build above, and the one Neucord names to Discord), commit it and

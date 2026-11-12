@@ -73,16 +73,6 @@ workflow opens an issue to check it by hand.
 Snapshots live on the `discord-snapshots` branch, one commit per build, so
 its history is the history of the client. An issue links the full diff.
 
-## What Discord sends the account
-
-A build says what each variant means, never which one an account gets:
-READY does. `node cli.mjs account <decomp> <neucord>` runs Neucord, logged
-in, until READY (`NEUCORD_DEBUG_EXPERIMENTS`), and commits to
-`<decomp>/account` every assignment and server rollout, named from the
-decomp's build, with READY's shape. Its diff shows rollouts moving for the
-account and its servers, and fields Discord starts or stops sending. It
-names our servers, so it stays in the decomp, which has no remote.
-
 ## Reading the client
 
 `node cli.mjs update <dir>` fetches the current build into a git repo, one
