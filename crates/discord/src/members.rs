@@ -6,8 +6,12 @@
 //! authors and of whom they mention, unless it knows them or asked already
 //! (`GuildMemberRequesterStore`). [`Members`] keeps that same account, so
 //! Neucord asks for exactly what the client would.
+//!
+//! A pill naming a user searches a server's members by name
+//! ([`MemberSearch`]), which the gateway answers the same way.
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use crate::{Guild, Message, Role, Snowflake};
 
@@ -180,6 +184,11 @@ impl Members {
         out
     }
 
+    /// The members of `guild` we know, by user.
+    pub fn of_guild(&self, guild: Snowflake) -> impl Iterator<Item = (Snowflake, &Known)> {
+        self.known.iter().filter(move |((g, _), _)| *g == guild).map(|((_, u), k)| (*u, k))
+    }
+
     /// A resumed session: ask again for what went unanswered, at the next
     /// [`Members::flush`].
     pub fn resumed(&mut self) {
@@ -187,6 +196,65 @@ impl Members {
             requests.unanswered.retain(|&user| !self.known.contains_key(&(guild, user)));
             requests.pending.extend(&requests.unanswered);
         }
+    }
+}
+
+/// How many members a pill's search asks for (`queryGuildUsers` in 997625,
+/// whose limit is 10).
+pub const PILL_SEARCH_LIMIT: usize = 10;
+
+/// How long a search waits for the typing to stop (695184's `setTimeout`).
+pub const SEARCH_WAIT: Duration = Duration::from_millis(200);
+
+/// How long a server and query count as searched (695184's cache, `maxAge`
+/// a minute).
+pub const SEARCH_AGAIN: Duration = Duration::from_secs(60);
+
+/// Searching servers' members by name, as 695184's `requestMembers` does:
+/// a server and query are searched at most once a minute, counted from when
+/// they were asked for, even if a later query replaced them in the wait; one
+/// wait for every server, so only the last query of a burst goes, 200 ms
+/// after it, lowercased.
+#[derive(Debug, Default)]
+pub struct MemberSearch {
+    /// When each server and query (as typed) was asked for.
+    asked: HashMap<(Snowflake, String), Instant>,
+    waiting: Option<Search>,
+}
+
+/// A search to send: op 8 with `query`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Search {
+    pub guild: Snowflake,
+    /// Lowercased, as it goes out.
+    pub query: String,
+    pub limit: usize,
+    /// When it goes.
+    pub at: Instant,
+}
+
+impl MemberSearch {
+    /// Search `guild`'s members for `query`, unless it was asked for in the
+    /// last minute. True when it now waits ([`SEARCH_WAIT`]) in place of
+    /// whatever waited, and the caller should look again after the wait
+    /// with [`MemberSearch::due`].
+    pub fn ask(&mut self, guild: Snowflake, query: &str, limit: usize, now: Instant) -> bool {
+        if query.is_empty() {
+            return false;
+        }
+        let key = (guild, query.to_owned());
+        if self.asked.get(&key).is_some_and(|&at| now.duration_since(at) < SEARCH_AGAIN) {
+            return false;
+        }
+        self.asked.retain(|_, at| now.duration_since(*at) < SEARCH_AGAIN);
+        self.asked.insert(key, now);
+        self.waiting = Some(Search { guild, query: query.to_lowercase(), limit, at: now + SEARCH_WAIT });
+        true
+    }
+
+    /// The search whose wait is over at `now`, if one is.
+    pub fn due(&mut self, now: Instant) -> Option<Search> {
+        self.waiting.take_if(|search| search.at <= now)
     }
 }
 
@@ -286,5 +354,32 @@ mod tests {
         members.page_loaded(G, &authors);
         let sizes: Vec<usize> = members.flush().iter().map(|(_, users)| users.len()).collect();
         assert_eq!(sizes, [100, 100, 50]);
+    }
+
+    #[test]
+    fn a_search_waits_for_the_typing_to_stop_and_goes_lowercased() {
+        let mut search = MemberSearch::default();
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        assert!(search.ask(G, "A", PILL_SEARCH_LIMIT, t0));
+        assert!(search.ask(G, "Al", PILL_SEARCH_LIMIT, t0 + ms(100)), "the wait starts again");
+        assert_eq!(search.due(t0 + ms(200)), None, "not yet: 200 ms after the last");
+        let due = search.due(t0 + ms(300)).expect("due");
+        assert_eq!((due.guild, due.query.as_str(), due.limit), (G, "al", 10));
+        assert_eq!(search.due(t0 + ms(400)), None, "sent once");
+        assert!(!search.ask(G, "A", PILL_SEARCH_LIMIT, t0 + ms(500)), "replaced in the wait, but asked");
+        assert!(!search.ask(G, "", PILL_SEARCH_LIMIT, t0 + ms(500)), "nothing typed, nothing searched");
+    }
+
+    #[test]
+    fn a_server_and_query_are_searched_once_a_minute() {
+        let mut search = MemberSearch::default();
+        let t0 = Instant::now();
+        assert!(search.ask(G, "al", 10, t0));
+        assert!(search.due(t0 + SEARCH_WAIT).is_some());
+        assert!(!search.ask(G, "al", 10, t0 + Duration::from_secs(59)), "within the minute");
+        assert!(search.ask(Snowflake(2), "al", 10, t0 + Duration::from_secs(59)), "another server");
+        assert!(search.ask(G, "Al", 10, t0 + Duration::from_secs(59)), "as typed: other capitals are another query");
+        assert!(search.ask(G, "al", 10, t0 + SEARCH_AGAIN), "a minute later");
     }
 }

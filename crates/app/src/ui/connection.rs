@@ -234,9 +234,12 @@ impl App {
                     self.on_threads(guild_id, |g| g.set_thread_member(thread, member))
                 }
                 Event::MemberUpdate { guild_id, member } => self.on_member(guild_id, member),
-                Event::Members { guild_id, members, not_found } => {
+                Event::Members { guild_id, members, not_found, names } => {
                     let (open, changed) = {
                         let mut state = self.account.state.borrow_mut();
+                        for (user, name) in names {
+                            state.users.entry(user.0).or_insert(name);
+                        }
                         let changed = state.members.add(guild_id, members, &not_found);
                         (state.guild == Some(guild_id), changed)
                     };

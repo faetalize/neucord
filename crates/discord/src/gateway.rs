@@ -203,11 +203,14 @@ pub enum Event {
     },
     /// Other people's members, with their roles: those a server arrives
     /// with, one that changed, or those we asked for. `not_found` are users
-    /// we asked for who aren't members.
+    /// we asked for who aren't members. `names` are their users' names
+    /// (global name, else username), which only an answer to a request
+    /// carries here: a search finds people we've never seen.
     Members {
         guild_id: Snowflake,
         members: Vec<(Snowflake, Known)>,
         not_found: Vec<Snowflake>,
+        names: Vec<(Snowflake, String)>,
     },
     /// A server's settings changed, its roles among them. It has no channels
     /// and no member of ours: see [`Guild::update`].
@@ -671,6 +674,17 @@ impl Gateway {
         }
     }
 
+    /// Search `guild`'s members whose names start with `query` (at most
+    /// `limit`), as a pill naming a user does (`queryGuildUsers` in 997625,
+    /// through [`crate::members::MemberSearch`]): op 8 with the query, which
+    /// Discord answers with [`Event::Members`]. Like the client, nothing is
+    /// sent before the session is established.
+    pub fn search_members(&self, guild: Snowflake, query: &str, limit: usize) {
+        if self.state.established.get() {
+            send_text(&self.conn, &request_text(8, &MemberSearchRequest::new(guild, query, limit)));
+        }
+    }
+
     /// Tell Discord what we show as, as the client does (`presenceUpdate`,
     /// 868): op 3, see [`crate::presence`]. Like the client, nothing is sent
     /// before the session is established.
@@ -714,6 +728,23 @@ struct MemberRequest<'a> {
 impl<'a> MemberRequest<'a> {
     fn new(guild: Snowflake, users: &'a [Snowflake]) -> Self {
         MemberRequest { guild_id: [guild], user_ids: users, presences: false }
+    }
+}
+
+/// Op 8's payload for a search, in the client's field order
+/// (`requestGuildMembers` in 868, from `GUILD_MEMBERS_REQUEST` in 225123,
+/// which asks for presences unless told not to).
+#[derive(serde::Serialize)]
+struct MemberSearchRequest<'a> {
+    guild_id: [Snowflake; 1],
+    query: &'a str,
+    limit: usize,
+    presences: bool,
+}
+
+impl<'a> MemberSearchRequest<'a> {
+    fn new(guild: Snowflake, query: &'a str, limit: usize) -> Self {
+        MemberSearchRequest { guild_id: [guild], query, limit, presences: true }
     }
 }
 
@@ -1042,7 +1073,7 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
                     .push(Event::GuildVoiceStates { guild_id, states: VoiceState::parse_list(&guild["voice_states"]) });
                 let members = members_of(&Value::Null, &data["merged_members"][i]);
                 if !members.is_empty() {
-                    parser.push(Event::Members { guild_id, members, not_found: Vec::new() });
+                    parser.push(Event::Members { guild_id, members, not_found: Vec::new(), names: Vec::new() });
                 }
             }
             for raw in data["merged_presences"]["friends"].as_array().into_iter().flatten() {
@@ -1142,11 +1173,21 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
             let Some(guild_id) = parse_id(&data["guild_id"]) else { return };
             if !parser.me.get().is_some_and(|me| is_me(&data, me)) {
                 let Some(member) = member_known(&data) else { return };
-                return parser.push(Event::Members { guild_id, members: vec![member], not_found: Vec::new() });
+                return parser.push(Event::Members {
+                    guild_id,
+                    members: vec![member],
+                    not_found: Vec::new(),
+                    names: Vec::new(),
+                });
             }
             // Our own nickname and picture show in the chat like anyone's.
             if let Some(known) = member_known(&data) {
-                parser.push(Event::Members { guild_id, members: vec![known], not_found: Vec::new() });
+                parser.push(Event::Members {
+                    guild_id,
+                    members: vec![known],
+                    not_found: Vec::new(),
+                    names: Vec::new(),
+                });
             }
             Event::MemberUpdate { guild_id, member: Member::from_value(&data) }
         }
@@ -1154,7 +1195,16 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
             let Some(guild_id) = parse_id(&data["guild_id"]) else { return };
             let members = data["members"].as_array().into_iter().flatten().filter_map(member_known).collect();
             let not_found = data["not_found"].as_array().into_iter().flatten().filter_map(parse_id).collect();
-            Event::Members { guild_id, members, not_found }
+            let names = data["members"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|m| {
+                    let user = User::deserialize(&m["user"]).ok()?;
+                    Some((user.id, user.display_name().to_owned()))
+                })
+                .collect();
+            Event::Members { guild_id, members, not_found, names }
         }
         "GUILD_UPDATE" => match Guild::from_value(&data) {
             Ok(guild) => Event::GuildUpdate(guild),
@@ -1227,7 +1277,7 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
             let members = (update.members().iter())
                 .map(|m| (m.user.id, Known { roles: m.roles.clone(), nick: m.nick.clone(), avatar: m.avatar.clone() }))
                 .collect();
-            parser.push(Event::Members { guild_id: update.guild, members, not_found: Vec::new() });
+            parser.push(Event::Members { guild_id: update.guild, members, not_found: Vec::new(), names: Vec::new() });
             Event::MemberList(Box::new(update))
         }
         "THREAD_CREATE" | "THREAD_UPDATE" => match (Channel::deserialize(&data), parse_id(&data["guild_id"])) {
@@ -1317,8 +1367,12 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
         "GUILD_CREATE" => {
             let Some(me) = parser.me.get() else { return };
             let Some(guild) = guild_with_member(&data, &Value::Null, me) else { return };
-            let members =
-                Event::Members { guild_id: guild.id, members: members_of(&data, &Value::Null), not_found: Vec::new() };
+            let members = Event::Members {
+                guild_id: guild.id,
+                members: members_of(&data, &Value::Null),
+                not_found: Vec::new(),
+                names: Vec::new(),
+            };
             let voice =
                 Event::GuildVoiceStates { guild_id: guild.id, states: VoiceState::parse_list(&data["voice_states"]) };
             parser.push(Event::GuildCreate(guild));
@@ -1896,11 +1950,12 @@ mod tests {
         dispatch(
             &state,
             "GUILD_MEMBERS_CHUNK",
-            json!({"guild_id": "1", "members": [{"user": {"id": "8"}, "roles": ["40"]}], "not_found": ["9"],
-                   "chunk_index": 0, "chunk_count": 1}),
+            json!({"guild_id": "1", "members": [{"user": {"id": "8", "username": "u8", "global_name": "Eight"},
+                   "roles": ["40"]}], "not_found": ["9"], "chunk_index": 0, "chunk_count": 1}),
         );
-        let Ok(Event::Members { members, not_found, .. }) = state.try_recv() else { panic!("no chunk") };
+        let Ok(Event::Members { members, not_found, names, .. }) = state.try_recv() else { panic!("no chunk") };
         assert_eq!((members, not_found), (vec![(Snowflake(8), roles(&[40]))], vec![Snowflake(9)]));
+        assert_eq!(names, [(Snowflake(8), "Eight".to_owned())], "a search's answer names whom it found");
     }
 
     #[test]
@@ -2071,6 +2126,12 @@ mod tests {
     fn member_request_as_the_client_sends_it() {
         let d = MemberRequest::new(Snowflake(1), &[Snowflake(6), Snowflake(7)]);
         assert_eq!(request_text(8, &d), r#"{"op":8,"d":{"guild_id":["1"],"user_ids":["6","7"],"presences":false}}"#);
+    }
+
+    #[test]
+    fn member_search_as_the_client_sends_it() {
+        let d = MemberSearchRequest::new(Snowflake(1), "al", crate::members::PILL_SEARCH_LIMIT);
+        assert_eq!(request_text(8, &d), r#"{"op":8,"d":{"guild_id":["1"],"query":"al","limit":10,"presences":true}}"#);
     }
 
     #[test]
