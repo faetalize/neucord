@@ -440,6 +440,7 @@ impl App {
                     None => eprintln!("e2e: no clear {path}"),
                 }
             }
+            "modal-file" | "modal-unfile" | "modal-files" => self.e2e_modal_files(&form, command, rest),
             "modal-submit" => form.submit.emit_clicked(),
             "modal-cancel" => _ = form.dialog.close(),
             "modal-shot" => {
@@ -504,6 +505,52 @@ impl App {
                 }
             }
             other => eprintln!("e2e: unknown {other}"),
+        }
+    }
+}
+""")
+
+# A form's file field: `modal-file <path> <file>…` adds files as a pick or a drop does, `modal-unfile <path> <n>`
+# takes back its n-th, as its row's remove button does, `modal-files <path> [png]` prints what the field shows.
+with open(f"{root}/crates/app/src/ui/modal.rs", "a") as f:
+    f.write(r"""
+impl App {
+    fn e2e_modal_files(self: &Rc<Self>, form: &Rc<Form>, command: &str, rest: &str) {
+        let mut words = rest.split_whitespace();
+        let path = words.next().unwrap_or_default();
+        let field = form.fields.iter().find(|f| f.node.path == path);
+        let Some(files) = field.and_then(|f| f._files.clone()) else { return eprintln!("e2e: no file field {path}") };
+        match command {
+            "modal-file" => {
+                let paths: Vec<gio::File> = words.map(gio::File::for_path).collect();
+                let this = self.clone();
+                glib::spawn_future_local(async move { this.add_form_files(&files, paths).await });
+            }
+            "modal-unfile" => {
+                let n: usize = words.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+                match self.file_ids(&files).get(n) {
+                    Some(id) => self.remove_form_file(&files, &id.clone()),
+                    None => eprintln!("e2e: no file {path} {n}"),
+                }
+            }
+            _ => {
+                let mut labels: Vec<gtk::Label> = Vec::new();
+                e2e_all(files.holder.upcast_ref(), &mut labels);
+                let shown: Vec<String> = labels.iter().filter(|l| l.is_visible()).map(|l| l.label().to_string()).collect();
+                eprintln!("e2e: files {path} {:?} ids {:?}", shown, self.file_ids(&files));
+                if let Some(png) = words.next().map(str::to_owned) {
+                    // Scrolled to the bottom, where the fake's file field is, then shot once drawn.
+                    let scroller = files.holder.ancestor(gtk::ScrolledWindow::static_type());
+                    if let Some(scroller) = scroller.and_downcast::<gtk::ScrolledWindow>() {
+                        let adjustment = scroller.vadjustment();
+                        adjustment.set_value(adjustment.upper());
+                    }
+                    let dialog = form.dialog.clone();
+                    glib::timeout_add_local_once(std::time::Duration::from_millis(500), move || {
+                        super::e2e::shot(&dialog, &png);
+                    });
+                }
+            }
         }
     }
 }

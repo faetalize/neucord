@@ -23,7 +23,9 @@ what arrived, IDENTIFY's key order and properties first.
   the app would, or as `FAKE_INTERACTION=fail|silent|429|modal|iframe` says (`modal`: one
   of each field a form submits, and Formy's message in channel 600 has a
   button that asks for it), and takes a form as
-  `FAKE_MODAL_SUBMIT=fail|silent|429` says.
+  `FAKE_MODAL_SUBMIT=fail|silent|429` says. Files get an upload URL at the
+  fake, which takes the `PUT` and a `DELETE`, unless
+  `FAKE_UPLOAD_FAIL=too-large` turns the URL down with Discord's 40005.
   Both settings protos are kept, and a save merges into them field by field
   as Discord's does. The GIF endpoints answer made-up results, one with a
   numeric id, and take a pick's `POST /gifs/select`. `FAKE_VARIANTS="hiding=1,voice=1,ladder=1,lazy=1,upload=1,nsfwlevel=1"`
@@ -56,7 +58,10 @@ what arrived, IDENTIFY's key order and properties first.
   `press <message> <custom_id>` (a button of
   the open channel's), the top app form's `modal-fields`, `modal-set <path>
   <text>`, `modal-check <path> <n>`, `modal-pick <path> <n>`, `modal-clear
-  <path>`, `modal-submit`, `modal-cancel` and `modal-shot <png>`, `quit`. It edits the copy by exact strings
+  <path>`, `modal-submit`, `modal-cancel`, `modal-shot <png>`, a file
+  field's `modal-file <path> <file>…` (adds them, as a pick or a drop
+  does), `modal-unfile <path> <n>` (its row's remove button) and
+  `modal-files <path> [png]` (prints what it shows, and shoots it), `quit`. It edits the copy by exact strings
   and stops on the first that no longer matches: when the code it patches
   moves, update the string. The module it adds is only built here, so a
   change to what it calls needs a run to show it still builds.
@@ -65,7 +70,9 @@ what arrived, IDENTIFY's key order and properties first.
   `waitreq <method> <path> <count>` (wait for requests to a path, or to
   paths starting with it). `full` walks the DM list, a DM's attach menu and
   a server channel; `gifs` picks GIFs from a search, Trending and the
-  Favorites, and favourites three; `reopen` and `lazy` relaunch on the same data
+  Favorites, and favourites three; `modal-files` (with
+  `FAKE_INTERACTION=modal`) adds, takes back and submits a form's files;
+  `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).
 
 Add the endpoints, events and commands a change needs here, in the same pull

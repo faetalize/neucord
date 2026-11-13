@@ -71,6 +71,9 @@ if INTERACTION not in ("ok", "fail", "silent", "429", "modal", "iframe"):
 MODAL_SUBMIT = os.environ.get("FAKE_MODAL_SUBMIT") or "ok"
 if MODAL_SUBMIT not in ("ok", "fail", "silent", "429"):
     sys.exit("unknown FAKE_MODAL_SUBMIT " + MODAL_SUBMIT)
+UPLOAD_FAIL = os.environ.get("FAKE_UPLOAD_FAIL") or ""
+if UPLOAD_FAIL not in ("", "too-large"):
+    sys.exit("unknown FAKE_UPLOAD_FAIL " + UPLOAD_FAIL)
 
 ME = {"id": "100", "username": "tester_fake", "global_name": "Tester Fake", "avatar": None, "discriminator": "0",
       "premium_type": 0, "flags": 0, "verified": True, "mfa_enabled": False}
@@ -615,6 +618,35 @@ def interaction(body):
             push()
 
     return 204, None, answer
+
+
+# Upload URLs handed out, numbered from 1.
+UPLOADS = [0]
+
+
+@route("POST", r"/channels/(\d+)/attachments")
+def upload_url(channel, body):
+    """An upload URL per file, here at the fake; FAKE_UPLOAD_FAIL=too-large turns it down as Discord does a file
+    over the limit."""
+    if UPLOAD_FAIL == "too-large":
+        return 400, {"code": 40005, "message": "Request entity too large"}
+    slots = []
+    for f in body.get("files", []):
+        UPLOADS[0] += 1
+        n = UPLOADS[0]
+        slots.append({"id": f.get("id"), "upload_url": f"http://127.0.0.1:{PORT}/api/v9/upload/{n}",
+                      "upload_filename": f"{n}/{f.get('filename')}"})
+    return 200, {"attachments": slots}
+
+
+@route("PUT", r"/upload/(\d+)")
+def upload_put(n, body):
+    return 200, None
+
+
+@route("DELETE", r"/attachments/(\d+)/([^/]+)")
+def upload_delete(n, filename, body):
+    return 204, None
 
 
 def modal_form():

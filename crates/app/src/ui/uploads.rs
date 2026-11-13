@@ -155,6 +155,37 @@ impl Upload {
             spoiler.set_sensitive(!locked);
         }
     }
+
+    /// Its row, to put where it shows.
+    pub(super) fn row(&self) -> &gtk::Box {
+        &self.row.root
+    }
+}
+
+/// Wait for every one of `files` to be uploaded, and say what Discord keeps
+/// each by, or fail as soon as one has failed or been taken back, without
+/// trying any again: 358579's `A` without its second argument, under a
+/// `Promise.all`. The others go on.
+pub(super) async fn staged(files: &[Rc<Upload>]) -> Result<Vec<String>, ()> {
+    loop {
+        let mut uploaded = Vec::new();
+        for upload in files {
+            match &*upload.status.borrow() {
+                Status::Done(name) => uploaded.push(name.clone()),
+                Status::Failed(..) | Status::Canceled => return Err(()),
+                Status::Uploading(_) => {}
+            }
+        }
+        if uploaded.len() == files.len() {
+            return Ok(uploaded);
+        }
+        let (tx, rx) = async_channel::bounded(files.len());
+        for upload in files.iter().filter(|u| matches!(*u.status.borrow(), Status::Uploading(_))) {
+            upload.waiting.borrow_mut().push(tx.clone());
+        }
+        drop(tx);
+        let _ = rx.recv().await;
+    }
 }
 
 /// The file at `path`, as a browser's `File` would give it: its name, size
@@ -189,9 +220,22 @@ impl Sending {
     }
 }
 
+/// A file added to an app's form: its channel's `InteractionModal` draft
+/// in the client, under the form's `custom_id` (257249 `R`).
+pub(super) struct FormUpload {
+    pub(super) channel: Snowflake,
+    pub(super) custom_id: String,
+    /// What the field's state names it by.
+    pub(super) id: String,
+    pub(super) upload: Rc<Upload>,
+}
+
 /// What the message box has attached, by channel, and the tray showing it.
 pub(super) struct Drafts {
     files: RefCell<HashMap<Snowflake, Vec<Rc<Upload>>>>,
+    /// Forms' files, kept across closing and reopening until a submit
+    /// succeeds, in the order they were added.
+    pub(super) forms: RefCell<Vec<FormUpload>>,
     /// Channels with a message waiting on its files.
     sending: RefCell<HashMap<Snowflake, Rc<Sending>>>,
     tray: gtk::Box,
@@ -220,6 +264,7 @@ impl Drafts {
         };
         Drafts {
             files: RefCell::default(),
+            forms: RefCell::default(),
             sending: RefCell::default(),
             tray: gtk::Box::builder().orientation(gtk::Orientation::Vertical).visible(false).build(),
             attach: attach_button(),
@@ -685,6 +730,35 @@ impl App {
         upload
     }
 
+    /// A command's or a form's file (`setFile` with `allowOptimization: !1`,
+    /// 102077 and 232430): never converted, with no spoiler or edit button,
+    /// and a remove button (tooltip `remove`) that calls `removed`, which
+    /// decides what taking it back does. Its upload starts at once, unless
+    /// `CloudUpload.upload` (48325) would turn it down before any request:
+    /// then it shows why and never asks. The client draws nothing for that;
+    /// the row's words are Neucord's and change no request.
+    pub(super) fn plain_upload(
+        self: &Rc<Self>,
+        channel: Snowflake,
+        file: File,
+        remove: &str,
+        removed: impl Fn() + 'static,
+    ) -> Rc<Upload> {
+        let limits = {
+            let state = self.account.state.borrow();
+            state.limits().uploads(state.find_channel(channel).and_then(|(guild, _)| guild))
+        };
+        let checked = uploads::check_upload(&limits, file.size);
+        let upload = upload_of(channel, file, None, None, remove);
+        upload.optimized.set(true);
+        upload.row.remove.connect_clicked(move |_| removed());
+        match checked {
+            Ok(()) => self.start_upload(&upload),
+            Err(refusal) => upload.set_status(Status::Failed(refusal.body(), false)),
+        }
+        upload
+    }
+
     /// Start (or start again) uploading, as the client does when a file is
     /// added and, for one that failed, when the message is sent.
     fn start_upload(self: &Rc<Self>, upload: &Rc<Upload>) {
@@ -924,6 +998,9 @@ impl App {
     pub(super) fn discard_drafts(&self) {
         for upload in self.drafts.files.borrow().values().flatten() {
             upload.cancel(None);
+        }
+        for form in self.drafts.forms.take() {
+            form.upload.cancel(None);
         }
         self.drafts.files.borrow_mut().clear();
         self.drafts.sending.borrow_mut().clear();

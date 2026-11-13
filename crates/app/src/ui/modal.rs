@@ -6,20 +6,26 @@
 //!
 //! Menus of users, roles, mentionables and channels show and send the
 //! defaults that resolve, but can't be picked from (they need the member
-//! search); file uploads can't be used yet, so a required one blocks
-//! Submit with its field's own "This field is required.".
+//! search). A file field uploads what is added at once, unconverted, and
+//! the files stay with the form's `custom_id` in that channel until a
+//! submit succeeds, which deletes them.
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
+use std::time::Duration;
 
 use adw::prelude::*;
-use discord::Snowflake;
 use discord::gateway::Outcome;
-use discord::modal::{self, DefaultKind, FieldState, Modal, Node, NodeKind, SUBMIT_ERROR, SUBMIT_TIMEOUT, Submit};
-use gtk::{glib, pango};
+use discord::modal::{
+    self, DefaultKind, FieldState, FileUpload, Modal, Node, NodeKind, SUBMIT_ERROR, SUBMIT_TIMEOUT, Submit,
+    UPLOAD_TIMEOUT,
+};
+use discord::{Snowflake, uploads};
+use gtk::{gdk, gio, glib, pango};
 
 use super::App;
 use super::components::{Choices, choices_button, components};
+use super::uploads::{Details, FormUpload, Upload, file_at, staged};
 use crate::render::{self, Context};
 
 /// What a field that can't be used yet says.
@@ -46,6 +52,9 @@ struct Field {
     title: Rc<Title>,
     /// What takes the focus when it is wrong.
     focus: gtk::Widget,
+    /// A file field's own parts, held here for its widgets, which reach
+    /// them weakly.
+    _files: Option<Rc<FileField>>,
 }
 
 /// A field's title (742158 `FormTitle`): "Label *" when required, "Label -
@@ -116,6 +125,19 @@ fn cap_buffer(buffer: &gtk::TextBuffer, max: Option<usize>) {
 
 fn caption(text: &str) -> gtk::Label {
     gtk::Label::builder().label(text).xalign(0.0).wrap(true).css_classes(["caption", "dimmed"]).build()
+}
+
+/// A file field (232430 `eK`): drawn again on every change, from the
+/// field's state and the form's files that are still there.
+struct FileField {
+    channel: Snowflake,
+    custom_id: String,
+    node: Node,
+    field: FileUpload,
+    holder: gtk::Box,
+    set: Box<dyn Fn(FieldState)>,
+    /// "Drop here to upload", shown while files are dragged over the area.
+    dropping: RefCell<Option<gtk::Label>>,
 }
 
 /// What an option list's entry says: its label, and its description under it.
@@ -389,6 +411,7 @@ impl App {
             state.modal_drafts.get(&modal.custom_id).and_then(|d| d.state(node)).cloned()
         };
         let set = self.modal_setter(&modal.custom_id, node, &field_title);
+        let mut file_field = None;
         let focus: gtk::Widget = match &node.kind {
             NodeKind::TextInput(input) if input.paragraph => {
                 let view = gtk::TextView::builder()
@@ -473,17 +496,22 @@ impl App {
                 column.append(&button);
                 button.upcast()
             }
-            NodeKind::FileUpload(_) => {
-                // Where the command files' uploads plug in (C5's pieces).
-                let area = gtk::Label::builder()
-                    .label(NOT_YET)
-                    .xalign(0.0)
-                    .wrap(true)
-                    .css_classes(["dimmed"])
-                    .sensitive(false)
-                    .build();
-                column.append(&area);
-                area.upcast()
+            NodeKind::FileUpload(upload) => {
+                let holder = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).build();
+                let files = Rc::new(FileField {
+                    channel: modal.channel,
+                    custom_id: modal.custom_id.clone(),
+                    node: node.clone(),
+                    field: upload.clone(),
+                    holder: holder.clone(),
+                    set: Box::new(set),
+                    dropping: RefCell::default(),
+                });
+                self.fill_files(&files);
+                holder.add_controller(self.files_drop(&files));
+                column.append(&holder);
+                file_field = Some(files);
+                holder.upcast()
             }
             NodeKind::RadioGroup { options, required, .. } => {
                 let picked = match &state {
@@ -584,8 +612,216 @@ impl App {
             }
             _ => unreachable!("only fields are left"),
         };
-        fields.push(Field { node: node.clone(), title: field_title, focus });
+        fields.push(Field { node: node.clone(), title: field_title, focus, _files: file_field });
         column.upcast()
+    }
+
+    /// The form's files in its channel, in the order they were added: what
+    /// a submit names in `attachments` (969508 `M`).
+    fn form_uploads(&self, channel: Snowflake, custom_id: &str) -> Vec<(String, Rc<Upload>)> {
+        let forms = self.drafts.forms.borrow();
+        let ours = forms.iter().filter(|f| f.channel == channel && f.custom_id == custom_id);
+        ours.map(|f| (f.id.clone(), f.upload.clone())).collect()
+    }
+
+    /// The files a field holds, without those that have gone (taken back,
+    /// or added in another channel), which its state then forgets too.
+    fn file_ids(&self, files: &FileField) -> Vec<String> {
+        let held = {
+            let state = self.account.state.borrow();
+            match state.modal_drafts.get(&files.custom_id).and_then(|d| d.state(&files.node)) {
+                Some(FieldState::Files(ids)) => ids.clone(),
+                _ => Vec::new(),
+            }
+        };
+        let there = self.form_uploads(files.channel, &files.custom_id);
+        let ids: Vec<String> = held.iter().filter(|id| there.iter().any(|(t, _)| t == *id)).cloned().collect();
+        if ids.len() < held.len() {
+            (files.set)(FieldState::Files(ids.clone()));
+        }
+        ids
+    }
+
+    /// Draw a file field: the area to add files (or that it is full), and a
+    /// row per file. A field of one file that has it shows only that row.
+    fn fill_files(self: &Rc<Self>, files: &Rc<FileField>) {
+        let ids = self.file_ids(files);
+        let there = self.form_uploads(files.channel, &files.custom_id);
+        let uploads: Vec<Rc<Upload>> =
+            ids.iter().filter_map(|id| there.iter().find(|(t, _)| t == id).map(|(_, u)| u.clone())).collect();
+        let holder = &files.holder;
+        while let Some(child) = holder.first_child() {
+            holder.remove(&child);
+        }
+        files.dropping.take();
+        if !(files.field.max == Some(1) && uploads.len() == 1) {
+            if files.field.full(ids.len()) {
+                holder.append(&gtk::Label::builder().label(modal::FILES_FULL).xalign(0.0).wrap(true).build());
+                holder.append(&caption(modal::FILES_FULL_HINT));
+            } else {
+                let (words, link) = files.field.drop_words();
+                let area = gtk::Label::builder()
+                    .use_markup(true)
+                    .label(format!("{}<a href=\"browse\">{link}</a>", glib::markup_escape_text(words)))
+                    .xalign(0.0)
+                    .wrap(true)
+                    .build();
+                area.connect_activate_link({
+                    let (this, files) = (Rc::downgrade(self), Rc::downgrade(files));
+                    move |_, _| {
+                        if let (Some(this), Some(files)) = (this.upgrade(), files.upgrade()) {
+                            this.browse_files(&files);
+                        }
+                        glib::Propagation::Stop
+                    }
+                });
+                let max_size = {
+                    let state = self.account.state.borrow();
+                    state.limits().uploads(state.find_channel(files.channel).and_then(|(guild, _)| guild)).file_size
+                };
+                let dropping = gtk::Label::builder().label("Drop here to upload").xalign(0.0).visible(false).build();
+                holder.append(&area);
+                holder.append(&caption(&files.field.hint(max_size)));
+                holder.append(&dropping);
+                files.dropping.replace(Some(dropping));
+            }
+        }
+        for upload in uploads {
+            let row = upload.row();
+            if row.parent().is_some() {
+                row.unparent();
+            }
+            holder.append(row);
+        }
+    }
+
+    /// The area's drop target: files dropped on it are added, except on a
+    /// field of one file that has it, which has no area.
+    fn files_drop(self: &Rc<Self>, files: &Rc<FileField>) -> gtk::DropTarget {
+        let target = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+        let (this, weak) = (Rc::downgrade(self), Rc::downgrade(files));
+        target.connect_accept({
+            let (this, weak) = (this.clone(), weak.clone());
+            move |_, _| match (this.upgrade(), weak.upgrade()) {
+                (Some(this), Some(files)) => !(files.field.max == Some(1) && this.file_ids(&files).len() == 1),
+                _ => false,
+            }
+        });
+        let shown = |weak: &Weak<FileField>, visible: bool| {
+            if let Some(label) = weak.upgrade().and_then(|f| f.dropping.borrow().clone()) {
+                label.set_visible(visible);
+            }
+        };
+        target.connect_enter({
+            let weak = weak.clone();
+            move |_, _, _| {
+                shown(&weak, true);
+                gdk::DragAction::COPY
+            }
+        });
+        target.connect_leave({
+            let weak = weak.clone();
+            move |_| shown(&weak, false)
+        });
+        target.connect_drop(move |_, value, _, _| {
+            shown(&weak, false);
+            let (Some(this), Some(files), Ok(list)) = (this.upgrade(), weak.upgrade(), value.get::<gdk::FileList>())
+            else {
+                return false;
+            };
+            let paths = list.files();
+            glib::spawn_future_local(async move { this.add_form_files(&files, paths).await });
+            true
+        });
+        target
+    }
+
+    /// The file picker, filtered to what the field takes, for one file or
+    /// several as its `max_values` allows.
+    fn browse_files(self: &Rc<Self>, files: &Rc<FileField>) {
+        let dialog = gtk::FileDialog::builder().title("Upload a File").build();
+        let extensions = uploads::extensions(&files.field.file_types);
+        if !extensions.is_empty() {
+            let filter = gtk::FileFilter::new();
+            for extension in &extensions {
+                filter.add_suffix(extension);
+            }
+            let filters = gio::ListStore::new::<gtk::FileFilter>();
+            filters.append(&filter);
+            dialog.set_filters(Some(&filters));
+            dialog.set_default_filter(Some(&filter));
+        }
+        let (this, files) = (self.clone(), files.clone());
+        glib::spawn_future_local(async move {
+            let picked = if files.field.picks_several() {
+                dialog
+                    .open_multiple_future(Some(&this.window))
+                    .await
+                    .map(|list| list.iter::<gio::File>().flatten().collect())
+            } else {
+                dialog.open_future(Some(&this.window)).await.map(|file| vec![file])
+            };
+            if let Ok(paths) = picked {
+                this.add_form_files(&files, paths).await;
+            }
+        });
+    }
+
+    /// Add files to a field as `T` in 232430's `eK` does: refused all
+    /// together for the count, a size or a type, else each starts
+    /// uploading at once, never converted.
+    async fn add_form_files(self: &Rc<Self>, files: &Rc<FileField>, paths: Vec<gio::File>) {
+        let mut added = Vec::new();
+        for path in paths {
+            added.extend(file_at(path).await);
+        }
+        if added.is_empty() {
+            return;
+        }
+        let mut ids = self.file_ids(files);
+        let limits = {
+            let state = self.account.state.borrow();
+            state.limits().uploads(state.find_channel(files.channel).and_then(|(guild, _)| guild))
+        };
+        let named: Vec<(&str, u64)> = added.iter().map(|f| (f.filename.as_str(), f.size)).collect();
+        if let Err(refusal) = files.field.check(&limits, ids.len(), &named) {
+            let alert = adw::AlertDialog::new(Some(refusal.heading()), Some(&refusal.body()));
+            alert.add_response("okay", "_Okay");
+            alert.present(Some(&files.holder));
+            return;
+        }
+        for file in added {
+            let id = uploads::unique_id();
+            let removed = {
+                let (this, weak, id) = (Rc::downgrade(self), Rc::downgrade(files), id.clone());
+                move || {
+                    if let (Some(this), Some(files)) = (this.upgrade(), weak.upgrade()) {
+                        this.remove_form_file(&files, &id);
+                    }
+                }
+            };
+            let upload = self.plain_upload(files.channel, file, modal::REMOVE_FILE, removed);
+            let channel = files.channel;
+            let entry = FormUpload { channel, custom_id: files.custom_id.clone(), id: id.clone(), upload };
+            self.drafts.forms.borrow_mut().push(entry);
+            ids.push(id);
+        }
+        (files.set)(FieldState::Files(ids));
+        self.fill_files(files);
+    }
+
+    /// Take a file back (`removeFromMsgDraft`): its upload stops, or is
+    /// deleted if it had finished.
+    fn remove_form_file(self: &Rc<Self>, files: &Rc<FileField>, id: &str) {
+        let gone = {
+            let mut forms = self.drafts.forms.borrow_mut();
+            let at = forms.iter().position(|f| f.id == id);
+            at.map(|at| forms.remove(at))
+        };
+        if let Some(gone) = gone {
+            gone.upload.cancel(self.account.state.borrow().rest.clone());
+        }
+        self.fill_files(files);
     }
 
     /// What a field calls with its new state: the draft keeps it (even
@@ -620,6 +856,8 @@ impl App {
             return;
         }
         let modal = &form.modal;
+        let (ids, files): (Vec<String>, Vec<Rc<Upload>>) =
+            self.form_uploads(modal.channel, &modal.custom_id).into_iter().unzip();
         let (rest, session, guild, components, free) = {
             let state = self.account.state.borrow();
             let draft = state.modal_drafts.get(&modal.custom_id).cloned().unwrap_or_default();
@@ -628,7 +866,7 @@ impl App {
                 state.rest.clone(),
                 state.session_id.clone(),
                 channel.map(|(guild, _)| guild.map(|g| g.id)),
-                modal::components(&modal.components, &draft, &[]),
+                modal::components(&modal.components, &draft, &ids),
                 state.modal_submission.in_flight().is_none(),
             )
         };
@@ -649,31 +887,51 @@ impl App {
         self.account.state.borrow_mut().modal_submission.start(nonce);
         form.nonce.set(Some(nonce));
         self.refresh_modal_forms();
-        let body = Submit {
-            application: modal.application.id,
-            channel: modal.channel,
-            guild,
-            session: &session,
-            modal: modal.id,
-            custom_id: &modal.custom_id,
-            components,
-            attachments: Vec::new(),
-        }
-        .body(nonce);
         let this = Rc::downgrade(self);
-        glib::timeout_add_local_once(SUBMIT_TIMEOUT, {
-            let this = this.clone();
-            move || {
-                if let Some(this) = this.upgrade()
-                    && this.account.state.borrow_mut().modal_submission.timed_out(nonce)
-                {
-                    this.modal_ended(nonce, false);
-                }
-            }
-        });
+        self.modal_timer(nonce, if files.is_empty() { SUBMIT_TIMEOUT } else { UPLOAD_TIMEOUT });
+        let (application, modal_id, custom_id, channel) =
+            (modal.application.id, modal.id, modal.custom_id.clone(), modal.channel);
+        let modal_components = modal.components.clone();
         let task = glib::spawn_future_local({
             let form = Rc::downgrade(form);
             async move {
+                // With files, the form waits for them first (969508's
+                // preflight): one failing fails the submit, and nothing is
+                // posted. What is sent is read once they are up.
+                let (components, attachments, session) = if files.is_empty() {
+                    (components, Vec::new(), session)
+                } else {
+                    let uploaded = staged(&files).await;
+                    let Some(app) = this.upgrade() else { return };
+                    let Ok(uploaded) = uploaded else {
+                        if let Some(form) = form.upgrade() {
+                            form.task.take();
+                        }
+                        if app.account.state.borrow_mut().modal_submission.answered(nonce, false) {
+                            app.modal_ended(nonce, false);
+                        }
+                        return;
+                    };
+                    app.modal_timer(nonce, SUBMIT_TIMEOUT);
+                    let details = Details::of(&files);
+                    let attachments =
+                        details.sent(&files, &uploaded).iter().enumerate().map(|(at, s)| s.body(at)).collect();
+                    let state = app.account.state.borrow();
+                    let draft = state.modal_drafts.get(&custom_id).cloned().unwrap_or_default();
+                    let components = modal::components(&modal_components, &draft, &ids).unwrap_or(components);
+                    (components, attachments, state.session_id.clone())
+                };
+                let body = Submit {
+                    application,
+                    channel,
+                    guild,
+                    session: &session,
+                    modal: modal_id,
+                    custom_id: &custom_id,
+                    components,
+                    attachments,
+                }
+                .body(nonce);
                 let in_flight = {
                     let this = this.clone();
                     move || {
@@ -696,6 +954,19 @@ impl App {
         *form.task.borrow_mut() = Some(task);
     }
 
+    /// Fail the submit sent as `nonce` after `after`, if it is still in
+    /// flight then (750128's timers).
+    fn modal_timer(self: &Rc<Self>, nonce: Snowflake, after: Duration) {
+        let this = Rc::downgrade(self);
+        glib::timeout_add_local_once(after, move || {
+            if let Some(this) = this.upgrade()
+                && this.account.state.borrow_mut().modal_submission.timed_out(nonce)
+            {
+                this.modal_ended(nonce, false);
+            }
+        });
+    }
+
     /// Discord answered `nonce`. Whether it was the form submit in flight:
     /// then nothing else of ours waits on it. Only `INTERACTION_SUCCESS` and
     /// `INTERACTION_FAILURE` end it, never the app's reply message.
@@ -712,14 +983,27 @@ impl App {
     }
 
     /// The submit sent as `nonce` ended. Its form, if still open, closes on
-    /// a success and forgets what was typed (`CLEAR_INTERACTION_MODAL_STATE`),
-    /// or says it went wrong and may be sent again. A success with the form
-    /// closed keeps the draft, as the client clears it only from the form.
+    /// a success, forgets what was typed (`CLEAR_INTERACTION_MODAL_STATE`)
+    /// and deletes its files (`removeFiles`), or says it went wrong and may
+    /// be sent again. A success with the form closed keeps both, as the
+    /// client clears them only from the form.
     fn modal_ended(self: &Rc<Self>, nonce: Snowflake, ok: bool) {
         let form = self.modal_forms.borrow().iter().find(|f| f.nonce.get() == Some(nonce)).cloned();
         if let Some(form) = form {
             if ok {
-                self.account.state.borrow_mut().modal_drafts.remove(&form.modal.custom_id);
+                let modal = &form.modal;
+                self.account.state.borrow_mut().modal_drafts.remove(&modal.custom_id);
+                let gone: Vec<FormUpload> = {
+                    let mut forms = self.drafts.forms.borrow_mut();
+                    let (gone, kept) =
+                        forms.drain(..).partition(|f| f.channel == modal.channel && f.custom_id == modal.custom_id);
+                    *forms = kept;
+                    gone
+                };
+                let rest = self.account.state.borrow().rest.clone();
+                for file in gone {
+                    file.upload.cancel(rest.clone());
+                }
                 form.dialog.force_close();
             } else {
                 form.error.set_visible(true);

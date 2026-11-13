@@ -14,9 +14,10 @@ use serde_json::{Value, json};
 
 use crate::component::{Component, SelectOption};
 use crate::interaction::pick_error;
-use crate::limits::message_length;
+use crate::limits::{Uploads, message_length};
 use crate::members::Known;
 use crate::model::User;
+use crate::uploads;
 use crate::{Snowflake, cdn};
 
 /// `MODAL_SUBMIT` in 127258's interaction types.
@@ -24,6 +25,9 @@ pub const MODAL_SUBMIT: u8 = 5;
 /// How long a submit waits for Discord's answer before it fails (750128).
 /// With uploads it is 2 minutes from the submit and 10 s after they end.
 pub const SUBMIT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a submit with uploads waits from the submit (750128), as well
+/// as [`SUBMIT_TIMEOUT`] after its uploads end.
+pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 /// What the form says when a submit failed, whatever the reason (`uJgdEu`).
 pub const SUBMIT_ERROR: &str = "Something went wrong. Try again.";
 /// A string select's face with nothing picked and no placeholder (`c7` in 257249).
@@ -170,6 +174,122 @@ pub struct FileUpload {
     pub max: Option<usize>,
     pub required: bool,
     pub file_types: Vec<String>,
+}
+
+/// A file field at its limit (`eV` in 232430).
+pub const FILES_FULL: &str = "File upload limit reached";
+pub const FILES_FULL_HINT: &str = "Remove some files to upload new ones.";
+/// A file's remove button (`N86XcP`).
+pub const REMOVE_FILE: &str = "Remove";
+
+/// Why files weren't added to a file field (`T` in 232430's `eK`), in the
+/// order it asks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileRefusal {
+    /// More than `max_values` together with those already there.
+    TooMany { max: usize },
+    /// One over the file limit (518960's `P`).
+    TooLarge { max: u64 },
+    /// The added ones together over the total.
+    TotalTooLarge { max: u64 },
+    /// A name the field's `file_types` doesn't take (424170).
+    Type { types: String },
+}
+
+impl FileRefusal {
+    pub fn heading(&self) -> &'static str {
+        match self {
+            FileRefusal::TooMany { .. } => "Too many uploads!",
+            FileRefusal::TooLarge { .. } | FileRefusal::TotalTooLarge { .. } => "Your files are too powerful",
+            FileRefusal::Type { .. } => uploads::INVALID_TYPE,
+        }
+    }
+
+    /// 518960's `P` sizes with `Hb` (humanize's `filesize`), where
+    /// Neucord's message refusals write `size_words`.
+    pub fn body(&self) -> String {
+        match self {
+            FileRefusal::TooMany { max: 1 } => "You can upload up to 1 file.".to_owned(),
+            FileRefusal::TooMany { max } => format!("You can upload up to {} files.", grouped(*max)),
+            FileRefusal::TooLarge { max } => format!("Max file size is {} please.", uploads::filesize(*max)),
+            FileRefusal::TotalTooLarge { max } => {
+                format!("Total message size must be less than {}", uploads::filesize(*max))
+            }
+            FileRefusal::Type { types } => uploads::invalid_type_words(types),
+        }
+    }
+}
+
+/// A size as the hint writes it (`Xq` in 255438 over kibibytes, with a
+/// space): mebibytes rounded up, or gibibytes rounded.
+fn hint_size(bytes: u64) -> String {
+    let mib = (bytes as f64 / 1024.0 / 1024.0).ceil();
+    if mib < 1024.0 { format!("{} MB", grouped(mib as usize)) } else { format!("{} GB", (mib / 1024.0).round()) }
+}
+
+impl FileUpload {
+    /// What the empty area says, its last word opening the file picker
+    /// (`y68I8P`, by `max_values`, the API's default 1 when missing, as in
+    /// [`FileUpload::hint`]).
+    pub fn drop_words(&self) -> (&'static str, &'static str) {
+        let what = if self.max.unwrap_or(1) == 1 { "Drop file here or " } else { "Drop files here or " };
+        (what, "browse")
+    }
+
+    /// The hint under it (`y` in 257249), with `max_size` the file limit.
+    /// Without a `max_values` the client formats an undefined there; this
+    /// writes the API's default, 1.
+    pub fn hint(&self, max_size: u64) -> String {
+        let (min, max) = (self.min.unwrap_or_default(), self.max.unwrap_or(1));
+        let size = hint_size(max_size);
+        let types = uploads::types_words(&self.file_types);
+        match (types, min > 1) {
+            (Some(types), false) if max == 1 => format!("Upload 1 {types} file under {size}."),
+            (Some(types), false) => format!("Upload up to {} {types} files under {size}.", grouped(max)),
+            (Some(types), true) if min == max => format!("Upload {} {types} files under {size}.", grouped(min)),
+            (Some(types), true) => {
+                format!("Upload {}\u{2013}{} {types} files under {size}.", grouped(min), grouped(max))
+            }
+            (None, false) if max == 1 => format!("Upload a file under {size}."),
+            (None, false) => format!("Upload up to {} files under {size}.", grouped(max)),
+            (None, true) if min == max => format!("Upload {} files under {size}.", grouped(min)),
+            (None, true) => format!("Upload {}\u{2013}{} files under {size}.", grouped(min), grouped(max)),
+        }
+    }
+
+    /// Whether files named and sized `added` may join the `already` there:
+    /// the count, then the sizes (382287 `fJ` without deferring: any over
+    /// the file limit, or the added ones together over the total), then the
+    /// type. No empty-file check: the upload turns that down itself.
+    pub fn check(&self, limits: &Uploads, already: usize, added: &[(&str, u64)]) -> Result<(), FileRefusal> {
+        if let Some(max) = self.max
+            && already + added.len() > max
+        {
+            return Err(FileRefusal::TooMany { max });
+        }
+        if added.iter().any(|(_, size)| *size > limits.file_size) {
+            return Err(FileRefusal::TooLarge { max: limits.file_size });
+        }
+        if added.iter().map(|(_, size)| size).sum::<u64>() > limits.total_size {
+            return Err(FileRefusal::TotalTooLarge { max: limits.total_size });
+        }
+        let extensions = uploads::extensions(&self.file_types);
+        if !added.iter().all(|(name, _)| uploads::takes(&extensions, name)) {
+            let types = uploads::types_words(&self.file_types).unwrap_or_default();
+            return Err(FileRefusal::Type { types });
+        }
+        Ok(())
+    }
+
+    /// The picker's single or multiple choice (`multiple: max_values > 1`).
+    pub fn picks_several(&self) -> bool {
+        self.max.is_some_and(|max| max > 1)
+    }
+
+    /// Whether the field has all it may take (`eV` shows instead of the area).
+    pub fn full(&self, count: usize) -> bool {
+        self.max.is_some_and(|max| count >= max)
+    }
 }
 
 fn id_of(value: &Value) -> Option<Snowflake> {
@@ -1089,5 +1209,63 @@ mod tests {
         let text_first = modal(json!([{"type": 10, "content": "hi"},
                                       {"type": 1, "components": [{"type": 4, "custom_id": "a", "style": 1}]}]));
         assert_eq!(text_first.autofocus(), None);
+    }
+
+    fn file_field(min: Option<usize>, max: Option<usize>, types: &[&str]) -> FileUpload {
+        let file_types = types.iter().map(|t| (*t).to_owned()).collect();
+        FileUpload { custom_id: "f".into(), min, max, required: false, file_types }
+    }
+
+    #[test]
+    fn a_file_field_says_what_it_takes_in_the_clients_words() {
+        const MIB: u64 = 1024 * 1024;
+        let image = |min, max| file_field(min, max, &["image", ".pdf"]);
+        assert_eq!(image(None, Some(1)).hint(20 * MIB), "Upload 1 image or .pdf file under 20 MB.");
+        assert_eq!(image(Some(1), Some(3)).hint(20 * MIB), "Upload up to 3 image or .pdf files under 20 MB.");
+        assert_eq!(image(Some(2), Some(2)).hint(20 * MIB), "Upload 2 image or .pdf files under 20 MB.");
+        assert_eq!(image(Some(2), Some(4)).hint(20 * MIB), "Upload 2\u{2013}4 image or .pdf files under 20 MB.");
+        let any = |min, max| file_field(min, max, &[]);
+        assert_eq!(any(None, Some(1)).hint(500 * MIB), "Upload a file under 500 MB.");
+        assert_eq!(any(None, Some(5)).hint(20 * MIB), "Upload up to 5 files under 20 MB.");
+        assert_eq!(any(Some(3), Some(3)).hint(20 * MIB), "Upload 3 files under 20 MB.");
+        assert_eq!(any(Some(2), Some(10)).hint(20 * MIB), "Upload 2\u{2013}10 files under 20 MB.");
+        assert_eq!(any(None, Some(1)).hint(1024 * MIB), "Upload a file under 1 GB.");
+        assert_eq!(any(None, Some(1)).hint(10 * MIB + 1), "Upload a file under 11 MB.", "rounded up");
+        assert_eq!(any(None, None).hint(20 * MIB), "Upload a file under 20 MB.", "the API's default");
+        assert_eq!(any(None, Some(1)).drop_words(), ("Drop file here or ", "browse"));
+        assert_eq!(any(None, Some(2)).drop_words().0, "Drop files here or ");
+        assert_eq!(any(None, None).drop_words().0, "Drop file here or ");
+        assert!(any(None, Some(2)).picks_several() && !any(None, Some(1)).picks_several());
+        assert!(!any(None, None).picks_several() && !any(None, None).full(50));
+        assert!(any(None, Some(2)).full(2) && !any(None, Some(2)).full(1));
+    }
+
+    #[test]
+    fn files_are_added_after_the_count_the_sizes_and_the_type() {
+        const MIB: u64 = 1024 * 1024;
+        let limits = Uploads { file_size: 20 * MIB, files: 10, total_size: 500 * MIB };
+        let field = file_field(None, Some(2), &["image"]);
+        let check = |already, added: &[(&str, u64)]| field.check(&limits, already, added);
+        assert_eq!(check(0, &[("a.png", 1), ("b.png", 1)]), Ok(()));
+        assert_eq!(check(1, &[("a.txt", 30 * MIB), ("b.png", 1)]), Err(FileRefusal::TooMany { max: 2 }), "count first");
+        assert_eq!(check(0, &[("a.txt", 20 * MIB + 1)]), Err(FileRefusal::TooLarge { max: 20 * MIB }), "then size");
+        assert_eq!(check(0, &[("a.txt", 0)]), Err(FileRefusal::Type { types: "image".into() }), "no empty check");
+        assert_eq!(check(1, &[("b.PNG", 1)]), Ok(()));
+        let many = file_field(None, None, &[]);
+        let big = [("a", 20 * MIB); 26];
+        assert_eq!(many.check(&limits, 40, &big), Err(FileRefusal::TotalTooLarge { max: 500 * MIB }));
+        assert_eq!(many.check(&limits, 40, &big[..25]), Ok(()), "no max, no count; those there don't count");
+
+        assert_eq!(FileRefusal::TooMany { max: 1 }.body(), "You can upload up to 1 file.");
+        assert_eq!(FileRefusal::TooMany { max: 3 }.heading(), "Too many uploads!");
+        assert_eq!(FileRefusal::TooMany { max: 3 }.body(), "You can upload up to 3 files.");
+        assert_eq!(FileRefusal::TooLarge { max: 20 * MIB }.heading(), "Your files are too powerful");
+        assert_eq!(FileRefusal::TooLarge { max: 20 * MIB }.body(), "Max file size is 20.00 MB please.");
+        assert_eq!(
+            FileRefusal::TotalTooLarge { max: 500 * MIB }.body(),
+            "Total message size must be less than 500.00 MB"
+        );
+        let wrong = FileRefusal::Type { types: "image or .pdf".into() };
+        assert_eq!((wrong.heading(), wrong.body().as_str()), ("Invalid file type", "File must be image or .pdf."));
     }
 }
