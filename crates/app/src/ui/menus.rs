@@ -17,9 +17,9 @@ use gtk::{gdk, gio, glib};
 use super::App;
 use super::chat::{self, MessageTarget};
 use super::{
-    accounts, attachments, composer, create_thread, edits, emoji, forum, gifs, notify_menus, picker, poll_composer,
-    polls, profile, reactions, reactors, scheduling, server_privacy, sidebar, slash, spelling, stickers, threads,
-    uploads, viewer, voice,
+    accounts, attachments, composer, create_thread, edits, emoji, forum, gifs, launcher, notify_menus, picker,
+    poll_composer, polls, profile, reactions, reactors, scheduling, server_privacy, sidebar, slash, spelling, stickers,
+    threads, uploads, viewer, voice,
 };
 
 /// An item that copies or opens a link, shown when the link `$link` finds in
@@ -313,9 +313,15 @@ pub(super) const ATTACH: Table<()> = &[&[
     create_thread::ATTACH_MENU,
     poll_composer::CREATE_POLL,
     slash::USE_APPS,
+    launcher::APP_LAUNCHER,
     scheduling::SCHEDULE_MESSAGE,
     voice::RECORD_VOICE,
 ]];
+
+/// An app in the launcher, right-clicked (`activity-shelf-item-context`,
+/// `eq` in 621377), and its page's More (`app-details-more-menu`). The
+/// client's manage items open server or user settings Neucord lacks.
+pub(super) const LAUNCHER_APP: Table<launcher::AppTarget> = &[&[launcher::COPY_APP_ID]];
 
 /// Added below the message box's own menu (GTK's cut, copy, paste, undo,
 /// select all and emoji, which stand for the browser's menu the web client
@@ -801,6 +807,19 @@ mod tests {
         let at = |name| attach.iter().position(|n| *n == name).unwrap();
         assert_eq!(Some(at(thread)), uploads.map(|u| u + 1));
         assert_eq!(at(poll), at(thread) + 1);
+    }
+
+    #[test]
+    fn the_app_launcher_stands_where_use_apps_does() {
+        let attach: Vec<_> = ATTACH[0]
+            .iter()
+            .map(|entry| match entry {
+                Entry::Item(item) => item.name,
+                Entry::Choices(choices) => choices.name,
+            })
+            .collect();
+        let at = |name| attach.iter().position(|n| *n == name).unwrap();
+        assert_eq!(at("app-launcher"), at("use-apps") + 1, "one shows where the other doesn't (316576 eR)");
     }
 
     #[test]

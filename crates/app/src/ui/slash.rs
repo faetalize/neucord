@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use adw::prelude::*;
 use discord::commands::{
-    self, App as CommandApp, Autocomplete, Command, CommandOption, Names, Run, command_type, option_type,
+    self, App as CommandApp, Autocomplete, Command, CommandOption, Names, Run, RunFrom, command_type, option_type,
 };
 use discord::{Snowflake, interaction::Failure};
 use gtk::{gio, glib};
@@ -64,6 +64,9 @@ struct Active {
     app: CommandApp,
     fields: Vec<Field>,
     autocomplete: Autocomplete,
+    /// Where it was started from, which its run says (the origin and source
+    /// `ApplicationCommandStore` keeps with the active command).
+    from: RunFrom,
 }
 
 struct Field {
@@ -334,15 +337,15 @@ impl AppsMenu {
 }
 
 /// Use Apps, in the attach menu (`SLASH_COMMAND` in 316576): starts a command
-/// in the message box, as typing `/` does. The client's menu has an App
-/// Launcher in its place where the Apps button is turned off, a setting
-/// Neucord has no button for. The attach button on the notice that replaces
-/// the message box lacks it, as a command has nowhere to be typed there.
-/// Neucord sends no analytics for it (`CHANNEL_ATTACH_MENU_USE_APPS_CLICKED`).
+/// in the message box, as typing `/` does. Where the Apps button is turned
+/// off, App Launcher takes its place (`launcher::APP_LAUNCHER`). The attach
+/// button on the notice that replaces the message box lacks it, as a command
+/// has nowhere to be typed there. Neucord sends no analytics for it
+/// (`CHANNEL_ATTACH_MENU_USE_APPS_CLICKED`).
 pub(super) const USE_APPS: Entry<()> = Entry::Item(Item {
     name: "use-apps",
     label: "Use _Apps",
-    shows: |app, _| app.apps_channel().is_some(),
+    shows: |app, _| app.apps_channel().is_some() && !app.attach_launcher(),
     kind: Kind::Action(|app, _| app.use_apps()),
 });
 
@@ -502,7 +505,7 @@ impl App {
 
     /// Ask for the indexes a list of commands needs (`to_fetch`): each once,
     /// until Discord says it changed. `loaded` runs as each arrives.
-    fn fetch_command_indexes(
+    pub(super) fn fetch_command_indexes(
         self: &Rc<Self>,
         place: &commands::Place,
         offer: commands::Offer,
@@ -538,6 +541,13 @@ impl App {
 
     /// Fill in `id`, a suggestion, in the form.
     pub(super) fn start_command(self: &Rc<Self>, id: &str) {
+        self.start_command_from(id, RunFrom::CHAT);
+    }
+
+    /// Fill in `id` in the form, started from `from`. Setting the active
+    /// command closes the app launcher (`AppLauncherStore`, 989837).
+    pub(super) fn start_command_from(self: &Rc<Self>, id: &str, from: RunFrom) {
+        self.close_launcher();
         let Some(channel) = self.account.state.borrow().channel else { return };
         let found = {
             let state = self.account.state.borrow();
@@ -583,7 +593,14 @@ impl App {
             ));
         }
         let first = fields.first().map(|f| f.widget.clone());
-        slash.active.replace(Some(Active { channel, command, app, fields, autocomplete: Autocomplete::default() }));
+        slash.active.replace(Some(Active {
+            channel,
+            command,
+            app,
+            fields,
+            autocomplete: Autocomplete::default(),
+            from,
+        }));
         slash.bar.set_visible(true);
         self.composer.set_sensitive(false);
         self.refresh_chat_bar();
@@ -619,8 +636,10 @@ impl App {
         self.composer.grab_focus();
     }
 
-    /// Put the form away without running the command.
+    /// Put the form away without running the command. Clearing the active
+    /// command closes the app launcher too.
     pub(super) fn cancel_command(self: &Rc<Self>) {
+        self.close_launcher();
         self.slash.active.take();
         self.slash.bar.set_visible(false);
         self.composer.set_sensitive(true);
@@ -754,7 +773,7 @@ impl App {
                             session: &state.session_id,
                             data: active.command.data(options, None),
                             nonce,
-                            from: commands::RunFrom::CHAT,
+                            from: active.from,
                         };
                         Ask::Send(rest, run.autocomplete_body(), nonce)
                     } else {
@@ -909,7 +928,7 @@ impl App {
                             session: &state.session_id,
                             data: active.command.data(options, None),
                             nonce,
-                            from: commands::RunFrom::CHAT,
+                            from: active.from,
                         };
                         Prepared::Go {
                             channel: active.channel,
@@ -942,6 +961,20 @@ impl App {
     /// (`commandTargetId` in 545152's `A`): the command `id` on the user or
     /// message, with no options.
     fn run_context_command(self: &Rc<Self>, subject: Subject, id: &str) {
+        self.run_at_once(subject.channel, subject.kind, id, Some(subject.target), RunFrom::CHAT);
+    }
+
+    /// Run the command `id` of `kind` in `channel` with no options, on
+    /// `target` if it is a user or message command: the Apps menus, and the
+    /// launcher's Send (`MJ` in 735991).
+    pub(super) fn run_at_once(
+        self: &Rc<Self>,
+        channel: Snowflake,
+        kind: u8,
+        id: &str,
+        target: Option<Snowflake>,
+        from: RunFrom,
+    ) {
         enum Prepared {
             Nothing,
             NoticeBar,
@@ -949,24 +982,24 @@ impl App {
         }
         let prepared = {
             let state = self.account.state.borrow();
-            let found = state.command_place(subject.channel).and_then(|place| {
-                let (command, app) = state.commands.get(&place, subject.kind, id)?;
+            let found = state.command_place(channel).and_then(|place| {
+                let (command, app) = state.commands.get(&place, kind, id)?;
                 Some((command.clone(), app.clone()))
             });
             match found {
                 Some(_) if state.session_id.is_empty() => Prepared::Nothing,
-                Some(_) if !state.can_send(subject.channel) => Prepared::NoticeBar,
+                Some(_) if !state.can_send(channel) => Prepared::NoticeBar,
                 Some((command, app)) => {
-                    let guild = state.find_channel(subject.channel).and_then(|(guild, _)| guild.map(|g| g.id));
+                    let guild = state.find_channel(channel).and_then(|(guild, _)| guild.map(|g| g.id));
                     let nonce = Snowflake::now();
                     let run = Run {
                         application: command.application,
                         guild,
-                        channel: subject.channel,
+                        channel,
                         session: &state.session_id,
-                        data: command.data(Vec::new(), Some(subject.target)),
+                        data: command.data_at_once(target),
                         nonce,
-                        from: commands::RunFrom::CHAT,
+                        from,
                     };
                     let body = run.body(&[]);
                     Prepared::Go { command: Box::new(command), app: Box::new(app), body, nonce }
@@ -978,7 +1011,7 @@ impl App {
             Prepared::Nothing => {}
             Prepared::NoticeBar => self.update_notice_bar(),
             Prepared::Go { command, app, body, nonce } => {
-                self.send_command(subject.channel, *command, &app, body, nonce);
+                self.send_command(channel, *command, &app, body, nonce);
             }
         }
     }

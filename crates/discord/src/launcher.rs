@@ -608,6 +608,20 @@ mod tests {
     }
 
     #[test]
+    fn a_sub_command_sent_at_once_goes_inside_its_path() {
+        let index = index();
+        let here = place(Some(GUILD));
+        let dice = Snowflake(DICE.parse().unwrap());
+        let page = page(&index, &here, dice, &Used::default(), &[]);
+        let show = page.commands.iter().find(|c| c.display_name == "config show").unwrap();
+        let data = show.data_at_once(None);
+        assert_eq!(data["name"], "config");
+        assert_eq!(data["options"], json!([{"type": 1, "name": "show", "options": []}]));
+        let roll = page.commands.iter().find(|c| c.display_name == "roll").unwrap();
+        assert_eq!(roll.data_at_once(None)["options"], json!([]));
+    }
+
+    #[test]
     fn links_and_help() {
         let index = index();
         let dice = index.app(&place(Some(GUILD)), Snowflake(DICE.parse().unwrap())).unwrap();

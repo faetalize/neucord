@@ -32,6 +32,7 @@ impl App {
         self.refresh_typing();
         self.set_reply(None);
         self.end_edit();
+        self.close_launcher();
         self.cancel_command();
         self.refresh_command_status();
         self.discard_drafts();
@@ -473,6 +474,8 @@ impl App {
     pub(super) fn on_ready(self: &Rc<Self>, ready: Ready) {
         // A new session: what we hold for each channel may have missed events.
         self.account.timelines.borrow_mut().held.opened();
+        // `CONNECTION_OPEN` closes the app launcher.
+        self.close_launcher();
         self.forum_new_session();
         self.account.state.borrow_mut().reactors.clear();
         let Ready {

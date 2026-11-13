@@ -196,6 +196,7 @@ impl App {
         self.composer_box.append(&self.gif_button);
         self.composer_box.append(&self.sticker_button);
         self.composer_box.append(&self.emoji_button);
+        self.composer_box.append(&self.apps_button);
         self.composer_box.append(&self.send_separator);
         self.composer_box.append(&self.send_button);
         self.composer_box.append(&self.length.root);
@@ -213,6 +214,14 @@ impl App {
                 let Some(this) = this.upgrade() else { return };
                 let Some(channel) = this.account.state.borrow().channel else { return };
                 this.open_emoji_picker(channel, button, Intention::Chat, |app, item| app.insert_emoji(item));
+            }
+        });
+        self.apps_button.connect_clicked({
+            let this = Rc::downgrade(self);
+            move |_| {
+                if let Some(this) = this.upgrade() {
+                    this.toggle_launcher();
+                }
             }
         });
         self.build_voice();
@@ -592,6 +601,7 @@ impl App {
         self.gif_button.set_visible(shown.gif);
         self.sticker_button.set_visible(shown.sticker);
         self.emoji_button.set_visible(shown.emoji);
+        self.apps_button.set_visible(shown.apps);
         self.send_separator.set_visible(shown.send);
         self.send_button.set_visible(shown.send);
         self.send_button.set_sensitive(shown.send_enabled);

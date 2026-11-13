@@ -20,6 +20,7 @@ mod forum_post;
 mod friends;
 mod gifs;
 mod identity;
+mod launcher;
 mod login;
 mod media_frame;
 mod members;
@@ -138,6 +139,9 @@ pub struct App {
     composer_box: gtk::Box,
     /// Opens the emoji picker.
     emoji_button: gtk::Button,
+    /// Opens the app launcher.
+    apps_button: gtk::Button,
+    launcher: launcher::Slot,
     /// Sends what Enter sends, where the user chose to have it.
     send_button: gtk::Button,
     /// Between the expression buttons and the send button, which it follows.
@@ -360,6 +364,13 @@ impl App {
                 .valign(gtk::Align::Center)
                 .css_classes(["flat", "circular"])
                 .build(),
+            apps_button: gtk::Button::builder()
+                .icon_name("view-app-grid-symbolic")
+                .tooltip_text("Apps")
+                .valign(gtk::Align::Center)
+                .css_classes(["flat", "circular"])
+                .build(),
+            launcher: launcher::Slot::default(),
             send_button: gtk::Button::builder()
                 .icon_name("mail-send-symbolic")
                 .tooltip_text("Send Message")

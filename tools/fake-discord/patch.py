@@ -451,3 +451,60 @@ impl App {
     }
 }
 """)
+
+# The app launcher: `apps` presses the Apps button and `apps-visible` says whether it shows; with the launcher
+# open, `launcher-shot <png>`, `launcher-search <text>`, `launcher-rows` (the titles of the shown page's rows),
+# `launcher-row <title>` (activate it), `launcher-button <tooltip or label>` and `launcher-close`.
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(l) if l == "apps" || l == "apps-visible" || l.starts_with("launcher") => self.e2e_launcher(l, rest),
+            Some("quit") => {''')
+open(f"{root}/crates/app/src/ui/e2e.rs", "a").write(r"""
+impl App {
+    fn e2e_launcher(self: &Rc<Self>, command: &str, rest: &str) {
+        match command {
+            "apps" => return self.apps_button.emit_clicked(),
+            "apps-visible" => return eprintln!("e2e: apps button visible={}", self.apps_button.is_visible()),
+            _ => {}
+        }
+        let mut popovers: Vec<gtk::Popover> = Vec::new();
+        widgets(self.composer_box.upcast_ref(), &mut popovers);
+        let nav = |p: &gtk::Popover| p.child().and_downcast::<adw::NavigationView>();
+        let Some(popover) = popovers.into_iter().find(|p| p.is_mapped() && nav(p).is_some()) else {
+            return eprintln!("e2e: no launcher");
+        };
+        let Some(page) = nav(&popover).and_then(|n| n.visible_page()) else { return };
+        let page: gtk::Widget = page.upcast();
+        let mut rows: Vec<adw::ActionRow> = Vec::new();
+        widgets(&page, &mut rows);
+        let title = |r: &adw::ActionRow| adw::prelude::PreferencesRowExt::title(r).to_string();
+        match command {
+            "launcher-shot" => shot(&popover, if rest.is_empty() { "launcher.png" } else { rest }),
+            "launcher-close" => popover.popdown(),
+            "launcher-search" => {
+                let mut entries: Vec<gtk::SearchEntry> = Vec::new();
+                widgets(&page, &mut entries);
+                match entries.first() {
+                    Some(entry) => entry.set_text(rest),
+                    None => eprintln!("e2e: no search"),
+                }
+            }
+            "launcher-rows" => eprintln!("e2e: rows {:?}", rows.iter().map(title).collect::<Vec<_>>()),
+            "launcher-row" => match rows.iter().find(|r| title(r) == rest) {
+                Some(row) => adw::prelude::ActionRowExt::activate(row),
+                None => eprintln!("e2e: no row {rest}"),
+            },
+            "launcher-button" => {
+                let mut buttons: Vec<gtk::Button> = Vec::new();
+                widgets(&page, &mut buttons);
+                let named = |b: &gtk::Button| {
+                    b.tooltip_text().as_deref() == Some(rest) || b.label().as_deref() == Some(rest)
+                };
+                match buttons.iter().find(|b| named(b)) {
+                    Some(button) => button.emit_clicked(),
+                    None => eprintln!("e2e: no button {rest}"),
+                }
+            }
+            other => eprintln!("e2e: unknown {other}"),
+        }
+    }
+}
+""")

@@ -799,6 +799,8 @@ impl App {
     /// around it is asked for, not the newest, as the client does when a
     /// link or a search result takes it there.
     pub(super) fn select_channel_at(self: &Rc<Self>, id: Snowflake, target: Option<Snowflake>) {
+        // `CHANNEL_SELECT` closes the app launcher.
+        self.close_launcher();
         self.track_channel_use(id);
         let (title, forum, rest, left) = {
             let mut state = self.account.state.borrow_mut();

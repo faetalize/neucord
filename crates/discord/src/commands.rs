@@ -1960,11 +1960,7 @@ pub fn run_options(
         }
         options.push(entry);
     }
-    // Sub-command groups wrap the options, innermost first.
-    for step in command.path.iter().rev() {
-        options = vec![json!({ "type": step.kind, "name": step.name, "options": options })];
-    }
-    Ok(options)
+    Ok(command.inside_path(options))
 }
 
 /// The options of a run without the sub-command groups around them
@@ -2033,6 +2029,22 @@ impl Command {
             data.insert("target_id".into(), json!(target.to_string()));
         }
         Value::Object(data)
+    }
+
+    /// `data` of a run with no options: the launcher's Send (`MJ` in 735991
+    /// passes no `optionValues`, which `T` in 545152 still puts inside the
+    /// sub-command's path) and the Apps menus' user and message commands.
+    pub fn data_at_once(&self, target: Option<Snowflake>) -> Value {
+        self.data(self.inside_path(Vec::new()), target)
+    }
+
+    /// `options` inside the sub-command and group this command is, innermost
+    /// first.
+    fn inside_path(&self, mut options: Vec<Value>) -> Vec<Value> {
+        for step in self.path.iter().rev() {
+            options = vec![json!({ "type": step.kind, "name": step.name, "options": options })];
+        }
+        options
     }
 
     /// Whether the form can't take an option: files, which Neucord doesn't
