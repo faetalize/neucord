@@ -360,6 +360,12 @@ impl Rest {
         Ok(Gif::list(&answer))
     }
 
+    /// `/gif`'s search, with its own query ([`crate::gifs::command_query`]).
+    pub async fn gifs_command_search(&self, query: &str) -> Result<Vec<Gif>, Error> {
+        let answer: Value = self.request(call!(GIFS_SEARCH).query(&crate::gifs::command_query(query)), None).await?;
+        Ok(Gif::list(&answer))
+    }
+
     pub async fn gifs_suggest(&self, query: &str) -> Result<Vec<String>, Error> {
         let answer: Value =
             self.request(call!(GIFS_SUGGEST).query(&Request::Suggest(query.to_owned()).query()), None).await?;
