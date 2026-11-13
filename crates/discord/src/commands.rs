@@ -376,10 +376,11 @@ impl CommandIndex {
     /// its server's or DM's index where that has apps, and the account's,
     /// only where apps' commands are offered. That is the bare `/`'s browser
     /// (`ee` and `et`), and the Apps menus', with nothing `typed`; the typed
-    /// list (`query`) asks for the account's index whatever is offered.
+    /// list (`query`) asks for the account's index whatever is offered, and
+    /// for the server's only with View Channel and Use Application Commands.
     pub fn to_fetch(&mut self, place: &Place, now: Instant, offer: Offer, typed: &str) -> Vec<Target> {
         let mut targets = Vec::new();
-        if offer.apps && place.has_context_index() {
+        if offer.apps && (typed.is_empty() || place.base_access) && place.has_context_index() {
             let target = place.guild.map_or(Target::Channel(place.channel), Target::Guild);
             if self.wants(target, now) {
                 targets.push(target);
@@ -1898,6 +1899,18 @@ mod tests {
             commands.loaded(Target::User, &json!({"applications": [], "application_commands": []}), ME);
             assert_eq!(commands.to_fetch(&place, now, offer(true), "roll"), NOTHING, "current");
         }
+    }
+
+    #[test]
+    fn without_use_application_commands_only_a_bare_slash_fetches_the_servers_index() {
+        let now = Instant::now();
+        let mut place = place();
+        place.base_access = false;
+        let mut commands = CommandIndex::default();
+        assert_eq!(commands.to_fetch(&place, now, Offer::ALL, "ro"), [Target::User]);
+        let mut commands = CommandIndex::default();
+        let both = [Target::Guild(GUILD_ID), Target::User];
+        assert_eq!(commands.to_fetch(&place, now, Offer::ALL, ""), both, "the browser's fetch doesn't look");
     }
 
     #[test]
