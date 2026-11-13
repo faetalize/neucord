@@ -148,7 +148,8 @@ changed for unrelated reasons only needs a note in the issue.
   commands are found and ordered) and `handleCommand`, the run's request, are
   watched. Not watched: where a command may be used, `zl` in 46477 (anchor
   `MISSING_BASE_PERMISSIONS`) with the place's permissions, `Bh` in 240591
-  (anchor `hasBaseAccessPermissions`), and the rule types, 1 role, 2 user, 3
+  (anchor `hasBaseAccessPermissions`, with `p` there for where age-restricted
+  commands may show), and the rule types, 1 role, 2 user, 3
   channel (`RA` in 392054); how a command and its sub-commands are
   listed and what is kept of them, `Lz` in 168186 (anchor `subCommandPath`);
   what a run sends for each option, `A` in 545152 (anchor

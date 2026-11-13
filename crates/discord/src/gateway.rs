@@ -1838,10 +1838,11 @@ mod tests {
         dispatch(
             &state,
             "USER_UPDATE",
-            json!({"id": "5", "verified": true, "email": "a@example.org", "mfa_enabled": true, "premium_type": 2}),
+            json!({"id": "5", "verified": true, "email": "a@example.org", "mfa_enabled": true, "premium_type": 2,
+                   "nsfw_allowed": true}),
         );
         let Ok(Event::AccountUpdate(account, nitro)) = state.try_recv() else { panic!("no account update") };
-        assert!(account.verified && account.email && !account.phone && account.mfa);
+        assert!(account.verified && account.email && !account.phone && account.mfa && account.nsfw_allowed);
         assert_eq!(nitro.premium_type, Some(crate::limits::PremiumType::Tier2));
 
         dispatch(&state, "CHANNEL_UPDATE", json!({"id": "9", "type": 0, "guild_id": "1", "rate_limit_per_user": 30}));

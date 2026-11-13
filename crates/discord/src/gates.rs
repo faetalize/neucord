@@ -24,6 +24,12 @@ const TEEN_MESSAGE_REQUESTS: u64 = 4;
 const TEEN_ACTIVITY_STATUS: u64 = 8;
 /// `DM_PRIVACY_SETTINGS` among the features a region age-gates (687123).
 const AGE_GATED_DM_PRIVACY: u64 = 4;
+/// `COMMANDS_TOGGLE` among them (687123).
+const AGE_GATED_COMMANDS: u64 = 32;
+/// `ageVerificationStatus` `UNVERIFIED`. The client's `CLIENT_ONLY_PENDING`
+/// (99999) is its own state during its verification flow, which Neucord has
+/// none of.
+const UNVERIFIED: u64 = 1;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Gates {
@@ -40,6 +46,10 @@ pub struct Gates {
     /// Where an account that never chose shares its activity: large servers,
     /// not none.
     pub activity_status_by_default: bool,
+    /// Age-restricted commands in DMs wait for an account that has verified
+    /// its age, where the region age-gates them (`S9` in 386171; `Q9` in
+    /// 36149 lets every status but unverified through).
+    pub nsfw_commands_age_gated: bool,
 }
 
 impl Gates {
@@ -56,6 +66,7 @@ impl Gates {
             message_requests_forced: is_teen(age) && teen_defaults & TEEN_MESSAGE_REQUESTS != 0,
             message_requests_age_gated: !is_adult(age) && age_gated & AGE_GATED_DM_PRIVACY != 0,
             activity_status_by_default: teen_defaults & TEEN_ACTIVITY_STATUS != 0,
+            nsfw_commands_age_gated: age == UNVERIFIED && age_gated & AGE_GATED_COMMANDS != 0,
         }
     }
 }
@@ -107,5 +118,17 @@ mod tests {
         assert!(!Gates::from_ready(&ready(3, 0, 4)).message_requests_age_gated, "a verified adult");
         assert!(!Gates::from_ready(&ready(4, 0, 4)).message_requests_age_gated, "an inferred adult");
         assert!(!Gates::from_ready(&ready(1, 0, 3)).message_requests_age_gated, "not a gated feature");
+    }
+
+    #[test]
+    fn age_restricted_commands_in_dms_wait_for_a_verified_age_where_the_region_says() {
+        let ready = |age: Option<u64>, gated| json!({"user": {"age_verification_status": age}, "regional_feature_config": {"age_gated_features": gated}});
+        let gated = |age, features| Gates::from_ready(&ready(age, features)).nsfw_commands_age_gated;
+        assert!(gated(Some(1), 32), "unverified");
+        assert!(!gated(Some(1), 31), "not a gated feature");
+        assert!(!gated(Some(2), 32), "a verified teen passes");
+        assert!(!gated(Some(5), 32), "an inferred teen too");
+        assert!(!gated(Some(3), 32));
+        assert!(!gated(None, 32), "no status passes");
     }
 }
