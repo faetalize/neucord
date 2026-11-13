@@ -841,6 +841,12 @@ impl App {
         if self.reply.borrow().as_ref().is_some_and(|r| r.channel != id) {
             self.set_reply(None);
         }
+        // The box's text is the next channel's too: its line, as text, names the command again there if it can
+        // (`CHANNEL_SELECT` resets the client's command).
+        if left.is_some() {
+            self.end_command(super::slash::Keep::Text);
+            self.update_mention_popup();
+        }
         if self.editing.borrow().as_ref().is_some_and(|e| e.message.channel_id != id) {
             self.end_edit();
         }

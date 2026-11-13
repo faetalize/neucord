@@ -14,7 +14,7 @@ use discord::gifs::Tiles;
 use discord::interaction::Failure;
 use discord::limits::{Limits, Nitro};
 use discord::member_list::{self, MemberLists};
-use discord::members::{Members, RoleColour};
+use discord::members::{MemberSearch, Members, RoleColour};
 use discord::notice::Notice;
 use discord::notification_edit::{self, BulkAck};
 use discord::notifications::{Level, NotificationSettings, Place};
@@ -264,6 +264,8 @@ pub(super) struct State {
     pub(super) typing: Typing,
     /// Other people's roles in each server.
     pub(super) members: Members,
+    /// The pills' searches of servers' members by name.
+    pub(super) member_search: MemberSearch,
     /// What the gateway is subscribed to for each server.
     pub(super) subscriptions: Subscriptions,
     /// The rows of the member lists we asked for.

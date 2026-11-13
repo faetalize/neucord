@@ -1,5 +1,5 @@
 # The app launcher in #general: the home, search (case counts), Dicey's page, Send, a command filled in from
-# the page and run from the form, and a DM's home. Check the runs' analytics_location, section_name and source
+# the page and run from the box, and a DM's home. Check the runs' analytics_location, section_name and source
 # in fake.log, and that nothing but the indexes, settings-proto/2 and app icons was asked for.
 waitfor identify 1
 sleep 3
@@ -32,7 +32,8 @@ sleep 1
 cmd "launcher-row settings set"
 sleep 1
 cmd "apps-visible"
-cmd "shot $OUT/form.png"
+cmd "line"
+cmd "shot $OUT/filled-in.png"
 cmd "key Return"
 waitreq POST /api/v9/interactions 2
 sleep 1

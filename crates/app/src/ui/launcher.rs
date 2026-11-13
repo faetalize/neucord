@@ -836,7 +836,7 @@ impl Launcher {
     /// also closes the launcher (`U.Gf` in 721768).
     fn fill_in(&self, id: &str, from: RunFrom) {
         if let Some(app) = self.app.upgrade() {
-            app.start_command_from(id, from);
+            app.activate_command(id, from);
         }
     }
 

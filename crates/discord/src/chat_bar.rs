@@ -43,6 +43,9 @@ pub struct Bar {
     /// A slash command is active (`getActiveCommand`): the client draws no
     /// GIF or sticker button beside it (`null == K`).
     pub command: bool,
+    /// The type of the option whose pill holds the caret, while a command
+    /// is active (`getActiveOption`, `H`).
+    pub pill: Option<u8>,
     /// The box holds nothing to send ([`crate::rest::nothing_to_send`]).
     pub empty: bool,
     /// [`customizable`] for the account.
@@ -80,8 +83,12 @@ pub struct Shown {
     /// send. An active command is something to send: the client's box then
     /// holds the command's text.
     pub send_enabled: bool,
-    /// The character count, which Neucord draws in the row a recording takes.
+    /// The character count, which Neucord draws in the row a recording
+    /// takes. A command has none (`tD` in 989161).
     pub count: bool,
+    /// The command's app icon, in the attach button's place (`eY` in
+    /// 699344).
+    pub app_icon: bool,
 }
 
 pub fn shown(bar: Bar, prefs: Prefs) -> Shown {
@@ -90,7 +97,10 @@ pub fn shown(bar: Bar, prefs: Prefs) -> Shown {
     Shown {
         gif: message && !bar.command && chosen(prefs.gif),
         sticker: message && !bar.command && chosen(prefs.sticker),
-        emoji: !bar.recording && chosen(prefs.emoji),
+        // `en`: beside a command, only with the caret in a pill that takes text.
+        emoji: !bar.recording
+            && chosen(prefs.emoji)
+            && (!bar.command || bar.pill.is_some_and(|kind| kind != crate::commands::option_type::ATTACHMENT)),
         // `Z`: a box that takes commands (not the edit or announcement
         // box), with none active. Replying doesn't matter here, only to
         // the attach menu's Use Apps.
@@ -99,7 +109,8 @@ pub fn shown(bar: Bar, prefs: Prefs) -> Shown {
         // doubles as it.
         send: message && prefs.send,
         send_enabled: !bar.empty || bar.command,
-        count: !bar.recording,
+        count: !bar.recording && !bar.command,
+        app_icon: bar.open && !bar.editing && bar.command,
     }
 }
 
@@ -114,6 +125,7 @@ mod tests {
         editing: false,
         recording: false,
         command: false,
+        pill: None,
         empty: false,
         customizable: false,
         announcement: false,
@@ -151,8 +163,24 @@ mod tests {
     #[test]
     fn an_active_command_takes_the_gif_and_sticker_buttons() {
         let shown = shown(Bar { command: true, ..OPEN }, SEND);
-        assert_eq!((shown.gif, shown.sticker, shown.emoji, shown.apps), (false, false, true, false));
+        assert_eq!((shown.gif, shown.sticker, shown.apps), (false, false, false));
         assert!(shown.send, "the send button stays");
+    }
+
+    #[test]
+    fn beside_a_command_the_emoji_button_shows_in_a_pill_that_takes_text() {
+        use crate::commands::option_type::{ATTACHMENT, STRING};
+        let command = Bar { command: true, ..OPEN };
+        assert!(!shown(command, SEND).emoji, "the caret in no pill");
+        assert!(shown(Bar { pill: Some(STRING), ..command }, SEND).emoji);
+        assert!(!shown(Bar { pill: Some(ATTACHMENT), ..command }, SEND).emoji);
+    }
+
+    #[test]
+    fn a_command_takes_the_count_and_puts_its_app_icon_for_the_attach_button() {
+        let shown = shown(Bar { command: true, ..OPEN }, SEND);
+        assert!(!shown.count && shown.app_icon);
+        assert!(!super::shown(OPEN, SEND).app_icon);
     }
 
     #[test]

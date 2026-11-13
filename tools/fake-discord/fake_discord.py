@@ -853,11 +853,24 @@ class Handler(BaseHTTPRequestHandler):
                         threading.Timer(float(os.environ["FAKE_REIDENTIFY"]), lambda: send(9, False)).start()
                 else:
                     log(kind="gateway", op=message["op"], d=message.get("d"), at=time.time())
+                    if message["op"] == 8:
+                        member_search(send, message.get("d") or {})
         except (EOFError, OSError):
             pass
         if SESSION[0] is send:
             SESSION[0] = None
         self.close_connection = True
+
+
+def member_search(send, d):
+    """Op 8 with a `query`: the made-up people whose username or name starts with it, as one chunk."""
+    query = d.get("query")
+    if query is None:
+        return
+    found = [u for u in (ALICE, BOB) if u["username"].startswith(query) or u["global_name"].lower().startswith(query)]
+    for guild in d.get("guild_id", []):
+        send(0, {"guild_id": guild, "members": [{"user": u, "roles": [], "nick": None} for u in found[:d.get("limit", 10)]],
+                 "not_found": [], "chunk_index": 0, "chunk_count": 1}, "GUILD_MEMBERS_CHUNK")
 
 
 form_message()

@@ -40,8 +40,11 @@ what arrived, IDENTIFY's key order and properties first.
   `channel <id>`, `attach`, `shot <png>`, `shot-popover <widget> <png>` (the
   popover showing on `composer`, `composer_box` or `gif_button`),
   `type <text>` (as typed), `set <text>` (as the app sets it),
-  `suggestions [png]` (prints the autocomplete's rows, `*` on the selected
-  one), `pick <n>` (accepts row n), `key <name> [shift|ctrl|alt]…` (a key
+  `backspace` (GTK's own Backspace at the caret), `suggestions [png]`
+  (prints the autocomplete's rows and headers, `*` on the selected one),
+  `pick <n>` (accepts row n), `line` (prints the command in the box: its
+  text and caret, each pill and whether it is drawn as wrong, the bar,
+  "+n" and the buttons beside it), `key <name> [shift|ctrl|alt]…` (a key
   pressed in the message box, by its GDK name such as `Return` or
   `Escape`), `composer-menu [x y]` (opens the message box's menu, as a
   right-click there does, else the Menu key; shoot it with `shot-popover
@@ -72,6 +75,9 @@ what arrived, IDENTIFY's key order and properties first.
   a server channel; `gifs` picks GIFs from a search, Trending and the
   Favorites, and favourites three; `modal-files` (with
   `FAKE_INTERACTION=modal`) adds, takes back and submits a form's files;
+  `pills` fills a command's options in the box, searches members (the fake
+  answers op 8 with a `query` with its people whose username or name starts
+  with it), and ends commands by Backspace, a reply and a channel switch;
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).
 

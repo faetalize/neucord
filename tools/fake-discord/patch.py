@@ -136,6 +136,12 @@ impl App {
                 buffer.end_user_action();
             }
             Some("set") => self.set_composer_text(rest),
+            // GTK's own Backspace at the caret, as the key does when the box leaves it alone.
+            Some("backspace") => {
+                let buffer = self.composer.buffer();
+                let mut at = buffer.iter_at_offset(buffer.property::<i32>("cursor-position"));
+                buffer.backspace(&mut at, true, self.composer.is_editable());
+            }
             Some("suggestions") => {
                 let shown = self.mention_popover.is_visible();
                 let selected = self.mention_list.selected_row().map(|r| r.index());
@@ -146,13 +152,17 @@ impl App {
                     .iter()
                     .filter(|_| shown)
                     .map(|c| match c {
-                        Completion::Mention(_, name) => format!("@{name}"),
-                        Completion::Emoji(item) => format!(":{}:", item.name()),
                         Completion::Command(s) => format!("{} ({})", s.name, s.app),
+                        Completion::Status(text) => format!("[{text}]"),
+                        other => other.label(),
                     })
                     .collect();
+                let headers = self.mention.borrow().headers.clone();
                 eprintln!("e2e: suggestions {}", rows.len());
                 for (i, row) in rows.iter().enumerate() {
+                    if let Some((_, header)) = headers.iter().find(|(at, _)| *at == i) {
+                        eprintln!("e2e: header {} {}", header.words, header.query.as_deref().unwrap_or_default());
+                    }
                     let mark = if selected == Some(i as i32) { " *" } else { "" };
                     eprintln!("e2e: suggestion {i} {row}{mark}");
                 }
@@ -266,6 +276,7 @@ impl App {
                     eprintln!("e2e: {e}");
                 }
             }
+            Some("line") => self.e2e_line(),
             Some("quit") => {
                 if let Some(app) = self.window.application() {
                     app.quit();
@@ -276,6 +287,37 @@ impl App {
     }
 }
 """)
+
+# `line` prints the command in the box: its text, each pill (option, value, red), the caret, the bar, "+n", the
+# app icon and the buttons beside it.
+open(f"{root}/crates/app/src/ui/e2e.rs", "a").write(r"""
+impl App {
+    fn e2e_line(self: &Rc<Self>) {
+        let buffer = self.composer.buffer();
+        let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+        let caret = buffer.property::<i32>("cursor-position");
+        let selection = buffer.selection_bounds().map(|(a, b)| (a.offset(), b.offset()));
+        eprintln!("e2e: box {text:?} caret {caret} selection {selection:?}");
+        let Some((line, text)) = self.read_line() else { return eprintln!("e2e: no command") };
+        let chars: Vec<char> = text.chars().collect();
+        let slot = self.slash.active.borrow();
+        let active = slot.as_ref().expect("active");
+        for pill in &line.pills {
+            let value: String = chars[pill.value.clone()].iter().collect();
+            let red = if active.states.errored(&pill.option) { " errored" } else { "" };
+            eprintln!("e2e: pill {} {value:?}{red}", pill.option);
+        }
+        eprintln!("e2e: bar {:?} {:?} error={}", self.slash.title.label(), self.slash.description.label(),
+                  self.slash.description.has_css_class("error"));
+        eprintln!("e2e: more {:?} icon={} attach={} gif={} emoji={} length={}",
+                  self.slash.more.is_visible().then(|| self.slash.more.label()), self.slash.icon.is_visible(),
+                  self.drafts.attach.is_visible(), self.gif_button.is_visible(), self.emoji_button.is_visible(),
+                  self.length_visible());
+    }
+}
+""")
+edit("crates/app/src/ui/composer.rs", "    pub(super) fn update_length_indicator(&self) {",
+     "    pub(super) fn length_visible(&self) -> bool {\n        self.length.root.is_visible()\n    }\n\n    pub(super) fn update_length_indicator(&self) {")
 
 # The GIF picker: `gif` opens it, `gif-search <q>` types into its search, `gif-pick <n>`, `gif-shift-pick <n>`
 # and `gif-star <n>` press the nth GIF shown or its star, `gif-tile <n>` the nth front page tile, `gif-back`

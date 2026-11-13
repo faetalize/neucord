@@ -333,6 +333,10 @@ pub(super) const LAUNCHER_APP: Table<launcher::AppTarget> = &[&[launcher::COPY_A
 /// staff-only Fix Grammar, Translate and Transforms.
 pub(super) const COMPOSER: Table<()> = &[&[composer::SEND_BUTTON], &[spelling::SPELLING], &[uploads::PASTE_PLAIN]];
 
+/// The bar above a command in the message box (`dev-context`, 646938):
+/// Copy Command ID, in Developer Mode.
+pub(super) const COMMAND_BAR: Table<slash::BarTarget> = &[&[slash::COPY_COMMAND_ID]];
+
 /// An emoji or sticker of the picker (`expression-picker`, 233503). The
 /// client offers Copy Emoji, Copy Emoji ID and Copy Emoji Image Link, or
 /// Copy Sticker ID and Copy Sticker Image Link, only in Developer Mode, and
@@ -880,6 +884,7 @@ mod tests {
         // Send Message Button, the spelling groups, then Paste as Plain Text
         // (items 2, 3–4 and 5 of 194400).
         assert_eq!(names(COMPOSER), [["send-button"], ["spelling"], ["paste-plain-text"]]);
+        assert_eq!(names(COMMAND_BAR), [["copy-command-id"]]);
     }
 
     #[test]

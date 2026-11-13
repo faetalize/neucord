@@ -647,10 +647,16 @@ pub fn active(line: &Line, caret: usize) -> Option<&Pill> {
 
 /// What each pill holds, as written, by option (`SQ` in 317681); options
 /// without a pill are left out. `validate` and `run_options` trim where the
-/// client does.
-pub fn values(line: &Line, text: &str) -> Values {
+/// client does. A file option's value is its staged file, never text: a
+/// typed `file:` pill holds none until the box can hold a file, so a run
+/// never names a file it doesn't carry.
+pub fn values(command: &Command, line: &Line, text: &str) -> Values {
     let chars: Vec<char> = text.chars().collect();
-    line.pills.iter().map(|p| (p.option.clone(), slice(&chars, p.value.clone()))).collect()
+    line.pills
+        .iter()
+        .filter(|p| command.options.iter().any(|o| o.name == p.option && listed(o)))
+        .map(|p| (p.option.clone(), slice(&chars, p.value.clone())))
+        .collect()
 }
 
 /// Tab (`selectNextCommandOption` in 35277): the next pill's whole value,
@@ -1023,7 +1029,7 @@ impl OptionStates {
             }
         }
         for option in &command.options {
-            if option.required && !values.contains_key(&option.name) {
+            if option.required && !values.contains_key(&option.name) && !failing.contains(&option.name) {
                 failing.push(option.name.clone());
             }
         }
@@ -1240,7 +1246,7 @@ mod tests {
         assert_eq!(b.caret, b.text().chars().count() - 1, "in the last new pill");
         let line = b.line(&roll);
         assert_eq!(
-            values(&line, &b.text()).into_iter().collect::<Vec<_>>(),
+            values(&roll, &line, &b.text()).into_iter().collect::<Vec<_>>(),
             [
                 ("count".to_owned(), "3".to_owned()),
                 ("size".to_owned(), "D6".to_owned()),
@@ -1267,7 +1273,7 @@ mod tests {
         let (b, _) = activated(&names, "/names नाम:1 ชื่อ:2 x_y-z: 3 ");
         let line = b.line(&names);
         assert_eq!(line.pills.iter().map(|p| p.option.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
-        assert_eq!(values(&line, &b.text())["c"], "3", "trimmed");
+        assert_eq!(values(&names, &line, &b.text())["c"], "3", "trimmed");
     }
 
     #[test]
@@ -1308,7 +1314,7 @@ mod tests {
         let (mut b, _) = activated(&roll, "/roll ");
         b.type_text("3 ");
         let line = b.line(&roll);
-        assert_eq!(values(&line, &b.text())["count"], "3 ", "an INTEGER's spaces stay for its query");
+        assert_eq!(values(&roll, &line, &b.text())["count"], "3 ", "an INTEGER's spaces stay for its query");
     }
 
     #[test]
@@ -1571,7 +1577,7 @@ mod tests {
         let roll = roll();
         let (b, _) = activated(&roll, "/roll who:x size:D7");
         let line = b.line(&roll);
-        let values = values(&line, &b.text());
+        let values = values(&roll, &line, &b.text());
         let mut states = OptionStates::new(&roll);
         let failed = states.submit(&roll, &line, &values, &check).unwrap_err();
         // Pills in the box's order (who, size, count), count empty as required.
@@ -1584,5 +1590,28 @@ mod tests {
         assert!(states.error("count").is_none(), "no result kept without a pill");
         let ok = values_of(&[("count", "2")]);
         assert_eq!(OptionStates::new(&roll).submit(&roll, &line, &ok, &check), Ok(()));
+    }
+
+    #[test]
+    fn text_typed_in_a_file_pill_is_no_file_to_send() {
+        let upload = command(
+            "upload",
+            json!([{"type": 11, "name": "file", "description": "", "required": true},
+                   {"type": 3, "name": "note", "description": ""}]),
+        );
+        let (b, _) = activated(&upload, "/upload file:cat.png note:hi");
+        let line = b.line(&upload);
+        assert_eq!(line.pills.len(), 2, "the key is still a pill");
+        let values = values(&upload, &line, &b.text());
+        let mut states = OptionStates::new(&upload);
+        assert_eq!(states.submit(&upload, &line, &values, &check).unwrap_err(), ["file"], "required, no file");
+        let note = values_of(&[("note", "hi")]);
+        let sent =
+            crate::commands::run_options(&upload, &values, &NoNames, &Default::default(), None).unwrap_or_default();
+        assert_eq!(
+            sent,
+            crate::commands::run_options(&upload, &note, &NoNames, &Default::default(), None).unwrap(),
+            "no type 11 pointing at a file the run doesn't carry"
+        );
     }
 }

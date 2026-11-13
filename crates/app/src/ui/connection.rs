@@ -33,7 +33,7 @@ impl App {
         self.set_reply(None);
         self.end_edit();
         self.close_launcher();
-        self.cancel_command();
+        self.end_command(super::slash::Keep::Nothing);
         self.refresh_command_status();
         self.discard_drafts();
         rest
@@ -235,6 +235,7 @@ impl App {
                 }
                 Event::MemberUpdate { guild_id, member } => self.on_member(guild_id, member),
                 Event::Members { guild_id, members, not_found, names } => {
+                    let searched = !names.is_empty();
                     let (open, changed) = {
                         let mut state = self.account.state.borrow_mut();
                         for (user, name) in names {
@@ -247,6 +248,10 @@ impl App {
                     if open && changed {
                         self.refresh_rows();
                         self.refresh_member_rows();
+                    }
+                    // A pill's member list redraws as its search is answered.
+                    if open && searched {
+                        self.members_found();
                     }
                 }
                 Event::MemberList(update) => self.on_member_list(*update),
@@ -582,8 +587,10 @@ impl App {
         self.usage_connected();
         let me = self.account.state.borrow().me.as_ref().map(|u| u.display_name().to_owned()).unwrap_or_default();
         self.me_label.set_label(&me);
+        // A new session has no command (`CONNECTION_OPEN` in 861382); its line goes with it.
+        self.end_command(super::slash::Keep::Nothing);
         // READY may bring other Nitro, which changes the length limit.
-        self.update_length_indicator();
+        self.refresh_chat_bar();
         self.refresh_typing();
         // Not out from under a login that adds another account.
         if self.login_origin.get() != Origin::Beside || !self.on_login_page() {

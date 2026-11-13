@@ -418,13 +418,15 @@ impl App {
         let drafts = &self.drafts;
         let channel = self.attach_channel();
         // The menu holds more than files: it shows wherever anything in it does.
+        // A command's app icon takes its place (`eY` in 699344).
         drafts.attach.set_visible(
-            channel.is_some()
+            (channel.is_some()
                 || self.voice_channel().is_some()
                 || self.poll_channel().is_some()
                 || self.schedule_channel().is_some()
                 || self.thread_channel().is_some()
-                || self.apps_channel().is_some(),
+                || self.apps_channel().is_some())
+                && !self.slash.is_active(),
         );
         self.refresh_schedule_bar();
         while let Some(child) = drafts.tray.first_child() {

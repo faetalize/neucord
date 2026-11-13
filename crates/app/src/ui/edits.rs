@@ -82,6 +82,8 @@ impl App {
             return;
         }
         self.end_edit();
+        // A command's line is kept as the draft's text, which names it again once the edit ends.
+        self.end_command(super::slash::Keep::Text);
         let buffer = self.composer.buffer();
         let draft = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).into();
         let reply = self.reply.borrow().clone();

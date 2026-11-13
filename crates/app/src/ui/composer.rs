@@ -93,8 +93,22 @@ impl LengthIndicator {
 pub(super) enum Completion {
     Mention(u64, String),
     Emoji(Emoji),
-    /// A command to fill in the form of, not text to insert.
+    /// A command to put in the box, not text to insert.
     Command(super::slash::Suggestion),
+    /// An option of the command in the box, to add a pill for.
+    Option {
+        name: String,
+        display_name: String,
+        description: String,
+    },
+    /// A choice for a pill, by the name it shows.
+    Choice(String),
+    Role(Snowflake, String),
+    Channel(Snowflake, String),
+    /// `@everyone`, for a role or mentionable pill.
+    Everyone,
+    /// A line that can't be picked: loading, a failure, nothing found.
+    Status(String),
 }
 
 impl Completion {
@@ -103,38 +117,57 @@ impl Completion {
         match self {
             Completion::Mention(id, _) => format!("<@{id}> "),
             Completion::Emoji(item) => format!("{} ", item.text()),
-            Completion::Command(_) => String::new(),
+            _ => String::new(),
+        }
+    }
+
+    /// What its row says first.
+    pub(super) fn label(&self) -> String {
+        match self {
+            Completion::Mention(_, name) | Completion::Role(_, name) => format!("@{name}"),
+            Completion::Emoji(item) => format!(":{}:", item.name()),
+            Completion::Command(suggestion) => suggestion.name.clone(),
+            Completion::Option { display_name, .. } => display_name.clone(),
+            Completion::Choice(name) | Completion::Status(name) => name.clone(),
+            Completion::Channel(_, name) => format!("#{name}"),
+            Completion::Everyone => "@everyone".to_owned(),
         }
     }
 
     fn row(&self, images: &crate::images::Images) -> gtk::Widget {
+        let described = |name: &str, description: &str| {
+            let line = gtk::Box::builder().spacing(12).build();
+            line.append(&gtk::Label::builder().label(name).xalign(0.0).build());
+            line.append(
+                &gtk::Label::builder()
+                    .label(description)
+                    .xalign(0.0)
+                    .hexpand(true)
+                    .ellipsize(gtk::pango::EllipsizeMode::End)
+                    .width_chars(30)
+                    .max_width_chars(48)
+                    .css_classes(["dim-label"])
+                    .build(),
+            );
+            line
+        };
         match self {
-            Completion::Mention(_, name) => {
-                gtk::Label::builder().label(format!("@{name}")).xalign(0.0).build().upcast()
-            }
             Completion::Emoji(item) => {
                 let line = gtk::Box::builder().spacing(8).build();
                 line.append(&super::emoji::glyph(item, images));
-                line.append(&gtk::Label::builder().label(format!(":{}:", item.name())).xalign(0.0).build());
+                line.append(&gtk::Label::builder().label(self.label()).xalign(0.0).build());
                 line.upcast()
             }
             Completion::Command(suggestion) => {
-                let line = gtk::Box::builder().spacing(12).build();
-                line.append(&gtk::Label::builder().label(&suggestion.name).xalign(0.0).build());
-                line.append(
-                    &gtk::Label::builder()
-                        .label(&suggestion.description)
-                        .xalign(0.0)
-                        .hexpand(true)
-                        .ellipsize(gtk::pango::EllipsizeMode::End)
-                        .width_chars(30)
-                        .max_width_chars(48)
-                        .css_classes(["dim-label"])
-                        .build(),
-                );
+                let line = described(&suggestion.name, &suggestion.description);
                 line.append(&gtk::Label::builder().label(&suggestion.app).css_classes(["dim-label"]).build());
                 line.upcast()
             }
+            Completion::Option { display_name, description, .. } => described(display_name, description).upcast(),
+            Completion::Status(text) => {
+                gtk::Label::builder().label(text).xalign(0.0).css_classes(["dim-label"]).build().upcast()
+            }
+            _ => gtk::Label::builder().label(self.label()).xalign(0.0).build().upcast(),
         }
     }
 }
@@ -144,6 +177,17 @@ pub(super) struct MentionCtx {
     /// Char offset of the `@` or `:` being completed.
     pub(super) start: i32,
     pub(super) candidates: Vec<Completion>,
+    /// Headers over the rows they start.
+    pub(super) headers: Vec<(usize, discord::command_line::Header)>,
+    /// The pill of the command in the box a pick sets whole.
+    pub(super) pill: Option<String>,
+}
+
+impl MentionCtx {
+    /// How many rows can be picked; those that can't come last.
+    pub(super) fn selectable(&self) -> usize {
+        self.candidates.iter().filter(|c| !matches!(c, Completion::Status(_))).count()
+    }
 }
 
 impl App {
@@ -192,7 +236,9 @@ impl App {
         self.build_attach(area);
         self.build_stickers(area);
         self.build_gifs();
+        self.composer_box.append(&self.slash.icon);
         self.composer_box.append(&self.composer);
+        self.composer_box.append(&self.slash.more);
         self.composer_box.append(&self.gif_button);
         self.composer_box.append(&self.sticker_button);
         self.composer_box.append(&self.emoji_button);
@@ -248,13 +294,23 @@ impl App {
         self.composer.buffer().connect_changed({
             let this = Rc::downgrade(self);
             move |_| {
-                if let Some(this) = this.upgrade() {
+                let Some(this) = this.upgrade() else { return };
+                if this.slash.syncing.get() {
+                    return;
+                }
+                // A command's line is read again at the end of the user action, or once idle.
+                if this.slash.is_active() {
+                    if !this.slash.in_action.get() {
+                        this.queue_command_sync();
+                    }
+                } else {
                     this.update_mention_popup();
                     this.refresh_chat_bar();
-                    this.composer_typed();
                 }
+                this.composer_typed();
             }
         });
+        self.build_pills();
 
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed({
@@ -275,6 +331,11 @@ impl App {
         modifiers: gtk::gdk::ModifierType,
     ) -> glib::Propagation {
         use gtk::gdk::Key;
+        if self.slash.is_active()
+            && let Some(handled) = self.command_key(key, modifiers)
+        {
+            return handled;
+        }
         // While the mention popup is open, it owns the navigation keys.
         if self.mention_popover.is_visible() {
             match key {
@@ -530,13 +591,9 @@ impl App {
         let ping = ReplyPing::for_click(own, guild.is_none(), no_ping);
         let fixed_ping = ping.fixed();
         self.reply_ping.set_active(ping.ping);
-        self.set_reply(Some(ReplyCtx {
-            channel: message.channel_id,
-            guild,
-            to: message.id,
-            author: self.account.state.borrow().name_in(message.channel_id, &message.author),
-            fixed_ping,
-        }));
+        // Not borrowed through the call: a reply can end a command, which asks for its index.
+        let author = self.account.state.borrow().name_in(message.channel_id, &message.author);
+        self.set_reply(Some(ReplyCtx { channel: message.channel_id, guild, to: message.id, author, fixed_ping }));
         self.composer.grab_focus();
     }
 
@@ -549,6 +606,12 @@ impl App {
         }
         self.reply_bar.set_visible(reply.is_some());
         let previous = self.reply.replace(reply.clone());
+        // A reply ends an app's command, keeping its text (`C` in 870748),
+        // which then names nothing the reply offers; the built-ins a reply
+        // keeps would stay (#292).
+        if reply.is_some() && self.slash.active.borrow().as_ref().is_some_and(|a| !a.command.is_built_in()) {
+            self.end_command(super::slash::Keep::Text);
+        }
         // Use Apps in the attach menu shows only where nothing is replied to.
         self.refresh_attach();
         for id in previous.iter().chain(&reply).map(|r| r.to) {
@@ -593,11 +656,13 @@ impl App {
             editing: self.editing().is_some(),
             recording: channel.is_some_and(|c| self.has_voice_draft(c)),
             command: self.slash.is_active(),
+            pill: self.command_pill(),
             empty,
             customizable: self.chat_bar_customizable(),
             announcement,
         };
         let shown = chat_bar::shown(bar, self.chat_bar_prefs());
+        self.slash.icon.set_visible(shown.app_icon);
         self.gif_button.set_visible(shown.gif);
         self.sticker_button.set_visible(shown.sticker);
         self.emoji_button.set_visible(shown.emoji);
@@ -665,9 +730,16 @@ impl App {
         }
     }
 
-    /// Show `candidates` in the popup, for the token starting at `start`.
+    /// Show `candidates` in the popup, for the token starting at `start`,
+    /// the first selected.
     pub(super) fn show_completions(self: &Rc<Self>, start: i32, candidates: Vec<Completion>) {
-        if candidates.is_empty() {
+        self.show_listed(MentionCtx { start, candidates, ..MentionCtx::default() }, Some(0));
+    }
+
+    /// Show what `ctx` lists in the popup, under its headers, `selected`
+    /// selected.
+    pub(super) fn show_listed(self: &Rc<Self>, ctx: MentionCtx, selected: Option<usize>) {
+        if ctx.candidates.is_empty() {
             self.mention_popover.popdown();
             return;
         }
@@ -675,13 +747,21 @@ impl App {
         while let Some(child) = self.mention_list.first_child() {
             self.mention_list.remove(&child);
         }
-        for candidate in &candidates {
+        // The headers are read as the rows go in.
+        *self.mention.borrow_mut() = MentionCtx { headers: ctx.headers, ..MentionCtx::default() };
+        for candidate in &ctx.candidates {
             let row = gtk::ListBoxRow::new();
             row.set_child(Some(&candidate.row(&self.images)));
+            if matches!(candidate, Completion::Status(_)) {
+                row.set_activatable(false);
+                row.set_selectable(false);
+            }
             self.mention_list.append(&row);
         }
-        self.mention_list.select_row(self.mention_list.row_at_index(0).as_ref());
-        *self.mention.borrow_mut() = MentionCtx { start, candidates };
+        let headers = std::mem::take(&mut self.mention.borrow_mut().headers);
+        *self.mention.borrow_mut() = MentionCtx { candidates: ctx.candidates, headers, ..ctx };
+        self.mention_list.invalidate_headers();
+        self.select_row(selected);
 
         // Point at the caret so the popup tracks where you are typing.
         if let Some(rect) = self.caret_rect() {
@@ -690,7 +770,7 @@ impl App {
         self.mention_popover.popup();
     }
 
-    fn mention_candidates(&self, prefix: &str) -> Vec<Completion> {
+    pub(super) fn mention_candidates(&self, prefix: &str) -> Vec<Completion> {
         let prefix = prefix.to_lowercase();
         let state = self.account.state.borrow();
         let mut matches: Vec<(u64, String)> = state
@@ -713,7 +793,7 @@ impl App {
     /// ones aren't offered here, as in the client. Looking for emoji loads
     /// the counts of use (`queryEmojiResults`, 997625), which rank them once
     /// they are there.
-    fn emoji_candidates(self: &Rc<Self>, query: &str) -> Vec<Completion> {
+    pub(super) fn emoji_candidates(self: &Rc<Self>, query: &str) -> Vec<Completion> {
         let Some(channel) = self.account.state.borrow().channel else { return Vec::new() };
         self.load_frecency(|| {});
         let scores = self.emoji_scores(Intention::Chat);
@@ -732,6 +812,17 @@ impl App {
         });
     }
 
+    /// Select row `index` of the popup, or none, keeping it in view.
+    pub(super) fn select_row(&self, index: Option<usize>) {
+        match index.and_then(|i| self.mention_list.row_at_index(i as i32)) {
+            Some(row) => {
+                self.mention_list.select_row(Some(&row));
+                self.scroll_to_row(&row);
+            }
+            None => self.mention_list.unselect_all(),
+        }
+    }
+
     pub(super) fn move_mention_selection(&self, delta: i32) {
         let count = self.mention.borrow().candidates.len() as i32;
         if count == 0 {
@@ -739,11 +830,13 @@ impl App {
         }
         let current = self.mention_list.selected_row().map(|r| r.index()).unwrap_or(0);
         let next = (current + delta).rem_euclid(count);
-        let row = self.mention_list.row_at_index(next);
-        self.mention_list.select_row(row.as_ref());
-        // The list scrolls, so the selection must stay in view.
-        if let (Some(row), Some(scroller)) =
-            (row, self.mention_list.ancestor(gtk::ScrolledWindow::static_type()).and_downcast::<gtk::ScrolledWindow>())
+        self.select_row(Some(next as usize));
+    }
+
+    /// The list scrolls, so the selection must stay in view.
+    fn scroll_to_row(&self, row: &gtk::ListBoxRow) {
+        if let Some(scroller) =
+            self.mention_list.ancestor(gtk::ScrolledWindow::static_type()).and_downcast::<gtk::ScrolledWindow>()
             && let Some(bounds) = row.compute_bounds(&self.mention_list)
         {
             let adjustment = scroller.vadjustment();
@@ -757,12 +850,15 @@ impl App {
     }
 
     pub(super) fn accept_mention(self: &Rc<Self>, index: i32) {
+        if self.accept_in_line(index.max(0) as usize) {
+            return;
+        }
         let command = match self.mention.borrow().candidates.get(index.max(0) as usize) {
             Some(Completion::Command(suggestion)) => Some(suggestion.id.clone()),
             _ => None,
         };
         if let Some(id) = command {
-            return self.start_command(&id);
+            return self.activate_command(&id, discord::commands::RunFrom::CHAT);
         }
         let (start, text) = {
             let ctx = self.mention.borrow();

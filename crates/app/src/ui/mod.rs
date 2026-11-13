@@ -32,6 +32,7 @@ mod notify_menus;
 mod own_status;
 mod panes;
 mod picker;
+mod pills;
 mod poll_composer;
 mod polls;
 mod privacy;
