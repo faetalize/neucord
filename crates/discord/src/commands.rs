@@ -9,11 +9,14 @@
 //! the commands it can run as slash commands (type 1); the user and message
 //! commands of the Apps menus are the same index.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
+use crate::builtins::{BuiltIn, Input, Integration};
 use crate::gates::Gates;
 use crate::limits;
 use crate::limits::Limits;
@@ -43,6 +46,8 @@ pub mod command_type {
     pub const CHAT: u8 = 1;
     pub const USER: u8 = 2;
     pub const MESSAGE: u8 = 3;
+    /// An activity's launch command (878014).
+    pub const PRIMARY_ENTRY_POINT: u8 = 4;
 }
 
 /// `APPLICATION_COMMAND` and `APPLICATION_COMMAND_AUTOCOMPLETE` in 127258's
@@ -91,18 +96,62 @@ impl Target {
     }
 }
 
-/// An app in an index (`descriptor` in 264322).
+/// An app in an index (`descriptor` in 264322, of what `q` keeps:
+/// `description, icon, id, name, bot, flags, embedded_surfaces`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct App {
     pub id: Snowflake,
-    /// The bot's name, else the app's.
+    /// The bot's name, else the app's: what the suggestions show.
     pub name: String,
+    /// The app's own name, which the launcher shows and searches.
+    pub app_name: String,
     pub description: String,
     pub icon: Option<String>,
     /// The bot user the app's messages come from.
     pub bot: Option<Snowflake>,
+    /// That bot's avatar, when the index gives the bot whole.
+    pub bot_avatar: Option<String>,
+    /// `ApplicationFlags`.
+    pub flags: u64,
+    /// It runs as an activity: `embedded_surfaces` has `MAIN` (0; `W` in
+    /// 878014).
+    pub activity: bool,
     /// Who may use the app, where the server limited it.
     permissions: Vec<Rule>,
+}
+
+/// The section built-ins are listed under (`G` in 12115): no bot, no rules,
+/// and a description no text can be found in.
+static BUILT_IN: LazyLock<App> = LazyLock::new(|| App {
+    id: Snowflake(0),
+    name: "Built-In".into(),
+    app_name: "Built-In".into(),
+    description: String::new(),
+    icon: None,
+    bot: None,
+    bot_avatar: None,
+    flags: 0,
+    activity: false,
+    permissions: Vec::new(),
+});
+
+impl App {
+    /// `ApplicationFlags` (`PROMOTED` 1 << 29, `PARTNER` 1 << 30).
+    const PROMOTED: u64 = 1 << 29;
+    const PARTNER: u64 = 1 << 30;
+
+    pub fn partner(&self) -> bool {
+        self.flags & Self::PARTNER != 0
+    }
+
+    pub fn promoted(&self) -> bool {
+        self.flags & Self::PROMOTED != 0
+    }
+
+    /// What built-ins are listed as.
+    pub fn built_in() -> &'static App {
+        &BUILT_IN
+    }
 }
 
 /// One allow or deny of a command or app (`ec` in 264322).
@@ -176,6 +225,12 @@ pub struct CommandOption {
     pub max_value: Option<f64>,
     pub min_length: Option<u64>,
     pub max_length: Option<u64>,
+    /// The kinds of channel a `CHANNEL` option takes (`channelTypes`).
+    pub channel_types: Option<Vec<u64>>,
+    /// What an `ATTACHMENT` option takes: extensions with their dot, or
+    /// `image`, `video`, `audio`; empty for anything (`p` in 168186 reads it
+    /// only for that type).
+    pub file_types: Vec<String>,
 }
 
 /// A step from a command to its sub-command.
@@ -204,6 +259,10 @@ pub struct Command {
     pub display_description: String,
     pub options: Vec<CommandOption>,
     pub path: Vec<Step>,
+    /// The root's place among Discord's most used (`global_popularity_rank`).
+    pub popularity: Option<u64>,
+    /// The client's own command this is, which runs without an app.
+    pub builtin: Option<BuiltIn>,
     /// The root as the client sends it back with a run: `application_command`.
     root: Value,
     root_id: Value,
@@ -399,25 +458,25 @@ impl CommandIndex {
         self.slots.get(&key).and_then(|s| s.loaded.as_ref()).map_or(&[], |l| &l.sections)
     }
 
-    /// The commands of `kind` that may be run in `place`, matching `text`
-    /// (the words after `/`), best first.
-    pub fn find(&self, place: &Place, kind: u8, text: &str) -> Vec<Found<'_>> {
+    /// The commands of `kinds` that may be used in `place`, each with the app
+    /// it is listed under (`er` in 264322, through `zl`): the server's (or
+    /// DM's) index only with View Channel and Use Application Commands, and
+    /// an app the account has too under the account's listing, with its
+    /// commands first and then those only the place's index has.
+    fn usable(&self, place: &Place, kinds: &[u8]) -> Vec<(&App, &Command)> {
         let context = if place.base_access && place.has_context_index() {
             place.context().map_or(&[][..], |c| self.sections(Key::Context(c)))
         } else {
             &[]
         };
         let user = self.sections(Key::User);
-        let mut found = Vec::new();
         let mut apps: Vec<Snowflake> = context.iter().chain(user).map(|s| s.app.id).collect();
         apps.sort();
         apps.dedup();
-        let query = text.to_lowercase();
-        let words: Vec<&str> = query.split(' ').collect();
+        let mut usable = Vec::new();
         for app in apps {
             let (in_context, in_user) =
                 (context.iter().find(|s| s.app.id == app), user.iter().find(|s| s.app.id == app));
-            // The account's own listing of an app comes first, then what only the place's has.
             let (descriptor, commands): (&App, Vec<&Command>) = match (in_context, in_user) {
                 (Some(c), Some(u)) => {
                     let rest = c.commands.iter().filter(|c| !u.commands.iter().any(|u| u.id == c.id));
@@ -428,31 +487,45 @@ impl CommandIndex {
             };
             let allowed_for_user = descriptor_allows(&descriptor.permissions, place);
             let allowed_in_channel = channel_allows(&descriptor.permissions, place);
+            let installed = Installed { guild: in_context.is_some(), user: in_user.is_some() };
             for command in commands {
-                let access = place.access(
-                    command,
-                    kind,
-                    Installed { guild: in_context.is_some(), user: in_user.is_some() },
-                    allowed_for_user,
-                    allowed_in_channel,
-                    descriptor.bot,
-                );
-                if access != Access::Allowed {
-                    continue;
-                }
-                let score = score(command, descriptor, &query, &words);
-                if let Some(score) = score {
-                    found.push(Found { command, app: descriptor, score });
+                let allowed = kinds.contains(&command.kind)
+                    && place.access(
+                        command,
+                        command.kind,
+                        installed,
+                        allowed_for_user,
+                        allowed_in_channel,
+                        descriptor.bot,
+                    ) == Access::Allowed;
+                if allowed {
+                    usable.push((descriptor, command));
                 }
             }
         }
-        found.sort_by(|a, b| {
-            a.score
-                .cmp(&b.score)
-                .then_with(|| natural(&a.command.display_name, &b.command.display_name))
-                .then_with(|| natural(&a.app.name, &b.app.name))
-        });
+        usable
+    }
+
+    /// What `query` finds in `place`, best first: the apps' commands where
+    /// they are offered, and the built-ins it names.
+    pub fn query<'a>(&'a self, place: &Place, query: Query<'_, 'a>) -> Vec<Found<'a>> {
+        let text = query.text.to_lowercase();
+        let words: Vec<&str> = text.split(' ').collect();
+        let apps = if query.offer.apps { self.usable(place, &[query.kind]) } else { Vec::new() };
+        let builtins = query.builtins.iter().filter(|c| c.kind == query.kind).map(|c| (App::built_in(), c));
+        let mut found: Vec<Found<'a>> = apps
+            .into_iter()
+            .chain(builtins)
+            .filter_map(|(app, command)| score(command, app, &text, &words).map(|score| Found { command, app, score }))
+            .collect();
+        found.sort_by(order);
         found
+    }
+
+    /// The apps' commands of `kind` that may be run in `place`, matching
+    /// `text` (the words after `/`), best first.
+    pub fn find(&self, place: &Place, kind: u8, text: &str) -> Vec<Found<'_>> {
+        self.query(place, Query { kind, text, offer: Offer::ALL, builtins: &[] })
     }
 
     /// The command `id` of `kind` that may be used in `place`, with its app.
@@ -468,6 +541,30 @@ impl CommandIndex {
             .flatten()
             .find_map(|key| self.sections(key).iter().find(|s| s.app.id == application).map(|s| &s.app))
     }
+}
+
+/// What a list of commands asks for (the filters and query of `er` in
+/// 264322).
+#[derive(Clone, Copy, Debug)]
+pub struct Query<'t, 'b> {
+    pub kind: u8,
+    /// The words after `/`, as [`query_of`] leaves them; empty for all.
+    pub text: &'t str,
+    pub offer: Offer,
+    /// The built-ins offered here, listed beside the apps' commands.
+    pub builtins: &'b [Command],
+}
+
+/// The order of every list of commands: the better match, then the name,
+/// then an app's command before a built-in of the same name (the client
+/// sorts each section by `ea` in 264322, then lists Built-In last), then
+/// the app's name.
+fn order(a: &Found<'_>, b: &Found<'_>) -> Ordering {
+    a.score
+        .cmp(&b.score)
+        .then_with(|| natural(&a.command.display_name, &b.command.display_name))
+        .then_with(|| a.command.is_built_in().cmp(&b.command.is_built_in()))
+        .then_with(|| natural(&a.app.name, &b.app.name))
 }
 
 /// A command that matches what was typed.
@@ -512,7 +609,7 @@ pub fn by_app<'a>(found: Vec<Found<'a>>) -> Vec<(&'a App, Vec<&'a Command>)> {
 
 /// `Intl.Collator` with `sensitivity: accent, numeric` (264322's `H`): case
 /// doesn't matter and digits count as numbers.
-fn natural(a: &str, b: &str) -> std::cmp::Ordering {
+fn natural(a: &str, b: &str) -> Ordering {
     fn chunks(text: &str) -> Vec<(bool, String)> {
         let mut chunks: Vec<(bool, String)> = Vec::new();
         for c in text.to_lowercase().chars() {
@@ -702,11 +799,17 @@ pub fn offer(replying: bool) -> Offer {
 }
 
 /// The suggestions for `typed`, the text after `/` (`queryResults` of `B`
-/// in 496533): settled on the command's name once typing moved on, at
-/// most [`SUGGESTIONS`].
-pub fn suggestions<'a>(index: &'a CommandIndex, place: &Place, typed: &str, offer: Offer) -> Vec<Found<'a>> {
+/// in 496533): the apps' commands as `offer` says and `builtins`, settled
+/// on the command's name once typing moved on, at most [`SUGGESTIONS`].
+pub fn suggestions<'a>(
+    index: &'a CommandIndex,
+    place: &Place,
+    typed: &str,
+    offer: Offer,
+    builtins: &'a [Command],
+) -> Vec<Found<'a>> {
     let (query, terminated) = query_of(typed);
-    let found = if offer.apps { index.find(place, command_type::CHAT, &query) } else { Vec::new() };
+    let found = index.query(place, Query { kind: command_type::CHAT, text: &query, offer, builtins });
     let mut found = settled(found, &query, terminated);
     found.truncate(SUGGESTIONS);
     found
@@ -1042,6 +1145,12 @@ fn option_of(option: &Value) -> CommandOption {
         max_value: option["max_value"].as_f64(),
         min_length: option["min_length"].as_u64(),
         max_length: option["max_length"].as_u64(),
+        channel_types: option["channel_types"].as_array().map(|t| t.iter().filter_map(Value::as_u64).collect()),
+        file_types: if option["type"].as_u64() == Some(u64::from(option_type::ATTACHMENT)) {
+            option["file_types"].as_array().into_iter().flatten().filter_map(text).map(str::to_owned).collect()
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -1089,6 +1198,8 @@ fn leaf(root: &Value, command: &Value, path: Vec<Step>) -> Command {
             .to_owned(),
         options: command["options"].as_array().map(|o| o.iter().map(option_of).collect()).unwrap_or_default(),
         path,
+        popularity: root["global_popularity_rank"].as_u64(),
+        builtin: None,
         root: root.clone(),
         root_id: root["id"].clone(),
         root_name: text(&root["name"]).unwrap_or_default().to_owned(),
@@ -1153,13 +1264,18 @@ fn parse_index(index: &Value, me: Snowflake) -> Loaded {
         let Some(id) = app["id"].as_str().and_then(|s| s.parse().ok()).map(Snowflake) else { continue };
         let bot = app["bot"]["id"].as_str().or_else(|| app["bot_id"].as_str()).and_then(|s| s.parse().ok());
         let name = text(&app["bot"]["username"]).or_else(|| text(&app["name"])).unwrap_or_default().to_owned();
+        let surfaces = app["embedded_surfaces"].as_array().into_iter().flatten();
         sections.push(Section {
             app: App {
                 id,
                 name,
+                app_name: text(&app["name"]).unwrap_or_default().to_owned(),
                 description: text(&app["description"]).unwrap_or_default().to_owned(),
                 icon: text(&app["icon"]).map(str::to_owned),
                 bot: bot.map(Snowflake),
+                bot_avatar: text(&app["bot"]["avatar"]).map(str::to_owned),
+                flags: app["flags"].as_u64().unwrap_or(0),
+                activity: surfaces.into_iter().any(|s| s.as_u64() == Some(0)),
                 permissions: if app["permissions"].is_null() { Vec::new() } else { rules(&app["permissions"], me) },
             },
             commands: Vec::new(),
@@ -1470,6 +1586,24 @@ pub fn context_key(options: &[Value]) -> String {
 }
 
 impl Command {
+    /// The root command's id, which Copy Command ID copies; none for a
+    /// built-in.
+    pub fn root_id(&self) -> Option<Snowflake> {
+        self.root_id.as_str()?.parse().ok().map(Snowflake)
+    }
+
+    pub fn is_built_in(&self) -> bool {
+        self.builtin.is_some()
+    }
+
+    /// The search a built-in runs, for `/gif` and `/sticker`.
+    pub fn integration(&self) -> Option<Integration> {
+        match self.builtin?.input() {
+            Input::Integration(integration) => Some(integration),
+            Input::Text | Input::Action => None,
+        }
+    }
+
     /// The command's `data` in an interaction (`R` in 545152): its root's id,
     /// version and name, the options of the run, and the root itself.
     pub fn data(&self, options: Vec<Value>, target: Option<Snowflake>) -> Value {
@@ -1890,6 +2024,69 @@ mod tests {
     }
 
     #[test]
+    fn the_index_gives_what_the_launcher_pills_and_files_read() {
+        let commands = loaded(&json!({
+            "applications": [
+                {"id": APP, "name": "Dicey", "description": "", "flags": (1u64 << 29) | (1 << 30),
+                 "embedded_surfaces": [0], "bot": {"id": "300000000000000001", "username": "Dice Roller", "avatar": "abc"}},
+                {"id": "200000000000000002", "name": "Zed", "description": "", "bot_id": "300000000000000002"},
+            ],
+            "application_commands": [
+                {"id": "400000000000000001", "application_id": APP, "type": 1, "name": "roll", "description": "",
+                 "global_popularity_rank": 1, "options": [
+                    {"type": 7, "name": "where", "description": "", "channel_types": [0, 5]},
+                    {"type": 11, "name": "file", "description": "", "file_types": ["image", ".pdf"]},
+                    {"type": 3, "name": "note", "description": "", "file_types": [".txt"]}]},
+                {"id": "400000000000000002", "application_id": "200000000000000002", "type": 1, "name": "zap",
+                 "description": ""},
+            ]
+        }));
+        let found = commands.find(&place(), command_type::CHAT, "");
+        let (roll, dicey) = (found[0].command, found[0].app);
+        assert_eq!((dicey.name.as_str(), dicey.app_name.as_str()), ("Dice Roller", "Dicey"));
+        assert_eq!(dicey.bot_avatar.as_deref(), Some("abc"));
+        assert!(dicey.partner() && dicey.promoted() && dicey.activity);
+        let zed = found[1].app;
+        assert!(!zed.partner() && !zed.promoted() && !zed.activity && zed.bot_avatar.is_none());
+        assert_eq!((roll.popularity, found[1].command.popularity), (Some(1), None));
+        assert_eq!(roll.root_id(), Some(Snowflake(400_000_000_000_000_001)));
+        assert_eq!(roll.options[0].channel_types, Some(vec![0, 5]));
+        assert_eq!(roll.options[1].file_types, ["image", ".pdf"]);
+        assert!(roll.options[2].file_types.is_empty(), "only a file option takes file types");
+        assert!(!roll.is_built_in() && roll.integration().is_none());
+    }
+
+    #[test]
+    fn an_apps_command_comes_before_a_built_in_of_the_same_name() {
+        let commands = loaded(&index());
+        let base = commands.find(&place(), command_type::CHAT, "roll")[0].command.clone();
+        let builtin = |b: BuiltIn, name: &str| Command {
+            id: b.id().into(),
+            name: name.into(),
+            display_name: name.into(),
+            description: String::new(),
+            display_description: String::new(),
+            options: Vec::new(),
+            builtin: Some(b),
+            ..base.clone()
+        };
+        let builtins = [builtin(BuiltIn::Shrug, "roll"), builtin(BuiltIn::Gif, "gif")];
+        let query = |text| Query { kind: command_type::CHAT, text, offer: Offer::ALL, builtins: &builtins };
+        let found = commands.query(&place(), query("roll"));
+        assert_eq!(names(&found), ["roll", "roll", "stats reset all", "stats show"], "the app's description has roll");
+        assert_eq!((found[0].command.builtin, found[1].command.builtin), (None, Some(BuiltIn::Shrug)));
+        assert_eq!(found[1].app.name, "Built-In");
+        let found = commands.query(&place(), query("gi"));
+        assert_eq!(found[0].command.integration(), Some(Integration::Gif));
+        // Without apps' commands, only the built-ins.
+        let none = Offer { apps: false, builtins: BuiltIns::TextOnly };
+        let found = commands.query(&place(), Query { offer: none, ..query("") });
+        assert_eq!(names(&found), ["gif", "roll"]);
+        // The menus' `find` lists no built-ins.
+        assert_eq!(names(&commands.find(&place(), command_type::CHAT, "gi")), [""; 0]);
+    }
+
+    #[test]
     fn typing_moves_on_from_the_name() {
         assert_eq!(query_of("roll"), ("roll".into(), false));
         assert_eq!(query_of("roll "), ("roll".into(), true));
@@ -1908,9 +2105,12 @@ mod tests {
     #[test]
     fn a_reply_offers_no_apps_commands() {
         let commands = loaded(&index());
-        assert_eq!(names(&suggestions(&commands, &place(), "sta", offer(false))), ["stats reset all", "stats show"]);
+        assert_eq!(
+            names(&suggestions(&commands, &place(), "sta", offer(false), &[])),
+            ["stats reset all", "stats show"]
+        );
         for typed in ["", "sta", "roll ", "dice"] {
-            assert_eq!(names(&suggestions(&commands, &place(), typed, offer(true))), [""; 0], "/{typed}");
+            assert_eq!(names(&suggestions(&commands, &place(), typed, offer(true), &[])), [""; 0], "/{typed}");
         }
         assert_eq!(offer(true), Offer { apps: false, builtins: BuiltIns::TextOnly });
     }
@@ -2376,6 +2576,8 @@ mod tests {
             max_value: None,
             min_length: None,
             max_length: None,
+            channel_types: None,
+            file_types: Vec::new(),
         }
     }
 

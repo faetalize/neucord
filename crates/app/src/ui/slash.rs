@@ -446,7 +446,7 @@ impl App {
         }
         let suggestions: Vec<Suggestion> = {
             let state = self.account.state.borrow();
-            commands::suggestions(&state.commands, &place, typed, offer)
+            commands::suggestions(&state.commands, &place, typed, offer, &[])
                 .into_iter()
                 .map(|f| Suggestion {
                     id: f.command.id.clone(),
@@ -824,7 +824,7 @@ impl App {
             Go {
                 channel: Snowflake,
                 command: Box<Command>,
-                app: CommandApp,
+                app: Box<CommandApp>,
                 body: serde_json::Value,
                 nonce: Snowflake,
             },
@@ -871,7 +871,7 @@ impl App {
                         Prepared::Go {
                             channel: active.channel,
                             command: Box::new(active.command.clone()),
-                            app: active.app.clone(),
+                            app: Box::new(active.app.clone()),
                             body: run.body(&[]),
                             nonce,
                         }
@@ -902,7 +902,7 @@ impl App {
         enum Prepared {
             Nothing,
             NoticeBar,
-            Go { command: Box<Command>, app: CommandApp, body: serde_json::Value, nonce: Snowflake },
+            Go { command: Box<Command>, app: Box<CommandApp>, body: serde_json::Value, nonce: Snowflake },
         }
         let prepared = {
             let state = self.account.state.borrow();
@@ -925,7 +925,7 @@ impl App {
                         nonce,
                     };
                     let body = run.body(&[]);
-                    Prepared::Go { command: Box::new(command), app, body, nonce }
+                    Prepared::Go { command: Box::new(command), app: Box::new(app), body, nonce }
                 }
                 None => Prepared::Nothing,
             }
