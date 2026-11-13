@@ -34,8 +34,6 @@ use crate::{render, timelines};
 const FLASH: std::time::Duration = std::time::Duration::from_secs(2);
 /// Space between the last message and the composer, as around the composer.
 const COMPOSER_GAP: i32 = 12;
-/// Consecutive messages by one author within this window share a header.
-const GROUP_WINDOW_SECS: i64 = 7 * 60;
 
 /// What a message's menu acts on.
 pub(super) struct MessageTarget {
@@ -450,7 +448,7 @@ impl App {
         if open {
             self.resolve_mentions(&message.content);
         }
-        let blocked = self.account.state.borrow().relationships.is_blocked(message.author.id);
+        let blocked = message.is_blocked_by(|id| self.account.state.borrow().relationships.is_blocked(id));
         store.append(&timelines::boxed(message));
         if blocked {
             self.rebind_blocked_run(&store, store.n_items() - 1);
@@ -596,7 +594,8 @@ impl App {
         let divided = self.fill_divider(parts, &message, previous.as_ref());
         let (run, revealed) = {
             let state = self.account.state.borrow();
-            let run = timelines::run_at(&messages, position, |m| state.relationships.is_blocked(m.author.id));
+            let run =
+                timelines::run_at(&messages, position, |m| m.is_blocked_by(|id| state.relationships.is_blocked(id)));
             (run, run.is_some_and(|r| state.revealed_blocked.contains(&r.first)))
         };
         match run {
@@ -775,7 +774,7 @@ impl App {
     fn rebind_blocked_run(self: &Rc<Self>, store: &gio::ListStore, position: u32) {
         let run = {
             let state = self.account.state.borrow();
-            timelines::run_at(store, position, |m| state.relationships.is_blocked(m.author.id))
+            timelines::run_at(store, position, |m| m.is_blocked_by(|id| state.relationships.is_blocked(id)))
         };
         if let Some(run) = run {
             self.rebind(store, run.start, 1);
@@ -1714,7 +1713,7 @@ fn group_start(messages: &gio::ListStore, position: u32) -> Option<Snowflake> {
     let mut message = timelines::message_at(messages, at)?;
     while let Some(before) = at.checked_sub(1) {
         let previous = timelines::message_at(messages, before)?;
-        if !is_grouped(&message, Some(&previous)) {
+        if !message.groups_under(Some(&previous)) {
             break;
         }
         (at, message) = (before, previous);
@@ -1867,18 +1866,6 @@ fn forward_time(time: &glib::DateTime) -> String {
     time.format(pattern).map(String::from).unwrap_or_default()
 }
 
-pub(super) fn is_grouped(message: &Message, previous: Option<&Message>) -> bool {
-    let Some(previous) = previous.filter(|p| p.is_user_message()) else { return false };
-    // A reply always shows what it answers, under a full header.
-    if previous.author.id != message.author.id || message.reply_to().is_some() {
-        return false;
-    }
-    match (parse_time(&previous.timestamp), parse_time(&message.timestamp)) {
-        (Some(a), Some(b)) => b.difference(&a).as_seconds() < GROUP_WINDOW_SECS && a.ymd() == b.ymd(),
-        _ => false,
-    }
-}
-
 impl App {
     /// `text` naming `user` in `channel`, in the colour of their highest role.
     fn name_label(&self, channel: Snowflake, user: &discord::User, text: &str) -> gtk::Label {
@@ -1913,7 +1900,7 @@ impl App {
             row.set_visible(false);
             return;
         }
-        let grouped = kind == Kind::Normal && is_grouped(message, previous);
+        let grouped = kind == Kind::Normal && message.groups_under(previous);
         if !grouped {
             parts.group.set(message.id.0);
         }
@@ -2383,9 +2370,7 @@ impl App {
                     _ if blocked => "Blocked message".to_owned(),
                     _ if let Kind::System(system) = self.message_kind(original) => system.text(),
                     Some(line) => line.to_owned(),
-                    // The official client's wording for messages with no text.
-                    None if !original.sticker_items.is_empty() => "Click to see sticker".to_owned(),
-                    None => "Click to see attachment".to_owned(),
+                    None => original.reply_placeholder().to_owned(),
                 };
                 preview.append(&snippet(&text, &["reply-snippet"]));
             }

@@ -437,9 +437,7 @@ impl NotificationSettings {
 /// (`isBlockedOrIgnoredForMessage`), and a group DM's notice that someone
 /// left. Ignored users and a guild space's leaderboard aren't modelled.
 pub fn is_dropped(message: &Message, group_dm: bool, blocked: impl Fn(Snowflake) -> bool) -> bool {
-    (group_dm && message.kind == RECIPIENT_REMOVE)
-        || blocked(message.author.id)
-        || message.interaction_metadata.as_ref().is_some_and(|i| blocked(i.user.id))
+    (group_dm && message.kind == RECIPIENT_REMOVE) || message.is_blocked_by(blocked)
 }
 
 const RECIPIENT_REMOVE: u8 = 2;
