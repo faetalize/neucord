@@ -507,6 +507,9 @@ impl Channel {
     const PINNED: u64 = 1 << 1;
 }
 
+/// `GuildNSFWContentLevel` (652215): `EXPLICIT` and `AGE_RESTRICTED`.
+const AGE_RESTRICTED_LEVELS: [u8; 2] = [1, 3];
+
 #[derive(Clone, Debug)]
 pub struct Guild {
     pub id: Snowflake,
@@ -544,6 +547,10 @@ pub struct Guild {
     /// From READY or GUILD_CREATE; updates don't carry it.
     pub member_count: Option<u64>,
     pub hub_type: Option<u8>,
+    /// `GuildNSFWContentLevel` (652215) as Discord rates the server, and as
+    /// its owner set it: `DEFAULT` (0) when absent.
+    pub nsfw_level: u8,
+    pub owner_configured_content_level: u8,
     pub vanity_url_code: Option<String>,
     /// Boost level, 0 to 3.
     pub premium_tier: u8,
@@ -616,6 +623,8 @@ impl Guild {
         self.features = update.features;
         self.member_count = update.member_count.or(self.member_count);
         self.hub_type = update.hub_type;
+        self.nsfw_level = update.nsfw_level;
+        self.owner_configured_content_level = update.owner_configured_content_level;
         self.vanity_url_code = update.vanity_url_code;
         self.premium_tier = update.premium_tier;
         self.rules_channel_id = update.rules_channel_id;
@@ -626,6 +635,14 @@ impl Guild {
         if !update.stickers.is_empty() {
             self.stickers = update.stickers;
         }
+    }
+
+    /// Whether the server is age-restricted (`wh` in 260509): by
+    /// `nsfw_level` for accounts in `2025-09-server-nsfw-level`, else by the
+    /// level its owner set.
+    pub fn age_restricted(&self, by_nsfw_level: bool) -> bool {
+        let level = if by_nsfw_level { self.nsfw_level } else { self.owner_configured_content_level };
+        AGE_RESTRICTED_LEVELS.contains(&level)
     }
 
     /// One of the server's channels, not counting threads.
@@ -809,6 +826,11 @@ impl Guild {
             features,
             member_count: value["member_count"].as_u64(),
             hub_type: props["hub_type"].as_u64().and_then(|t| u8::try_from(t).ok()),
+            nsfw_level: props["nsfw_level"].as_u64().and_then(|v| u8::try_from(v).ok()).unwrap_or(0),
+            owner_configured_content_level: props["owner_configured_content_level"]
+                .as_u64()
+                .and_then(|v| u8::try_from(v).ok())
+                .unwrap_or(0),
             vanity_url_code: props["vanity_url_code"].as_str().map(String::from),
             premium_tier: props["premium_tier"].as_u64().and_then(|t| u8::try_from(t).ok()).unwrap_or(0),
             rules_channel_id: props["rules_channel_id"].as_str().and_then(|id| id.parse().ok()).map(Snowflake),
@@ -1843,6 +1865,40 @@ mod tests {
             serde_json::from_str(r#"{"id":"2","properties":{"name":"New","icon":"abc","owner_id":"7"},"channels":[]}"#)
                 .unwrap();
         assert_eq!((g.name.as_str(), g.icon.as_deref(), g.owner_id), ("New", Some("abc"), Some(Snowflake(7))));
+    }
+
+    #[test]
+    fn content_levels_in_either_guild_shape() {
+        let nested: Guild = serde_json::from_str(
+            r#"{"id":"2","properties":{"name":"N","nsfw_level":3,"owner_configured_content_level":1},"channels":[]}"#,
+        )
+        .unwrap();
+        let flat: Guild =
+            serde_json::from_str(r#"{"id":"2","name":"N","nsfw_level":3,"owner_configured_content_level":1}"#).unwrap();
+        for g in [&nested, &flat] {
+            assert_eq!((g.nsfw_level, g.owner_configured_content_level), (3, 1));
+        }
+        let none: Guild =
+            serde_json::from_str(r#"{"id":"2","name":"N","owner_configured_content_level":null}"#).unwrap();
+        assert_eq!((none.nsfw_level, none.owner_configured_content_level), (0, 0), "DEFAULT");
+        let mut kept = nested;
+        kept.update(none);
+        assert_eq!((kept.nsfw_level, kept.owner_configured_content_level), (0, 0), "GUILD_UPDATE replaces them");
+    }
+
+    #[test]
+    fn a_server_is_age_restricted_when_explicit_or_age_restricted() {
+        let guild = |level: u8, owner: u8| {
+            let mut g: Guild = serde_json::from_str(r#"{"id":"2","name":"N"}"#).unwrap();
+            (g.nsfw_level, g.owner_configured_content_level) = (level, owner);
+            g
+        };
+        for (level, restricted) in [(0, false), (1, true), (2, false), (3, true)] {
+            assert_eq!(guild(level, 0).age_restricted(true), restricted, "nsfw_level {level}");
+            assert_eq!(guild(0, level).age_restricted(false), restricted, "owner's level {level}");
+        }
+        assert!(!guild(3, 0).age_restricted(false), "outside the experiment the owner's level decides");
+        assert!(!guild(0, 3).age_restricted(true), "inside it Discord's");
     }
 
     #[test]

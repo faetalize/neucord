@@ -26,10 +26,13 @@ what arrived, IDENTIFY's key order and properties first.
   `FAKE_MODAL_SUBMIT=fail|silent|429` says.
   Both settings protos are kept, and a save merges into them field by field
   as Discord's does. The GIF endpoints answer made-up results, one with a
-  numeric id, and take a pick's `POST /gifs/select`. `FAKE_VARIANTS="hiding=1,voice=1,ladder=1,lazy=1,upload=1"`
+  numeric id, and take a pick's `POST /gifs/select`. `FAKE_VARIANTS="hiding=1,voice=1,ladder=1,lazy=1,upload=1,nsfwlevel=1"`
   assigns Apex experiments by name, `FAKE_REIDENTIFY=<s>` sends op 9 after
   that many seconds to force a second IDENTIFY, `FAKE_NEW_TOKEN` puts an
-  `auth_token` in READY.
+  `auth_token` in READY. `FAKE_NSFW="allowed=1,dms=0,status=3,gated=0,level=0,owner=0"`
+  (the defaults) sets the account's `nsfw_allowed` and age status, the
+  age-restricted commands in DMs setting, the region's age-gated features
+  and the server's content levels; channel 604 is `nsfw`.
 - **`patch.py`**: points the copy's API, gateway and CDN at the fake, and adds
   a command file the scenario writes to: `home`, `guild <id>`,
   `channel <id>`, `attach`, `shot <png>`, `shot-popover <widget> <png>` (the

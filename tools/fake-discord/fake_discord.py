@@ -6,7 +6,9 @@ which Apex experiments the account is assigned, e.g. "hiding=1,lazy=1".
 $FAKE_INTERACTION is how apps answer: ok (the default), fail, silent, 429,
 modal or iframe. $FAKE_MODAL_SUBMIT is how an app takes its form: ok (the
 default), fail, silent or 429. $FAKE_ANSWERS=1 ends #general's history with
-apps' answers to commands others ran.
+apps' answers to commands others ran. $FAKE_NSFW sets what decides
+age-restricted commands, e.g. "allowed=1,dms=1,status=3,gated=0,level=0,owner=0"
+(those are the defaults but dms, which is 0).
 """
 import base64, json, os, re, socket, struct, sys, threading, time, zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -60,6 +62,7 @@ NAMES = {
     "ladder": "2026-07-attachment-image-ladder",
     "lazy": "2026-02-lazy-load-all-images",
     "upload": "2026-09-nitro-file-upload-rollout",
+    "nsfwlevel": "2025-09-server-nsfw-level",
 }
 LADDER = json.dumps({"ladder": [64, 128, 256], "maxUpscale": 1.1, "minSnapDownDpr": 2})
 INTERACTION = os.environ.get("FAKE_INTERACTION") or "ok"
@@ -71,6 +74,9 @@ if MODAL_SUBMIT not in ("ok", "fail", "silent", "429"):
 
 ME = {"id": "100", "username": "tester_fake", "global_name": "Tester Fake", "avatar": None, "discriminator": "0",
       "premium_type": 0, "flags": 0, "verified": True, "mfa_enabled": False}
+NSFW = {"allowed": 1, "dms": 0, "status": 3, "gated": 0, "level": 0, "owner": 0}
+NSFW.update((k, int(v)) for k, v in (p.split("=") for p in os.environ.get("FAKE_NSFW", "").split(",") if p))
+ME.update(nsfw_allowed=bool(NSFW["allowed"]), age_verification_status=NSFW["status"])
 ALICE = {"id": "301", "username": "alice_fake", "global_name": "Alice Fake", "avatar": None, "discriminator": "0"}
 BOB = {"id": "302", "username": "bob_fake", "global_name": "Bob Fake", "avatar": None, "discriminator": "0"}
 VIEW, SEND, HISTORY, ATTACH, REACT, CONNECT = 1 << 10, 1 << 11, 1 << 16, 1 << 15, 1 << 6, 1 << 20
@@ -196,9 +202,12 @@ def guild():
          "permission_overwrites": []},
         {"id": "602", "type": 2, "name": "Lounge", "position": 3, "parent_id": None, "bitrate": 64000,
          "permission_overwrites": [], "flags": 0},
+        {"id": "604", "type": 0, "name": "after-dark", "position": 4, "parent_id": None, "nsfw": True,
+         "permission_overwrites": [], "flags": 0},
     ]
     return {"id": "500", "properties": {"name": "Test Server", "owner_id": "999", "icon": None, "features": [],
-            "premium_tier": 0, "default_message_notifications": 0}, "roles": [
+            "premium_tier": 0, "default_message_notifications": 0, "nsfw_level": NSFW["level"],
+            "owner_configured_content_level": NSFW["owner"]}, "roles": [
         {"id": "500", "name": "@everyone", "position": 0,
          "permissions": str(VIEW | SEND | HISTORY | ATTACH | REACT | CONNECT | USE_APPLICATION_COMMANDS)},
         {"id": "510", "name": "Mods", "permissions": "0", "position": 1, "color": 0, "hoist": False,
@@ -228,6 +237,8 @@ def ready():
         ], "partial": False, "version": 1},
         "user_guild_settings": {"entries": [], "partial": False, "version": 1},
         "apex_experiments": apex(), "experiments": [], "guild_experiments": [],
+        "regional_feature_config": {"age_gated_features": NSFW["gated"], "teen_by_default_settings": 0},
+        **({"user_settings_proto": settings_answer("1")} if NSFW["dms"] else {}),
         "auth_token": os.environ.get("FAKE_NEW_TOKEN") or None,
         "country_code": "ZZ", "analytics_token": "fake", "api_code_version": 0,
     }
@@ -397,8 +408,9 @@ def frecency_settings():
     return field(7, frecency(commands)) + field(9, frecency(apps))
 
 
-# Each settings proto as Discord keeps it, without `versions`, and its data_version.
-SETTINGS = {"1": [b"", 1], "2": [frecency_settings(), 1]}
+# Each settings proto as Discord keeps it, without `versions`, and its data_version. With FAKE_NSFW's dms=1,
+# proto 1 has text_and_images.view_nsfw_commands (6.23, a BoolValue) on.
+SETTINGS = {"1": [field(6, field(23, field(1, 1))) if NSFW["dms"] else b"", 1], "2": [frecency_settings(), 1]}
 
 
 def settings_answer(kind):

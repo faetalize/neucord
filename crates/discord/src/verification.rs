@@ -84,8 +84,9 @@ impl Rules {
 }
 
 /// What servers ask of the account: verification, and 2FA for moderation
-/// where they require it. Only whether an email and a phone are set is kept,
-/// never the address or the number.
+/// where they require it, and whether Discord lets it see age-restricted
+/// content. Only whether an email and a phone are set is kept, never the
+/// address or the number.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Account {
     pub id: Snowflake,
@@ -96,6 +97,9 @@ pub struct Account {
     pub phone: bool,
     /// Two-factor authentication is on.
     pub mfa: bool,
+    /// `nsfw_allowed`: Discord counts the account as an adult's (read as
+    /// `?? false` in 240591).
+    pub nsfw_allowed: bool,
 }
 
 impl Account {
@@ -107,6 +111,7 @@ impl Account {
             email: user["email"].is_string(),
             phone: user["phone"].is_string(),
             mfa: user["mfa_enabled"] == true,
+            nsfw_allowed: user["nsfw_allowed"] == true,
         })
     }
 }
@@ -231,7 +236,7 @@ mod tests {
     }
 
     fn account() -> Account {
-        Account { id: ME, verified: true, email: true, phone: false, mfa: false }
+        Account { id: ME, verified: true, email: true, phone: false, mfa: false, nsfw_allowed: false }
     }
 
     fn guild(level: u64) -> Guild {
@@ -334,8 +339,20 @@ mod tests {
             json!({"id": "5", "verified": true, "email": "someone@example.org", "phone": null, "mfa_enabled": true});
         assert_eq!(
             Account::from_user(&user),
-            Some(Account { id: Snowflake(5), verified: true, email: true, phone: false, mfa: true })
+            Some(Account {
+                id: Snowflake(5),
+                verified: true,
+                email: true,
+                phone: false,
+                mfa: true,
+                nsfw_allowed: false
+            })
         );
+        for (nsfw_allowed, adult) in [(json!(true), true), (json!(false), false), (Value::Null, false)] {
+            let user = json!({"id": "5", "nsfw_allowed": nsfw_allowed});
+            assert_eq!(Account::from_user(&user).unwrap().nsfw_allowed, adult, "{nsfw_allowed}");
+        }
+        assert!(!Account::from_user(&json!({"id": "5"})).unwrap().nsfw_allowed, "missing");
         let member = Member::from_value(&json!({"joined_at": "2022-12-02T00:00:00.250000+00:00", "flags": 4}));
         assert_eq!((member.joined_at, member.pending, member.flags), (Some(ONBOARDING_CUTOFF + 1), false, 4));
     }

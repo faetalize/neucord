@@ -14,8 +14,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
+use crate::gates::Gates;
 use crate::limits;
+use crate::limits::Limits;
 use crate::permissions::{self, Permissions};
+use crate::settings::Settings;
 use crate::uploads::Sent;
 use crate::verification::Account;
 use crate::{Channel, ChannelKind, Guild, Snowflake};
@@ -709,6 +712,27 @@ pub fn suggestions<'a>(index: &'a CommandIndex, place: &Place, typed: &str, offe
     found
 }
 
+/// What decides, apart from the place, whether age-restricted commands are
+/// offered (`p` in 240591).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NsfwRules {
+    /// In DMs and group DMs: `view_nsfw_commands`, unless the region holds
+    /// it back (`S9` in 386171).
+    pub in_dms: bool,
+    /// A server is age-restricted by its `nsfw_level` (see
+    /// [`Guild::age_restricted`]).
+    pub by_nsfw_level: bool,
+}
+
+impl NsfwRules {
+    pub fn new(settings: &Settings, gates: &Gates, limits: &Limits<'_>) -> NsfwRules {
+        NsfwRules {
+            in_dms: settings.nsfw_commands_in_dms && !gates.nsfw_commands_age_gated,
+            by_nsfw_level: limits.servers_by_nsfw_level(),
+        }
+    }
+}
+
 /// Where a command would run, as far as its availability goes (`Bh` in 240591).
 #[derive(Clone, Debug)]
 pub struct Place {
@@ -726,7 +750,9 @@ pub struct Place {
     pub base_access: bool,
     /// Send Messages (in Threads, in a thread), or a DM.
     pub can_send: bool,
-    /// Whether NSFW commands may be offered.
+    /// Whether NSFW commands may be offered (`p` in 240591): to an adult's
+    /// account, in an `nsfw` channel (a thread's parent) or an age-restricted
+    /// server, or in a DM where [`NsfwRules::in_dms`] says.
     pub allow_nsfw: bool,
 }
 
@@ -735,7 +761,7 @@ impl Place {
     /// A thread takes its parent's permissions, with Send Messages in
     /// Threads in place of Send Messages. A DM has every permission that
     /// counts.
-    pub fn of(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64) -> Place {
+    pub fn of(guild: Option<&Guild>, channel: &Channel, me: &Account, nsfw: NsfwRules, now: i64) -> Place {
         let is_thread = channel.kind.is_thread();
         let base = Place {
             channel: channel.id,
@@ -752,7 +778,8 @@ impl Place {
         };
         let Some(guild) = guild else {
             let recipient = (channel.kind == ChannelKind::Dm).then(|| channel.recipients.first()).flatten();
-            return Place { recipient: recipient.map(|u| (u.id, u.bot)), ..base };
+            let allow_nsfw = me.nsfw_allowed && nsfw.in_dms;
+            return Place { recipient: recipient.map(|u| (u.id, u.bot)), allow_nsfw, ..base };
         };
         let parent = channel.parent_id.filter(|_| is_thread);
         let counted = parent.and_then(|p| guild.channel(p)).unwrap_or(channel);
@@ -765,6 +792,7 @@ impl Place {
             permissions,
             base_access: permissions.contains(Permissions::VIEW_CHANNEL | Permissions::USE_APPLICATION_COMMANDS),
             can_send: permissions.contains(send),
+            allow_nsfw: me.nsfw_allowed && (counted.nsfw || guild.age_restricted(nsfw.by_nsfw_level)),
             ..base
         }
     }
@@ -861,6 +889,9 @@ impl Place {
         if command.kind != kind {
             return Access::WrongCommandType;
         }
+        // The client also treats an app it has classified as adult (`d.A` in
+        // 46477, from ApplicationStore) as NSFW; Neucord keeps no
+        // applications, so only `nsfw` counts.
         if command.nsfw && !self.allow_nsfw {
             return Access::NsfwNotAllowed;
         }
@@ -2014,7 +2045,7 @@ mod tests {
     }
 
     fn account() -> Account {
-        Account { id: ME, verified: true, email: true, phone: false, mfa: false }
+        Account { id: ME, verified: true, email: true, phone: false, mfa: false, nsfw_allowed: false }
     }
 
     #[test]
@@ -2022,17 +2053,19 @@ mod tests {
         let seen = Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES | Permissions::USE_APPLICATION_COMMANDS;
         let guild = guild_of(seen);
         let channel = guild.channel(CHANNEL).unwrap();
-        let place = Place::of(Some(&guild), channel, &account(), 0);
+        let place = Place::of(Some(&guild), channel, &account(), NsfwRules::default(), 0);
         assert!(place.base_access && place.can_send && place.guild == Some(GUILD_ID));
         // A thread asks for Send Messages in Threads, which this server's members lack.
         let thread =
             guild.thread(Snowflake(100_000_000_000_000_021)).or(guild.channel(Snowflake(100_000_000_000_000_021)));
-        let place = Place::of(Some(&guild), thread.unwrap(), &account(), 0);
+        let place = Place::of(Some(&guild), thread.unwrap(), &account(), NsfwRules::default(), 0);
         assert!(place.is_thread && place.parent == Some(CHANNEL));
         assert!(place.base_access && !place.can_send);
         // Without Use Application Commands the server's apps stay out of reach.
         let guild = guild_of(Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES);
-        assert!(!Place::of(Some(&guild), guild.channel(CHANNEL).unwrap(), &account(), 0).base_access);
+        assert!(
+            !Place::of(Some(&guild), guild.channel(CHANNEL).unwrap(), &account(), NsfwRules::default(), 0).base_access
+        );
     }
 
     #[test]
@@ -2041,11 +2074,11 @@ mod tests {
             "id": "100000000000000020", "type": 1, "recipients": [{"id": "300000000000000001", "username": "bot", "bot": true}],
         }))
         .unwrap();
-        let place = Place::of(None, &dm, &account(), 0);
+        let place = Place::of(None, &dm, &account(), NsfwRules::default(), 0);
         assert!(place.guild.is_none() && place.base_access && place.can_send);
         assert_eq!(place.recipient, Some((Snowflake(300_000_000_000_000_001), true)));
         let group: Channel = serde_json::from_value(json!({"id": "9", "type": 3})).unwrap();
-        assert_eq!(Place::of(None, &group, &account(), 0).recipient, None);
+        assert_eq!(Place::of(None, &group, &account(), NsfwRules::default(), 0).recipient, None);
     }
 
     #[test]
@@ -2078,6 +2111,84 @@ mod tests {
         let mut allowed = place();
         allowed.allow_nsfw = true;
         assert_eq!(count(&nsfw, &allowed), 1);
+    }
+
+    #[test]
+    fn nsfw_commands_are_offered_in_an_age_restricted_channel_to_an_adult() {
+        let seen = Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES | Permissions::USE_APPLICATION_COMMANDS;
+        let mut guild = guild_of(seen);
+        guild.channels[0].nsfw = true;
+        let channel = guild.channel(CHANNEL).unwrap();
+        let adult = Account { nsfw_allowed: true, ..account() };
+        let place = Place::of(Some(&guild), channel, &adult, NsfwRules::default(), 0);
+        assert_eq!(count(&with(json!({"nsfw": true})), &place), 1);
+    }
+
+    #[test]
+    fn allow_nsfw_follows_the_channel_the_server_and_the_dm_setting() {
+        let seen = Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES | Permissions::USE_APPLICATION_COMMANDS;
+        let adult = Account { nsfw_allowed: true, ..account() };
+        let rules = |in_dms, by_nsfw_level| NsfwRules { in_dms, by_nsfw_level };
+        let allowed = |guild: &Guild, id: Snowflake, me: &Account, nsfw| {
+            let channel = guild.channel(id).or(guild.thread(id)).unwrap();
+            Place::of(Some(guild), channel, me, nsfw, 0).allow_nsfw
+        };
+        let mut guild = guild_of(seen);
+        guild.channels[0].nsfw = true;
+        assert!(allowed(&guild, CHANNEL, &adult, rules(false, false)), "an nsfw channel");
+        assert!(!allowed(&guild, CHANNEL, &account(), rules(true, true)), "not to an account Discord holds back");
+        let thread = Snowflake(100_000_000_000_000_021);
+        assert!(allowed(&guild, thread, &adult, rules(false, false)), "a thread under an nsfw parent");
+        let mut plain = guild_of(seen);
+        plain.nsfw_level = 3;
+        assert!(allowed(&plain, CHANNEL, &adult, rules(false, true)), "an age-restricted server");
+        assert!(!allowed(&plain, CHANNEL, &adult, rules(false, false)), "outside the experiment the owner decides");
+        plain.owner_configured_content_level = 1;
+        assert!(allowed(&plain, CHANNEL, &adult, rules(false, false)));
+        plain.nsfw_level = 2;
+        assert!(!allowed(&plain, CHANNEL, &adult, rules(false, true)), "SAFE");
+        let dm: Channel = serde_json::from_value(json!({
+            "id": "100000000000000020", "type": 1, "recipients": [{"id": "300000000000000001", "username": "bot", "bot": true}],
+        }))
+        .unwrap();
+        let group: Channel = serde_json::from_value(json!({"id": "9", "type": 3})).unwrap();
+        for private in [&dm, &group] {
+            assert!(Place::of(None, private, &adult, rules(true, false), 0).allow_nsfw);
+            assert!(!Place::of(None, private, &adult, rules(false, true), 0).allow_nsfw);
+            assert!(!Place::of(None, private, &account(), rules(true, false), 0).allow_nsfw);
+        }
+    }
+
+    #[test]
+    fn nsfw_rules_from_the_setting_the_region_and_the_experiment() {
+        use crate::experiments::{Experiments, murmur3};
+        let assigned = json!({"apex_experiments": {"assignments": {"1": {ME.to_string(): {"assignments": [
+            [murmur3("2025-09-server-nsfw-level"), 1, 0, 1]]}}}}});
+        let (nitro, none, by_level) =
+            (crate::limits::Nitro::default(), Experiments::default(), Experiments::from_ready(&assigned));
+        let (off, on) = (Settings::default(), Settings { nsfw_commands_in_dms: true, ..Settings::default() });
+        let (open, gated) = (Gates::default(), Gates { nsfw_commands_age_gated: true, ..Gates::default() });
+        let rules = |settings: &Settings, gates: &Gates, experiments: &Experiments| {
+            NsfwRules::new(settings, gates, &Limits { nitro: &nitro, experiments, me: ME })
+        };
+        assert_eq!(rules(&off, &open, &none), NsfwRules::default());
+        assert!(rules(&on, &open, &none).in_dms);
+        assert!(!rules(&on, &gated, &none).in_dms, "the region holds it back");
+        assert!(rules(&off, &open, &by_level).by_nsfw_level);
+    }
+
+    #[test]
+    fn the_apps_menus_hide_nsfw_user_and_message_commands_too() {
+        for kind in [command_type::USER, command_type::MESSAGE] {
+            let mut command = json!({"id": "400000000000000009", "application_id": APP, "type": kind,
+                "name": "Spicy", "description": "", "nsfw": true});
+            let commands = loaded(&json!({"applications": [{"id": APP, "name": "Dicey"}],
+                "application_commands": [command.take()]}));
+            assert!(commands.find(&place(), kind, "").is_empty(), "type {kind}");
+            let mut allowed = place();
+            allowed.allow_nsfw = true;
+            assert_eq!(commands.find(&allowed, kind, "").len(), 1, "type {kind}");
+        }
     }
 
     #[test]

@@ -767,6 +767,9 @@ pub struct Settings {
     /// The skin tone emoji with tones show and send in; none is the default
     /// yellow.
     pub skin_tone: Option<Tone>,
+    /// `view_nsfw_commands`: age-restricted commands are offered in DMs and
+    /// group DMs.
+    pub nsfw_commands_in_dms: bool,
 }
 
 /// The settings a payload mentions; the rest are `None`.
@@ -784,6 +787,7 @@ pub struct SettingsPatch {
     pub localization: Option<Option<String>>,
     /// `diversity_surrogate`: the tone, or none for the default.
     pub skin_tone: Option<Option<Tone>>,
+    pub nsfw_commands_in_dms: Option<bool>,
 }
 
 impl SettingsPatch {
@@ -823,6 +827,7 @@ impl Settings {
         if let Some(tone) = patch.skin_tone {
             self.skin_tone = tone;
         }
+        self.nsfw_commands_in_dms = patch.nsfw_commands_in_dms.unwrap_or(self.nsfw_commands_in_dms);
     }
 
     /// Take `patch` as all of the settings, as a replacing protobuf is: what

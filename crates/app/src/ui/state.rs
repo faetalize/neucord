@@ -361,7 +361,8 @@ impl State {
     /// Where commands would run if `channel` is open, for what they may be.
     pub(super) fn command_place(&self, channel: Snowflake) -> Option<discord::commands::Place> {
         let (guild, channel) = self.find_channel(channel)?;
-        Some(discord::commands::Place::of(guild, channel, self.account.as_ref()?, now_unix()))
+        let nsfw = discord::commands::NsfwRules::new(&self.settings, &self.gates, &self.limits());
+        Some(discord::commands::Place::of(guild, channel, self.account.as_ref()?, nsfw, now_unix()))
     }
 
     /// A press of ours is over, answered or refused by the request itself

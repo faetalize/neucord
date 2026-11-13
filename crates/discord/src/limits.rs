@@ -440,6 +440,13 @@ impl Limits<'_> {
         self.experiments.apex_user(self.me, "2026-02-lazy-load-all-images").is_some_and(|a| a.variant == 1)
     }
 
+    /// Whether a server is age-restricted by its `nsfw_level` rather than the
+    /// level its owner set, which `2025-09-server-nsfw-level` (329972) does
+    /// for variant 1.
+    pub fn servers_by_nsfw_level(&self) -> bool {
+        self.experiments.apex_user(self.me, "2025-09-server-nsfw-level").is_some_and(|a| a.variant == 1)
+    }
+
     /// Variant 1 raises Nitro's file size to 1 GiB, and everyone's total
     /// per message to 1 GiB (219882).
     fn upload_rollout(&self) -> bool {
@@ -623,6 +630,15 @@ mod tests {
         assert_eq!(limits(&unset).image_ladder(), None);
         assert_eq!(limits(&bad).image_ladder(), None);
         assert!(!limits(&other).lazy_images(), "only variant 1");
+    }
+
+    #[test]
+    fn servers_are_age_restricted_by_their_nsfw_level_in_variant_1() {
+        let nitro = Nitro::default();
+        let by_level = |e: &Experiments| Limits { nitro: &nitro, experiments: e, me: ME }.servers_by_nsfw_level();
+        assert!(!by_level(&Experiments::default()));
+        assert!(by_level(&experiments(&[("2025-09-server-nsfw-level", 1)])));
+        assert!(!by_level(&experiments(&[("2025-09-server-nsfw-level", 0)])));
     }
 
     #[test]
