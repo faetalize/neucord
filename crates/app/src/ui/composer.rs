@@ -482,6 +482,7 @@ impl App {
         for id in previous.iter().chain(&reply).map(|r| r.to) {
             self.refresh_message(id);
         }
+        self.reply_changed_slash();
     }
 
     pub(super) fn show_composer_error(&self, text: &str) {

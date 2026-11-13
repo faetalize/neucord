@@ -372,18 +372,20 @@ impl CommandIndex {
             .any(|key| self.slots.get(&key).is_some_and(|s| s.fetching))
     }
 
-    /// What to fetch to list commands for `place` (`query` in 264322 with
-    /// `allowFetch`): its server's or DM's index where that has apps, and the
-    /// account's.
-    pub fn to_fetch(&mut self, place: &Place, now: Instant) -> Vec<Target> {
+    /// What to fetch to list commands for `place` (264322 with `allowFetch`):
+    /// its server's or DM's index where that has apps, and the account's,
+    /// only where apps' commands are offered. That is the bare `/`'s browser
+    /// (`ee` and `et`), and the Apps menus', with nothing `typed`; the typed
+    /// list (`query`) asks for the account's index whatever is offered.
+    pub fn to_fetch(&mut self, place: &Place, now: Instant, offer: Offer, typed: &str) -> Vec<Target> {
         let mut targets = Vec::new();
-        if place.has_context_index() {
+        if offer.apps && place.has_context_index() {
             let target = place.guild.map_or(Target::Channel(place.channel), Target::Guild);
             if self.wants(target, now) {
                 targets.push(target);
             }
         }
-        if self.wants(Target::User, now) {
+        if (offer.apps || !typed.is_empty()) && self.wants(Target::User, now) {
             targets.push(Target::User);
         }
         targets
@@ -662,6 +664,48 @@ pub fn settled<'a>(found: Vec<Found<'a>>, text: &str, terminated: bool) -> Vec<F
         .into_iter()
         .filter(|f| f.command.display_name == text || f.command.display_name.starts_with(&spaced))
         .collect()
+}
+
+/// What the `/` suggestions may list (`applicationCommands` and `builtIns`
+/// in 264322's filters).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Offer {
+    /// Apps' commands.
+    pub apps: bool,
+    pub builtins: BuiltIns,
+}
+
+impl Offer {
+    /// The filters' defaults, which the Apps menus keep.
+    pub const ALL: Offer = Offer { apps: true, builtins: BuiltIns::All };
+}
+
+/// Which built-ins are listed (`y.n` in 210978).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuiltIns {
+    All,
+    /// Those that write the message, and the two that search
+    /// (`ONLY_TEXT`).
+    TextOnly,
+}
+
+/// What the message box's `/` offers (`ta` in 496533, and the bare `/`'s
+/// browser, `ed` in 989161): while a reply is pending
+/// (`canOnlyUseTextCommands`), no app's commands and only the built-ins
+/// that write text (`NEW_TEXT_ONLY`).
+pub fn offer(replying: bool) -> Offer {
+    if replying { Offer { apps: false, builtins: BuiltIns::TextOnly } } else { Offer::ALL }
+}
+
+/// The suggestions for `typed`, the text after `/` (`queryResults` of `B`
+/// in 496533): settled on the command's name once typing moved on, at
+/// most [`SUGGESTIONS`].
+pub fn suggestions<'a>(index: &'a CommandIndex, place: &Place, typed: &str, offer: Offer) -> Vec<Found<'a>> {
+    let (query, terminated) = query_of(typed);
+    let found = if offer.apps { index.find(place, command_type::CHAT, &query) } else { Vec::new() };
+    let mut found = settled(found, &query, terminated);
+    found.truncate(SUGGESTIONS);
+    found
 }
 
 /// Where a command would run, as far as its availability goes (`Bh` in 240591).
@@ -1830,6 +1874,33 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_offers_no_apps_commands() {
+        let commands = loaded(&index());
+        assert_eq!(names(&suggestions(&commands, &place(), "sta", offer(false))), ["stats reset all", "stats show"]);
+        for typed in ["", "sta", "roll ", "dice"] {
+            assert_eq!(names(&suggestions(&commands, &place(), typed, offer(true))), [""; 0], "/{typed}");
+        }
+        assert_eq!(offer(true), Offer { apps: false, builtins: BuiltIns::TextOnly });
+    }
+
+    #[test]
+    fn a_reply_fetches_no_server_index() {
+        const NOTHING: [Target; 0] = [];
+        let now = Instant::now();
+        let mut dm = place();
+        dm.guild = None;
+        dm.recipient = Some((Snowflake(1), true));
+        for place in [place(), dm] {
+            let mut commands = CommandIndex::default();
+            assert_eq!(commands.to_fetch(&place, now, offer(true), ""), NOTHING, "a bare / fetches nothing");
+            assert_eq!(commands.to_fetch(&place, now, offer(true), "ro"), [Target::User], "only the account's");
+            assert_eq!(commands.to_fetch(&place, now, offer(true), "rol"), NOTHING, "under way");
+            commands.loaded(Target::User, &json!({"applications": [], "application_commands": []}), ME);
+            assert_eq!(commands.to_fetch(&place, now, offer(true), "roll"), NOTHING, "current");
+        }
+    }
+
+    #[test]
     fn a_thread_and_a_dm_without_a_bot_have_no_server_index() {
         let mut place = place();
         place.guild = None;
@@ -1839,8 +1910,8 @@ mod tests {
         assert_eq!(place.context(), Some(CHANNEL));
         let mut commands = CommandIndex::default();
         let now = Instant::now();
-        assert_eq!(commands.to_fetch(&place, now), [Target::Channel(CHANNEL), Target::User]);
-        assert!(commands.to_fetch(&place, now).is_empty(), "both are under way");
+        assert_eq!(commands.to_fetch(&place, now, Offer::ALL, ""), [Target::Channel(CHANNEL), Target::User]);
+        assert!(commands.to_fetch(&place, now, Offer::ALL, "").is_empty(), "both are under way");
     }
 
     #[test]

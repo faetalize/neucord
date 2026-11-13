@@ -203,7 +203,7 @@ fn apps_menu<T: CommandTarget + 'static>(app: &Rc<App>, target: &Rc<T>, live: Li
     });
     let place = app.account.state.borrow().command_place(subject.channel);
     if let Some(place) = place {
-        app.fetch_command_indexes(&place, {
+        app.fetch_command_indexes(&place, commands::Offer::ALL, "", {
             let menu = Rc::downgrade(&menu);
             Rc::new(move || {
                 if let Some(menu) = menu.upgrade() {
@@ -406,6 +406,21 @@ impl App {
     /// start of the message box, fetching the apps and commands first if the
     /// client would. Returns whether the box holds a command.
     pub(super) fn update_slash_popup(self: &Rc<Self>) -> bool {
+        self.slash_popup(true)
+    }
+
+    /// A reply started or ended. A bare `/`'s list is the client's command
+    /// browser, whose filters follow the reply at once (`ed` in 989161) and
+    /// which fetches only as it opens (`ee`, `et` in 264322); a typed list
+    /// is made again only as the text changes (31498).
+    pub(super) fn reply_changed_slash(self: &Rc<Self>) {
+        let buffer = self.composer.buffer();
+        if buffer.text(&buffer.start_iter(), &buffer.end_iter(), false) == "/" {
+            self.slash_popup(false);
+        }
+    }
+
+    fn slash_popup(self: &Rc<Self>, fetch: bool) -> bool {
         let buffer = self.composer.buffer();
         let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).to_string();
         let Some(typed) = text.strip_prefix('/') else { return false };
@@ -414,22 +429,23 @@ impl App {
         }
         let Some(channel) = self.account.state.borrow().channel else { return false };
         let Some(place) = self.account.state.borrow().command_place(channel) else { return false };
-        self.fetch_command_indexes(&place, {
-            let this = Rc::downgrade(self);
-            Rc::new(move || {
-                // The box may have moved on while the index came.
-                if let Some(this) = this.upgrade() {
-                    this.update_slash_popup();
-                }
-            })
-        });
-        let (query, terminated) = commands::query_of(typed);
+        let replying = self.reply.borrow().as_ref().is_some_and(|r| r.channel == channel);
+        let offer = commands::offer(replying);
+        if fetch {
+            self.fetch_command_indexes(&place, offer, typed, {
+                let this = Rc::downgrade(self);
+                Rc::new(move || {
+                    // The box may have moved on while the index came.
+                    if let Some(this) = this.upgrade() {
+                        this.update_slash_popup();
+                    }
+                })
+            });
+        }
         let suggestions: Vec<Suggestion> = {
             let state = self.account.state.borrow();
-            let found = state.commands.find(&place, command_type::CHAT, &query);
-            commands::settled(found, &query, terminated)
+            commands::suggestions(&state.commands, &place, typed, offer)
                 .into_iter()
-                .take(commands::SUGGESTIONS)
                 .map(|f| Suggestion {
                     id: f.command.id.clone(),
                     name: format!("/{}", f.command.display_name),
@@ -442,16 +458,21 @@ impl App {
         true
     }
 
-    /// Ask for the indexes a list of commands needs (`query` with
-    /// `allowFetch` in 264322): each once, until Discord says it changed.
-    /// `loaded` runs as each arrives.
-    fn fetch_command_indexes(self: &Rc<Self>, place: &commands::Place, loaded: Rc<dyn Fn()>) {
+    /// Ask for the indexes a list of commands needs (`to_fetch`): each once,
+    /// until Discord says it changed. `loaded` runs as each arrives.
+    fn fetch_command_indexes(
+        self: &Rc<Self>,
+        place: &commands::Place,
+        offer: commands::Offer,
+        typed: &str,
+        loaded: Rc<dyn Fn()>,
+    ) {
         let (rest, me) = {
             let state = self.account.state.borrow();
             (state.rest.clone(), state.me())
         };
         let (Some(rest), Some(me)) = (rest, me) else { return };
-        let targets = self.account.state.borrow_mut().commands.to_fetch(place, Instant::now());
+        let targets = self.account.state.borrow_mut().commands.to_fetch(place, Instant::now(), offer, typed);
         let epoch = self.account.epoch.get();
         for target in targets {
             let (this, rest, loaded) = (self.clone(), rest.clone(), loaded.clone());
