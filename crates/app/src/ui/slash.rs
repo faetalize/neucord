@@ -201,6 +201,16 @@ fn apps_menu<T: CommandTarget + 'static>(app: &Rc<App>, target: &Rc<T>, live: Li
             menu.list();
         }
     });
+    // `F` in 56494, as the menu's commands are asked for: what is used
+    // orders them and makes the Frequently Used Commands.
+    app.load_frecency({
+        let menu = Rc::downgrade(&menu);
+        move || {
+            if let Some(menu) = menu.upgrade() {
+                menu.list();
+            }
+        }
+    });
     let place = app.account.state.borrow().command_place(subject.channel);
     if let Some(place) = place {
         app.fetch_command_indexes(&place, commands::Offer::ALL, "", {
@@ -221,32 +231,45 @@ enum Listing {
     Empty,
     /// Commands found for what was searched for, best first: id and name.
     Found(Vec<(String, String)>),
-    /// Each app and its commands.
-    Apps(Vec<(String, Vec<(String, String)>)>),
+    /// The commands used most here, then each app and its commands.
+    Apps {
+        frequent: Vec<(String, String)>,
+        apps: Vec<(String, Vec<(String, String)>)>,
+    },
 }
 
 impl AppsMenu {
     /// Fill the menu with what is known now.
     fn list(&self) {
         let Some(app) = self.app.upgrade() else { return };
+        let used = app.command_use();
         let listing = {
             let state = app.account.state.borrow();
             let Some(place) = state.command_place(self.subject.channel) else { return };
             let query = self.query.borrow();
-            let found = state.commands.find(&place, self.subject.kind, &query);
-            let own = |f: &commands::Found| (f.command.id.clone(), f.command.display_name.clone());
+            let asked = commands::Query {
+                kind: self.subject.kind,
+                text: &query,
+                offer: commands::Offer::ALL,
+                builtins: &[],
+                used: Some(&used),
+            };
+            let found = state.commands.query(&place, asked);
+            let command = |c: &Command| (c.id.clone(), c.display_name.clone());
             if state.commands.loading(&place) {
                 Listing::Loading
             } else if found.is_empty() {
                 Listing::Empty
             } else if !query.is_empty() {
-                Listing::Found(found.iter().map(own).collect())
+                Listing::Found(found.iter().map(|f| command(f.command)).collect())
             } else {
-                let apps = commands::by_app(found).into_iter().map(|(app, found)| {
-                    let command = |c: &Command| (c.id.clone(), c.display_name.clone());
-                    (app.name.clone(), found.into_iter().map(command).collect())
-                });
-                Listing::Apps(apps.collect())
+                // `XC` in 264322: of the commands in the order they are listed, the five used most.
+                let by_app = commands::by_app(found);
+                let listed: Vec<&Command> = by_app.iter().flat_map(|(_, commands)| commands.iter().copied()).collect();
+                let frequent = used.frequently_used(&listed, place.guild).into_iter().map(command).collect();
+                let apps =
+                    by_app.iter().map(|(app, found)| (app.name.clone(), found.iter().copied().map(command).collect()));
+                Listing::Apps { frequent, apps: apps.collect() }
             }
         };
         for name in self.listed.take() {
@@ -261,7 +284,14 @@ impl AppsMenu {
                     self.menu.append_item(&self.command(&id, &name));
                 }
             }
-            Listing::Apps(apps) => {
+            Listing::Apps { frequent, apps } => {
+                if !frequent.is_empty() {
+                    let group = gio::Menu::new();
+                    for (id, name) in frequent {
+                        group.append_item(&self.command(&id, &name));
+                    }
+                    self.menu.append_section(Some("Frequently Used Commands"), &group);
+                }
                 let group = gio::Menu::new();
                 for (name, found) in apps {
                     let commands = gio::Menu::new();
@@ -444,9 +474,19 @@ impl App {
                 })
             });
         }
+        let loads_use = commands::loads_use(&self.account.state.borrow().commands, &place, typed, offer);
+        if loads_use {
+            let this = Rc::downgrade(self);
+            self.load_frecency(move || {
+                if let Some(this) = this.upgrade() {
+                    this.slash_popup(false);
+                }
+            });
+        }
+        let used = self.command_use();
         let suggestions: Vec<Suggestion> = {
             let state = self.account.state.borrow();
-            commands::suggestions(&state.commands, &place, typed, offer, &[])
+            commands::suggestions(&state.commands, &place, typed, offer, &[], &used)
                 .into_iter()
                 .map(|f| Suggestion {
                     id: f.command.id.clone(),
@@ -951,6 +991,8 @@ impl App {
     ) -> bool {
         let rest = self.account.state.borrow().rest.clone();
         let Some(rest) = rest else { return false };
+        let guild = self.account.state.borrow().find_channel(channel).and_then(|(guild, _)| guild.map(|g| g.id));
+        self.command_used(&command, guild);
         self.account
             .state
             .borrow_mut()

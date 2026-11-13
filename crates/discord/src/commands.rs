@@ -518,14 +518,15 @@ impl CommandIndex {
             .chain(builtins)
             .filter_map(|(app, command)| score(command, app, &text, &words).map(|score| Found { command, app, score }))
             .collect();
-        found.sort_by(order);
+        let used = query.used.filter(|_| !query.text.is_empty());
+        found.sort_by(|a, b| order(a, b, used, place.guild));
         found
     }
 
     /// The apps' commands of `kind` that may be run in `place`, matching
     /// `text` (the words after `/`), best first.
     pub fn find(&self, place: &Place, kind: u8, text: &str) -> Vec<Found<'_>> {
-        self.query(place, Query { kind, text, offer: Offer::ALL, builtins: &[] })
+        self.query(place, Query { kind, text, offer: Offer::ALL, builtins: &[], used: None })
     }
 
     /// The command `id` of `kind` that may be used in `place`, with its app.
@@ -553,18 +554,86 @@ pub struct Query<'t, 'b> {
     pub offer: Offer,
     /// The built-ins offered here, listed beside the apps' commands.
     pub builtins: &'b [Command],
+    /// How much each command is used, which orders equal matches once
+    /// something is typed.
+    pub used: Option<&'t Used>,
 }
 
-/// The order of every list of commands: the better match, then the name,
-/// then an app's command before a built-in of the same name (the client
-/// sorts each section by `ea` in 264322, then lists Built-In last), then
-/// the app's name.
-fn order(a: &Found<'_>, b: &Found<'_>) -> Ordering {
+/// The order of every list of commands: the better match, then, with
+/// something typed, the one used more (`er` in 264322 sorts by use only
+/// with a `scoreMethod`, which every caller passes only for a query), then
+/// the name, then an app's command before a built-in of the same name (the
+/// client sorts each section, then lists Built-In last), then the app's
+/// name.
+fn order(a: &Found<'_>, b: &Found<'_>, used: Option<&Used>, guild: Option<Snowflake>) -> Ordering {
+    let by_use = || match used {
+        Some(used) => {
+            used.score(b.command, guild).partial_cmp(&used.score(a.command, guild)).unwrap_or(Ordering::Equal)
+        }
+        None => Ordering::Equal,
+    };
     a.score
         .cmp(&b.score)
+        .then_with(by_use)
         .then_with(|| natural(&a.command.display_name, &b.command.display_name))
         .then_with(|| a.command.is_built_in().cmp(&b.command.is_built_in()))
         .then_with(|| natural(&a.app.name, &b.app.name))
+}
+
+/// How many commands a Frequently Used section lists (`XC` in 264322).
+pub const FREQUENTLY_USED: usize = 5;
+
+/// What a command's use is filed under (`_` in 26909): a built-in by its
+/// (negative) id, a command registered to a server and run in one as
+/// `"<id>:<server>"`, any other by its id. A sub-command's id holds its path,
+/// NUL-separated, as `Lz` (168186) makes it.
+pub fn usage_key(command: &Command, guild: Option<Snowflake>) -> String {
+    // `0 > Number(id)`: a NUL-joined id is NaN, never negative.
+    let built_in = command.id.strip_prefix('-').is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()));
+    let registered = command.guild.as_ref().is_some_and(|g| !g.is_null());
+    match guild {
+        Some(guild) if !built_in && registered => format!("{}:{}", command.id, guild.0),
+        _ => command.id.clone(),
+    }
+}
+
+/// Of the keys used most, those that count in `guild` (`RG` in 26909): a
+/// server's own commands only there, the rest anywhere, without the server.
+pub fn place_keys(top: &[String], guild: Option<Snowflake>) -> Vec<String> {
+    top.iter()
+        .filter(|key| {
+            !key.contains(':') || guild.is_some_and(|g| key.split(':').nth(1) == Some(g.0.to_string().as_str()))
+        })
+        .map(|key| key.split(':').next().unwrap_or_default().to_owned())
+        .collect()
+}
+
+/// How much the account uses each command (`ApplicationCommandFrecencyStore`).
+#[derive(Clone, Debug, Default)]
+pub struct Used {
+    /// `getScore`, by [`usage_key`].
+    pub scores: HashMap<String, f64>,
+    /// `frequently`: the 100 keys with the best frecency, best first.
+    pub top: Vec<String>,
+}
+
+impl Used {
+    /// `getScoreWithoutLoadingLatest`: 0 for what was never used.
+    pub fn score(&self, command: &Command, guild: Option<Snowflake>) -> f64 {
+        self.scores.get(&usage_key(command, guild)).copied().unwrap_or(0.0)
+    }
+
+    /// The Frequently Used section (`XC` in 264322): of `listed` (what the
+    /// place offers, in the order shown unsearched), those among the keys
+    /// used most that count here, by score (not rank), at most
+    /// [`FREQUENTLY_USED`].
+    pub fn frequently_used<'a>(&self, listed: &[&'a Command], guild: Option<Snowflake>) -> Vec<&'a Command> {
+        let keys = place_keys(&self.top, guild);
+        let mut frequent: Vec<&Command> = listed.iter().copied().filter(|c| keys.contains(&c.id)).collect();
+        frequent.sort_by(|a, b| self.score(b, guild).partial_cmp(&self.score(a, guild)).unwrap_or(Ordering::Equal));
+        frequent.truncate(FREQUENTLY_USED);
+        frequent
+    }
 }
 
 /// A command that matches what was typed.
@@ -799,17 +868,21 @@ pub fn offer(replying: bool) -> Offer {
 }
 
 /// The suggestions for `typed`, the text after `/` (`queryResults` of `B`
-/// in 496533): the apps' commands as `offer` says and `builtins`, settled
-/// on the command's name once typing moved on, at most [`SUGGESTIONS`].
+/// in 496533): the apps' commands as `offer` says and `builtins`, equal
+/// matches by `used`, settled on the command's name once typing moved on,
+/// at most [`SUGGESTIONS`].
 pub fn suggestions<'a>(
     index: &'a CommandIndex,
     place: &Place,
     typed: &str,
     offer: Offer,
     builtins: &'a [Command],
+    used: &Used,
 ) -> Vec<Found<'a>> {
     let (query, terminated) = query_of(typed);
-    let found = index.query(place, Query { kind: command_type::CHAT, text: &query, offer, builtins });
+    let query_text = query.as_str();
+    let found =
+        index.query(place, Query { kind: command_type::CHAT, text: query_text, offer, builtins, used: Some(used) });
     let mut found = settled(found, &query, terminated);
     found.truncate(SUGGESTIONS);
     found
@@ -834,6 +907,14 @@ impl NsfwRules {
             by_nsfw_level: limits.servers_by_nsfw_level(),
         }
     }
+}
+
+/// Whether listing `typed` (the text after `/`) needs how much commands are
+/// used, which the settings proto of type 2 holds: the bare `/`'s browser
+/// loads it as it opens (`F` in 56494), a typed list once an app's command
+/// matches (`er` in 264322 loads it only then).
+pub fn loads_use(index: &CommandIndex, place: &Place, typed: &str, offer: Offer) -> bool {
+    typed.is_empty() || (offer.apps && !index.find(place, command_type::CHAT, &query_of(typed).0).is_empty())
 }
 
 /// Where a command would run, as far as its availability goes (`Bh` in 240591).
@@ -1679,6 +1760,16 @@ impl Run<'_> {
     }
 }
 
+#[cfg(test)]
+impl Command {
+    /// A command as an index would give it, for other modules' tests.
+    pub(crate) fn made_up(id: &str, kind: u8, application: u64, guild: Option<&str>) -> Command {
+        let root = json!({"id": id, "application_id": application.to_string(), "type": kind, "name": "made-up",
+                          "description": "", "guild_id": guild});
+        leaf(&root, &root, Vec::new())
+    }
+}
+
 // ---- Autocomplete ----
 
 /// The choices an app gave for the option typed in (`ApplicationCommandAutocompleteStore`,
@@ -2071,7 +2162,7 @@ mod tests {
             ..base.clone()
         };
         let builtins = [builtin(BuiltIn::Shrug, "roll"), builtin(BuiltIn::Gif, "gif")];
-        let query = |text| Query { kind: command_type::CHAT, text, offer: Offer::ALL, builtins: &builtins };
+        let query = |text| Query { kind: command_type::CHAT, text, offer: Offer::ALL, builtins: &builtins, used: None };
         let found = commands.query(&place(), query("roll"));
         assert_eq!(names(&found), ["roll", "roll", "stats reset all", "stats show"], "the app's description has roll");
         assert_eq!((found[0].command.builtin, found[1].command.builtin), (None, Some(BuiltIn::Shrug)));
@@ -2084,6 +2175,90 @@ mod tests {
         assert_eq!(names(&found), ["gif", "roll"]);
         // The menus' `find` lists no built-ins.
         assert_eq!(names(&commands.find(&place(), command_type::CHAT, "gi")), [""; 0]);
+    }
+
+    #[test]
+    fn a_command_is_filed_under_its_id_or_its_server() {
+        let server = Some(Snowflake(500));
+        let global = Command::made_up("910", 1, 900, None);
+        assert_eq!(usage_key(&global, server), "910");
+        let own = Command::made_up("913", 1, 900, Some("500"));
+        assert_eq!(usage_key(&own, server), "913:500");
+        assert_eq!(usage_key(&own, None), "913", "in a DM");
+        let sub = Command { id: "913\0show".into(), ..own.clone() };
+        assert_eq!(usage_key(&sub, server), "913\0show:500");
+        let builtin = Command { id: "-1".into(), builtin: Some(BuiltIn::Shrug), ..own };
+        assert_eq!(usage_key(&builtin, server), "-1");
+    }
+
+    #[test]
+    fn only_this_servers_and_global_uses_count_here() {
+        let top = ["1", "2:500", "3:600", "-1"].map(String::from);
+        assert_eq!(place_keys(&top, Some(Snowflake(500))), ["1", "2", "-1"]);
+        assert_eq!(place_keys(&top, None), ["1", "-1"]);
+    }
+
+    fn used(scores: &[(&str, f64)], top: &[&str]) -> Used {
+        Used {
+            scores: scores.iter().map(|(k, s)| (k.to_string(), *s)).collect(),
+            top: top.iter().map(|k| k.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn equal_matches_go_by_use() {
+        let commands = loaded(&index());
+        let query = |text, used| Query { kind: command_type::CHAT, text, offer: Offer::ALL, builtins: &[], used };
+        // Both sub-commands of stats start with "stats": a tie the use breaks.
+        let reset = "400000000000000002\0reset\0all";
+        let more = used(&[(reset, 0.5), ("400000000000000002\0show", 0.2)], &[]);
+        assert_eq!(names(&commands.query(&place(), query("stats", None))), ["stats reset all", "stats show"]);
+        let less = used(&[("400000000000000002\0show", 0.5)], &[]);
+        assert_eq!(names(&commands.query(&place(), query("stats", Some(&less)))), ["stats show", "stats reset all"]);
+        assert_eq!(names(&commands.query(&place(), query("stats", Some(&more)))), ["stats reset all", "stats show"]);
+        // A better match beats use: "roll" starts with "ro"; the stats are only Dicey's description ("rolls").
+        let stats = used(&[("400000000000000002\0show", 9.0)], &[]);
+        assert_eq!(names(&commands.query(&place(), query("ro", Some(&stats))))[0], "roll");
+        // Nothing typed: by name, whatever is used.
+        assert_eq!(names(&commands.query(&place(), query("", Some(&less)))), ["roll", "stats reset all", "stats show"]);
+    }
+
+    #[test]
+    fn a_list_needs_the_use_when_it_opens_bare_or_finds_an_apps_command() {
+        let commands = loaded(&index());
+        assert!(loads_use(&commands, &place(), "", offer(false)), "the bare / browser");
+        assert!(loads_use(&commands, &place(), "", offer(true)), "replying, too");
+        assert!(loads_use(&commands, &place(), "ro", offer(false)));
+        assert!(!loads_use(&commands, &place(), "qqq", offer(false)), "nothing matched");
+        assert!(!loads_use(&commands, &place(), "ro", offer(true)), "no app's commands while replying");
+    }
+
+    #[test]
+    fn frequently_used_goes_by_score_not_rank() {
+        let commands = loaded(&index());
+        let found = commands.find(&place(), command_type::CHAT, "");
+        let listed: Vec<&Command> = found.iter().map(|f| f.command).collect();
+        let (roll, show) = ("400000000000000001", "400000000000000002\0show");
+        // Roll ranks first (its frecency is higher), but show scores more.
+        let use_of = used(&[(roll, 1.0), (show, 3.0)], &[roll, show]);
+        let frequent = use_of.frequently_used(&listed, Some(GUILD_ID));
+        assert_eq!(frequent.iter().map(|c| c.display_name.as_str()).collect::<Vec<_>>(), ["stats show", "roll"]);
+        // Not used: not there. Ties keep the listed order.
+        let tie = used(&[(roll, 1.0), (show, 1.0)], &[show, roll]);
+        let frequent = tie.frequently_used(&listed, Some(GUILD_ID));
+        assert_eq!(frequent.iter().map(|c| c.display_name.as_str()).collect::<Vec<_>>(), ["roll", "stats show"]);
+        // A server's own command used in another server isn't offered here.
+        let elsewhere = used(&[], &["400000000000000001:600"]);
+        assert!(elsewhere.frequently_used(&listed, Some(GUILD_ID)).is_empty());
+        // At most five.
+        let many: Vec<Command> = (0..7).map(|n| Command::made_up(&n.to_string(), 1, 1, None)).collect();
+        let many_listed: Vec<&Command> = many.iter().collect();
+        let keys: Vec<String> = (0..7).map(|n| n.to_string()).collect();
+        let all = Used { scores: keys.iter().map(|k| (k.clone(), 1.0)).collect(), top: keys };
+        assert_eq!(all.frequently_used(&many_listed, None).len(), FREQUENTLY_USED);
+        // Used but not offered here (a message command) isn't listed.
+        let reroll = used(&[("400000000000000004", 5.0)], &["400000000000000004"]);
+        assert!(reroll.frequently_used(&listed, Some(GUILD_ID)).is_empty());
     }
 
     #[test]
@@ -2106,11 +2281,15 @@ mod tests {
     fn a_reply_offers_no_apps_commands() {
         let commands = loaded(&index());
         assert_eq!(
-            names(&suggestions(&commands, &place(), "sta", offer(false), &[])),
+            names(&suggestions(&commands, &place(), "sta", offer(false), &[], &Used::default())),
             ["stats reset all", "stats show"]
         );
         for typed in ["", "sta", "roll ", "dice"] {
-            assert_eq!(names(&suggestions(&commands, &place(), typed, offer(true), &[])), [""; 0], "/{typed}");
+            assert_eq!(
+                names(&suggestions(&commands, &place(), typed, offer(true), &[], &Used::default())),
+                [""; 0],
+                "/{typed}"
+            );
         }
         assert_eq!(offer(true), Offer { apps: false, builtins: BuiltIns::TextOnly });
     }

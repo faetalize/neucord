@@ -5,8 +5,9 @@
 //! The client loads it the first time something needs it (the emoji picker
 //! opening, `loadIfNecessary`) and saves changes to it as it does for the
 //! other proto, which [`crate::settings_sync::SettingsSync`] does for both.
-//! A favourite is saved at once; how often things are used is recorded by
-//! [`crate::usage`] and goes in the background, with whatever else is saved.
+//! A favourite is saved at once; how often things are used (emoji, stickers,
+//! channels, commands and apps) is recorded by [`crate::usage`] and goes in
+//! the background, with whatever else is saved.
 
 use std::time::Duration;
 
@@ -20,6 +21,8 @@ const FAVORITE_STICKERS: u32 = 3;
 const STICKER_FRECENCY: u32 = 4;
 const FAVORITE_EMOJIS: u32 = 5;
 const EMOJI_FRECENCY: u32 = 6;
+const APPLICATION_COMMAND_FRECENCY: u32 = 7;
+const APPLICATION_FRECENCY: u32 = 9;
 const GUILD_AND_CHANNEL_FRECENCY: u32 = 12;
 const EMOJI_REACTION_FRECENCY: u32 = 13;
 
@@ -114,6 +117,12 @@ pub struct FrecencyPatch {
     pub sticker_usage: Option<Vec<(String, Usage)>>,
     /// `guild_and_channel_frecency.guild_and_channels`, by id.
     pub channel_usage: Option<Vec<(String, Usage)>>,
+    /// `application_command_frecency.application_commands`, by
+    /// [`crate::commands::usage_key`].
+    pub command_usage: Option<Vec<(String, Usage)>>,
+    /// `application_frecency.applications`, by app id (as a string, like
+    /// the commands' keys).
+    pub application_usage: Option<Vec<(String, Usage)>>,
 }
 
 /// The entries of a frecency message: a map of `FrecencyItem`s whose keys
@@ -166,6 +175,8 @@ impl FrecencyPatch {
             reaction_usage: settings.message(EMOJI_REACTION_FRECENCY).map(|m| usage_of(m, false)),
             sticker_usage: settings.message(STICKER_FRECENCY).map(|m| usage_of(m, true)),
             channel_usage: settings.message(GUILD_AND_CHANNEL_FRECENCY).map(|m| usage_of(m, true)),
+            command_usage: settings.message(APPLICATION_COMMAND_FRECENCY).map(|m| usage_of(m, false)),
+            application_usage: settings.message(APPLICATION_FRECENCY).map(|m| usage_of(m, false)),
         })
     }
 }
@@ -195,6 +206,8 @@ impl Frecency {
             reaction_usage: Some(patch.reaction_usage.clone().unwrap_or_default()),
             sticker_usage: Some(patch.sticker_usage.clone().unwrap_or_default()),
             channel_usage: Some(patch.channel_usage.clone().unwrap_or_default()),
+            command_usage: Some(patch.command_usage.clone().unwrap_or_default()),
+            application_usage: Some(patch.application_usage.clone().unwrap_or_default()),
             ..patch
         };
         self.apply(patch, now_ms);
@@ -223,6 +236,12 @@ impl Frecency {
         }
         if let Some(usage) = patch.channel_usage {
             self.stores.channels.reload(&usage, &[], now_ms);
+        }
+        if let Some(usage) = patch.command_usage {
+            self.stores.commands.reload(&usage, &[], now_ms);
+        }
+        if let Some(usage) = patch.application_usage {
+            self.stores.applications.reload(&usage, &[], now_ms);
         }
     }
 }
@@ -446,9 +465,20 @@ mod tests {
             bytes_field(STICKER_FRECENCY, &id_entry(7, 3)),
             bytes_field(GUILD_AND_CHANNEL_FRECENCY, &id_entry(11, 2)),
             bytes_field(EMOJI_REACTION_FRECENCY, &entry("heart", 4, &[1])),
+            bytes_field(APPLICATION_COMMAND_FRECENCY, &entry("913\0show:500", 3, &[5])),
+            bytes_field(APPLICATION_FRECENCY, &entry("900", 2, &[6])),
         ]
         .concat();
         let patch = FrecencyPatch::from_proto_bytes(&proto).unwrap();
+        assert_eq!(
+            patch.command_usage,
+            Some(vec![("913\0show:500".to_owned(), Usage { total_uses: 3, recent_uses: vec![5] })]),
+            "a command's key is a string, its path and server in it"
+        );
+        assert_eq!(
+            patch.application_usage,
+            Some(vec![("900".to_owned(), Usage { total_uses: 2, recent_uses: vec![6] })])
+        );
         assert_eq!(patch.favorite_stickers, Some(vec![7, 9]));
         let (gifs, hidden) = patch.favorite_gifs.clone().unwrap();
         assert!(hidden);
@@ -483,6 +513,17 @@ mod tests {
         let reactions = frecency.stores.reactions.history.frequently(now, |_| true);
         assert_eq!(&reactions[..2], ["100", "thumbsup"], "used twice, a name that was listed twice");
         assert!(!frecency.stores.has_pending(), "seeded uses are never sent");
+        let used = vec![("910".to_owned(), Usage { total_uses: 1, recent_uses: vec![now] })];
+        let patch = FrecencyPatch {
+            command_usage: Some(used.clone()),
+            application_usage: Some(used.clone()),
+            ..Default::default()
+        };
+        frecency.load(patch, now);
+        assert_eq!(frecency.stores.commands.history.frequently(now, |_| true), ["910"]);
+        frecency.load(FrecencyPatch::default(), now);
+        assert!(frecency.stores.commands.history.frequently(now, |_| true).is_empty(), "no stale command use");
+        assert!(frecency.stores.applications.history.frequently(now, |_| true).is_empty(), "nor app use");
     }
 
     #[test]
@@ -550,6 +591,7 @@ mod tests {
         let before = vec![("heart".to_owned(), Usage { total_uses: 1, recent_uses: vec![now - 86_400_000] })];
         frecency.load(FrecencyPatch { emoji_usage: Some(before), ..Default::default() }, now);
         frecency.stores.emoji.track("thumbsup", now);
+        frecency.stores.commands.track("910", now);
         let schedule = sync.touch().unwrap();
         assert_eq!(schedule.after, Duration::ZERO);
         let (added, sent) = frecency.stores.before_send(now);
@@ -559,6 +601,8 @@ mod tests {
         let message = Message::parse(&proto).unwrap();
         assert!(message.message(EMOJI_FRECENCY).is_some());
         assert!(message.message(EMOJI_REACTION_FRECENCY).is_some(), "emoji and reactions go together");
+        assert!(message.message(APPLICATION_COMMAND_FRECENCY).is_some(), "a command use rides along");
+        assert!(message.message(APPLICATION_FRECENCY).is_none(), "no app use was pending");
         assert!(message.message(FAVORITE_EMOJIS).is_none());
         // Answered, the pending use is the account's.
         let saved = crate::settings_sync::Saved { settings: Some(proto), out_of_date: false };
