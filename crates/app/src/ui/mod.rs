@@ -143,6 +143,10 @@ pub struct App {
     send_separator: gtk::Separator,
     /// Opens the GIF picker.
     gif_button: gtk::Button,
+    /// Ends the GIF button's pulse after a favourite.
+    gif_pulse: RefCell<Option<glib::SourceId>>,
+    /// "Added to Favorites", over the GIF button while it pulses.
+    gif_hint: gtk::Popover,
     /// Opens the sticker picker, and the sticker waiting for the message.
     sticker_button: gtk::Button,
     waiting: stickers::Waiting,
@@ -372,6 +376,12 @@ impl App {
                 .valign(gtk::Align::Center)
                 .css_classes(["flat"])
                 .build(),
+            gif_pulse: RefCell::default(),
+            gif_hint: gtk::Popover::builder()
+                .autohide(false)
+                .position(gtk::PositionType::Top)
+                .child(&gtk::Label::new(Some("Added to Favorites")))
+                .build(),
             sticker_button: gtk::Button::builder()
                 .icon_name("image-x-generic-symbolic")
                 .tooltip_text("Stickers")
@@ -493,6 +503,7 @@ impl App {
         // the window is open. Released on close, which breaks the cycle.
         let keep_alive = RefCell::new(Some(this.clone()));
         let popover = this.mention_popover.clone();
+        let gif_hint = this.gif_hint.clone();
         this.window.connect_close_request(move |window| {
             if keep_alive.borrow().as_ref().is_some_and(|app| app.keeps_running()) {
                 window.set_visible(false);
@@ -500,6 +511,7 @@ impl App {
             }
             // A manually-parented popover must be unparented before teardown.
             popover.unparent();
+            gif_hint.unparent();
             keep_alive.take();
             glib::Propagation::Proceed
         });

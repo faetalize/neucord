@@ -304,6 +304,7 @@
     "resolveUnreadSetting",
     "retryOpts",
     "scheduleSaveFromOfflineEdit",
+    "selectItem",
     "sendPollMessage",
     "setForumThreadsCreated",
     "setNotificationSettings",
@@ -393,6 +394,7 @@
     "attachment image ladder": ["2026-07-attachment-image-ladder"],
     "image sizes": ["targetWidth", "maxUpscale", "ladder"],
     "lazy images": ["_lazyLoadIO", "rootMargin"],
+    "chat bar buttons": ["ChannelTextAreaButtons", "isGifButtonEnabled"],
     "message box menu": ["textarea-context", "submit-button"]
   },
   "constants": ["ACCOUNT_AGE", "FONT_SIZES", "MEMBER_AGE", "POLLS", "REPLYABLE", "UNDELETABLE", "USER_MESSAGE", "bannerHeight", "bannerWidth"],

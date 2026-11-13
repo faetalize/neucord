@@ -32,6 +32,11 @@ pub struct Key {
 /// Whether others see us typing (`POST /channels/{id}/typing`).
 pub const SEND_TYPING: Key = Key { group: "Chat", name: "send-typing", default: true };
 
+/// The GIF button, where the account may turn it off
+/// (`discord::gifs::button_customizable`): the client keeps it on the device
+/// (`gifButtonEnabled` in 775602), on by default.
+pub const GIF_BUTTON: Key = Key { group: "Chat", name: "gif-button", default: true };
+
 /// A send button at the end of the message box (`submitButtonEnabled` in
 /// the client's `AccessibilityStore`, off unless chosen).
 pub const SEND_BUTTON: Key = Key { group: "Chat", name: "send-button", default: false };

@@ -289,6 +289,13 @@ impl App {
         option_switch(self, &chat_box, "Show send message button", "", &config::SEND_BUTTON, |app, _| {
             app.refresh_send_button()
         });
+        // The GIF button's switch shows only under the experiment that lets it
+        // count (the client's Show Advanced Chat Bar Settings).
+        if self.gif_button_customizable() {
+            option_switch(self, &chat_box, "Show GIF button", "", &config::GIF_BUTTON, |app, _| {
+                app.refresh_gif_button()
+            });
+        }
         let background = group("Background", "");
         option_switch(
             self,

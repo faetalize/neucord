@@ -75,6 +75,8 @@ impl App {
             true => state.frecency.apply(patch, now_ms() as u64),
             false => state.frecency.load(patch, now_ms() as u64),
         }
+        drop(state);
+        self.refresh_gif_hint();
     }
 
     /// Whether the emoji is one of the account's favourites.
@@ -114,19 +116,26 @@ impl App {
     }
 
     /// Favourite the GIF, or take it back out (`wg` and `Tr` in 497685).
+    /// Favouriting pulses the GIF button whatever came of it: the client
+    /// signals it before `wg` loads the settings or checks the size (439401).
     pub(super) fn favorite_gif(self: &Rc<Self>, star: &Starred, favorite: bool) {
         let (held, hidden) = {
             let state = self.account.state.borrow();
             (state.frecency.favorite_gifs.clone(), state.frecency.hide_gif_tooltip)
         };
         let setting = match favorite {
-            true => match favorited(star, &held, hidden) {
-                Ok((gifs, hidden)) => Setting::FavoriteGifs(gifs, hidden),
-                Err(TooBig) => return self.toast("You cannot have more favorites."),
-            },
-            false => Setting::FavoriteGifs(unfavorited(&held, &star.url), hidden),
+            true => favorited(star, &held, hidden).map(|(gifs, hidden)| Setting::FavoriteGifs(gifs, hidden)),
+            false => Ok(Setting::FavoriteGifs(unfavorited(&held, &star.url), hidden)),
         };
-        self.edit_frecency(setting);
+        match setting {
+            Ok(setting) => self.edit_frecency(setting),
+            Err(TooBig) => self.toast("You cannot have more favorites."),
+        }
+        match favorite {
+            true => self.pulse_gif_button(),
+            // The hint follows the count while the button pulses.
+            false => self.refresh_gif_hint(),
+        }
     }
 
     /// Whether the GIF is one of the account's favourites.

@@ -109,8 +109,10 @@ the embed's own, and a server folder's colour is the one set on your account.
 
 Neucord connects only to Discord's API, gateway and CDN, and to hCaptcha
 when Discord asks for a captcha. Captchas run in a private web view that
-keeps nothing once it closes. There are no analytics, no crash reporting,
-and none of the tracking calls the official client makes. It identifies
+keeps nothing once it closes. There are no analytics and no crash
+reporting. Of the calls the official client makes only to report what you
+do, Neucord makes one, as the client does with every pick: which GIF picker
+result you picked, for which search (`POST /gifs/select`). It identifies
 itself to Discord as Neucord instead of impersonating the official client.
 What it says about itself, and why: [IDENTITY.md](IDENTITY.md).
 

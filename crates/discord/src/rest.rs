@@ -356,6 +356,14 @@ impl Rest {
         Ok(Picker::parse_suggestions(&answer))
     }
 
+    /// Report a pick of the picker's results, `body` being
+    /// [`Picker::selection`]'s: the client sends it as the pick is handled
+    /// (`g4`, 497685) and reads no answer.
+    pub async fn select_gif(&self, body: Value) -> Result<(), Error> {
+        let _: Value = self.request(call!(GIFS_SELECT), Some(body)).await?;
+        Ok(())
+    }
+
     /// Post `content`, the uploaded `attachments` and a `sticker`, which
     /// with any one of them may be all of it.
     pub async fn send_message(
