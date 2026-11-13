@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Snowflake;
 use crate::commands::{self, Command, Used, command_type};
+use crate::launcher::AppUsage;
 use crate::protobuf::{Value, build, int32, packed};
 
 const DAY_MS: i64 = 86_400_000;
@@ -206,6 +207,12 @@ impl History {
     pub fn scores(&mut self, now_ms: u64) -> HashMap<String, f64> {
         self.compute(now_ms);
         self.entries.iter().map(|(key, entry)| (key.clone(), entry.score)).collect()
+    }
+
+    /// Each thing's latest use (`max(getEntry(key).recentUses)`).
+    pub fn latest(&mut self, now_ms: u64) -> HashMap<String, u64> {
+        self.compute(now_ms);
+        self.entries.iter().filter_map(|(key, entry)| Some((key.clone(), *entry.recent_uses.iter().max()?))).collect()
     }
 
     /// What a save carries: at most as many entries as the kind saves, the
@@ -403,6 +410,12 @@ impl Stores {
     pub fn command_use(&mut self, now_ms: u64) -> Used {
         let history = &mut self.commands.history;
         Used { scores: history.scores(now_ms), top: history.frequently(now_ms, |_| true) }
+    }
+
+    /// How much each app is used, for the launcher's orders.
+    pub fn app_use(&mut self, now_ms: u64) -> AppUsage {
+        let history = &mut self.applications.history;
+        AppUsage { scores: history.scores(now_ms), latest: history.latest(now_ms) }
     }
 
     /// The messages a save carries for what is pending, by field of
@@ -647,6 +660,8 @@ mod tests {
         let used = stores.command_use(NOW);
         assert_eq!(used.scores["913:500"], 1.0, "used today: 100 × 0.01");
         assert_eq!(used.top.len(), 5);
+        let apps = stores.app_use(NOW);
+        assert_eq!((apps.scores["900"], apps.latest["900"]), (200.0, NOW), "an app counts whole");
     }
 
     #[test]

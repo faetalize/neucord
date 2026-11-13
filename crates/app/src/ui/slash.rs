@@ -754,6 +754,7 @@ impl App {
                             session: &state.session_id,
                             data: active.command.data(options, None),
                             nonce,
+                            from: commands::RunFrom::CHAT,
                         };
                         Ask::Send(rest, run.autocomplete_body(), nonce)
                     } else {
@@ -908,6 +909,7 @@ impl App {
                             session: &state.session_id,
                             data: active.command.data(options, None),
                             nonce,
+                            from: commands::RunFrom::CHAT,
                         };
                         Prepared::Go {
                             channel: active.channel,
@@ -964,6 +966,7 @@ impl App {
                         session: &state.session_id,
                         data: command.data(Vec::new(), Some(subject.target)),
                         nonce,
+                        from: commands::RunFrom::CHAT,
                     };
                     let body = run.body(&[]);
                     Prepared::Go { command: Box::new(command), app: Box::new(app), body, nonce }

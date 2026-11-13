@@ -135,6 +135,15 @@ static BUILT_IN: LazyLock<App> = LazyLock::new(|| App {
     permissions: Vec::new(),
 });
 
+/// The app the launcher lists built-ins under (`N3` in 735991, whose id is
+/// the built-ins' `"-1"`): only its name and description show.
+static DISCORD_BUILT_IN: LazyLock<App> = LazyLock::new(|| App {
+    name: "Discord Built-In".into(),
+    app_name: "Discord Built-In".into(),
+    description: "Built-in commands for everyday use".into(),
+    ..BUILT_IN.clone()
+});
+
 impl App {
     /// `ApplicationFlags` (`PROMOTED` 1 << 29, `PARTNER` 1 << 30).
     const PROMOTED: u64 = 1 << 29;
@@ -151,6 +160,16 @@ impl App {
     /// What built-ins are listed as.
     pub fn built_in() -> &'static App {
         &BUILT_IN
+    }
+
+    /// What the launcher lists built-ins as.
+    pub fn discord_built_in() -> &'static App {
+        &DISCORD_BUILT_IN
+    }
+
+    /// Whether this stands for the built-ins rather than an app.
+    pub fn is_built_in(&self) -> bool {
+        self.id == BUILT_IN.id
     }
 }
 
@@ -463,7 +482,7 @@ impl CommandIndex {
     /// DM's) index only with View Channel and Use Application Commands, and
     /// an app the account has too under the account's listing, with its
     /// commands first and then those only the place's index has.
-    fn usable(&self, place: &Place, kinds: &[u8]) -> Vec<(&App, &Command)> {
+    pub(crate) fn usable(&self, place: &Place, kinds: &[u8]) -> Vec<(&App, &Command)> {
         let context = if place.base_access && place.has_context_index() {
             place.context().map_or(&[][..], |c| self.sections(Key::Context(c)))
         } else {
@@ -536,6 +555,42 @@ impl CommandIndex {
     /// The command `id` of `kind` that may be used in `place`, with its app.
     pub fn get(&self, place: &Place, kind: u8, id: &str) -> Option<(&Command, &App)> {
         self.find(place, kind, "").into_iter().find(|f| f.command.id == id).map(|f| (f.command, f.app))
+    }
+
+    /// The apps with a command of `kinds` that may be used in `place`, under
+    /// the account's listing where both indexes have one, by name: the
+    /// sections `er` (264322) gives the launcher (`cu` in 842209).
+    pub fn apps(&self, place: &Place, kinds: &[u8]) -> Vec<&App> {
+        let mut apps: Vec<&App> = Vec::new();
+        for (app, _) in self.usable(place, kinds) {
+            if !apps.iter().any(|a| a.id == app.id) {
+                apps.push(app);
+            }
+        }
+        apps.sort_by(|a, b| natural(&a.name, &b.name));
+        apps
+    }
+
+    /// Of [`Self::apps`], those in the server's own index (`lL` in 621377
+    /// reads `ON(guild_id)`): none outside a server.
+    pub fn server_apps(&self, place: &Place, kinds: &[u8]) -> Vec<&App> {
+        let Some(guild) = place.guild else { return Vec::new() };
+        let server = self.sections(Key::Context(guild));
+        self.apps(place, kinds).into_iter().filter(|app| server.iter().any(|s| s.app.id == app.id)).collect()
+    }
+
+    /// `application`'s slash commands that may be used in `place`, by name
+    /// (`ea` in 264322 for an unscored section): an app page's "Use this
+    /// app".
+    pub fn app_commands(&self, place: &Place, application: Snowflake) -> Vec<&Command> {
+        let mut commands: Vec<&Command> = self
+            .usable(place, &[command_type::CHAT])
+            .into_iter()
+            .filter(|(app, _)| app.id == application)
+            .map(|(_, command)| command)
+            .collect();
+        commands.sort_by(|a, b| natural(&a.display_name, &b.display_name));
+        commands
     }
 
     /// The app listed for `application` in `place`, wherever it is installed.
@@ -682,7 +737,7 @@ pub fn by_app<'a>(found: Vec<Found<'a>>) -> Vec<(&'a App, Vec<&'a Command>)> {
 
 /// `Intl.Collator` with `sensitivity: accent, numeric` (264322's `H`): case
 /// doesn't matter and digits count as numbers.
-fn natural(a: &str, b: &str) -> Ordering {
+pub(crate) fn natural(a: &str, b: &str) -> Ordering {
     fn chunks(text: &str) -> Vec<(bool, String)> {
         let mut chunks: Vec<(bool, String)> = Vec::new();
         for c in text.to_lowercase().chars() {
@@ -1987,6 +2042,46 @@ impl Command {
     }
 }
 
+/// Where a command was started from (`CommandOrigin`, `iw` in 392054).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Origin {
+    /// The `/` suggestions and everything else that starts one in the box.
+    #[default]
+    Chat,
+    /// An app page's command, filled in in the box (`APPLICATION_LAUNCHER`).
+    Launcher,
+    /// An app page's Send (`APP_LAUNCHER_APPLICATION_VIEW`).
+    LauncherView,
+}
+
+impl Origin {
+    /// `analytics_location` (`j` in 545152, `Oh` in 392054).
+    pub fn location(self) -> &'static str {
+        match self {
+            Origin::Chat => "slash_ui",
+            Origin::Launcher => "app_launcher",
+            Origin::LauncherView => "app_launcher_application_view",
+        }
+    }
+}
+
+/// What a run says about where it came from (`A` in 545152): the origin and
+/// source `ApplicationCommandStore` kept as the command was started, and the
+/// launcher section its Send was pressed in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunFrom {
+    pub origin: Origin,
+    /// `section_name`.
+    pub section: Option<&'static str>,
+    /// `source`: the launcher's entrypoint (`s4` in 500049).
+    pub source: Option<&'static str>,
+}
+
+impl RunFrom {
+    /// The `/` suggestions, the form and the Apps menus.
+    pub const CHAT: RunFrom = RunFrom { origin: Origin::Chat, section: None, source: None };
+}
+
 /// Where a run is sent from.
 pub struct Run<'a> {
     pub application: Snowflake,
@@ -1995,14 +2090,15 @@ pub struct Run<'a> {
     pub session: &'a str,
     pub data: Value,
     pub nonce: Snowflake,
+    pub from: RunFrom,
 }
 
 impl Run<'_> {
     /// `POST /interactions` for running the command (`handleCommand` in
-    /// 870801): `analytics_location` says it came from the suggestions
-    /// (`slash_ui`). A DM has no `guild_id`. `data.attachments` names the
-    /// run's uploaded files, `[]` when there are none, since `A` in 545152
-    /// always passes its list on.
+    /// 870801): `analytics_location` from the origin, then `section_name`
+    /// and `source` when there are any. A DM has no `guild_id`.
+    /// `data.attachments` names the run's uploaded files, `[]` when there are
+    /// none, since `A` in 545152 always passes its list on.
     pub fn body(&self, files: &[Sent<'_>]) -> Value {
         let mut body = self.body_of(APPLICATION_COMMAND, true);
         body["data"]["attachments"] = files.iter().enumerate().map(|(i, file)| file.body(i)).collect();
@@ -2028,7 +2124,13 @@ impl Run<'_> {
             body["guild_id"] = json!(guild.to_string());
         }
         if analytics {
-            body["analytics_location"] = json!("slash_ui");
+            body["analytics_location"] = json!(self.from.origin.location());
+            if let Some(section) = self.from.section {
+                body["section_name"] = json!(section);
+            }
+            if let Some(source) = self.from.source {
+                body["source"] = json!(source);
+            }
         }
         body
     }
@@ -2388,6 +2490,7 @@ mod tests {
             session: "s",
             data: command.data(Vec::new(), Some(target)),
             nonce: Snowflake(5),
+            from: RunFrom::CHAT,
         };
         let body = run.body(&[]);
         assert_eq!(body["application_id"], app.id.to_string());
@@ -3309,6 +3412,7 @@ mod tests {
             session: "session",
             data,
             nonce: Snowflake(9),
+            from: RunFrom::CHAT,
         };
         let body = run.body(&[]);
         assert_eq!(body["type"], 2);
@@ -3353,6 +3457,7 @@ mod tests {
             session: "session",
             data: command.data(Vec::new(), target),
             nonce: Snowflake(9),
+            from: RunFrom::CHAT,
         };
         let (roll, _) = commands.get(&place, command_type::CHAT, "400000000000000001").unwrap();
         assert_eq!(run(roll, None).body(&[])["data"]["attachments"], json!([]));

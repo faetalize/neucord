@@ -38,6 +38,7 @@ pub mod images;
 mod inflate;
 pub mod interaction;
 mod invalid;
+pub mod launcher;
 pub mod limits;
 pub mod locales;
 pub mod markup;
