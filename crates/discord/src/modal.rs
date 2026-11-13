@@ -205,8 +205,7 @@ impl FileRefusal {
         }
     }
 
-    /// 518960's `P` sizes with `Hb` (humanize's `filesize`), where
-    /// Neucord's message refusals write `size_words`.
+    /// 518960's `P` sizes with `Hb` (humanize's `filesize`).
     pub fn body(&self) -> String {
         match self {
             FileRefusal::TooMany { max: 1 } => "You can upload up to 1 file.".to_owned(),

@@ -212,11 +212,12 @@ impl Refusal {
         }
     }
 
+    /// Sizes as `P` in 518960 and `WQ` in 382287 write them, with `Hb`.
     pub fn body(&self) -> String {
         match self {
             Refusal::Empty => "File cannot be empty".to_owned(),
-            Refusal::TooLarge { max } => format!("Max file size is {} please.", size_words(*max)),
-            Refusal::TotalTooLarge { max } => format!("Total message size must be less than {}", size_words(*max)),
+            Refusal::TooLarge { max } => format!("Max file size is {} please.", filesize(*max)),
+            Refusal::TotalTooLarge { max } => format!("Total message size must be less than {}", filesize(*max)),
             Refusal::TooMany { max } => format!("You can only upload {max} files at a time!"),
         }
     }
@@ -224,7 +225,7 @@ impl Refusal {
 
 const MIB: u64 = 1024 * 1024;
 
-/// A size as the client writes it: `20 MB`, with mebibytes.
+/// A file's size in its row: `20 MB`, with mebibytes.
 pub fn size_words(bytes: u64) -> String {
     match bytes {
         b if b >= 1024 * MIB && b % (1024 * MIB) == 0 => format!("{} GB", b / (1024 * MIB)),
@@ -237,8 +238,7 @@ pub fn size_words(bytes: u64) -> String {
 
 /// A size as humanize's `filesize` writes it (796873, which `Hb` in 453771
 /// calls): base 1024, two decimals from a kilobyte on, `,` grouping, so
-/// `20.00 MB`, `512 bytes`. What a command run's staging says, where a
-/// message's refusals write [`size_words`].
+/// `20.00 MB`, `512 bytes`: every limit the client's refusals name.
 pub fn filesize(bytes: u64) -> String {
     const UNITS: [&str; 6] = ["bytes", "KB", "MB", "GB", "TB", "PB"];
     if bytes == 0 {
@@ -765,8 +765,10 @@ mod tests {
     fn refusals_speak_like_the_client() {
         assert_eq!(Refusal::TooMany { max: 10 }.heading(), "Too many uploads!");
         assert_eq!(Refusal::TooMany { max: 10 }.body(), "You can only upload 10 files at a time!");
-        assert_eq!(Refusal::TooLarge { max: 20 * MIB }.body(), "Max file size is 20 MB please.");
-        assert_eq!(Refusal::TotalTooLarge { max: 1024 * MIB }.body(), "Total message size must be less than 1 GB");
+        // `P` in 518960 and `WQ` in 382287 write the limit with `Hb`.
+        assert_eq!(Refusal::TooLarge { max: 20 * MIB }.body(), "Max file size is 20.00 MB please.");
+        assert_eq!(Refusal::TotalTooLarge { max: 1024 * MIB }.body(), "Total message size must be less than 1.00 GB");
+        assert_eq!(Refusal::TotalTooLarge { max: 500 * MIB }.body(), "Total message size must be less than 500.00 MB");
         assert_eq!(Refusal::Empty.body(), "File cannot be empty");
     }
 
