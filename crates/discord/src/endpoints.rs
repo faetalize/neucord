@@ -75,6 +75,7 @@ pub(crate) const GIFS_SEARCH: Endpoint = Endpoint::get("/gifs/search");
 pub(crate) const GIFS_TRENDING: Endpoint = Endpoint::get("/gifs/trending");
 pub(crate) const GIFS_TRENDING_GIFS: Endpoint = Endpoint::get("/gifs/trending-gifs");
 pub(crate) const GIFS_SUGGEST: Endpoint = Endpoint::get("/gifs/suggest");
+pub(crate) const GIFS_SELECT: Endpoint = Endpoint::post("/gifs/select");
 pub(crate) const SAFETY_HUB: Endpoint = Endpoint::get("/safety-hub/@me");
 pub(crate) const SAFETY_HUB_SUSPENDED: Endpoint = Endpoint::post("/safety-hub/suspended/@me");
 pub(crate) const SETTINGS_PROTO: Endpoint = Endpoint::get("/users/@me/settings-proto/{kind}");

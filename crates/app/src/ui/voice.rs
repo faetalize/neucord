@@ -199,6 +199,12 @@ impl App {
         }
     }
 
+    /// Whether a recording takes the open channel's message box.
+    pub(super) fn recording_here(&self) -> bool {
+        let channel = self.account.state.borrow().channel;
+        self.voice.draft.borrow().as_ref().is_some_and(|d| Some(d.channel) == channel)
+    }
+
     fn voice_phase(&self) -> Option<Phase> {
         self.voice.draft.borrow().as_ref().map(|d| d.phase)
     }
@@ -219,6 +225,7 @@ impl App {
         if shown.is_some() {
             self.sticker_button.set_visible(false);
         }
+        self.refresh_gif_button();
         if shown.is_some() {
             self.length.show(None);
         } else {

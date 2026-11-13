@@ -310,7 +310,16 @@ impl App {
             &config::UNREAD_BADGE,
             |app, _| app.refresh_tray(),
         );
-        let neucord = page("Neucord", "preferences-system-symbolic", &[&appearance, &typing, &background]);
+        // The client offers its chat bar's switches only under the experiment
+        // that lets them count (Appearance ▸ Chat Box).
+        let chat_box = group("Chat Box", "");
+        option_switch(self, &chat_box, "Show GIF button", "", &config::GIF_BUTTON, |app, _| app.refresh_gif_button());
+        let mut groups = vec![&appearance, &typing];
+        if self.gif_button_customizable() {
+            groups.push(&chat_box);
+        }
+        groups.push(&background);
+        let neucord = page("Neucord", "preferences-system-symbolic", &groups);
         neucord.set_description("These are saved on this computer only, not to your Discord account.");
 
         let dialog = adw::PreferencesDialog::builder().title("Settings").build();
