@@ -25,11 +25,7 @@ Last checked against: stable 668923.
    `git -C ~/Source/Discord-Decomp diff <old> <new> -- modules/<id>.js`.
 3. If a module is gone or the anchors no longer find the code, search the new
    build for the anchors and update the entry.
-4. With Neucord built from master and logged in, and no other instance
-   running, run `node tools/discord-watch/cli.mjs account
-   ~/Source/Discord-Decomp target/debug/neucord`. It prints what Discord
-   sends the account that moved since the last check.
-5. Say in the issue what changed and whether Neucord now acts differently
+4. Say in the issue what changed and whether Neucord now acts differently
    from the client. Open an issue for each real difference, then run
    `node tools/discord-watch/cli.mjs raise-build ~/Source/Discord-Decomp`
    (the build above, and the one Neucord names to Discord), commit it and
@@ -151,8 +147,9 @@ changed for unrelated reasons only needs a note in the issue.
   commands are listed and kept (168186) and what a run sends for each option
   (545152) are watched. Not watched: where a command may be used, `zl` in
   46477 (anchor `MISSING_BASE_PERMISSIONS`) with the place's permissions,
-  `Bh` in 240591 (anchor `hasBaseAccessPermissions`), and the rule types, 1
-  role, 2 user, 3 channel (`RA` in 392054); the checks a value passes, `J` in
+  `Bh` in 240591 (anchor `hasBaseAccessPermissions`, with `p` there for
+  where age-restricted commands may show), and the rule types, 1 role, 2
+  user, 3 channel (`RA` in 392054); the checks a value passes, `J` in
   300541 (anchor `allowEmptyValues`); which answers show who ran the command
   (267508): 567008 (anchor `childrenExecutedCommand`) and 268719, when
   `interaction`'s `name_localized ?? name` (432005) isn't empty, with `V` in
@@ -407,7 +404,8 @@ changed for unrelated reasons only needs a note in the issue.
   link as the message at once, with a reply, leaving the box, its files and a
   waiting sticker alone, or with Shift puts it in the box (`nd` in 989161,
   anchor `source_object: "GIF Picker"`; `handleSendMessage` in 699344, anchor
-  `isGif`). Either way a result with an id is reported (`g4` in 497685).
+  `isGif`). Either way a result with an id is reported, `{id, q}` (`g4` in
+  497685).
 - **When a popout asks for a profile, and what** (`profile.rs`,
   `ui/profile.rs`). The endpoints, the query's field names, `UserProfileStore`
   and `NoteStore` are watched; their values and when to ask aren't. A mouse

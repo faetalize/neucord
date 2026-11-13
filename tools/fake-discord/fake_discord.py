@@ -63,6 +63,7 @@ NAMES = {
     "lazy": "2026-02-lazy-load-all-images",
     "upload": "2026-09-nitro-file-upload-rollout",
     "nsfwlevel": "2025-09-server-nsfw-level",
+    "chatbar": "2026-06-chat-bar-customization",
 }
 LADDER = json.dumps({"ladder": [64, 128, 256], "maxUpscale": 1.1, "minSnapDownDpr": 2})
 INTERACTION = os.environ.get("FAKE_INTERACTION") or "ok"

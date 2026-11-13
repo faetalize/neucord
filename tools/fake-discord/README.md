@@ -28,7 +28,7 @@ what arrived, IDENTIFY's key order and properties first.
   `FAKE_UPLOAD_FAIL=too-large` turns the URL down with Discord's 40005.
   Both settings protos are kept, and a save merges into them field by field
   as Discord's does. The GIF endpoints answer made-up results, one with a
-  numeric id, and take a pick's `POST /gifs/select`. `FAKE_VARIANTS="hiding=1,voice=1,ladder=1,lazy=1,upload=1,nsfwlevel=1"`
+  numeric id, and take a pick's `POST /gifs/select`. `FAKE_VARIANTS="hiding=1,voice=1,ladder=1,lazy=1,upload=1,nsfwlevel=1,chatbar=1"`
   assigns Apex experiments by name, `FAKE_REIDENTIFY=<s>` sends op 9 after
   that many seconds to force a second IDENTIFY, `FAKE_NEW_TOKEN` puts an
   `auth_token` in READY. `FAKE_NSFW="allowed=1,dms=0,status=3,gated=0,level=0,owner=0"`

@@ -67,7 +67,7 @@ GTK and libadwaita defaults: no CSS until there's a reason for it.
   each connect, to exercise reconnecting and resuming.
 - `NEUCORD_DEBUG_EXPERIMENTS=<dir>` writes, on READY, the account's
   experiment assignments and server rollouts, and READY's shape, into
-  `<dir>`. discord-watch's `account` command runs it for the weekly check.
+  `<dir>`.
 - `NEUCORD_DEBUG_UNKNOWN_MESSAGES=1` puts a line in the chat for every system
   message type Neucord has no line for, with its number, including the ones
   it hides. If the official client draws nothing there either, ignore it.

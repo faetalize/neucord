@@ -32,6 +32,20 @@ fn remember(playback: Playback) {
     PLAYBACK.with(|p| p.set(playback));
 }
 
+/// A stream of `path` that plays unmuted at full volume until told
+/// otherwise. GTK passes volume and mute to GStreamer only when they change,
+/// and a PipeWire stream that is told neither starts with the ones the
+/// session manager saved for Neucord: those of its last stream, muted after
+/// a muted video. Moving both away and back tells GStreamer.
+pub(super) fn media_file(path: &Path) -> gtk::MediaFile {
+    let file = gtk::MediaFile::for_filename(path);
+    file.set_muted(true);
+    file.set_muted(false);
+    file.set_volume(0.0);
+    file.set_volume(1.0);
+    file
+}
+
 pub(super) struct Options {
     /// Start playing, as the viewer does; inline videos play on a click that
     /// already asked for them.
@@ -114,7 +128,7 @@ pub(super) struct Player {
 
 impl Player {
     pub(super) fn new(file: &Path, options: &Options) -> Player {
-        let stream = gtk::MediaFile::for_filename(file);
+        let stream = media_file(file);
         let start = playback();
         stream.set_volume(start.volume);
         stream.set_muted(start.muted);
