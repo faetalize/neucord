@@ -199,6 +199,10 @@ pub(super) struct State {
     pub(super) commands: discord::commands::CommandIndex,
     /// Commands we ran that their app hasn't answered, by nonce.
     pub(super) running: HashMap<Snowflake, super::slash::Running>,
+    /// What was typed and picked in apps' forms, by modal `custom_id`.
+    pub(super) modal_drafts: HashMap<String, discord::modal::Draft>,
+    /// The last form submit, which only one may be in flight.
+    pub(super) modal_submission: discord::modal::Submission,
     /// Display names by user id, accumulated from every user we see plus lazy
     /// `GET /users/{id}` lookups, so mentions resolve even for people no longer
     /// in the server.

@@ -20,6 +20,7 @@ impl App {
     /// answered its requests.
     pub(super) fn leave_account(self: &Rc<Self>) -> Option<Rest> {
         let (rest, notified) = self.account.leave();
+        self.close_modal_forms();
         super::identity::end();
         self.withdraw_notifications(notified);
         // Folds it hadn't saved are not the next account's to send.
@@ -289,7 +290,13 @@ impl App {
                 Event::TypingStart { channel_id, user_id, user } => self.on_typing(channel_id, user_id, user.as_ref()),
                 Event::MessageCreate(message) => self.on_message(*message),
                 Event::MessageUpdate(edit) => self.on_message_update(edit),
-                Event::Interaction { nonce, outcome, reason } => self.on_interaction(nonce, outcome, reason),
+                Event::Interaction { nonce, outcome, reason } => {
+                    // A form's submit first: the app's reply message ends no form.
+                    if !self.modal_answered(nonce, outcome) {
+                        self.on_interaction(nonce, outcome, reason);
+                    }
+                }
+                Event::Modal(modal) => self.on_modal(*modal),
                 Event::InteractionCreated { nonce } => self.command_created(nonce),
                 Event::Autocomplete { nonce, choices } => self.on_autocomplete(nonce, &choices),
                 Event::CommandIndexChanged { guild, version } => self.command_index_changed(guild, version),

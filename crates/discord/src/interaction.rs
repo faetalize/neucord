@@ -143,14 +143,15 @@ impl Local {
 }
 
 /// What is wrong with picking `count` options from a menu that takes `min` to
-/// `max` (`Lr` in 257249 and the validator in 911408): picking none is fine
-/// only where `min` is 0.
-pub fn pick_error(count: usize, min: usize, max: usize) -> Option<String> {
+/// `max` (the select validator in 911408): picking none is fine where
+/// `empty_ok` (`Lr` in 257249: a message's menu whose `min` is 0, a form's
+/// that isn't required), and a missing limit isn't checked.
+pub fn pick_error(count: usize, empty_ok: bool, min: Option<usize>, max: Option<usize>) -> Option<String> {
     match count {
-        0 if min == 0 => None,
+        0 if empty_ok => None,
         0 => Some("This field is required.".into()),
-        n if n < min => Some(format!("Select at least {min}")),
-        n if n > max => Some(format!("Select at most {max}")),
+        n if min.is_some_and(|min| n < min) => Some(format!("Select at least {}", min.unwrap_or_default())),
+        n if max.is_some_and(|max| n > max) => Some(format!("Select at most {}", max.unwrap_or_default())),
         _ => None,
     }
 }
@@ -413,11 +414,12 @@ mod tests {
 
     #[test]
     fn picks_are_checked_against_the_menus_limits() {
-        assert_eq!(pick_error(1, 1, 1), None);
-        assert_eq!(pick_error(0, 0, 3), None, "a menu that takes none");
-        assert_eq!(pick_error(0, 1, 3).as_deref(), Some("This field is required."));
-        assert_eq!(pick_error(1, 2, 3).as_deref(), Some("Select at least 2"));
-        assert_eq!(pick_error(4, 1, 3).as_deref(), Some("Select at most 3"));
+        let message = |count, min: usize, max| pick_error(count, min == 0, Some(min), Some(max));
+        assert_eq!(message(1, 1, 1), None);
+        assert_eq!(message(0, 0, 3), None, "a menu that takes none");
+        assert_eq!(message(0, 1, 3).as_deref(), Some("This field is required."));
+        assert_eq!(message(1, 2, 3).as_deref(), Some("Select at least 2"));
+        assert_eq!(message(4, 1, 3).as_deref(), Some("Select at most 3"));
     }
 
     fn failure(status: u32, body: &str) -> Failure {

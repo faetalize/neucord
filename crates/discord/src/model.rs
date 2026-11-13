@@ -164,6 +164,26 @@ impl ChannelKind {
         }
     }
 
+    /// The number Discord gives the kind.
+    pub fn raw(self) -> u8 {
+        match self {
+            Self::Text => 0,
+            Self::Dm => 1,
+            Self::Voice => 2,
+            Self::GroupDm => 3,
+            Self::Category => 4,
+            Self::Announcement => 5,
+            Self::AnnouncementThread => 10,
+            Self::PublicThread => 11,
+            Self::PrivateThread => 12,
+            Self::Stage => 13,
+            Self::Forum => 15,
+            Self::Media => 16,
+            Self::MediaThread => 19,
+            Self::Other(raw) => raw,
+        }
+    }
+
     /// Channels that hold a plain message history.
     pub fn is_text(self) -> bool {
         matches!(self, Self::Text | Self::Announcement | Self::Dm | Self::GroupDm)
@@ -1527,6 +1547,13 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn a_channel_kind_gives_back_its_number() {
+        for raw in 0..=u8::MAX {
+            assert_eq!(ChannelKind::from_raw(raw).raw(), raw);
+        }
+    }
 
     /// One of ours (5), changed by `extra`.
     fn ours(extra: Value) -> Message {

@@ -4,8 +4,9 @@
 Everything it is sent goes to $FAKE_LOG as JSON lines. $FAKE_VARIANTS names
 which Apex experiments the account is assigned, e.g. "hiding=1,lazy=1".
 $FAKE_INTERACTION is how apps answer: ok (the default), fail, silent, 429,
-modal or iframe. $FAKE_ANSWERS=1 ends #general's history with apps' answers
-to commands others ran.
+modal or iframe. $FAKE_MODAL_SUBMIT is how an app takes its form: ok (the
+default), fail, silent or 429. $FAKE_ANSWERS=1 ends #general's history with
+apps' answers to commands others ran.
 """
 import base64, json, os, re, socket, struct, sys, threading, time, zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -64,6 +65,9 @@ LADDER = json.dumps({"ladder": [64, 128, 256], "maxUpscale": 1.1, "minSnapDownDp
 INTERACTION = os.environ.get("FAKE_INTERACTION") or "ok"
 if INTERACTION not in ("ok", "fail", "silent", "429", "modal", "iframe"):
     sys.exit("unknown FAKE_INTERACTION " + INTERACTION)
+MODAL_SUBMIT = os.environ.get("FAKE_MODAL_SUBMIT") or "ok"
+if MODAL_SUBMIT not in ("ok", "fail", "silent", "429"):
+    sys.exit("unknown FAKE_MODAL_SUBMIT " + MODAL_SUBMIT)
 
 ME = {"id": "100", "username": "tester_fake", "global_name": "Tester Fake", "avatar": None, "discriminator": "0",
       "premium_type": 0, "flags": 0, "verified": True, "mfa_enabled": False}
@@ -572,6 +576,8 @@ def interaction(body):
         LIMITED.add(nonce)
         return 429, {"message": "You are being rate limited.", "retry_after": 1, "global": False}
     app = APPS.get(body.get("application_id"), {"id": body.get("application_id"), "name": "Unknown"})
+    if kind == 5:
+        return modal_submitted(body, app, nonce, iid)
 
     def answer():
         if INTERACTION == "silent":
@@ -590,15 +596,73 @@ def interaction(body):
                     "title": "Tell us", "application": app}
             if INTERACTION == "iframe":
                 return dispatch("INTERACTION_IFRAME_MODAL_CREATE", {**form, "iframe_path": "/", "modal_size": 1})
-            row = {"type": 1, "components": [{"type": 4, "custom_id": "name", "style": 1, "label": "Name",
-                                              "required": True}]}
-            return dispatch("INTERACTION_MODAL_CREATE", {**form, "components": [row]})
+            return dispatch("INTERACTION_MODAL_CREATE", {**form, **modal_form()})
         dispatch("INTERACTION_SUCCESS", {"id": iid, "nonce": nonce})
         if kind == 2:
             _, push = answered(body, app, iid)
             push()
 
     return 204, None, answer
+
+
+def modal_form():
+    """The form every press and command gets under FAKE_INTERACTION=modal: one of each field a form submits."""
+    def label(text, component, description=None):
+        return {"type": 18, "label": text, "description": description, "component": component}
+
+    def options(*names, default=None):
+        return [{"label": n.title(), "value": n, "description": "the %s one" % n, "default": n == default}
+                for n in names]
+
+    components = [
+        {"type": 1, "components": [{"type": 4, "custom_id": "name", "style": 1, "label": "Name", "required": True,
+                                    "placeholder": "Who you are", "max_length": 20}]},
+        label("About", {"type": 4, "custom_id": "about", "style": 2, "min_length": 5, "max_length": 200,
+                        "required": True}, "A few made-up words"),
+        label("Flavour", {"type": 3, "custom_id": "flavour", "options": options("lemon", "mint", default="mint")}),
+        {"type": 10, "content": "Answers go to **Formy**, a made-up app."},
+        label("Size", {"type": 21, "custom_id": "size", "options": options("small", "large"), "required": True}),
+        label("Toppings", {"type": 22, "custom_id": "toppings", "options": options("nuts", "fruit", "cream"),
+                           "max_values": 2}),
+        label("Agree", {"type": 23, "custom_id": "agree"}, "Tick to agree"),
+        label("Friend", {"type": 5, "custom_id": "friend", "default_values": [{"id": "301", "type": "user"}]}),
+        label("Picture", {"type": 19, "custom_id": "picture", "file_types": ["image"]}),
+    ]
+    return {"components": components, "resolved": {"users": {"301": ALICE},
+                                                   "members": {"301": {"nick": "Al", "roles": []}}}}
+
+
+def modal_submitted(body, app, nonce, iid):
+    """A form's submit: 204, then as $FAKE_MODAL_SUBMIT says. A success is followed by the app's reply."""
+    if MODAL_SUBMIT == "429" and nonce not in LIMITED:
+        LIMITED.add(nonce)
+        return 429, {"message": "You are being rate limited.", "retry_after": 1, "global": False}
+
+    def answer():
+        if MODAL_SUBMIT == "silent":
+            return
+        dispatch("INTERACTION_CREATE", {"id": iid, "nonce": nonce})
+        if MODAL_SUBMIT == "fail":
+            return dispatch("INTERACTION_FAILURE", {"id": iid, "nonce": nonce})
+        dispatch("INTERACTION_SUCCESS", {"id": iid, "nonce": nonce})
+        channel = body.get("channel_id")
+        owners = {"0": body.get("guild_id") or "0"}
+        _, push = post(channel, app.get("bot") or ME, "Thanks for filling in the made-up form.", type=20,
+                       application_id=app["id"], webhook_id=app["id"],
+                       interaction_metadata={"id": iid, "type": 5, "user": ME,
+                                             "authorizing_integration_owners": owners})
+        push()
+
+    return 204, None, answer
+
+
+def form_message():
+    """Formy's message in 600, the newest of its history, whose button asks for its form."""
+    button = {"type": 2, "style": 1, "label": "Open form", "custom_id": "open-form"}
+    msg, _ = post("600", FORMY, "Press it for a made-up form.", application_id="800",
+                  components=[{"type": 1, "components": [button]}], id=snowflake(5000, 41),
+                  timestamp="2026-01-01T10:40:00.000000+00:00")
+    return msg
 
 
 def focused(options):
@@ -751,6 +815,8 @@ class Handler(BaseHTTPRequestHandler):
             SESSION[0] = None
         self.close_connection = True
 
+
+form_message()
 
 if __name__ == "__main__":
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)

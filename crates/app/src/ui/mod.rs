@@ -25,6 +25,7 @@ mod media_frame;
 mod members;
 mod menus;
 mod message_row;
+mod modal;
 mod notify;
 mod notify_menus;
 mod own_status;
@@ -162,6 +163,8 @@ pub struct App {
     thread_expiry: RefCell<Option<glib::SourceId>>,
     /// Saves the folds no request carried, fifteen seconds after the last.
     fold_save: RefCell<Option<glib::SourceId>>,
+    /// Apps' forms open on the window.
+    modal_forms: RefCell<Vec<Rc<modal::Form>>>,
     /// Threads we started and are waiting for the gateway to bring.
     thread_waiters: RefCell<Vec<(Snowflake, async_channel::Sender<()>)>>,
     /// The post list a forum or media channel shows.
@@ -391,6 +394,7 @@ impl App {
             timeout_end: RefCell::default(),
             thread_expiry: RefCell::default(),
             fold_save: RefCell::default(),
+            modal_forms: RefCell::default(),
             thread_waiters: RefCell::default(),
             forum: forum::Page::new(),
             post_form: RefCell::default(),

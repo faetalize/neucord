@@ -246,6 +246,16 @@ struct Menu<'a> {
     max: usize,
 }
 
+/// What a menu of options lists and how it picks: one, or up to `max`.
+pub(super) struct Choices<'a> {
+    pub(super) placeholder: Option<&'a str>,
+    pub(super) options: &'a [SelectOption],
+    pub(super) max: usize,
+    /// Choosing the one picked again unpicks it (a form's menu that may be
+    /// left empty, `Lr` in 257249).
+    pub(super) clearable: bool,
+}
+
 /// What a menu's face says, which outlives the component it came from.
 struct MenuText {
     placeholder: Option<String>,
@@ -253,7 +263,7 @@ struct MenuText {
 }
 
 impl MenuText {
-    fn of(menu: &Menu) -> Self {
+    fn of(menu: &Choices) -> Self {
         MenuText { placeholder: menu.placeholder.map(str::to_owned), options: menu.options.to_vec() }
     }
 
@@ -264,22 +274,53 @@ impl MenuText {
         match (names.is_empty(), &self.placeholder) {
             (false, _) => names.join(", "),
             (true, Some(placeholder)) => placeholder.clone(),
-            (true, None) => "Make a selection".to_owned(),
+            (true, None) => discord::modal::SELECT_PLACEHOLDER.to_owned(),
         }
     }
 }
 
-/// A menu of options: the button shows what is picked, and a popover lists
-/// them. One to pick sends when it is chosen; several, when the list closes
-/// with something changed (`nt` in 232430).
+/// A message's menu of options, which sends what is picked.
 fn menu_widget(menu: &Menu, component: &Component, images: Option<&Images>, live: Option<&Live>) -> gtk::Widget {
     // What it holds before anything is picked: the message's own defaults,
     // or what a press left.
     let defaults: Vec<String> = menu.options.iter().filter(|o| o.default).map(|o| o.value.clone()).collect();
     let held = live.zip(menu.custom_id).and_then(|(live, id)| live.local.picked(id)).map(<[String]>::to_vec);
-    let picked = Rc::new(RefCell::new(held.unwrap_or(defaults)));
     let loading = live.is_some_and(|l| l.local.visual(component) == Visual::Loading);
+    let choices = Choices { placeholder: menu.placeholder, options: menu.options, max: menu.max, clearable: false };
+    let (Some(live), Some(id)) = (live, menu.custom_id) else {
+        let button = choices_button(&choices, held.unwrap_or(defaults), images, false, |_| false);
+        button.set_sensitive(false);
+        button.set_tooltip_text(Some(NOT_YET));
+        return button.upcast();
+    };
+    let (live_handle, id) = (live.handle(), id.to_owned());
+    let (min, max) = (menu.min, menu.max);
+    let button = choices_button(&choices, held.unwrap_or(defaults), images, loading, move |now| {
+        if let Some(error) = interaction::pick_error(now.len(), min == 0, Some(min), Some(max)) {
+            live_handle.say(&error);
+            return false;
+        }
+        live_handle.act(&id, interaction::STRING_SELECT, Some(now.to_vec()));
+        true
+    });
+    button.set_sensitive(live.usable(component, menu.disabled) && !loading);
+    button.upcast()
+}
 
+/// A menu of options: the button shows what is picked, and a popover lists
+/// them. What is picked is given to `commit` when the list closes with
+/// something changed since it last took it: for one option when it is
+/// chosen, for several when the list is dismissed (`nt` in 232430).
+/// `commit` says whether it took it. Committing then leaves the popover
+/// whole when the menu is drawn again.
+pub(super) fn choices_button(
+    menu: &Choices,
+    picked: Vec<String>,
+    images: Option<&Images>,
+    loading: bool,
+    commit: impl Fn(&[String]) -> bool + 'static,
+) -> gtk::MenuButton {
+    let picked = Rc::new(RefCell::new(picked));
     let label = gtk::Label::builder()
         .label(MenuText::of(menu).label(&picked.borrow()))
         .ellipsize(pango::EllipsizeMode::End)
@@ -290,17 +331,9 @@ fn menu_widget(menu: &Menu, component: &Component, images: Option<&Images>, live
         face.append(&gtk::Spinner::builder().spinning(true).build());
     }
     let button = gtk::MenuButton::builder().child(&face).build();
-    let (Some(live), Some(id)) = (live, menu.custom_id) else {
-        button.set_sensitive(false);
-        button.set_tooltip_text(Some(NOT_YET));
-        return button.upcast();
-    };
-    button.set_sensitive(live.usable(component, menu.disabled) && !loading);
 
     let sent = Rc::new(RefCell::new(picked.borrow().clone()));
-    let single = menu.max <= 1;
-    let (live, id) = (Rc::new(live.handle()), id.to_owned());
-    let (min, max) = (menu.min, menu.max);
+    let (single, max, clearable) = (menu.max <= 1, menu.max, menu.clearable);
     let popover = gtk::Popover::new();
     let list = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(2).build();
     let scroller = gtk::ScrolledWindow::builder()
@@ -312,23 +345,8 @@ fn menu_widget(menu: &Menu, component: &Component, images: Option<&Images>, live
     popover.set_child(Some(&scroller));
     button.set_popover(Some(&popover));
 
-    // Send what is picked, if it differs from what was last sent and fits.
-    let commit = {
-        let (picked, sent, live, id) = (picked.clone(), sent.clone(), live.clone(), id.clone());
-        move || {
-            let now = picked.borrow().clone();
-            if now == *sent.borrow() {
-                return;
-            }
-            if let Some(error) = interaction::pick_error(now.len(), min, max) {
-                return live.say(&error);
-            }
-            *sent.borrow_mut() = now.clone();
-            live.act(&id, interaction::STRING_SELECT, Some(now));
-        }
-    };
-
     let checks: Rc<RefCell<Vec<(String, gtk::CheckButton)>>> = Rc::default();
+    let ticks: Rc<RefCell<Vec<(String, gtk::Image)>>> = Rc::default();
     for option in menu.options {
         let row = gtk::Box::builder().spacing(8).build();
         if let (Some(emoji), Some(images)) = (&option.emoji, images) {
@@ -349,13 +367,20 @@ fn menu_widget(menu: &Menu, component: &Component, images: Option<&Images>, live
         row.append(&text);
         let value = option.value.clone();
         if single {
-            if picked.borrow().contains(&value) {
-                row.append(&gtk::Image::from_icon_name("object-select-symbolic"));
-            }
+            let tick = gtk::Image::builder()
+                .icon_name("object-select-symbolic")
+                .visible(picked.borrow().contains(&value))
+                .build();
+            row.append(&tick);
+            ticks.borrow_mut().push((value.clone(), tick));
             let choice = gtk::Button::builder().child(&row).css_classes(["flat"]).build();
-            let (picked, popover) = (picked.clone(), popover.clone());
+            let (picked, popover, ticks) = (picked.clone(), popover.clone(), ticks.clone());
             choice.connect_clicked(move |_| {
-                *picked.borrow_mut() = vec![value.clone()];
+                let again = picked.borrow().contains(&value);
+                *picked.borrow_mut() = if again && clearable { Vec::new() } else { vec![value.clone()] };
+                for (v, tick) in ticks.borrow().iter() {
+                    tick.set_visible(picked.borrow().contains(v));
+                }
                 popover.popdown();
             });
             list.append(&choice);
@@ -386,15 +411,15 @@ fn menu_widget(menu: &Menu, component: &Component, images: Option<&Images>, live
             check.set_sensitive(!full || picked.borrow().contains(v));
         }
     }
-    // What was picked goes when the list has closed: for one option that
-    // is when it is chosen, for several when it is dismissed. Sending then
-    // leaves the popover whole when the row is drawn again.
-    let (face_label, menu_copy) = (label.clone(), MenuText::of(menu));
+    let (face_label, text) = (label.clone(), MenuText::of(menu));
     popover.connect_closed(move |_| {
-        face_label.set_label(&menu_copy.label(&picked.borrow()));
-        commit();
+        face_label.set_label(&text.label(&picked.borrow()));
+        let now = picked.borrow().clone();
+        if now != *sent.borrow() && commit(&now) {
+            *sent.borrow_mut() = now;
+        }
     });
-    button.upcast()
+    button
 }
 
 impl Live {

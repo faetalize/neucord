@@ -20,7 +20,10 @@ what arrived, IDENTIFY's key order and properties first.
   the rest a session needs. Messages posted are kept and come back as
   `MESSAGE_CREATE`. One command index of made-up apps serves the server, the
   account and the bot's DM; `POST /interactions` answers on the gateway as
-  the app would, or as `FAKE_INTERACTION=fail|silent|429|modal|iframe` says.
+  the app would, or as `FAKE_INTERACTION=fail|silent|429|modal|iframe` says (`modal`: one
+  of each field a form submits, and Formy's message in channel 600 has a
+  button that asks for it), and takes a form as
+  `FAKE_MODAL_SUBMIT=fail|silent|429` says.
   Both settings protos are kept, and a save merges into them field by field
   as Discord's does. The GIF endpoints answer made-up results, one with a
   numeric id, and take a pick's `POST /gifs/select`. `FAKE_VARIANTS="hiding=1,voice=1,ladder=1,lazy=1,upload=1"`
@@ -39,7 +42,11 @@ what arrived, IDENTIFY's key order and properties first.
   `gif-search <q>`, `gif-pick <n>`, `gif-shift-pick <n>`, `gif-star <n>`
   (the nth GIF shown, or its star), `gif-tile <n>` (the nth front page
   tile), `gif-back`, `gif-hint [png]` (prints whether the GIF button
-  pulses and shows "Added to Favorites", and shoots the hint), `quit`. It edits the copy by exact strings
+  pulses and shows "Added to Favorites", and shoots the hint),
+  `press <message> <custom_id>` (a button of
+  the open channel's), the top app form's `modal-fields`, `modal-set <path>
+  <text>`, `modal-check <path> <n>`, `modal-pick <path> <n>`, `modal-clear
+  <path>`, `modal-submit`, `modal-cancel` and `modal-shot <png>`, `quit`. It edits the copy by exact strings
   and stops on the first that no longer matches: when the code it patches
   moves, update the string. The module it adds is only built here, so a
   change to what it calls needs a run to show it still builds.

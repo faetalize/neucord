@@ -1410,7 +1410,7 @@ impl App {
     }
 
     /// The users we know and the open guild's channels.
-    fn names(&self) -> Names {
+    pub(super) fn names(&self) -> Names {
         let state = self.account.state.borrow();
         let channels = state
             .guild

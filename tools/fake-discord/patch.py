@@ -31,7 +31,7 @@ use gtk::glib;
 use super::App;
 use super::composer::Completion;
 
-fn shot(widget: &impl IsA<gtk::Widget>, path: &str) {
+pub(super) fn shot(widget: &impl IsA<gtk::Widget>, path: &str) {
     let w = widget.upcast_ref::<gtk::Widget>();
     let paintable = gtk::WidgetPaintable::new(Some(w));
     let snapshot = gtk::Snapshot::new();
@@ -187,6 +187,15 @@ impl App {
                     None => eprintln!("e2e: no such response"),
                 }
             }
+            Some("press") => {
+                let message = id(parts.next());
+                let custom_id = parts.next().unwrap_or_default().to_owned();
+                match self.account.state.borrow().channel {
+                    Some(channel) => self.interact(channel, message, custom_id, discord::interaction::BUTTON, None),
+                    None => eprintln!("e2e: no channel"),
+                }
+            }
+            Some(command) if command.starts_with("modal-") => self.e2e_modal(command, rest),
             Some("quit") => {
                 if let Some(app) = self.window.application() {
                     app.quit();
@@ -269,6 +278,104 @@ impl App {
                 Some(b) => b.emit_clicked(),
                 None => eprintln!("e2e: no back button"),
             },
+            other => eprintln!("e2e: unknown {other}"),
+        }
+    }
+}
+""")
+
+# The form's own commands, inside the module so they reach its fields: `modal-fields` prints each field's path,
+# kind and title; `modal-set <path> <text>` fills an input; `modal-check <path> <n>` clicks a field's n-th
+# check or radio button; `modal-pick <path> <n>` picks a menu's n-th option and closes it; `modal-clear <path>`
+# clicks Clear selection; `modal-submit`; `modal-cancel` (Escape); `modal-shot <png>` shoots the top form.
+with open(f"{root}/crates/app/src/ui/modal.rs", "a") as f:
+    f.write(r"""
+fn e2e_all<T: IsA<gtk::Widget>>(widget: &gtk::Widget, found: &mut Vec<T>) {
+    let mut child = widget.first_child();
+    while let Some(c) = child {
+        if let Ok(t) = c.clone().downcast::<T>() {
+            found.push(t);
+        }
+        e2e_all(&c, found);
+        child = c.next_sibling();
+    }
+}
+
+impl App {
+    pub(super) fn e2e_modal(self: &Rc<Self>, command: &str, rest: &str) {
+        let Some(form) = self.modal_forms.borrow().last().cloned() else { return eprintln!("e2e: no form") };
+        let mut words = rest.split_whitespace();
+        let path = words.next().unwrap_or_default();
+        let field = form.fields.iter().find(|f| f.node.path == path);
+        let column = || field.and_then(|f| f.focus.parent()).filter(|p| p.is::<gtk::Box>());
+        match command {
+            "modal-fields" => {
+                eprintln!("e2e: form {:?} error {}", form.modal.title, form.error.is_visible());
+                for field in &form.fields {
+                    let kind = format!("{:?}", field.node.kind);
+                    let kind = kind.split(['(', ' ', '{']).next().unwrap_or_default().to_owned();
+                    eprintln!("e2e: field {} {kind} {:?}", field.node.path, field.title.label.label().as_str());
+                }
+                let state = self.account.state.borrow();
+                eprintln!("e2e: submission {:?}", state.modal_submission);
+            }
+            "modal-set" => {
+                let text = rest.split_once(' ').map_or("", |(_, text)| text);
+                match field.map(|f| f.focus.clone()) {
+                    Some(w) if w.is::<gtk::Entry>() => w.downcast::<gtk::Entry>().unwrap().set_text(text),
+                    Some(w) if w.is::<gtk::TextView>() => w.downcast::<gtk::TextView>().unwrap().buffer().set_text(text),
+                    _ => eprintln!("e2e: no input {path}"),
+                }
+            }
+            "modal-check" => {
+                let n: usize = words.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+                let mut checks: Vec<gtk::CheckButton> = Vec::new();
+                match field.map(|f| f.focus.clone()) {
+                    Some(w) if w.is::<gtk::CheckButton>() && column().is_some() => e2e_all(&column().unwrap(), &mut checks),
+                    _ => {}
+                }
+                let radio = matches!(field.map(|f| &f.node.kind), Some(NodeKind::RadioGroup { .. }));
+                match checks.get(n) {
+                    Some(check) => check.set_active(radio || !check.is_active()),
+                    None => eprintln!("e2e: no check {path} {n}"),
+                }
+            }
+            "modal-pick" => {
+                let n: usize = words.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+                let Some(button) = field.and_then(|f| f.focus.clone().downcast::<gtk::MenuButton>().ok()) else {
+                    return eprintln!("e2e: no menu {path}");
+                };
+                button.popup();
+                let Some(popover) = button.popover() else { return eprintln!("e2e: no popover") };
+                let mut choices: Vec<gtk::Button> = Vec::new();
+                e2e_all(popover.upcast_ref(), &mut choices);
+                let mut checks: Vec<gtk::CheckButton> = Vec::new();
+                e2e_all(popover.upcast_ref(), &mut checks);
+                if let Some(choice) = choices.get(n) {
+                    choice.emit_clicked();
+                } else if let Some(check) = checks.get(n) {
+                    check.set_active(!check.is_active());
+                    button.popdown();
+                } else {
+                    eprintln!("e2e: no option {n}");
+                }
+            }
+            "modal-clear" => {
+                let mut buttons: Vec<gtk::Button> = Vec::new();
+                if let Some(column) = column() {
+                    e2e_all(&column, &mut buttons);
+                }
+                match buttons.into_iter().find(|b| b.label().as_deref() == Some("Clear selection")) {
+                    Some(clear) => clear.emit_clicked(),
+                    None => eprintln!("e2e: no clear {path}"),
+                }
+            }
+            "modal-submit" => form.submit.emit_clicked(),
+            "modal-cancel" => _ = form.dialog.close(),
+            "modal-shot" => {
+                let png = if path.is_empty() { "modal.png" } else { path };
+                super::e2e::shot(&form.dialog, png);
+            }
             other => eprintln!("e2e: unknown {other}"),
         }
     }

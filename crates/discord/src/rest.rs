@@ -672,6 +672,33 @@ impl Rest {
         }
     }
 
+    /// Submit an app's form: `POST /interactions` with `body`
+    /// ([`crate::modal::Submit::body`]), as 969508 posts it, with no timeout
+    /// of its own (the form's 10 s is the caller's). A 429 sends the same
+    /// body again after its `retry_after`, as often as Discord says so, while
+    /// `in_flight()` (the client: until the form closes; Neucord also stops
+    /// once this nonce is no longer the submit in flight, so an old nonce
+    /// never goes again). Dropping the future aborts the request, as the
+    /// form's abort signal does. A success only means Discord took it.
+    pub async fn submit_modal(&self, body: Value, in_flight: impl Fn() -> bool) -> Result<(), ()> {
+        loop {
+            let sending = Sending { retry_rate_limit: false, ..Sending::default() };
+            let (status, response) =
+                self.send_with(call!(INTERACT), Some(body.clone()), sending).await.map_err(drop)?;
+            match status {
+                200..=299 => return Ok(()),
+                429 => {
+                    let after = serde_json::from_slice::<Value>(&response).ok().and_then(|b| b["retry_after"].as_f64());
+                    glib::timeout_future(Duration::from_secs_f64(after.unwrap_or(0.0).max(0.0))).await;
+                    if !in_flight() {
+                        return Err(());
+                    }
+                }
+                _ => return Err(()),
+            }
+        }
+    }
+
     /// Ask an app for choices to an option (`WL` in 721768): the same
     /// request, given three seconds, and its answer comes on the gateway.
     pub async fn autocomplete(&self, body: Value) -> Result<(), Failure> {

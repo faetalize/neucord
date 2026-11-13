@@ -41,6 +41,7 @@ pub mod markup;
 pub mod media;
 pub mod member_list;
 pub mod members;
+pub mod modal;
 pub mod model;
 pub mod notes;
 pub mod notice;

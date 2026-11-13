@@ -112,12 +112,13 @@ pub struct Ready {
 }
 
 /// How an interaction of ours ended, as the events `INTERACTION_SUCCESS`,
-/// `INTERACTION_FAILURE`, and `INTERACTION_MODAL_CREATE` and
-/// `INTERACTION_IFRAME_MODAL_CREATE` (a form to fill in) say.
+/// `INTERACTION_FAILURE` and `INTERACTION_IFRAME_MODAL_CREATE` say. An
+/// app's own form comes as [`Event::Modal`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Success,
     Failure,
+    /// A web page to show in a form (949548), which Neucord can't.
     Form,
 }
 
@@ -242,6 +243,9 @@ pub enum Event {
         outcome: Outcome,
         reason: Option<u64>,
     },
+    /// An app answered with a form (`INTERACTION_MODAL_CREATE`), ours or
+    /// not: the client opens any (764056).
+    Modal(Box<crate::modal::Modal>),
     /// Discord took the interaction we sent as `nonce` (`INTERACTION_CREATE`);
     /// the app has yet to answer.
     InteractionCreated {
@@ -1353,10 +1357,11 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
                 components: data.get("components").and_then(|c| Vec::<Component>::deserialize(c).ok()),
             })
         }
-        "INTERACTION_SUCCESS"
-        | "INTERACTION_FAILURE"
-        | "INTERACTION_MODAL_CREATE"
-        | "INTERACTION_IFRAME_MODAL_CREATE" => {
+        "INTERACTION_MODAL_CREATE" => {
+            let Some(modal) = crate::modal::Modal::from_event(&data) else { return };
+            Event::Modal(Box::new(modal))
+        }
+        "INTERACTION_SUCCESS" | "INTERACTION_FAILURE" | "INTERACTION_IFRAME_MODAL_CREATE" => {
             // Without the nonce we sent, it isn't one of ours.
             let Some(nonce) = parse_id(&data["nonce"]) else { return };
             let outcome = match name {
@@ -2253,6 +2258,24 @@ mod tests {
             [(None, vec![Snowflake(5), Snowflake(6)]), (Some(Snowflake(12)), vec![Snowflake(7)])],
             "one with no emoji is left out"
         );
+    }
+
+    #[test]
+    fn an_apps_form_opens_with_or_without_our_nonce_and_a_web_page_doesnt() {
+        let state = fresh_state();
+        let form = json!({"id": "70", "channel_id": "600", "custom_id": "feedback", "title": "Tell us",
+                          "application": {"id": "800", "name": "Formy"}, "components": []});
+        dispatch(&state, "INTERACTION_MODAL_CREATE", form.clone());
+        let Ok(Event::Modal(modal)) = state.try_recv() else { panic!("no modal") };
+        assert_eq!((modal.title.as_str(), modal.custom_id.as_str(), modal.nonce), ("Tell us", "feedback", None));
+        let mut ours = form;
+        ours["nonce"] = json!("71");
+        dispatch(&state, "INTERACTION_MODAL_CREATE", ours);
+        let Ok(Event::Modal(modal)) = state.try_recv() else { panic!("no modal") };
+        assert_eq!(modal.nonce, Some(Snowflake(71)));
+        dispatch(&state, "INTERACTION_IFRAME_MODAL_CREATE", json!({"id": "72", "nonce": "73", "iframe_path": "/x"}));
+        let Ok(Event::Interaction { nonce, outcome, .. }) = state.try_recv() else { panic!("no interaction") };
+        assert_eq!((nonce, outcome), (Snowflake(73), Outcome::Form));
     }
 
     #[test]
