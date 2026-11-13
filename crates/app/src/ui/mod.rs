@@ -135,6 +135,10 @@ pub struct App {
     composer_box: gtk::Box,
     /// Opens the emoji picker.
     emoji_button: gtk::Button,
+    /// Sends what Enter sends, where the user chose to have it.
+    send_button: gtk::Button,
+    /// Between the expression buttons and the send button, which it follows.
+    send_separator: gtk::Separator,
     /// Opens the GIF picker.
     gif_button: gtk::Button,
     /// Ends the GIF button's pulse after a favourite.
@@ -356,6 +360,19 @@ impl App {
                 .tooltip_text("Emoji")
                 .valign(gtk::Align::Center)
                 .css_classes(["flat", "circular"])
+                .build(),
+            send_button: gtk::Button::builder()
+                .icon_name("mail-send-symbolic")
+                .tooltip_text("Send Message")
+                .valign(gtk::Align::Center)
+                .visible(false)
+                .css_classes(["flat", "circular"])
+                .build(),
+            send_separator: gtk::Separator::builder()
+                .orientation(gtk::Orientation::Vertical)
+                .margin_top(8)
+                .margin_bottom(8)
+                .visible(false)
                 .build(),
             gif_button: gtk::Button::builder()
                 .label("GIF")

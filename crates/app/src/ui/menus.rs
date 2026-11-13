@@ -313,9 +313,15 @@ pub(super) const ATTACH: Table<()> = &[&[
     voice::RECORD_VOICE,
 ]];
 
-/// Added below the message box's own menu (GTK's cut, copy, paste and
-/// emoji). The official client's (194400) also has spellcheck and more.
-pub(super) const COMPOSER: Table<()> = &[];
+/// Added below the message box's own menu (GTK's cut, copy, paste, undo,
+/// select all and emoji, which stand for the browser's menu the web client
+/// leaves there). These are the desktop client's items (`textarea-context`,
+/// 194400) Neucord has, in its order, as the message menu has the desktop's
+/// Copy Link. Left out: Suggestions ▸ Slash Commands, which only toggles a
+/// mentioned bot's command suggestions (`e2` in 496533) Neucord doesn't
+/// make; the spelling groups; and the staff-only Fix Grammar, Translate and
+/// Transforms.
+pub(super) const COMPOSER: Table<()> = &[&[composer::SEND_BUTTON], &[uploads::PASTE_PLAIN]];
 
 /// An emoji or sticker of the picker (`expression-picker`, 233503). The
 /// client offers Copy Emoji, Copy Emoji ID and Copy Emoji Image Link, or
@@ -563,21 +569,25 @@ pub(super) fn on_keys(widget: &impl IsA<gtk::Widget>, open: impl Fn(&gtk::Widget
 }
 
 /// Add `table`'s items to `view`'s own menu, below its items, for `target`
-/// as it is when the menu opens.
+/// as it is when the menu opens. `opening` runs first, with where the view
+/// was clicked or pressed (`None` from the keyboard).
 pub(super) fn extend<T: 'static>(
     app: &Rc<App>,
-    view: &gtk::TextView,
+    view: &impl IsA<gtk::TextView>,
     table: Table<T>,
     target: impl Fn() -> T + 'static,
+    opening: impl Fn(&Rc<App>, Option<(f64, f64)>) + 'static,
 ) {
+    let view = view.upcast_ref::<gtk::TextView>();
     let extra = gio::Menu::new();
     view.set_extra_menu(Some(&extra));
     // The view builds its menu around ours, so ours is refilled just
     // before, however the menu is opened, and the view goes on to open it.
     let refill = Rc::new({
         let (app, view) = (Rc::downgrade(app), view.downgrade());
-        move || {
+        move |at: Option<(f64, f64)>| {
             let (Some(app), Some(view)) = (app.upgrade(), view.upgrade()) else { return };
+            opening(&app, at);
             let actions = gio::SimpleActionGroup::new();
             extra.remove_all();
             fill(&app, table, &Rc::new(target()), &extra, &actions, &Widgets::default());
@@ -590,18 +600,18 @@ pub(super) fn extend<T: 'static>(
         .build();
     click.connect_pressed({
         let refill = refill.clone();
-        move |_, _, _, _| refill()
+        move |_, _, x, y| refill(Some((x, y)))
     });
     view.add_controller(click);
     let press =
         gtk::GestureLongPress::builder().touch_only(true).propagation_phase(gtk::PropagationPhase::Capture).build();
     press.connect_pressed({
         let refill = refill.clone();
-        move |_, _, _| refill()
+        move |_, x, y| refill(Some((x, y)))
     });
     view.add_controller(press);
     on_keys(view, move |_| {
-        refill();
+        refill(None);
         false
     });
 }
@@ -731,8 +741,8 @@ mod tests {
     }
 
     /// The names of a table's entries, section by section.
-    fn names(table: Table<MessageTarget>) -> Vec<Vec<&'static str>> {
-        let name = |entry: &Entry<MessageTarget>| match entry {
+    fn names<T>(table: Table<T>) -> Vec<Vec<&'static str>> {
+        let name = |entry: &Entry<T>| match entry {
             Entry::Item(item) => item.name,
             Entry::Choices(choices) => choices.name,
         };
@@ -835,5 +845,11 @@ mod tests {
         assert_eq!(*cx.log.borrow(), ["shown m", "muted false", "level mentions true", "role 7 true", "mute 900 true"]);
         assert_eq!(state("muted").and_then(|s| s.get::<bool>()), Some(false));
         assert_eq!(state("level").and_then(|s| s.get::<String>()).as_deref(), Some("mentions"));
+    }
+
+    #[test]
+    fn the_message_box_menu_follows_the_desktop_clients_order() {
+        // Send Message Button, then Paste as Plain Text (items 2 and 5 of 194400).
+        assert_eq!(names(COMPOSER), [["send-button"], ["paste-plain-text"]]);
     }
 }

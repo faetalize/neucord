@@ -32,6 +32,10 @@ pub struct Key {
 /// Whether others see us typing (`POST /channels/{id}/typing`).
 pub const SEND_TYPING: Key = Key { group: "Chat", name: "send-typing", default: true };
 
+/// A send button at the end of the message box (`submitButtonEnabled` in
+/// the client's `AccessibilityStore`, off unless chosen).
+pub const SEND_BUTTON: Key = Key { group: "Chat", name: "send-button", default: false };
+
 /// Bars and panels that let the content scrolling beneath them show through,
 /// blurred (`--neucord-bar-opacity` and `--neucord-blur` in `style.css`).
 pub const TRANSLUCENT: Key = Key { group: "Appearance", name: "translucent", default: true };
@@ -157,6 +161,7 @@ mod tests {
         assert!(store.get(&MINIMIZE_TO_TRAY), "as the client has it");
         assert!(store.get(&UNREAD_BADGE), "as the client has it");
         assert!(!store.get(&OPEN_ON_STARTUP), "nothing is written to the session until asked");
+        assert!(!store.get(&SEND_BUTTON), "as the client has it");
         assert!(!dir.file().exists(), "reading creates nothing");
     }
 

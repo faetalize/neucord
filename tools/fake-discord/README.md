@@ -38,7 +38,12 @@ what arrived, IDENTIFY's key order and properties first.
   `suggestions [png]` (prints the autocomplete's rows, `*` on the selected
   one), `pick <n>` (accepts row n), `key <name> [shift|ctrl|alt]…` (a key
   pressed in the message box, by its GDK name such as `Return` or
-  `Escape`), `reply [message id]` (the newest
+  `Escape`), `composer-menu [x y]` (opens the message box's menu, as a
+  right-click there does, else the Menu key; shoot it with `shot-popover
+  composer`), `menu-item <name>` (chooses
+  an item of it), `send` (clicks the send button, or says why it can't),
+  `clip-image`, `clip-files [path]` (puts an image, or a file with its path
+  as text, on the clipboard), `reply [message id]` (the newest
   message without one), `confirm [response]` (the open alert's, else its
   last that doesn't close it), `gif` (opens the GIF picker),
   `gif-search <q>`, `gif-pick <n>`, `gif-shift-pick <n>`, `gif-star <n>`

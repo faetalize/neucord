@@ -302,6 +302,29 @@ pub fn text_file(text: &str) -> TextFile<'_> {
     TextFile { filename: "message.txt".to_owned(), content: text, rest: String::new() }
 }
 
+/// What pasting the clipboard into a box that takes files does (`onPaste`
+/// in 84046): a file list attaches its files, an image alone attaches
+/// itself, and anything with text pastes the text. The client attaches an
+/// image that comes with text too, which is what its Paste as Plain Text is
+/// for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pasted {
+    Files,
+    Image,
+    Text,
+}
+
+/// What pasting does with a clipboard holding `files`, an `image`, `text`.
+pub fn pasted(files: bool, image: bool, text: bool) -> Pasted {
+    if files {
+        Pasted::Files
+    } else if image && !text {
+        Pasted::Image
+    } else {
+        Pasted::Text
+    }
+}
+
 /// How long to wait between retries (158390): from half a second, growing
 /// by a random share of double itself, to ten times the first.
 pub struct Backoff {
@@ -708,5 +731,14 @@ mod tests {
         assert_eq!(content_type("notes.txt"), "text/plain");
         assert_eq!(content_type("README"), "", "no extension");
         assert_eq!(content_type("data.zzzunknown"), "");
+    }
+
+    #[test]
+    fn a_paste_attaches_files_and_lone_images_and_pastes_text() {
+        assert_eq!(pasted(true, false, true), Pasted::Files, "a file manager's copy holds text too");
+        assert_eq!(pasted(true, false, false), Pasted::Files);
+        assert_eq!(pasted(false, true, false), Pasted::Image);
+        assert_eq!(pasted(false, true, true), Pasted::Text);
+        assert_eq!(pasted(false, false, true), Pasted::Text);
     }
 }

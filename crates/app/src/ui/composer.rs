@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use adw::prelude::*;
-use discord::chat_bar::{self, Bar};
+use discord::chat_bar::{self, Bar, Prefs};
 use discord::cooldowns::{Slowmode, bypasses_slowmode, wait_words};
 use discord::emoji::{Intention, Item as Emoji, locked_notice};
 use discord::limits::{LengthCount, TooLong, message_length};
@@ -21,6 +21,19 @@ use super::chat::MessageTarget;
 use super::menus::{self, Entry, Item, Kind};
 use super::state::{now_ms, now_unix};
 use super::uploads::{Outgoing, Stopped};
+use crate::config;
+
+/// The message box's menu: whether the send button shows (194400's
+/// `submit-button`). The client's edit box has none.
+pub(super) const SEND_BUTTON: Entry<()> = Entry::Item(Item {
+    name: "send-button",
+    label: "_Send Message Button",
+    shows: |app, _| app.editing().is_none(),
+    kind: Kind::Check {
+        checked: |app, _| app.config.get(&config::SEND_BUTTON),
+        set: |app, _, on| app.set_send_button(on),
+    },
+});
 
 /// Reply to a message from its menu; Shift turns the ping off, as with the
 /// button.
@@ -136,7 +149,7 @@ pub(super) struct MentionCtx {
 impl App {
     /// The message box floating under the list, with its mention popup and keys.
     pub(super) fn build_composer(self: &Rc<Self>, area: &gtk::Box) {
-        menus::extend(self, &self.composer, menus::COMPOSER, || ());
+        menus::extend(self, &self.composer, menus::COMPOSER, || (), |app, _| app.paste_opening());
         area.append(&self.composer_error);
         area.append(&self.notice_bar);
         self.reply_bar.append(&self.reply_label);
@@ -174,7 +187,17 @@ impl App {
         self.composer_box.append(&self.gif_button);
         self.composer_box.append(&self.sticker_button);
         self.composer_box.append(&self.emoji_button);
+        self.composer_box.append(&self.send_separator);
+        self.composer_box.append(&self.send_button);
         self.composer_box.append(&self.length.root);
+        self.send_button.connect_clicked({
+            let this = Rc::downgrade(self);
+            move |_| {
+                if let Some(this) = this.upgrade() {
+                    this.submit();
+                }
+            }
+        });
         self.emoji_button.connect_clicked({
             let this = Rc::downgrade(self);
             move |button| {
@@ -209,7 +232,7 @@ impl App {
             move |_| {
                 if let Some(this) = this.upgrade() {
                     this.update_mention_popup();
-                    this.update_length_indicator();
+                    this.refresh_chat_bar();
                     this.composer_typed();
                 }
             }
@@ -292,9 +315,24 @@ impl App {
         glib::Propagation::Proceed
     }
 
-    /// What Enter in the message box does, and the send button.
+    /// What Enter in the message box does, and the send button: the
+    /// client's `submit`, which runs an active command.
     pub(super) fn submit(self: &Rc<Self>) {
+        if self.slash.is_active() {
+            return self.run_command();
+        }
         self.send_composer();
+    }
+
+    /// Show the send button or not, as chosen in the menu or Settings.
+    pub(super) fn set_send_button(self: &Rc<Self>, on: bool) {
+        match self.config.set(&config::SEND_BUTTON, on) {
+            Ok(()) => self.refresh_chat_bar(),
+            Err(e) => {
+                eprintln!("config: {e}");
+                self.toast("Could not save that option");
+            }
+        }
     }
 
     /// What replaces the message box where we can't post: accept and ignore
@@ -520,15 +558,26 @@ impl App {
     /// them for the open channel.
     pub(super) fn refresh_chat_bar(&self) {
         let channel = self.account.state.borrow().channel;
-        let shown = chat_bar::shown(Bar {
+        let buffer = self.composer.buffer();
+        let empty = discord::rest::nothing_to_send(
+            &buffer.text(&buffer.start_iter(), &buffer.end_iter(), false),
+            channel.map_or(0, |c| self.files_for_message(c).len()),
+            channel.is_some_and(|c| self.waiting.of(c).is_some()),
+        );
+        let bar = Bar {
             open: channel.is_some() && self.composer_box.is_visible(),
             editing: self.editing().is_some(),
             recording: channel.is_some_and(|c| self.has_voice_draft(c)),
             command: self.slash.is_active(),
-        });
+            empty,
+        };
+        let shown = chat_bar::shown(bar, Prefs { send: self.config.get(&config::SEND_BUTTON) });
         self.gif_button.set_visible(shown.gif);
         self.sticker_button.set_visible(shown.sticker);
         self.emoji_button.set_visible(shown.emoji);
+        self.send_separator.set_visible(shown.send);
+        self.send_button.set_visible(shown.send);
+        self.send_button.set_sensitive(shown.send_enabled);
         if shown.count {
             self.update_length_indicator();
         } else {

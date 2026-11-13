@@ -18,18 +18,27 @@ edit("crates/discord/src/cdn.rs", 'host == "media.discordapp.net" ||', 'host == 
 edit("crates/discord/src/cdn.rs", 'let host = url.strip_prefix("https://").and_then(|rest| rest.split([\'/\', \'?\']).next()).unwrap_or_default();', 'let host = url.strip_prefix("http://").and_then(|rest| rest.split([\'/\', \'?\']).next()).unwrap_or_default();')
 edit("crates/app/src/ui/uploads.rs", "    attach: gtk::Button,", "    pub(super) attach: gtk::Button,")
 edit("crates/app/src/ui/mod.rs", "mod emoji;", "mod e2e;\nmod emoji;")
+# What a right-click does to the message box's menu before GTK opens it, for `composer-menu`.
+edit("crates/app/src/ui/menus.rs", "    view.add_controller(press);\n    on_keys(view, move |_| {",
+     "    view.add_controller(press);\n    super::e2e::REFILL.with(|r| r.borrow_mut().push({ let refill = refill.clone(); Rc::new(move |at| refill(at)) }));\n    on_keys(view, move |_| {")
 edit("crates/app/src/ui/mod.rs", "glib::spawn_future_local(async move { this.resume_session().await });",
      "let _ = &this; self.e2e_start();")
 open(f"{root}/crates/app/src/ui/e2e.rs", "w").write(r"""
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
 use adw::prelude::*;
 use discord::Snowflake;
-use gtk::glib;
+use gtk::{gdk, gio, glib};
 
 use super::App;
 use super::composer::Completion;
+
+thread_local! {
+    /// Each `menus::extend`'s refill, the message box's first.
+    pub(super) static REFILL: RefCell<Vec<Rc<dyn Fn(Option<(f64, f64)>)>>> = RefCell::default();
+}
 
 pub(super) fn shot(widget: &impl IsA<gtk::Widget>, path: &str) {
     let w = widget.upcast_ref::<gtk::Widget>();
@@ -213,6 +222,50 @@ impl App {
                 }
             }
             Some(command) if command.starts_with("modal-") => self.e2e_modal(command, rest),
+            // The message box's menu, as a right-click at x y opens it (else the Menu key): shoot it with
+            // `shot-popover composer`.
+            Some("composer-menu") => {
+                let at = parts.next().zip(parts.next()).and_then(|(x, y)| Some((x.parse().ok()?, y.parse().ok()?)));
+                if let Some(refill) = REFILL.with(|r| r.borrow().first().cloned()) {
+                    refill(at);
+                }
+                if let Err(e) = self.composer.activate_action("menu.popup", None) {
+                    eprintln!("e2e: {e}");
+                }
+            }
+            // An item of the message box's menu, by its name, as chosen.
+            Some("menu-item") => {
+                let name = parts.next().unwrap_or_default();
+                match self.composer.activate_action(&format!("menu.{name}"), None) {
+                    Ok(()) => eprintln!("e2e: chose {name}"),
+                    Err(e) => eprintln!("e2e: {e}"),
+                }
+            }
+            Some("send") => {
+                let button = &self.send_button;
+                if !button.is_visible() || !button.is_sensitive() {
+                    return eprintln!("e2e: send button visible={} sensitive={}", button.is_visible(), button.is_sensitive());
+                }
+                button.emit_clicked();
+                eprintln!("e2e: sent");
+            }
+            // A copied image (2×2 red pixels), or a copied file with its path as text, as a file manager copies.
+            Some("clip-image") => {
+                let bytes = glib::Bytes::from_owned([255u8, 0, 0, 255].repeat(4));
+                let texture = gdk::MemoryTexture::new(2, 2, gdk::MemoryFormat::R8g8b8a8, &bytes, 8);
+                self.composer.clipboard().set_texture(&texture);
+            }
+            Some("clip-files") => {
+                let path = parts.next().unwrap_or("/tmp/e2e.txt");
+                let files = gdk::FileList::from_array(&[gio::File::for_path(path)]);
+                let provider = gdk::ContentProvider::new_union(&[
+                    gdk::ContentProvider::for_value(&files.to_value()),
+                    gdk::ContentProvider::for_value(&path.to_value()),
+                ]);
+                if let Err(e) = self.composer.clipboard().set_content(Some(&provider)) {
+                    eprintln!("e2e: {e}");
+                }
+            }
             Some("quit") => {
                 if let Some(app) = self.window.application() {
                     app.quit();
