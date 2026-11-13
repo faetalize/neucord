@@ -284,6 +284,11 @@ impl App {
             &config::TRANSLUCENT,
             |app, on| app.theme.set_translucent(on),
         );
+        // The web client's place for it is Appearance ▸ Chat Box.
+        let chat_box = group("Chat Box", "");
+        option_switch(self, &chat_box, "Show send message button", "", &config::SEND_BUTTON, |app, _| {
+            app.refresh_send_button()
+        });
         let background = group("Background", "");
         option_switch(
             self,
@@ -310,7 +315,7 @@ impl App {
             &config::UNREAD_BADGE,
             |app, _| app.refresh_tray(),
         );
-        let neucord = page("Neucord", "preferences-system-symbolic", &[&appearance, &typing, &background]);
+        let neucord = page("Neucord", "preferences-system-symbolic", &[&appearance, &chat_box, &typing, &background]);
         neucord.set_description("These are saved on this computer only, not to your Discord account.");
 
         let dialog = adw::PreferencesDialog::builder().title("Settings").build();

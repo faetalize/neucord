@@ -259,6 +259,7 @@ impl App {
         self.sticker_button.set_visible(channel.is_some());
         // The GIF button shows wherever the sticker button does.
         self.gif_button.set_visible(channel.is_some());
+        self.refresh_send_button();
         let waiting = channel.and_then(|c| self.waiting.of(c));
         self.waiting.bar.set_visible(waiting.is_some());
         if let Some(listed) = waiting {

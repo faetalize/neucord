@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use discord::images;
-use discord::uploads::{self, Data, File, Refusal, Sent};
+use discord::uploads::{self, Data, File, Pasted, Refusal, Sent, pasted};
 use discord::{Channel, Rest, Snowflake};
 use gtk::{gdk, gio, glib};
 
@@ -30,6 +30,17 @@ pub(super) const UPLOAD_TEXT: Entry<()> = Entry::Item(Item {
     label: "Upload your _message as a file",
     shows: |app, _| app.attach_channel().is_some() && app.composer.buffer().char_count() > 0,
     kind: Kind::Action(|app, _| app.upload_composer_text()),
+});
+
+/// The message box's menu: the clipboard's text alone, where Paste would
+/// attach what also holds text (a file manager's copy). This stands for
+/// the desktop's `clipboardHasMixedContent` (194400), which no web build
+/// defines.
+pub(super) const PASTE_PLAIN: Entry<()> = Entry::Item(Item {
+    name: "paste-plain-text",
+    label: "Paste as P_lain Text",
+    shows: |app, _| app.composer_paste().is_some_and(|(pasted, text)| text && pasted != Pasted::Text),
+    kind: Kind::Action(|app, _| app.paste_plain_text()),
 });
 
 /// Where an upload stands.
@@ -381,18 +392,54 @@ impl App {
             let this = Rc::downgrade(self);
             move |view| {
                 let Some(this) = this.upgrade() else { return };
-                if this.attach_channel().is_none() {
-                    return;
-                }
-                let formats = view.clipboard().formats();
-                let files = formats.contains_type(gdk::FileList::static_type());
-                let image =
-                    !formats.contains_type(glib::Type::STRING) && formats.contains_type(gdk::Texture::static_type());
-                if files || image {
+                let Some((pasted, _)) = this.composer_paste() else { return };
+                if pasted != Pasted::Text {
                     view.stop_signal_emission_by_name("paste-clipboard");
-                    this.paste_files(files);
+                    this.paste_files(pasted == Pasted::Files);
                 }
             }
+        });
+    }
+
+    /// What pasting the clipboard in the message box does now, and whether
+    /// the clipboard holds text: `None` where the box takes no files, which
+    /// pastes text alone.
+    fn composer_paste(&self) -> Option<(Pasted, bool)> {
+        self.attach_channel()?;
+        let formats = self.composer.clipboard().formats();
+        let text = formats.contains_type(glib::Type::STRING);
+        let files = formats.contains_type(gdk::FileList::static_type());
+        Some((pasted(files, formats.contains_type(gdk::Texture::static_type()), text), text))
+    }
+
+    /// Let the menu's Paste attach the image or files on the clipboard, as
+    /// Ctrl+V does: GTK greys it without text, once it has looked as the
+    /// menu opens.
+    pub(super) fn paste_opening(self: &Rc<Self>) {
+        let this = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            let Some(this) = this.upgrade() else { return };
+            if this.composer_paste().is_some_and(|(pasted, _)| pasted != Pasted::Text) {
+                this.composer.action_set_enabled("clipboard.paste", true);
+            }
+        });
+    }
+
+    /// Paste only the clipboard's text, as typed.
+    fn paste_plain_text(self: &Rc<Self>) {
+        let clipboard = self.composer.clipboard();
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            let Ok(Some(text)) = clipboard.read_text_future().await else { return };
+            if text.is_empty() {
+                return;
+            }
+            let (view, buffer) = (&this.composer, this.composer.buffer());
+            buffer.begin_user_action();
+            buffer.delete_selection(true, view.is_editable());
+            buffer.insert_interactive_at_cursor(&text, view.is_editable());
+            buffer.end_user_action();
+            view.grab_focus();
         });
     }
 

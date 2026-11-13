@@ -17,6 +17,7 @@ async-channel.workspace = true
 qrcodegen.workspace = true
 webkit.workspace = true
 sourceview.workspace = true
+libspelling.workspace = true
 serde_json.workspace = true
 gst.workspace = true
 gst-app.workspace = true

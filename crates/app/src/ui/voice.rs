@@ -219,6 +219,7 @@ impl App {
         if shown.is_some() {
             self.sticker_button.set_visible(false);
         }
+        self.refresh_send_button();
         if shown.is_some() {
             self.length.show(None);
         } else {

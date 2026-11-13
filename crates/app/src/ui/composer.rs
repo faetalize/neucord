@@ -20,6 +20,19 @@ use super::chat::MessageTarget;
 use super::menus::{self, Entry, Item, Kind};
 use super::state::{now_ms, now_unix};
 use super::uploads::{Outgoing, Stopped};
+use crate::config;
+
+/// The message box's menu: whether the send button shows (194400's
+/// `submit-button`). The client's edit box has none.
+pub(super) const SEND_BUTTON: Entry<()> = Entry::Item(Item {
+    name: "send-button",
+    label: "_Send Message Button",
+    shows: |app, _| app.editing().is_none(),
+    kind: Kind::Check {
+        checked: |app, _| app.config.get(&config::SEND_BUTTON),
+        set: |app, _, on| app.set_send_button(on),
+    },
+});
 
 /// Reply to a message from its menu; Shift turns the ping off, as with the
 /// button.
@@ -135,7 +148,16 @@ pub(super) struct MentionCtx {
 impl App {
     /// The message box floating under the list, with its mention popup and keys.
     pub(super) fn build_composer(self: &Rc<Self>, area: &gtk::Box) {
-        menus::extend(self, &self.composer, menus::COMPOSER, || ());
+        menus::extend(
+            self,
+            &self.composer,
+            menus::COMPOSER,
+            || (),
+            |app, at| {
+                app.spelling_opening(at);
+                app.paste_opening();
+            },
+        );
         area.append(&self.composer_error);
         area.append(&self.notice_bar);
         self.reply_bar.append(&self.reply_label);
@@ -173,7 +195,17 @@ impl App {
         self.composer_box.append(&self.gif_button);
         self.composer_box.append(&self.sticker_button);
         self.composer_box.append(&self.emoji_button);
+        self.composer_box.append(&self.send_separator);
+        self.composer_box.append(&self.send_button);
         self.composer_box.append(&self.length.root);
+        self.send_button.connect_clicked({
+            let this = Rc::downgrade(self);
+            move |_| {
+                if let Some(this) = this.upgrade() {
+                    this.submit();
+                }
+            }
+        });
         self.emoji_button.connect_clicked({
             let this = Rc::downgrade(self);
             move |button| {
@@ -209,6 +241,7 @@ impl App {
                 if let Some(this) = this.upgrade() {
                     this.update_mention_popup();
                     this.update_length_indicator();
+                    this.refresh_send_button();
                     this.composer_typed();
                 }
             }
@@ -279,6 +312,46 @@ impl App {
             }
         });
         self.composer.add_controller(keys);
+    }
+
+    /// What the send button does: the client's `submit`, which is Enter's,
+    /// and runs an active command.
+    fn submit(self: &Rc<Self>) {
+        if self.slash.is_active() {
+            return self.run_command();
+        }
+        self.send_composer();
+    }
+
+    /// Show the send button or not, as chosen in the menu or Settings.
+    pub(super) fn set_send_button(self: &Rc<Self>, on: bool) {
+        match self.config.set(&config::SEND_BUTTON, on) {
+            Ok(()) => self.refresh_send_button(),
+            Err(e) => {
+                eprintln!("config: {e}");
+                self.toast("Could not save that option");
+            }
+        }
+    }
+
+    /// The send button (`eu` in 4025), after a separator at the end of the
+    /// chat bar, where it is chosen: not while editing or recording, and
+    /// greyed with nothing to send (`G`: no text, files or sticker), unless
+    /// a command is waiting to run.
+    pub(super) fn refresh_send_button(&self) {
+        let channel = self.account.state.borrow().channel;
+        let shown = self.config.get(&config::SEND_BUTTON)
+            && self.composer_box.is_visible()
+            && self.editing().is_none()
+            && channel.is_some_and(|c| !self.has_voice_draft(c));
+        self.send_separator.set_visible(shown);
+        self.send_button.set_visible(shown);
+        let Some(channel) = channel.filter(|_| shown) else { return };
+        let buffer = self.composer.buffer();
+        let typed = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+        let empty =
+            typed.trim().is_empty() && self.files_for_message(channel).is_empty() && self.waiting.of(channel).is_none();
+        self.send_button.set_sensitive(!empty || self.slash.is_active());
     }
 
     /// What replaces the message box where we can't post: accept and ignore

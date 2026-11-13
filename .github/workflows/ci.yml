@@ -16,7 +16,7 @@ jobs:
     steps:
       # libheif is glycin's optional HEIC loader; the image tests need it.
       - name: Install dependencies
-        run: pacman -Syu --noconfirm --needed base-devel git rust gtk4 libadwaita libsoup3 webkitgtk-6.0 gtksourceview5 gst-plugins-base-libs libsecret openssl libheif
+        run: pacman -Syu --noconfirm --needed base-devel git rust gtk4 libadwaita libsoup3 webkitgtk-6.0 gtksourceview5 libspelling gst-plugins-base-libs libsecret openssl libheif
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - name: Format

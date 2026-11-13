@@ -18,8 +18,8 @@ use super::App;
 use super::chat::{self, MessageTarget};
 use super::{
     accounts, attachments, composer, create_thread, edits, emoji, forum, gifs, notify_menus, picker, poll_composer,
-    polls, profile, reactions, reactors, scheduling, server_privacy, sidebar, slash, stickers, threads, uploads,
-    viewer, voice,
+    polls, profile, reactions, reactors, scheduling, server_privacy, sidebar, slash, spelling, stickers, threads,
+    uploads, viewer, voice,
 };
 
 /// An item that copies or opens a link, shown when the link `$link` finds in
@@ -81,6 +81,10 @@ pub(super) enum Kind<T: 'static, C: 'static = App> {
     /// while it is open, such as the commands of the Apps item. It shows
     /// whenever the item does, empty or not.
     Live(fn(&Rc<C>, &Rc<T>, Live)),
+    /// A section another library builds and keeps up to date (the spelling
+    /// corrections), linked in as it is, in place of the item, whose label
+    /// doesn't show. Its actions are its own group's; `None` leaves nothing.
+    Linked(fn(&C, &T) -> Option<gio::MenuModel>),
 }
 
 /// What a [`Kind::Live`] submenu is made of: its entries change through
@@ -313,9 +317,15 @@ pub(super) const ATTACH: Table<()> = &[&[
     voice::RECORD_VOICE,
 ]];
 
-/// Added below the message box's own menu (GTK's cut, copy, paste and
-/// emoji). The official client's (194400) also has spellcheck and more.
-pub(super) const COMPOSER: Table<()> = &[];
+/// Added below the message box's own menu (GTK's cut, copy, paste, undo,
+/// select all and emoji, which stand for the browser's menu the web client
+/// leaves there). These are the desktop client's items (`textarea-context`,
+/// 194400) Neucord has, in its order, as the message menu has the desktop's
+/// Copy Link. Left out: Suggestions ▸ Slash Commands, which only toggles a
+/// mentioned bot's command suggestions (`e2` in 496533) Neucord doesn't
+/// make; Remove from Dictionary, which libspelling has no word for; and the
+/// staff-only Fix Grammar, Translate and Transforms.
+pub(super) const COMPOSER: Table<()> = &[&[composer::SEND_BUTTON], &[spelling::SPELLING], &[uploads::PASTE_PLAIN]];
 
 /// An emoji or sticker of the picker (`expression-picker`, 233503). The
 /// client offers Copy Emoji, Copy Emoji ID and Copy Emoji Image Link, or
@@ -405,6 +415,11 @@ fn fill<T: 'static, C: 'static>(
                             Live { menu: submenu.clone(), actions: actions.clone(), widgets: widgets.clone() },
                         );
                         section.append_submenu(Some(item.label), &submenu);
+                    }
+                    Kind::Linked(model) => {
+                        if let Some(model) = model(cx, target) {
+                            section.append_section(None, &model);
+                        }
                     }
                 },
                 Entry::Choices(choices) => {
@@ -563,21 +578,25 @@ pub(super) fn on_keys(widget: &impl IsA<gtk::Widget>, open: impl Fn(&gtk::Widget
 }
 
 /// Add `table`'s items to `view`'s own menu, below its items, for `target`
-/// as it is when the menu opens.
+/// as it is when the menu opens. `opening` runs first, with where the view
+/// was clicked or pressed (`None` from the keyboard).
 pub(super) fn extend<T: 'static>(
     app: &Rc<App>,
-    view: &gtk::TextView,
+    view: &impl IsA<gtk::TextView>,
     table: Table<T>,
     target: impl Fn() -> T + 'static,
+    opening: impl Fn(&Rc<App>, Option<(f64, f64)>) + 'static,
 ) {
+    let view = view.upcast_ref::<gtk::TextView>();
     let extra = gio::Menu::new();
     view.set_extra_menu(Some(&extra));
     // The view builds its menu around ours, so ours is refilled just
     // before, however the menu is opened, and the view goes on to open it.
     let refill = Rc::new({
         let (app, view) = (Rc::downgrade(app), view.downgrade());
-        move || {
+        move |at: Option<(f64, f64)>| {
             let (Some(app), Some(view)) = (app.upgrade(), view.upgrade()) else { return };
+            opening(&app, at);
             let actions = gio::SimpleActionGroup::new();
             extra.remove_all();
             fill(&app, table, &Rc::new(target()), &extra, &actions, &Widgets::default());
@@ -590,18 +609,18 @@ pub(super) fn extend<T: 'static>(
         .build();
     click.connect_pressed({
         let refill = refill.clone();
-        move |_, _, _, _| refill()
+        move |_, _, x, y| refill(Some((x, y)))
     });
     view.add_controller(click);
     let press =
         gtk::GestureLongPress::builder().touch_only(true).propagation_phase(gtk::PropagationPhase::Capture).build();
     press.connect_pressed({
         let refill = refill.clone();
-        move |_, _, _| refill()
+        move |_, x, y| refill(Some((x, y)))
     });
     view.add_controller(press);
     on_keys(view, move |_| {
-        refill();
+        refill(None);
         false
     });
 }
@@ -731,8 +750,8 @@ mod tests {
     }
 
     /// The names of a table's entries, section by section.
-    fn names(table: Table<MessageTarget>) -> Vec<Vec<&'static str>> {
-        let name = |entry: &Entry<MessageTarget>| match entry {
+    fn names<T>(table: Table<T>) -> Vec<Vec<&'static str>> {
+        let name = |entry: &Entry<T>| match entry {
             Entry::Item(item) => item.name,
             Entry::Choices(choices) => choices.name,
         };
@@ -835,5 +854,41 @@ mod tests {
         assert_eq!(*cx.log.borrow(), ["shown m", "muted false", "level mentions true", "role 7 true", "mute 900 true"]);
         assert_eq!(state("muted").and_then(|s| s.get::<bool>()), Some(false));
         assert_eq!(state("level").and_then(|s| s.get::<String>()).as_deref(), Some("mentions"));
+    }
+
+    #[test]
+    fn the_message_box_menu_follows_the_desktop_clients_order() {
+        // Send Message Button, the spelling groups, then Paste as Plain Text
+        // (items 2, 3–4 and 5 of 194400).
+        assert_eq!(names(COMPOSER), [["send-button"], ["spelling"], ["paste-plain-text"]]);
+    }
+
+    #[test]
+    fn a_linked_section_goes_in_as_it_is() {
+        const LINKED: Entry<Target, Cx> = Entry::Item(Item {
+            name: "linked",
+            label: "Not shown",
+            shows: |_, _| true,
+            kind: Kind::Linked(|_, target| {
+                (*target == "m").then(|| {
+                    let model = gio::Menu::new();
+                    model.append(Some("Theirs"), Some("theirs.act"));
+                    model.upcast()
+                })
+            }),
+        });
+        const TABLE: Table<Target, Cx> = &[&[SHOWN], &[LINKED], &[SHOWN]];
+        let cx = Rc::new(Cx::default());
+        let (menu, actions, _) = build(&cx, TABLE, "m");
+        assert_eq!(menu.n_items(), 3);
+        let linked = section(&section(menu.upcast_ref(), 1), 0);
+        assert_eq!(label(&linked, 0).as_deref(), Some("Theirs"));
+        let action: Option<String> =
+            linked.item_attribute_value(0, "action", Some(glib::VariantTy::STRING)).and_then(|v| v.get());
+        assert_eq!(action.as_deref(), Some("theirs.act"), "its own actions, not ours");
+        assert!(!actions.has_action("linked"));
+        // Without a model, its section is left out.
+        let (menu, _, _) = build(&cx, TABLE, "other");
+        assert_eq!(menu.n_items(), 2);
     }
 }
