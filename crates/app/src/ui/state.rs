@@ -269,6 +269,10 @@ pub(super) struct State {
     pub(super) members: Members,
     /// The pills' searches of servers' members by name.
     pub(super) member_search: MemberSearch,
+    /// `/gif`'s searches, kept for the session (`IntegrationQueryStore`).
+    pub(super) gif_commands: discord::gifs::CommandSearches,
+    /// `/gif`'s one debounce (`eb`), which nothing cancels.
+    pub(super) gif_command_wait: Option<glib::SourceId>,
     /// What the gateway is subscribed to for each server.
     pub(super) subscriptions: Subscriptions,
     /// The rows of the member lists we asked for.

@@ -273,6 +273,7 @@ impl App {
                     if let Some(guild) = self.account.state.borrow_mut().guilds.iter_mut().find(|g| g.id == guild_id) {
                         guild.stickers = stickers;
                     }
+                    self.stickers_changed();
                 }
                 Event::RoleUpdate { guild_id, role } => {
                     if let Some(guild) = self.account.state.borrow_mut().guilds.iter_mut().find(|g| g.id == guild_id) {

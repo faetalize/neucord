@@ -198,6 +198,13 @@ def apex():
     return {"assignments": {"1": {"100": {"assignments": entries, "evaluation_id": "e"}}}, "installation": "fake-install"}
 
 
+def guild_stickers():
+    """The server's stickers: one found by its name, one only by its tag (`/sticker`'s "Similar to")."""
+    sticker = {"format_type": 1, "available": True, "guild_id": "500", "type": 2, "description": None}
+    return [{**sticker, "id": "710", "name": "wave", "tags": "wave"},
+            {**sticker, "id": "711", "name": "hi there", "tags": "wave"}]
+
+
 def guild():
     channels = [
         {"id": "600", "type": 0, "name": "general", "position": 0, "parent_id": None, "permission_overwrites": [],
@@ -218,7 +225,7 @@ def guild():
          "permissions": str(VIEW | SEND | HISTORY | ATTACH | REACT | CONNECT | USE_APPLICATION_COMMANDS)},
         {"id": "510", "name": "Mods", "permissions": "0", "position": 1, "color": 0, "hoist": False,
          "mentionable": True, "managed": False, "flags": 0}],
-        "channels": channels, "emojis": [], "stickers": [], "threads": [], "member_count": 3,
+        "channels": channels, "emojis": [], "stickers": guild_stickers(), "threads": [], "member_count": 3,
         "data_mode": "full", "joined_at": "2026-01-01T00:00:00.000000+00:00", "large": False, "lazy": True}
 
 
@@ -573,6 +580,12 @@ def gifs_search(body):
 @route("GET", r"/gifs/suggest")
 def gifs_suggest(body):
     return 200, ["kitten", "cats"]
+
+
+@route("GET", r"/sticker-packs")
+def sticker_packs(body):
+    return 200, {"sticker_packs": [{"id": "720", "name": "Pals", "stickers": [
+        {"id": "721", "name": "hello", "format_type": 1, "pack_id": "720", "type": 1, "tags": "wave"}]}]}
 
 
 @route("POST", r"/gifs/select")

@@ -21,6 +21,7 @@ mod forum_post;
 mod friends;
 mod gifs;
 mod identity;
+mod integrations;
 mod launcher;
 mod login;
 mod media_frame;
@@ -192,6 +193,8 @@ pub struct App {
     /// The token being completed (char offset of its start) and the
     /// candidates shown, row-aligned.
     mention: RefCell<composer::MentionCtx>,
+    /// `/gif`'s and `/sticker`'s results, over the box.
+    integration: integrations::View,
     /// "Replying to …" above the composer, with the ping toggle.
     reply_bar: gtk::Box,
     reply_label: gtk::Label,
@@ -441,6 +444,7 @@ impl App {
                 .build(),
             mention_list: gtk::ListBox::builder().css_classes(["navigation-sidebar"]).build(),
             mention: RefCell::default(),
+            integration: integrations::View::new(),
             reply_bar: gtk::Box::builder().spacing(8).visible(false).css_classes(["reply-bar"]).build(),
             reply_label: gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(pango::EllipsizeMode::End).build(),
             reply_ping: gtk::ToggleButton::builder()

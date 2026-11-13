@@ -313,6 +313,7 @@ impl App {
             }
         });
         self.build_pills();
+        self.build_integrations();
 
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed({

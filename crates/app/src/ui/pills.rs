@@ -368,6 +368,7 @@ impl App {
         self.slash.bar.set_visible(false);
         self.slash.more.set_visible(false);
         self.mention_popover.popdown();
+        self.hide_integration();
         self.refresh_attach();
         // The text may name a command here, or be plain text with its own lists.
         if keep == Keep::Text {
@@ -656,6 +657,9 @@ impl App {
         let enter = matches!(key, Key::Return | Key::KP_Enter | Key::ISO_Enter);
         let tab = key == Key::Tab && none;
         let back_tab = key == Key::ISO_Left_Tab || (key == Key::Tab && mods == ModifierType::SHIFT_MASK);
+        if let Some(handled) = self.integration_key(key, modifiers) {
+            return Some(handled);
+        }
         if self.mention_popover.is_visible() {
             let count = self.mention.borrow().selectable();
             let ctrl = mods == ModifierType::CONTROL_MASK;
@@ -756,6 +760,9 @@ impl App {
     /// members and roles, channels, or the box's own `@` and `:` lists for
     /// text.
     pub(super) fn update_command_popup(self: &Rc<Self>) {
+        if self.integration_popup() {
+            return;
+        }
         let Some((line, text)) = self.read_line() else { return };
         let caret = self.cursor();
         let chars: Vec<char> = text.chars().collect();

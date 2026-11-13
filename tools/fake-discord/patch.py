@@ -601,3 +601,54 @@ impl App {
 # `end` scrolls the chat to its newest message.
 edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("end") => self.scroll_to_end(),
             Some("quit") => {''')
+
+# Stickers' images come from the fake (`Sticker::image`, before model.rs's tests).
+edit("crates/discord/src/model.rs", '"https://media.discordapp.net/stickers/{}', '"http://127.0.0.1:8099/attachments/stickers/{}')
+
+# `/gif`'s and `/sticker`'s results: `results [png]` prints the popup's title and each result, `*` on the selected
+# one, and shoots it; `result-click <n>` clicks result n.
+edit("crates/app/src/ui/e2e.rs", '            Some("line") => self.e2e_line(),',
+     '            Some("line") => self.e2e_line(),\n'
+     '            Some("results") => self.e2e_results(parts.next()),\n'
+     '            Some("result-click") => self.e2e_result_click(parts.next().and_then(|n| n.parse().ok()).unwrap_or(0)),')
+with open(f"{root}/crates/app/src/ui/integrations.rs", "a") as f:
+    f.write(r"""
+impl App {
+    pub(super) fn e2e_results(&self, png: Option<&str>) {
+        let view = &self.integration;
+        if !view.popover.is_visible() {
+            return eprintln!("e2e: results hidden");
+        }
+        let selected = self.slash.active.borrow().as_ref().and_then(|a| a.selection.selected());
+        let title = if view.title.is_visible() { view.title.text().to_string() } else { String::new() };
+        eprintln!("e2e: results {title:?} spinner {}", view.spinner.is_visible());
+        let rows: Vec<String> = match &*view.shown.borrow() {
+            Shown::Gifs(gifs) => gifs.iter().map(|g| format!("{} {:?}", g.url, g.command_preview())).collect(),
+            Shown::Stickers(hits) => hits
+                .iter()
+                .map(|h| format!("{} | {:?} | {:?}", h.entry.listed.sticker.name, h.similar_to(), h.source))
+                .collect(),
+            Shown::Nothing => Vec::new(),
+        };
+        for (i, row) in rows.iter().enumerate() {
+            let mark = if selected == Some(i) { " *" } else { "" };
+            eprintln!("e2e: result {i} {row}{mark}");
+        }
+        if let Some(png) = png {
+            super::e2e::shot(&view.popover, png);
+        }
+    }
+
+    pub(super) fn e2e_result_click(&self, n: i32) {
+        let view = &self.integration;
+        // What is shown is read first: the click changes it.
+        let gifs = matches!(&*view.shown.borrow(), Shown::Gifs(_));
+        let stickers = matches!(&*view.shown.borrow(), Shown::Stickers(_));
+        if gifs {
+            view.gifs.child_at_index(n).map(|c| c.activate());
+        } else if stickers {
+            view.stickers.row_at_index(n).map(|r| r.activate());
+        }
+    }
+}
+""")
