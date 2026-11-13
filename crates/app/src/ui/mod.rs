@@ -44,6 +44,7 @@ mod server_privacy;
 mod settings;
 mod sidebar;
 mod slash;
+mod spelling;
 mod state;
 mod stickers;
 mod switcher;
@@ -130,10 +131,16 @@ pub struct App {
     manage: RefCell<Option<(adw::Dialog, gtk::Label)>>,
     list: gtk::ListView,
     scroller: gtk::ScrolledWindow,
-    composer: gtk::TextView,
+    composer: sourceview::View,
+    /// Spellcheck over the composer's buffer.
+    spelling: libspelling::TextBufferAdapter,
     composer_box: gtk::Box,
     /// Opens the emoji picker.
     emoji_button: gtk::Button,
+    /// Sends what Enter sends, where the user chose to have it.
+    send_button: gtk::Button,
+    /// Between the expression buttons and the send button, which it follows.
+    send_separator: gtk::Separator,
     /// Opens the GIF picker.
     gif_button: gtk::Button,
     /// Ends the GIF button's pulse after a favourite.
@@ -298,6 +305,7 @@ impl App {
         let selection = gtk::NoSelection::new(Some(blank.clone()));
         let config = Rc::new(Store::open(config::config_path()));
         let remembered = Rc::new(Store::open(config::state_path()));
+        let (composer, spelling) = spelling::composer(&config);
         let this = Rc::new(App {
             window,
             medium,
@@ -340,19 +348,27 @@ impl App {
             switch_items: gio::Menu::new(),
             manage: RefCell::default(),
             scroller: gtk::ScrolledWindow::builder().vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build(),
-            composer: gtk::TextView::builder()
-                .wrap_mode(gtk::WrapMode::WordChar)
-                .accepts_tab(false)
-                .hexpand(true)
-                .valign(gtk::Align::Center)
-                .css_classes(["composer-input"])
-                .build(),
+            composer,
+            spelling,
             composer_box: gtk::Box::builder().css_classes(["composer", "card-row"]).build(),
             emoji_button: gtk::Button::builder()
                 .icon_name("face-smile-symbolic")
                 .tooltip_text("Emoji")
                 .valign(gtk::Align::Center)
                 .css_classes(["flat", "circular"])
+                .build(),
+            send_button: gtk::Button::builder()
+                .icon_name("mail-send-symbolic")
+                .tooltip_text("Send Message")
+                .valign(gtk::Align::Center)
+                .visible(false)
+                .css_classes(["flat", "circular"])
+                .build(),
+            send_separator: gtk::Separator::builder()
+                .orientation(gtk::Orientation::Vertical)
+                .margin_top(8)
+                .margin_bottom(8)
+                .visible(false)
                 .build(),
             gif_button: gtk::Button::builder()
                 .label("GIF")

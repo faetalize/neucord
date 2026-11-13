@@ -258,6 +258,7 @@ impl App {
         let channel = self.sticker_channel();
         self.sticker_button.set_visible(channel.is_some());
         self.refresh_gif_button();
+        self.refresh_send_button();
         let waiting = channel.and_then(|c| self.waiting.of(c));
         self.waiting.bar.set_visible(waiting.is_some());
         if let Some(listed) = waiting {

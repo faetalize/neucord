@@ -284,6 +284,18 @@ impl App {
             &config::TRANSLUCENT,
             |app, on| app.theme.set_translucent(on),
         );
+        // The web client's place for it is Appearance ▸ Chat Box.
+        let chat_box = group("Chat Box", "");
+        option_switch(self, &chat_box, "Show send message button", "", &config::SEND_BUTTON, |app, _| {
+            app.refresh_send_button()
+        });
+        // The GIF button's switch shows only under the experiment that lets it
+        // count (the client's Show Advanced Chat Bar Settings).
+        if self.gif_button_customizable() {
+            option_switch(self, &chat_box, "Show GIF button", "", &config::GIF_BUTTON, |app, _| {
+                app.refresh_gif_button()
+            });
+        }
         let background = group("Background", "");
         option_switch(
             self,
@@ -310,16 +322,7 @@ impl App {
             &config::UNREAD_BADGE,
             |app, _| app.refresh_tray(),
         );
-        // The client offers its chat bar's switches only under the experiment
-        // that lets them count (Appearance ▸ Chat Box).
-        let chat_box = group("Chat Box", "");
-        option_switch(self, &chat_box, "Show GIF button", "", &config::GIF_BUTTON, |app, _| app.refresh_gif_button());
-        let mut groups = vec![&appearance, &typing];
-        if self.gif_button_customizable() {
-            groups.push(&chat_box);
-        }
-        groups.push(&background);
-        let neucord = page("Neucord", "preferences-system-symbolic", &groups);
+        let neucord = page("Neucord", "preferences-system-symbolic", &[&appearance, &chat_box, &typing, &background]);
         neucord.set_description("These are saved on this computer only, not to your Discord account.");
 
         let dialog = adw::PreferencesDialog::builder().title("Settings").build();

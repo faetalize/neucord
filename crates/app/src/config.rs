@@ -37,6 +37,14 @@ pub const SEND_TYPING: Key = Key { group: "Chat", name: "send-typing", default: 
 /// (`gifButtonEnabled` in 775602), on by default.
 pub const GIF_BUTTON: Key = Key { group: "Chat", name: "gif-button", default: true };
 
+/// A send button at the end of the message box (`submitButtonEnabled` in
+/// the client's `AccessibilityStore`, off unless chosen).
+pub const SEND_BUTTON: Key = Key { group: "Chat", name: "send-button", default: false };
+
+/// Spelling is checked in the message box (`SpellcheckStore.enabled`, on
+/// unless turned off).
+pub const SPELLCHECK: Key = Key { group: "Chat", name: "spellcheck", default: true };
+
 /// Bars and panels that let the content scrolling beneath them show through,
 /// blurred (`--neucord-bar-opacity` and `--neucord-blur` in `style.css`).
 pub const TRANSLUCENT: Key = Key { group: "Appearance", name: "translucent", default: true };
@@ -162,6 +170,8 @@ mod tests {
         assert!(store.get(&MINIMIZE_TO_TRAY), "as the client has it");
         assert!(store.get(&UNREAD_BADGE), "as the client has it");
         assert!(!store.get(&OPEN_ON_STARTUP), "nothing is written to the session until asked");
+        assert!(!store.get(&SEND_BUTTON), "as the client has it");
+        assert!(store.get(&SPELLCHECK), "as the client has it");
         assert!(!dir.file().exists(), "reading creates nothing");
     }
 

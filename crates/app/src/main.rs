@@ -46,6 +46,7 @@ fn main() -> glib::ExitCode {
             .build();
         app.add_action_entries([quit, about]);
         app.set_accels_for_action("app.quit", &["<Control>q"]);
+        libspelling::init();
     });
 
     app.connect_activate(|app| launch(app, false));

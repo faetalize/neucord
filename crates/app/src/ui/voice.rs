@@ -226,6 +226,7 @@ impl App {
             self.sticker_button.set_visible(false);
         }
         self.refresh_gif_button();
+        self.refresh_send_button();
         if shown.is_some() {
             self.length.show(None);
         } else {

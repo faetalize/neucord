@@ -31,6 +31,7 @@ I'm trying to get as close as possible to Discord - feature-wise, as well as beh
 - libsoup 3
 - WebKitGTK 6.0, for captchas
 - GtkSourceView 5, to highlight code
+- libspelling, and a dictionary enchant can use (such as Hunspell's), to check spelling
 - GStreamer with its Opus and PipeWire plugins, to record voice messages
 - libsecret, and a Secret Service provider such as GNOME Keyring or KWallet
 - OpenSSL
@@ -39,7 +40,7 @@ I'm trying to get as close as possible to Discord - feature-wise, as well as beh
 On Arch Linux:
 
 ```sh
-sudo pacman -S --needed rust gtk4 libadwaita libsoup3 webkitgtk-6.0 gtksourceview5 gst-plugins-base gst-plugin-pipewire libsecret openssl
+sudo pacman -S --needed rust gtk4 libadwaita libsoup3 webkitgtk-6.0 gtksourceview5 libspelling hunspell hunspell-en_us gst-plugins-base gst-plugin-pipewire libsecret openssl
 ```
 
 ## Building
