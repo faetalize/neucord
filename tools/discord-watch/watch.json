@@ -100,6 +100,7 @@
       "ACTIVITY_STATUS_ON_FOR_LARGE_GUILDS",
       "ACTIVITY_STATUS_ON"
     ],
+    "GuildNSFWContentLevel": ["EXPLICIT", "SAFE", "AGE_RESTRICTED"],
     "InteractionType": ["PING", "APPLICATION_COMMAND", "MESSAGE_COMPONENT", "APPLICATION_COMMAND_AUTOCOMPLETE"],
     "LinkStatus": ["PENDING", "ACTIVE", "INACTIVE", "DECLINED", "EXPIRED"],
     "LinkType": ["PARENT", "CHILD"],
@@ -395,7 +396,10 @@
     "image sizes": ["targetWidth", "maxUpscale", "ladder"],
     "lazy images": ["_lazyLoadIO", "rootMargin"],
     "chat bar buttons": ["ChannelTextAreaButtons", "isGifButtonEnabled"],
-    "message box menu": ["textarea-context", "submit-button"]
+    "message box menu": ["textarea-context", "submit-button"],
+    "age-restricted commands in DMs": ["COMMANDS_TOGGLE", "getSetting"],
+    "age-restricted servers": ["ownerConfiguredContentLevel", "guild_record"],
+    "age verification checks": ["CLIENT_ONLY_PENDING", "REACTIVE_CHECK"]
   },
   "constants": ["ACCOUNT_AGE", "FONT_SIZES", "MEMBER_AGE", "POLLS", "REPLYABLE", "UNDELETABLE", "USER_MESSAGE", "bannerHeight", "bannerWidth"],
   "protos": [

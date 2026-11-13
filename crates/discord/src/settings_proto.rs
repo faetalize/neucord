@@ -45,6 +45,7 @@ const RENDER_REACTIONS: u32 = 13;
 const ANIMATE_EMOJI: u32 = 14;
 const ANIMATE_STICKERS: u32 = 15;
 const MESSAGE_DISPLAY_COMPACT: u32 = 17;
+const VIEW_NSFW_COMMANDS: u32 = 23;
 
 // NotificationSettings.
 const REACTION_NOTIFICATIONS: u32 = 7;
@@ -169,6 +170,7 @@ impl SettingsPatch {
             status: settings.message(STATUS).map(|status| status_settings(&status)),
             localization: settings.message(LOCALIZATION).map(|l| l.string_value(LOCALE).map(String::from)),
             skin_tone: text.as_ref().and_then(|t| t.string_value(DIVERSITY_SURROGATE)).map(Tone::from_modifier),
+            nsfw_commands_in_dms: flag(VIEW_NSFW_COMMANDS),
         })
     }
 }
@@ -513,6 +515,20 @@ mod tests {
     fn reads_developer_mode_from_appearance() {
         let patch = patch(&bytes_field(APPEARANCE, &varint_field(DEVELOPER_MODE, 1)));
         assert_eq!(patch.developer_mode, Some(true));
+    }
+
+    /// Read from the protobuf only, which READY's JSON also carries but the
+    /// client never reads.
+    #[test]
+    fn age_restricted_commands_in_dms() {
+        let patch = patch(&bytes_field(TEXT_AND_IMAGES, &bool_wrapper(VIEW_NSFW_COMMANDS, true)));
+        assert_eq!(patch.nsfw_commands_in_dms, Some(true));
+        assert_eq!(self::patch(&bytes_field(TEXT_AND_IMAGES, &[])).nsfw_commands_in_dms, None);
+        let mut settings = crate::settings::Settings { nsfw_commands_in_dms: true, ..Default::default() };
+        settings.replace(self::patch(&bytes_field(TEXT_AND_IMAGES, &[])));
+        assert!(!settings.nsfw_commands_in_dms, "absent is off");
+        let json = SettingsPatch::from_json(&serde_json::json!({"view_nsfw_commands": true}));
+        assert_eq!(json.nsfw_commands_in_dms, None);
     }
 
     /// Developer Mode is a plain `bool`, not a wrapper: proto3 leaves `false`
