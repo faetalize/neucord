@@ -179,6 +179,8 @@ pub(super) struct MentionCtx {
     pub(super) candidates: Vec<Completion>,
     /// Headers over the rows they start.
     pub(super) headers: Vec<(usize, discord::command_line::Header)>,
+    /// The icon names beside some of those headers.
+    pub(super) icons: Vec<(usize, &'static str)>,
     /// The pill of the command in the box a pick sets whole.
     pub(super) pill: Option<String>,
 }
@@ -748,7 +750,7 @@ impl App {
             self.mention_list.remove(&child);
         }
         // The headers are read as the rows go in.
-        *self.mention.borrow_mut() = MentionCtx { headers: ctx.headers, ..MentionCtx::default() };
+        *self.mention.borrow_mut() = MentionCtx { headers: ctx.headers, icons: ctx.icons, ..MentionCtx::default() };
         for candidate in &ctx.candidates {
             let row = gtk::ListBoxRow::new();
             row.set_child(Some(&candidate.row(&self.images)));
@@ -758,8 +760,11 @@ impl App {
             }
             self.mention_list.append(&row);
         }
-        let headers = std::mem::take(&mut self.mention.borrow_mut().headers);
-        *self.mention.borrow_mut() = MentionCtx { candidates: ctx.candidates, headers, ..ctx };
+        let (headers, icons) = {
+            let mut kept = self.mention.borrow_mut();
+            (std::mem::take(&mut kept.headers), std::mem::take(&mut kept.icons))
+        };
+        *self.mention.borrow_mut() = MentionCtx { candidates: ctx.candidates, headers, icons, ..ctx };
         self.mention_list.invalidate_headers();
         self.select_row(selected);
 

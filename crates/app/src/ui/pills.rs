@@ -19,6 +19,7 @@ use std::time::Instant;
 
 use adw::prelude::*;
 use discord::Snowflake;
+use discord::builtins::BuiltIn;
 use discord::command_line::{self, Caret, Change, Edit, Header, Line, Marked, OptionStates, Part};
 use discord::commands::{self, CommandOption, Focus, Pick, RunFrom, Selection, Values, option_type};
 use discord::members::{PILL_SEARCH_LIMIT, SEARCH_WAIT};
@@ -188,8 +189,12 @@ impl App {
             move |row, _| {
                 let Some(this) = this.upgrade() else { return };
                 let index = row.index().max(0) as usize;
-                let header = this.mention.borrow().headers.iter().find(|(at, _)| *at == index).map(|(_, h)| h.clone());
-                row.set_header(header.map(|h| header_label(&h)).as_ref());
+                let (header, icon) = {
+                    let ctx = this.mention.borrow();
+                    let header = ctx.headers.iter().find(|(at, _)| *at == index).map(|(_, h)| h.clone());
+                    (header, ctx.icons.iter().find(|(at, _)| *at == index).map(|(_, icon)| *icon))
+                };
+                row.set_header(header.map(|h| header_row(&h, icon)).as_ref());
             }
         });
     }
@@ -278,12 +283,20 @@ impl App {
     pub(super) fn activate_command(self: &Rc<Self>, id: &str, from: RunFrom) {
         self.close_launcher();
         let Some(channel) = self.account.state.borrow().channel else { return };
-        let found = {
-            let state = self.account.state.borrow();
-            let place = state.command_place(channel);
-            place.and_then(|p| {
-                state.commands.get(&p, commands::command_type::CHAT, id).map(|(c, a)| (c.clone(), a.clone()))
-            })
+        let found = match BuiltIn::from_id(id) {
+            // A built-in is found again among those offered here now.
+            Some(_) => {
+                let replying = self.reply.borrow().as_ref().is_some_and(|r| r.channel == channel);
+                let offered = self.builtin_commands(channel, commands::offer(replying).builtins);
+                offered.into_iter().find(|c| c.id == id).map(|c| (c, commands::App::built_in().clone()))
+            }
+            None => {
+                let state = self.account.state.borrow();
+                let place = state.command_place(channel);
+                place.and_then(|p| {
+                    state.commands.get(&p, commands::command_type::CHAT, id).map(|(c, a)| (c.clone(), a.clone()))
+                })
+            }
         };
         let Some((command, app)) = found else { return };
         self.end_command(Keep::Text);
@@ -608,13 +621,14 @@ impl App {
                 true,
                 size,
             );
-            (app.name.clone(), url)
+            (app.name.clone(), url, app.is_built_in())
         };
-        let (name, url) = found;
+        let (name, url, built_in) = found;
         let icon = &self.slash.icon;
         icon.set_tooltip_text(Some(&name));
         icon.set_custom_image(None::<&gtk::gdk::Paintable>);
-        icon.set_icon_name(Some("application-x-addon-symbolic"));
+        // The built-ins' section icon (`SlashBoxIcon`, 834968).
+        icon.set_icon_name(Some(if built_in { super::slash::BUILT_IN_ICON } else { super::slash::APP_ICON }));
         if let Some(url) = url {
             let icon = icon.downgrade();
             self.images.load(&url, move |paintable| {
@@ -824,8 +838,8 @@ impl App {
             pill: Some(pill.option.clone()),
         };
         let matching = |plain: &'static str, matching: &'static str, query: &str, mark: &str| match query {
-            "" => Header { words: plain, query: None },
-            q => Header { words: matching, query: Some(format!("{mark}{q}")) },
+            "" => Header { words: plain.into(), query: None },
+            q => Header { words: matching.into(), query: Some(format!("{mark}{q}")) },
         };
         // Choices come first (`F`): the option's own, true or false, or the app's.
         let static_choices = match &option.choices {
@@ -1063,6 +1077,7 @@ impl App {
             start: listing.start,
             candidates: listing.candidates,
             headers: listing.headers,
+            icons: Vec::new(),
             pill: listing.pill,
         };
         self.show_listed(ctx, selected);
@@ -1129,11 +1144,28 @@ impl App {
     }
 }
 
+/// A list's header, after its icon if it has one.
+fn header_row(header: &Header, icon: Option<&str>) -> gtk::Widget {
+    let label = header_label(header);
+    let Some(icon) = icon else { return label.upcast() };
+    label.set_margin_start(0);
+    let row = gtk::Box::builder().spacing(6).margin_start(6).build();
+    let image = gtk::Image::from_icon_name(icon);
+    image.set_margin_top(6);
+    image.set_margin_bottom(2);
+    image.add_css_class("dim-label");
+    row.append(&image);
+    row.append(&label);
+    row.upcast()
+}
+
 /// A list's header: its words, and what was searched for in bold.
 fn header_label(header: &Header) -> gtk::Label {
+    // An app's name may hold markup's own characters.
+    let words = glib::markup_escape_text(&header.words);
     let markup = match &header.query {
-        Some(query) => format!("{} <b>{}</b>", header.words, glib::markup_escape_text(query)),
-        None => header.words.to_owned(),
+        Some(query) => format!("{words} <b>{}</b>", glib::markup_escape_text(query)),
+        None => words.to_string(),
     };
     gtk::Label::builder()
         .use_markup(true)

@@ -893,7 +893,8 @@ pub fn remaining<'c>(
 /// client shows in bold.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Header {
-    pub words: &'static str,
+    /// The client's words, or a section's name (an app's).
+    pub words: std::borrow::Cow<'static, str>,
     pub query: Option<String>,
 }
 
@@ -903,8 +904,8 @@ pub fn options_headers(required: bool, query: &str) -> (Header, Header) {
     let words = |plain, matching| if q.is_some() { matching } else { plain };
     let rest = if required { ("Other options", "Options matching") } else { ("Options", "Options matching") };
     (
-        Header { words: words("Required options", "Required options matching"), query: q.clone() },
-        Header { words: words(rest.0, rest.1), query: q.clone() },
+        Header { words: words("Required options", "Required options matching").into(), query: q.clone() },
+        Header { words: words(rest.0, rest.1).into(), query: q.clone() },
     )
 }
 
@@ -930,8 +931,8 @@ pub fn mention_header(
         ("Members", "Members matching")
     };
     Some(match query {
-        "" => Header { words: plain, query: None },
-        q => Header { words: matching, query: Some(format!("@{q}")) },
+        "" => Header { words: plain.into(), query: None },
+        q => Header { words: matching.into(), query: Some(format!("@{q}")) },
     })
 }
 
@@ -1502,23 +1503,25 @@ mod tests {
         assert_eq!(others.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(), ["who"], "lowercased");
         let (required, _) = remaining(&roll, &none, "c");
         assert_eq!(required.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(), ["count"]);
-        assert_eq!(options_headers(true, "").0, Header { words: "Required options", query: None });
+        assert_eq!(options_headers(true, "").0, Header { words: "Required options".into(), query: None });
         assert_eq!(options_headers(true, "").1.words, "Other options");
-        assert_eq!(options_headers(false, "w").1, Header { words: "Options matching", query: Some("w".into()) });
+        assert_eq!(options_headers(false, "w").1, Header { words: "Options matching".into(), query: Some("w".into()) });
     }
 
     #[test]
     fn one_header_over_a_pills_mentions() {
-        let header = |m, members, everyone, roles, q| mention_header(m, members, everyone, roles, q).map(|h| h.words);
-        assert_eq!(header(true, 2, true, 1, ""), Some("Members"));
-        assert_eq!(header(true, 0, true, 1, ""), Some("Options"), "only @everyone and roles");
-        assert_eq!(header(false, 0, false, 2, ""), Some("Roles"));
-        assert_eq!(header(true, 0, false, 2, ""), Some("Roles"));
-        assert_eq!(header(false, 0, true, 2, ""), Some("Options"), "a ROLE pill with @everyone listed");
+        let header = |m, members, everyone, roles, q| {
+            mention_header(m, members, everyone, roles, q).map(|h| h.words.into_owned())
+        };
+        assert_eq!(header(true, 2, true, 1, ""), Some("Members".to_owned()));
+        assert_eq!(header(true, 0, true, 1, ""), Some("Options".to_owned()), "only @everyone and roles");
+        assert_eq!(header(false, 0, false, 2, ""), Some("Roles".to_owned()));
+        assert_eq!(header(true, 0, false, 2, ""), Some("Roles".to_owned()));
+        assert_eq!(header(false, 0, true, 2, ""), Some("Options".to_owned()), "a ROLE pill with @everyone listed");
         assert_eq!(header(true, 0, false, 0, ""), None);
         assert_eq!(
             mention_header(true, 1, false, 0, "al"),
-            Some(Header { words: "Members matching", query: Some("@al".into()) })
+            Some(Header { words: "Members matching".into(), query: Some("@al".into()) })
         );
     }
 

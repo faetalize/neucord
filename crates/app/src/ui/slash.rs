@@ -9,16 +9,26 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use adw::prelude::*;
-use discord::command_line::OptionStates;
+use discord::builtins;
+use discord::command_line::{Header, OptionStates};
 use discord::commands::{self, App as CommandApp, Autocomplete, Command, Names, Run, RunFrom, Selection, command_type};
 use discord::{Snowflake, interaction::Failure};
 use gtk::{gio, glib};
 
 use super::App;
 use super::chat::MessageTarget;
-use super::composer::Completion;
+use super::composer::{Completion, MentionCtx};
 use super::menus::{Entry, Item, Kind, Live};
 use super::profile::UserTarget;
+use super::state::now_unix;
+
+/// The icons over the command browser's sections: the clock over Frequently
+/// Used and a slash in a box over Built-In (`ClockIcon`, `SlashBoxIcon` in
+/// 834968), and, since an app's picture would be a request the list doesn't
+/// make, the one the box shows for an app without one.
+const FREQUENTLY_USED_ICON: &str = "document-open-recent-symbolic";
+pub(super) const BUILT_IN_ICON: &str = "utilities-terminal-symbolic";
+pub(super) const APP_ICON: &str = "application-x-addon-symbolic";
 
 /// How long typing in an option waits before asking its app for choices
 /// again (`debounce`, 500 ms leading and trailing, in 496533).
@@ -511,20 +521,52 @@ impl App {
             self.activate_typed(id);
             return true;
         }
-        let suggestions: Vec<Suggestion> = {
-            let state = self.account.state.borrow();
-            commands::suggestions(&state.commands, &place, typed, offer, &[], &used)
-                .into_iter()
-                .map(|f| Suggestion {
-                    id: f.command.id.clone(),
-                    name: format!("/{}", f.command.display_name),
-                    description: f.command.display_description.clone(),
-                    app: f.app.name.clone(),
-                })
-                .collect()
+        let builtins = self.builtin_commands(channel, offer.builtins);
+        let suggestion = |f: &commands::Found<'_>| {
+            Completion::Command(Suggestion {
+                id: f.command.id.clone(),
+                name: format!("/{}", f.command.display_name),
+                description: f.command.display_description.clone(),
+                app: f.app.name.clone(),
+            })
         };
-        self.show_completions(0, suggestions.into_iter().map(Completion::Command).collect());
+        let listed = {
+            let state = self.account.state.borrow();
+            if typed.is_empty() {
+                // The command browser: each section under its name and icon.
+                let mut listed = MentionCtx::default();
+                for section in commands::browse(&state.commands, &place, offer, &builtins, &used) {
+                    let at = listed.candidates.len();
+                    let icon = match section.heading {
+                        commands::Heading::FrequentlyUsed => FREQUENTLY_USED_ICON,
+                        commands::Heading::App(app) if app.is_built_in() => BUILT_IN_ICON,
+                        commands::Heading::App(_) => APP_ICON,
+                    };
+                    let words = section.heading.title().to_owned().into();
+                    listed.headers.push((at, Header { words, query: None }));
+                    listed.icons.push((at, icon));
+                    listed.candidates.extend(section.commands.iter().map(suggestion));
+                }
+                listed
+            } else {
+                let found = commands::suggestions(&state.commands, &place, typed, offer, &builtins, &used);
+                MentionCtx { candidates: found.iter().map(suggestion).collect(), ..MentionCtx::default() }
+            }
+        };
+        self.show_listed(listed, Some(0));
         true
+    }
+
+    /// The built-ins offered in `channel` now, as `offer` lists them (`F`
+    /// in 12115 and each one's predicate), made again each time since they
+    /// follow our permissions, the TTS setting and the message limit.
+    pub(super) fn builtin_commands(&self, channel: Snowflake, offer: commands::BuiltIns) -> Vec<Command> {
+        let state = self.account.state.borrow();
+        let (Some((guild, at)), Some(me)) = (state.find_channel(channel), state.account.as_ref()) else {
+            return Vec::new();
+        };
+        let facts = builtins::Facts::of(guild, at, me, state.settings.tts_command(), now_unix());
+        builtins::commands(&facts, offer, state.limits().max_message_length() as u64)
     }
 
     /// The command the box's text names whole, its name ended, where the
@@ -543,7 +585,11 @@ impl App {
         let place = state.command_place(channel)?;
         let (query, terminated) = commands::query_of(typed);
         let offer = commands::offer(replying);
-        let asked = commands::Query { kind: command_type::CHAT, text: &query, offer, builtins: &[], used: Some(&used) };
+        drop(state);
+        let builtins = self.builtin_commands(channel, offer.builtins);
+        let state = self.account.state.borrow();
+        let asked =
+            commands::Query { kind: command_type::CHAT, text: &query, offer, builtins: &builtins, used: Some(&used) };
         let found = state.commands.query(&place, asked);
         commands::typed_command(found, &query, terminated).map(|c| c.id.clone())
     }
