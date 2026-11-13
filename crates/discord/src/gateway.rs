@@ -203,14 +203,14 @@ pub enum Event {
     },
     /// Other people's members, with their roles: those a server arrives
     /// with, one that changed, or those we asked for. `not_found` are users
-    /// we asked for who aren't members. `names` are their users' names
-    /// (global name, else username), which only an answer to a request
-    /// carries here: a search finds people we've never seen.
+    /// we asked for who aren't members. `users` are their users, which
+    /// only an answer to a request carries here: a search finds people
+    /// we've never seen.
     Members {
         guild_id: Snowflake,
         members: Vec<(Snowflake, Known)>,
         not_found: Vec<Snowflake>,
-        names: Vec<(Snowflake, String)>,
+        users: Vec<User>,
     },
     /// A server's settings changed, its roles among them. It has no channels
     /// and no member of ours: see [`Guild::update`].
@@ -1073,7 +1073,7 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
                     .push(Event::GuildVoiceStates { guild_id, states: VoiceState::parse_list(&guild["voice_states"]) });
                 let members = members_of(&Value::Null, &data["merged_members"][i]);
                 if !members.is_empty() {
-                    parser.push(Event::Members { guild_id, members, not_found: Vec::new(), names: Vec::new() });
+                    parser.push(Event::Members { guild_id, members, not_found: Vec::new(), users: Vec::new() });
                 }
             }
             for raw in data["merged_presences"]["friends"].as_array().into_iter().flatten() {
@@ -1177,7 +1177,7 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
                     guild_id,
                     members: vec![member],
                     not_found: Vec::new(),
-                    names: Vec::new(),
+                    users: Vec::new(),
                 });
             }
             // Our own nickname and picture show in the chat like anyone's.
@@ -1186,7 +1186,7 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
                     guild_id,
                     members: vec![known],
                     not_found: Vec::new(),
-                    names: Vec::new(),
+                    users: Vec::new(),
                 });
             }
             Event::MemberUpdate { guild_id, member: Member::from_value(&data) }
@@ -1195,16 +1195,9 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
             let Some(guild_id) = parse_id(&data["guild_id"]) else { return };
             let members = data["members"].as_array().into_iter().flatten().filter_map(member_known).collect();
             let not_found = data["not_found"].as_array().into_iter().flatten().filter_map(parse_id).collect();
-            let names = data["members"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|m| {
-                    let user = User::deserialize(&m["user"]).ok()?;
-                    Some((user.id, user.display_name().to_owned()))
-                })
-                .collect();
-            Event::Members { guild_id, members, not_found, names }
+            let users =
+                data["members"].as_array().into_iter().flatten().filter_map(|m| User::deserialize(&m["user"]).ok());
+            Event::Members { guild_id, members, not_found, users: users.collect() }
         }
         "GUILD_UPDATE" => match Guild::from_value(&data) {
             Ok(guild) => Event::GuildUpdate(guild),
@@ -1277,7 +1270,7 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
             let members = (update.members().iter())
                 .map(|m| (m.user.id, Known { roles: m.roles.clone(), nick: m.nick.clone(), avatar: m.avatar.clone() }))
                 .collect();
-            parser.push(Event::Members { guild_id: update.guild, members, not_found: Vec::new(), names: Vec::new() });
+            parser.push(Event::Members { guild_id: update.guild, members, not_found: Vec::new(), users: Vec::new() });
             Event::MemberList(Box::new(update))
         }
         "THREAD_CREATE" | "THREAD_UPDATE" => match (Channel::deserialize(&data), parse_id(&data["guild_id"])) {
@@ -1371,7 +1364,7 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
                 guild_id: guild.id,
                 members: members_of(&data, &Value::Null),
                 not_found: Vec::new(),
-                names: Vec::new(),
+                users: Vec::new(),
             };
             let voice =
                 Event::GuildVoiceStates { guild_id: guild.id, states: VoiceState::parse_list(&data["voice_states"]) };
@@ -1953,9 +1946,11 @@ mod tests {
             json!({"guild_id": "1", "members": [{"user": {"id": "8", "username": "u8", "global_name": "Eight"},
                    "roles": ["40"]}], "not_found": ["9"], "chunk_index": 0, "chunk_count": 1}),
         );
-        let Ok(Event::Members { members, not_found, names, .. }) = state.try_recv() else { panic!("no chunk") };
+        let Ok(Event::Members { members, not_found, users, .. }) = state.try_recv() else { panic!("no chunk") };
         assert_eq!((members, not_found), (vec![(Snowflake(8), roles(&[40]))], vec![Snowflake(9)]));
-        assert_eq!(names, [(Snowflake(8), "Eight".to_owned())], "a search's answer names whom it found");
+        let named: Vec<(Snowflake, &str, &str)> =
+            users.iter().map(|u| (u.id, u.username.as_str(), u.display_name())).collect();
+        assert_eq!(named, [(Snowflake(8), "u8", "Eight")], "a search's answer brings whom it found whole");
     }
 
     #[test]

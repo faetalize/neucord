@@ -78,6 +78,9 @@ pub(super) struct Slash {
     /// The box is being changed by the line's own code, whose changes the
     /// box's handlers leave alone.
     pub(super) syncing: Cell<bool>,
+    /// A /thread is on its way: Enter waits for it (the client's command
+    /// stays, its run already in hand).
+    pub(super) thread_busy: Cell<bool>,
     /// Inside a user action (typing, a deletion, a paste), at whose end the
     /// line is read again.
     pub(super) in_action: Cell<bool>,
@@ -124,6 +127,7 @@ impl Slash {
             more: gtk::Label::builder().visible(false).valign(gtk::Align::Center).css_classes(["dim-label"]).build(),
             active: RefCell::default(),
             syncing: Cell::default(),
+            thread_busy: Cell::default(),
             in_action: Cell::default(),
             queued: Cell::default(),
         }
@@ -745,7 +749,7 @@ impl App {
         enum Prepared {
             Nothing,
             Failing(String),
-            BuiltIn(Snowflake, Box<Command>),
+            BuiltIn(Snowflake, Box<Command>, Vec<serde_json::Value>),
             Error(String),
             NoticeBar,
             Go {
@@ -771,7 +775,10 @@ impl App {
             if let Err(failing) = checked {
                 Prepared::Failing(failing.into_iter().next().unwrap_or_default())
             } else if active.command.is_built_in() {
-                Prepared::BuiltIn(active.channel, Box::new(active.command.clone()))
+                match commands::run_options(&active.command, &values, &names, answers, None) {
+                    Err(why) => Prepared::Error(why),
+                    Ok(options) => Prepared::BuiltIn(active.channel, Box::new(active.command.clone()), options),
+                }
             } else if state.session_id.is_empty() {
                 Prepared::Nothing
             } else if !state.can_send(active.channel) {
@@ -809,7 +816,7 @@ impl App {
                 self.command_failed(&first);
                 false
             }
-            Prepared::BuiltIn(channel, command) => self.run_built_in(channel, &command, &values),
+            Prepared::BuiltIn(channel, command, options) => self.run_built_in(channel, &command, &options),
             Prepared::Error(why) => {
                 self.show_composer_error(&why);
                 false
@@ -825,15 +832,6 @@ impl App {
         if ran {
             self.end_command(Keep::Nothing);
         }
-    }
-
-    /// Run a built-in: never an interaction, each its own way (#292's
-    /// built-ins and `/gif`, `/sticker` branch off here, recording their
-    /// use through `command_used` first). Until they are offered none can
-    /// be active; one that can't run shakes the box, as `SHAKE_APP` does.
-    fn run_built_in(self: &Rc<Self>, _channel: Snowflake, _command: &Command, _values: &commands::Values) -> bool {
-        self.composer.error_bell();
-        false
     }
 
     /// Run a user or message command from the Apps menu of `subject`'s menu

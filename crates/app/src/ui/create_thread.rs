@@ -405,31 +405,16 @@ impl App {
     /// Say why Discord turned a thread down, as the client does: an alert for
     /// most, next to the name for the name's own refusals.
     fn thread_refused(self: &Rc<Self>, form: &Form, refused: &Refused, error: &discord::Error) {
-        let alert = |heading: &str, body: &str| {
-            let dialog = adw::AlertDialog::new(Some(heading), Some(body));
-            dialog.add_response("okay", "_Okay");
-            dialog.present(Some(&form.dialog));
-        };
-        const CANNOT: &str = "Cannot create thread";
         match refused {
-            Refused::TooManyThreads => alert(
-                CANNOT,
-                "This server has reached the maximum number of active threads. Free up space by archiving a thread.",
-            ),
-            Refused::TooManyAnnouncementThreads => alert(
-                CANNOT,
-                "This server has reached the maximum number of active announcement threads. Free up space by archiving a thread.",
-            ),
-            Refused::RateLimited => alert(CANNOT, "You are being rate limited."),
-            Refused::Slowmode(seconds) => {
-                alert(CANNOT, &format!("Slowmode is on in this channel. Try again in {seconds} seconds."))
-            }
             Refused::AutoMod { reason: Some(reason), .. } => form.show_errors(Some(reason), None),
             Refused::Name => form.show_errors(Some("Thread Name is required"), None),
-            Refused::AutoMod { reason: None, .. } | Refused::Other => match error {
-                discord::Error::Http { .. } => alert("Error", "An error occurred, please try again."),
-                other => alert("Error", &other.to_string()),
-            },
+            _ => {
+                if let Some((heading, body)) = refusal_alert(refused, error) {
+                    let dialog = adw::AlertDialog::new(Some(heading), Some(&body));
+                    dialog.add_response("okay", "_Okay");
+                    dialog.present(Some(&form.dialog));
+                }
+            }
         }
     }
 
@@ -456,4 +441,31 @@ impl App {
             !here
         });
     }
+}
+
+/// The alert the client shows for a thread Discord refused, its heading and
+/// body (`Y` in 971389); none for the name's own refusals, which show by the
+/// name.
+pub(super) fn refusal_alert(refused: &Refused, error: &discord::Error) -> Option<(&'static str, String)> {
+    const CANNOT: &str = "Cannot create thread";
+    let text = match refused {
+        Refused::TooManyThreads => {
+            "This server has reached the maximum number of active threads. Free up space by archiving a thread."
+        }
+        Refused::TooManyAnnouncementThreads => {
+            "This server has reached the maximum number of active announcement threads. Free up space by archiving a thread."
+        }
+        Refused::RateLimited => "You are being rate limited.",
+        Refused::Slowmode(seconds) => {
+            return Some((CANNOT, format!("Slowmode is on in this channel. Try again in {seconds} seconds.")));
+        }
+        Refused::AutoMod { reason: Some(_), .. } | Refused::Name => return None,
+        Refused::AutoMod { reason: None, .. } | Refused::Other => {
+            return Some(match error {
+                discord::Error::Http { .. } => ("Error", "An error occurred, please try again.".to_owned()),
+                other => ("Error", other.to_string()),
+            });
+        }
+    };
+    Some((CANNOT, text.to_owned()))
 }

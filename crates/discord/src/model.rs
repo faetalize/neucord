@@ -306,6 +306,10 @@ pub struct Channel {
     /// itself, when its starter doesn't pick one.
     #[serde(default)]
     pub default_auto_archive_duration: Option<u32>,
+    /// The app that manages a group DM (`isManaged`), which /leave's
+    /// confirmation names.
+    #[serde(default)]
+    pub application_id: Option<Snowflake>,
     /// Ours, in a thread we've joined.
     #[serde(default)]
     pub member: Option<ThreadMember>,

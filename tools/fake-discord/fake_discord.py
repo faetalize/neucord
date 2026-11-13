@@ -66,6 +66,8 @@ NAMES = {
     "chatbar": "2026-06-chat-bar-customization",
 }
 LADDER = json.dumps({"ladder": [64, 128, 256], "maxUpscale": 1.1, "minSnapDownDpr": 2})
+# Under FAKE_OWNER the account owns the server, so its moderation commands show.
+OWNER = bool(os.environ.get("FAKE_OWNER"))
 INTERACTION = os.environ.get("FAKE_INTERACTION") or "ok"
 if INTERACTION not in ("ok", "fail", "silent", "429", "modal", "iframe"):
     sys.exit("unknown FAKE_INTERACTION " + INTERACTION)
@@ -209,7 +211,7 @@ def guild():
         {"id": "604", "type": 0, "name": "after-dark", "position": 4, "parent_id": None, "nsfw": True,
          "permission_overwrites": [], "flags": 0},
     ]
-    return {"id": "500", "properties": {"name": "Test Server", "owner_id": "999", "icon": None, "features": [],
+    return {"id": "500", "properties": {"name": "Test Server", "owner_id": "100" if OWNER else "999", "icon": None, "features": [],
             "premium_tier": 0, "default_message_notifications": 0, "nsfw_level": NSFW["level"],
             "owner_configured_content_level": NSFW["owner"]}, "roles": [
         {"id": "500", "name": "@everyone", "position": 0,
@@ -648,6 +650,32 @@ def upload_put(n, body):
 @route("DELETE", r"/attachments/(\d+)/([^/]+)")
 def upload_delete(n, filename, body):
     return 204, None
+
+
+# What the built-ins send: the nick comes back as set, the rest are taken.
+@route("PATCH", r"/guilds/(\d+)/members/@me/nick")
+def change_nick(guild, body):
+    return 200, {"nick": (body or {}).get("nick")}
+
+
+@route("DELETE", r"/guilds/(\d+)/members/(\d+)")
+def kick(guild, user, body):
+    return 204, None
+
+
+@route("PUT", r"/guilds/(\d+)/bans/(\d+)")
+def ban(guild, user, body):
+    return 204, None
+
+
+@route("PATCH", r"/guilds/(\d+)/members/(\d+)")
+def edit_member(guild, user, body):
+    return 200, {"user": USERS.get(user, {"id": user}), "roles": [], **(body or {})}
+
+
+@route("DELETE", r"/channels/(\d+)")
+def close_channel(channel, body):
+    return 200, {"id": channel}
 
 
 def modal_form():

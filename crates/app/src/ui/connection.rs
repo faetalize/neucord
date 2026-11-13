@@ -234,12 +234,13 @@ impl App {
                     self.on_threads(guild_id, |g| g.set_thread_member(thread, member))
                 }
                 Event::MemberUpdate { guild_id, member } => self.on_member(guild_id, member),
-                Event::Members { guild_id, members, not_found, names } => {
-                    let searched = !names.is_empty();
+                Event::Members { guild_id, members, not_found, users } => {
+                    let searched = !users.is_empty();
                     let (open, changed) = {
                         let mut state = self.account.state.borrow_mut();
-                        for (user, name) in names {
-                            state.users.entry(user.0).or_insert(name);
+                        for user in users {
+                            state.users.entry(user.id.0).or_insert_with(|| user.display_name().to_owned());
+                            state.whole_users.insert(user.id.0, user);
                         }
                         let changed = state.members.add(guild_id, members, &not_found);
                         (state.guild == Some(guild_id), changed)
@@ -557,6 +558,7 @@ impl App {
             let migrated = std::mem::take(&mut state.migrating);
             state.persisted = true;
             state.users.insert(user.id.0, user.display_name().to_string());
+            state.whole_users.insert(user.id.0, user.clone());
             state.me = Some(user.clone());
             ((store.flatten(), migrated), was_ready, offline_save)
         };

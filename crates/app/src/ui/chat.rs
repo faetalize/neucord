@@ -1486,6 +1486,7 @@ impl App {
             for user in users {
                 let name = user.display_name().to_string();
                 renamed |= state.users.insert(user.id.0, name.clone()).is_some_and(|old| old != name);
+                state.whole_users.insert(user.id.0, user.clone());
             }
         }
         // Rows on screen keep the old name until they're filled in again, as

@@ -326,6 +326,17 @@ impl App {
 
     /// Open the DM with `user`, creating it if there is none yet.
     pub(super) fn message_user(self: &Rc<Self>, user: Snowflake) {
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            if let Err(e) = this.open_dm_with(user).await {
+                this.show_friends_error(&format!("Could not open the DM: {e}"));
+            }
+        });
+    }
+
+    /// Open the DM with `user` and go to it (`openPrivateChannel` in
+    /// 308528): the one we have with no request, else a new one. Its id.
+    pub(super) async fn open_dm_with(self: &Rc<Self>, user: Snowflake) -> Result<Snowflake, discord::Error> {
         let existing = self
             .account
             .state
@@ -335,20 +346,16 @@ impl App {
             .find(|c| c.kind == ChannelKind::Dm && c.recipients.first().is_some_and(|u| u.id == user))
             .map(|c| c.id);
         if let Some(channel) = existing {
-            return self.open_channel(channel);
+            self.open_channel(channel);
+            return Ok(channel);
         }
-        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
-        let this = self.clone();
-        glib::spawn_future_local(async move {
-            match rest.open_dm(user).await {
-                Ok(channel) => {
-                    let id = channel.id;
-                    this.on_private_channel(channel);
-                    this.open_channel(id);
-                }
-                Err(e) => this.show_friends_error(&format!("Could not open the DM: {e}")),
-            }
-        });
+        let rest = self.account.state.borrow().rest.clone();
+        let Some(rest) = rest else { return Err(discord::Error::Protocol("not connected".to_owned())) };
+        let channel = rest.open_dm(user).await?;
+        let id = channel.id;
+        self.on_private_channel(channel);
+        self.open_channel(id);
+        Ok(id)
     }
 
     pub(super) fn confirm_remove_friend(self: &Rc<Self>, user: Snowflake) {

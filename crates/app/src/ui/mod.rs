@@ -5,6 +5,7 @@ mod account;
 mod accounts;
 mod attachments;
 mod background;
+mod builtins;
 mod captcha;
 mod chat;
 mod components;

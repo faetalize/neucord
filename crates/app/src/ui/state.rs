@@ -209,6 +209,9 @@ pub(super) struct State {
     pub(super) users: HashMap<u64, String>,
     /// User ids we have already tried to fetch, to avoid repeat requests.
     pub(super) fetched_users: std::collections::HashSet<u64>,
+    /// The users themselves as last seen whole (the client's `UserStore`),
+    /// which the built-ins' checks and Clyde's lines read.
+    pub(super) whole_users: HashMap<u64, User>,
     /// Who reacted with what, as far as we know.
     pub(super) reactors: discord::reactions::Reactors,
     /// The profiles popouts asked for, and our notes on people.

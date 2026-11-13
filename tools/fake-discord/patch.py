@@ -597,3 +597,7 @@ impl App {
     }
 }
 """)
+
+# `end` scrolls the chat to its newest message.
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("end") => self.scroll_to_end(),
+            Some("quit") => {''')
