@@ -409,15 +409,14 @@ impl App {
         self.slash_popup(true)
     }
 
-    /// A reply started or ended. A bare `/`'s list is the client's command
-    /// browser, whose filters follow the reply at once (`ed` in 989161) and
-    /// which fetches only as it opens (`ee`, `et` in 264322); a typed list
-    /// is made again only as the text changes (31498).
+    /// A reply started or ended: the `/` list follows it at once, fetching
+    /// nothing. A bare `/`'s list is the client's command browser, whose
+    /// filters follow the reply (`ed` in 989161) and which fetches only as it
+    /// opens (`ee`, `et` in 264322); a typed list is asked again whenever
+    /// `PendingReplyStore` changes, one of the stores of `B` in 496533 that
+    /// 133746 listens to, without `allowFetch` (31498).
     pub(super) fn reply_changed_slash(self: &Rc<Self>) {
-        let buffer = self.composer.buffer();
-        if buffer.text(&buffer.start_iter(), &buffer.end_iter(), false) == "/" {
-            self.slash_popup(false);
-        }
+        self.slash_popup(false);
     }
 
     fn slash_popup(self: &Rc<Self>, fetch: bool) -> bool {
