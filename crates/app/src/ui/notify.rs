@@ -216,7 +216,7 @@ impl App {
         self.typing_message_sent(channel);
         let this = self.clone();
         glib::spawn_future_local(async move {
-            let message = Outgoing { text: &text, reply: None, sticker: None, at: None };
+            let message = Outgoing { text: &text, reply: None, sticker: None, at: None, tts: false };
             match this.send_with_uploads(&rest, channel, &message, Vec::new()).await {
                 Ok(()) => {
                     this.message_sent(channel);

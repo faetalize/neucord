@@ -225,14 +225,16 @@ pub(super) struct Outgoing<'a> {
     pub(super) sticker: Option<Snowflake>,
     /// An ISO 8601 time, for a message Discord posts then, not now.
     pub(super) at: Option<&'a str>,
+    /// Read aloud (`/tts`). A scheduled message carries no `tts`.
+    pub(super) tts: bool,
 }
 
 /// Post the message with `sent`, uploaded already, or have Discord post it later.
 async fn post(rest: &Rest, channel: Snowflake, message: &Outgoing<'_>, sent: &[Sent<'_>]) -> Result<(), Stopped> {
-    let Outgoing { text, reply, sticker, at } = *message;
+    let Outgoing { text, reply, sticker, at, tts } = *message;
     match at {
         // The gateway echoes a message back, which is what adds it to the list; a scheduled one isn't posted yet.
-        None => rest.send_message(channel, text, reply, sent, sticker).await.map(drop),
+        None => rest.send_message(channel, text, reply, sent, sticker, tts).await.map(drop),
         Some(at) => rest.schedule_message(channel, at, text, reply, sent, sticker, None).await,
     }
     .map_err(Stopped::Send)

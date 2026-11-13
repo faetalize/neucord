@@ -152,6 +152,23 @@ impl App {
                 }
             }
             Some("pick") => self.accept_mention(parts.next().and_then(|n| n.parse().ok()).unwrap_or(0)),
+            // A key pressed in the message box, by its GDK name, with modifiers after it.
+            Some("key") => {
+                let Some(key) = parts.next().and_then(gtk::gdk::Key::from_name) else {
+                    return eprintln!("e2e: no such key");
+                };
+                let mut modifiers = gtk::gdk::ModifierType::empty();
+                for word in parts {
+                    modifiers |= match word {
+                        "shift" => gtk::gdk::ModifierType::SHIFT_MASK,
+                        "ctrl" => gtk::gdk::ModifierType::CONTROL_MASK,
+                        "alt" => gtk::gdk::ModifierType::ALT_MASK,
+                        other => return eprintln!("e2e: no modifier {other}"),
+                    };
+                }
+                let handled = self.composer_key(key, modifiers) == glib::Propagation::Stop;
+                eprintln!("e2e: key {}", if handled { "handled" } else { "not handled" });
+            }
             Some("reply") => {
                 let wanted = parts.next().map(|s| id(Some(s)));
                 let messages = self.messages();

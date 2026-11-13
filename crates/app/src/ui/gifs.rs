@@ -233,7 +233,7 @@ impl App {
         self.set_reply(None);
         let (this, link) = (self.clone(), link.to_owned());
         glib::spawn_future_local(async move {
-            match rest.send_message(channel, &link, reply, &[], None).await {
+            match rest.send_message(channel, &link, reply, &[], None, false).await {
                 Ok(_) => this.message_sent(channel),
                 Err(e) => {
                     this.message_stopped(channel, &Stopped::Send(e));

@@ -218,68 +218,83 @@ impl App {
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed({
             let this = Rc::downgrade(self);
-            move |_, key, _, modifiers| {
-                let Some(this) = this.upgrade() else { return glib::Propagation::Proceed };
-                use gtk::gdk::Key;
-                // While the mention popup is open, it owns the navigation keys.
-                if this.mention_popover.is_visible() {
-                    match key {
-                        Key::Escape => {
-                            this.mention_popover.popdown();
-                            return glib::Propagation::Stop;
-                        }
-                        Key::Down | Key::Tab => {
-                            this.move_mention_selection(1);
-                            return glib::Propagation::Stop;
-                        }
-                        Key::Up => {
-                            this.move_mention_selection(-1);
-                            return glib::Propagation::Stop;
-                        }
-                        Key::Return | Key::KP_Enter => {
-                            let index = this.mention_list.selected_row().map(|r| r.index()).unwrap_or(0);
-                            this.accept_mention(index);
-                            return glib::Propagation::Stop;
-                        }
-                        _ => {}
-                    }
-                }
-                if key == Key::Escape && this.editing().is_some() {
-                    this.end_edit();
-                    return glib::Propagation::Stop;
-                }
-                // Up alone in an empty box edits our last message, as in the official client.
-                let alone = !modifiers.intersects(gtk::accelerator_get_default_mod_mask());
-                if key == Key::Up && alone && this.composer.buffer().char_count() == 0 && this.edit_last() {
-                    return glib::Propagation::Stop;
-                }
-                if key == Key::Escape && this.reply.borrow().is_some() {
-                    this.set_reply(None);
-                    return glib::Propagation::Stop;
-                }
-                // The scheduled time goes after the reply, and a waiting sticker after it (92960).
-                let channel = this.account.state.borrow().channel;
-                if key == Key::Escape
-                    && let Some(channel) = channel.filter(|c| this.scheduled_time(*c).is_some())
-                {
-                    this.clear_schedule(channel);
-                    return glib::Propagation::Stop;
-                }
-                if key == Key::Escape
-                    && let Some(channel) = channel.filter(|c| this.waiting.of(*c).is_some())
-                {
-                    this.set_waiting_sticker(channel, None);
-                    return glib::Propagation::Stop;
-                }
-                let enter = matches!(key, Key::Return | Key::KP_Enter);
-                if enter && !modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
-                    this.send_composer();
-                    return glib::Propagation::Stop;
-                }
-                glib::Propagation::Proceed
+            move |_, key, _, modifiers| match this.upgrade() {
+                Some(this) => this.composer_key(key, modifiers),
+                None => glib::Propagation::Proceed,
             }
         });
         self.composer.add_controller(keys);
+    }
+
+    /// What a key pressed in the message box does, before the box's own
+    /// bindings.
+    pub(super) fn composer_key(
+        self: &Rc<Self>,
+        key: gtk::gdk::Key,
+        modifiers: gtk::gdk::ModifierType,
+    ) -> glib::Propagation {
+        use gtk::gdk::Key;
+        // While the mention popup is open, it owns the navigation keys.
+        if self.mention_popover.is_visible() {
+            match key {
+                Key::Escape => {
+                    self.mention_popover.popdown();
+                    return glib::Propagation::Stop;
+                }
+                Key::Down | Key::Tab => {
+                    self.move_mention_selection(1);
+                    return glib::Propagation::Stop;
+                }
+                Key::Up => {
+                    self.move_mention_selection(-1);
+                    return glib::Propagation::Stop;
+                }
+                Key::Return | Key::KP_Enter => {
+                    let index = self.mention_list.selected_row().map(|r| r.index()).unwrap_or(0);
+                    self.accept_mention(index);
+                    return glib::Propagation::Stop;
+                }
+                _ => {}
+            }
+        }
+        if key == Key::Escape && self.editing().is_some() {
+            self.end_edit();
+            return glib::Propagation::Stop;
+        }
+        // Up alone in an empty box edits our last message, as in the official client.
+        let alone = !modifiers.intersects(gtk::accelerator_get_default_mod_mask());
+        if key == Key::Up && alone && self.composer.buffer().char_count() == 0 && self.edit_last() {
+            return glib::Propagation::Stop;
+        }
+        if key == Key::Escape && self.reply.borrow().is_some() {
+            self.set_reply(None);
+            return glib::Propagation::Stop;
+        }
+        // The scheduled time goes after the reply, and a waiting sticker after it (92960).
+        let channel = self.account.state.borrow().channel;
+        if key == Key::Escape
+            && let Some(channel) = channel.filter(|c| self.scheduled_time(*c).is_some())
+        {
+            self.clear_schedule(channel);
+            return glib::Propagation::Stop;
+        }
+        if key == Key::Escape
+            && let Some(channel) = channel.filter(|c| self.waiting.of(*c).is_some())
+        {
+            self.set_waiting_sticker(channel, None);
+            return glib::Propagation::Stop;
+        }
+        let enter = matches!(key, Key::Return | Key::KP_Enter);
+        if enter && !modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
+            self.submit();
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    }
+
+    /// What Enter in the message box does, and the send button.
+    pub(super) fn submit(self: &Rc<Self>) {
+        self.send_composer();
     }
 
     /// What replaces the message box where we can't post: accept and ignore
@@ -712,33 +727,42 @@ impl App {
         }
     }
 
+    /// Save the edit, or send what the box holds to the open channel.
     pub(super) fn send_composer(self: &Rc<Self>) {
         if self.editing().is_some() {
             return self.save_edit();
         }
         let buffer = self.composer.buffer();
         let typed = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).trim().to_owned();
-        let (channel, rest) = {
-            let state = self.account.state.borrow();
-            (state.channel, state.rest.clone())
-        };
-        let (Some(channel), Some(rest)) = (channel, rest) else { return };
+        let Some(channel) = self.account.state.borrow().channel else { return };
+        self.send_text(channel, typed, false);
+    }
+
+    /// Send `typed` to `channel` as the box sends a message, with the box's
+    /// files, waiting sticker, reply and scheduled time, the text read aloud
+    /// with `tts`. True once it is on its way, or reacted for `+:name:`;
+    /// false when held back, the text left where it was. If Discord refuses
+    /// it, `typed` goes back in an empty box.
+    pub(super) fn send_text(self: &Rc<Self>, channel: Snowflake, typed: String, tts: bool) -> bool {
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return false };
         let files = self.files_for_message(channel);
         let waiting = self.waiting.of(channel);
         // A hidden message box is a channel we must never post to (#51).
-        if (typed.is_empty() && files.is_empty() && waiting.is_none()) || !self.composer_box.is_visible() {
-            return;
+        if discord::rest::nothing_to_send(&typed, files.len(), waiting.is_some()) || !self.composer_box.is_visible() {
+            return false;
         }
         // The box follows our permissions, but they may have changed since.
         if !self.account.state.borrow().can_send(channel) {
-            return self.update_notice_bar();
+            self.update_notice_bar();
+            return false;
         }
         // What was true when the sticker was picked may not be now.
         if let Some(listed) = &waiting
             && self.sticker_sendable(channel, listed).is_err()
         {
             self.set_waiting_sticker(channel, None);
-            return self.show_composer_error("That sticker can't be sent here.");
+            self.show_composer_error("That sticker can't be sent here.");
+            return false;
         }
         // `:name:`s go out as emoji. The length is checked on what goes out,
         // which is longer than what was typed.
@@ -748,28 +772,33 @@ impl App {
         // The client checks length before slowmode. The text stays in the box to be shortened.
         let too_long = self.account.state.borrow().limits().check_length(&text);
         if let Err(too_long) = too_long {
-            return self.show_too_long(too_long);
+            self.show_too_long(too_long);
+            return false;
         }
         if !files.is_empty() {
             if !self.account.state.borrow().can_attach(channel) {
-                return self.update_notice_bar();
+                self.update_notice_bar();
+                return false;
             }
             let allowed = {
                 let state = self.account.state.borrow();
                 state.limits().uploads(state.find_channel(channel).and_then(|(guild, _)| guild))
             };
             if let Err(refusal) = discord::uploads::check_send(&allowed, &Self::sizes(&files)) {
-                return self.show_refusal(&refusal);
+                self.show_refusal(&refusal);
+                return false;
             }
         }
         // Slowmode would refuse it; the notice bar says how long is left.
         if self.slowmode_left(channel) > 0 {
-            return self.update_notice_bar();
+            self.update_notice_bar();
+            return false;
         }
         // The time may have come too close since it was chosen, which Discord would refuse.
         let scheduled = self.scheduled_time(channel);
         if let Some(Err(refusal)) = scheduled.map(|at| scheduled::check(at, now_unix(), None)) {
-            return self.show_composer_error(refusal.text());
+            self.show_composer_error(refusal.text());
+            return false;
         }
         // `+:name:` reacts to the newest message in place of sending, unless
         // files go with it, which send as they are.
@@ -777,7 +806,7 @@ impl App {
             self.typing_message_sent(channel);
             self.set_composer_text("");
             self.mention_popover.popdown();
-            return;
+            return true;
         }
         let can_reply = self.account.state.borrow().can_reply(channel);
         let replying = self.reply.borrow().clone().filter(|r| r.channel == channel && can_reply);
@@ -809,7 +838,7 @@ impl App {
         glib::spawn_future_local(async move {
             // The gateway echoes our own message back, which is what adds it to the list.
             let sticker = waiting.as_ref().map(|w| w.sticker.id);
-            let message = Outgoing { text: &text, reply, sticker, at: at.as_deref() };
+            let message = Outgoing { text: &text, reply, sticker, at: at.as_deref(), tts };
             match this.send_with_uploads(&rest, channel, &message, files).await {
                 Ok(()) => match scheduled {
                     Some(at) => this.message_scheduled(channel, at),
@@ -838,6 +867,7 @@ impl App {
                 }
             }
         });
+        true
     }
 }
 

@@ -365,7 +365,7 @@ impl Rest {
     }
 
     /// Post `content`, the uploaded `attachments` and a `sticker`, which
-    /// with any one of them may be all of it.
+    /// with any one of them may be all of it, read aloud with `tts`.
     pub async fn send_message(
         &self,
         channel: Snowflake,
@@ -373,8 +373,10 @@ impl Rest {
         reply: Option<Reply>,
         attachments: &[Sent<'_>],
         sticker: Option<Snowflake>,
+        tts: bool,
     ) -> Result<Message, Error> {
-        let body = message_body(channel, content, &Snowflake::now().to_string(), 0, reply, attachments, sticker);
+        let nonce = Snowflake::now().to_string();
+        let body = message_body(channel, content, &nonce, 0, reply, attachments, sticker, tts);
         self.request(call!(SEND_MESSAGE, channel), Some(body)).await
     }
 
@@ -387,7 +389,7 @@ impl Rest {
         recording: Sent<'_>,
     ) -> Result<Message, Error> {
         let flags = Message::IS_VOICE_MESSAGE;
-        let body = message_body(channel, "", &Snowflake::now().to_string(), flags, reply, &[recording], None);
+        let body = message_body(channel, "", &Snowflake::now().to_string(), flags, reply, &[recording], None, false);
         self.request(call!(SEND_MESSAGE, channel), Some(body)).await
     }
 
@@ -1133,7 +1135,15 @@ fn vote_body(answers: &[u32]) -> Value {
     json!({ "answer_ids": answers.iter().map(u32::to_string).collect::<Vec<_>>() })
 }
 
+/// Whether the message box holds nothing a message could carry: no text
+/// but spaces, no file and no sticker (`G` in 4025, which greys the send
+/// button; Enter sends nothing then either).
+pub fn nothing_to_send(text: &str, files: usize, sticker: bool) -> bool {
+    text.trim().is_empty() && files == 0 && !sticker
+}
+
 /// What sending a message sends, as `_sendMessage` in 138399 builds it.
+#[expect(clippy::too_many_arguments, reason = "the parts of one message")]
 fn message_body(
     channel: Snowflake,
     content: &str,
@@ -1142,11 +1152,12 @@ fn message_body(
     reply: Option<Reply>,
     attachments: &[Sent<'_>],
     sticker: Option<Snowflake>,
+    tts: bool,
 ) -> Value {
     let mut body = json!({
         "content": content,
         "nonce": nonce,
-        "tts": false,
+        "tts": tts,
         "flags": flags,
     });
     if let Some(reply) = reply {
@@ -1217,7 +1228,7 @@ fn edit_scheduled_body(content: &str, flags: u64) -> Value {
 
 /// What posting a poll sends: an empty message with the `poll`.
 fn poll_body(channel: Snowflake, nonce: &str, poll: Value) -> Value {
-    let mut body = message_body(channel, "", nonce, 0, None, &[], None);
+    let mut body = message_body(channel, "", nonce, 0, None, &[], None, false);
     body["poll"] = poll;
     body
 }
@@ -1290,8 +1301,8 @@ mod tests {
 
     use super::{
         Captcha, Page, Reply, ReplyPing, add_reaction_call, archived_threads_call, base_headers, create_post_call,
-        edit_body, edit_scheduled_body, is_md5, join_thread_call, leave_thread_call, message_body, poll_body,
-        rate_limit_wait, reactors_call, remove_reaction_call, save_answer, schedule_body, vote_body,
+        edit_body, edit_scheduled_body, is_md5, join_thread_call, leave_thread_call, message_body, nothing_to_send,
+        poll_body, rate_limit_wait, reactors_call, remove_reaction_call, save_answer, schedule_body, vote_body,
     };
     use crate::endpoints::call;
     use crate::model::Emoji;
@@ -1418,17 +1429,17 @@ mod tests {
             content_type: "image/png",
             voice: None,
         };
-        let body = message_body(Snowflake(9), "", "1", 0, None, &[sent("a.png"), sent("b.png")], None);
+        let body = message_body(Snowflake(9), "", "1", 0, None, &[sent("a.png"), sent("b.png")], None, false);
         assert_eq!(body["content"], "", "files alone are a message");
         assert_eq!(
             (body["attachments"][0]["id"].as_str(), body["attachments"][1]["id"].as_str()),
             (Some("0"), Some("1"))
         );
         assert_eq!(body["attachments"][1]["filename"], "b.png");
-        assert!(message_body(Snowflake(9), "hi", "1", 0, None, &[], None).get("attachments").is_none());
+        assert!(message_body(Snowflake(9), "hi", "1", 0, None, &[], None, false).get("attachments").is_none());
         // A reply to a message goes with the files.
         let reply = Reply { to: Snowflake(3), guild: None, ping: true };
-        let body = message_body(Snowflake(9), "hi", "1", 0, Some(reply), &[sent("a.png")], None);
+        let body = message_body(Snowflake(9), "hi", "1", 0, Some(reply), &[sent("a.png")], None, false);
         assert_eq!(body["message_reference"], json!({ "message_id": "3", "channel_id": "9" }));
         assert_eq!(body["attachments"].as_array().map(Vec::len), Some(1));
     }
@@ -1436,9 +1447,9 @@ mod tests {
     #[test]
     fn a_sticker_goes_by_id_alone_or_with_text_a_reply_and_files() {
         // `_sendMessage` (138399) adds `sticker_ids` to the same body, whatever else is in it.
-        let body = message_body(Snowflake(9), "", "1", 0, None, &[], Some(Snowflake(5)));
+        let body = message_body(Snowflake(9), "", "1", 0, None, &[], Some(Snowflake(5)), false);
         assert_eq!((body["content"].as_str(), body["sticker_ids"].clone()), (Some(""), json!(["5"])));
-        assert!(message_body(Snowflake(9), "", "1", 0, None, &[], None).get("sticker_ids").is_none());
+        assert!(message_body(Snowflake(9), "", "1", 0, None, &[], None, false).get("sticker_ids").is_none());
         let reply = Reply { to: Snowflake(3), guild: Some(Snowflake(2)), ping: false };
         let sent = Sent {
             filename: "a.png",
@@ -1448,7 +1459,7 @@ mod tests {
             content_type: "image/png",
             voice: None,
         };
-        let body = message_body(Snowflake(9), "hi", "1", 0, Some(reply), &[sent], Some(Snowflake(5)));
+        let body = message_body(Snowflake(9), "hi", "1", 0, Some(reply), &[sent], Some(Snowflake(5)), false);
         assert_eq!((body["content"].as_str(), body["sticker_ids"].clone()), (Some("hi"), json!(["5"])));
         assert_eq!(body["message_reference"]["message_id"], "3");
         assert_eq!(body["attachments"].as_array().map(Vec::len), Some(1));
@@ -1464,12 +1475,27 @@ mod tests {
             content_type: "audio/ogg",
             voice: Some(Voice { duration_secs: 3.0, waveform: "AAEC" }),
         };
-        let body = message_body(Snowflake(9), "", "1", Message::IS_VOICE_MESSAGE, None, &[recording], None);
+        let body = message_body(Snowflake(9), "", "1", Message::IS_VOICE_MESSAGE, None, &[recording], None, false);
         assert_eq!(body["flags"], 8192);
         assert_eq!(body["content"], "");
         assert_eq!(body["attachments"][0]["duration_secs"], 3.0);
         assert_eq!(body["attachments"][0]["waveform"], "AAEC");
-        assert_eq!(message_body(Snowflake(9), "hi", "1", 0, None, &[], None)["flags"], 0);
+        assert_eq!(message_body(Snowflake(9), "hi", "1", 0, None, &[], None, false)["flags"], 0);
+    }
+
+    #[test]
+    fn a_message_is_read_aloud_only_when_asked() {
+        assert_eq!(message_body(Snowflake(9), "hi", "1", 0, None, &[], None, false)["tts"], false);
+        assert_eq!(message_body(Snowflake(9), "hi", "1", 0, None, &[], None, true)["tts"], true);
+    }
+
+    #[test]
+    fn spaces_alone_are_nothing_to_send() {
+        assert!(nothing_to_send("", 0, false));
+        assert!(nothing_to_send(" \n\t ", 0, false));
+        assert!(!nothing_to_send(" hi ", 0, false));
+        assert!(!nothing_to_send("", 1, false), "a file alone goes");
+        assert!(!nothing_to_send("  ", 0, true), "a waiting sticker alone goes");
     }
 
     #[test]

@@ -395,7 +395,7 @@ impl App {
             if this.account.state.borrow().channel == Some(parent) {
                 this.select_channel(thread.id);
             }
-            match rest.send_message(thread.id, &text, None, &[], None).await {
+            match rest.send_message(thread.id, &text, None, &[], None, false).await {
                 Ok(_) => this.message_sent(thread.id),
                 Err(error) => this.message_stopped(thread.id, &Stopped::Send(error)),
             }

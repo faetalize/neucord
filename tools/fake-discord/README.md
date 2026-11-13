@@ -36,7 +36,9 @@ what arrived, IDENTIFY's key order and properties first.
   popover showing on `composer`, `composer_box` or `gif_button`),
   `type <text>` (as typed), `set <text>` (as the app sets it),
   `suggestions [png]` (prints the autocomplete's rows, `*` on the selected
-  one), `pick <n>` (accepts row n), `reply [message id]` (the newest
+  one), `pick <n>` (accepts row n), `key <name> [shift|ctrl|alt]…` (a key
+  pressed in the message box, by its GDK name such as `Return` or
+  `Escape`), `reply [message id]` (the newest
   message without one), `confirm [response]` (the open alert's, else its
   last that doesn't close it), `gif` (opens the GIF picker),
   `gif-search <q>`, `gif-pick <n>`, `gif-shift-pick <n>`, `gif-star <n>`
