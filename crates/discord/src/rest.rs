@@ -697,22 +697,24 @@ impl Rest {
     /// `in_flight()` (the client: until the form closes; Neucord also stops
     /// once this nonce is no longer the submit in flight, so an old nonce
     /// never goes again). Dropping the future aborts the request, as the
-    /// form's abort signal does. A success only means Discord took it.
-    pub async fn submit_modal(&self, body: Value, in_flight: impl Fn() -> bool) -> Result<(), ()> {
+    /// form's abort signal does. Whether Discord took it, which is all a
+    /// success means.
+    pub async fn submit_modal(&self, body: Value, in_flight: impl Fn() -> bool) -> bool {
         loop {
             let sending = Sending { retry_rate_limit: false, ..Sending::default() };
-            let (status, response) =
-                self.send_with(call!(INTERACT), Some(body.clone()), sending).await.map_err(drop)?;
+            let Ok((status, response)) = self.send_with(call!(INTERACT), Some(body.clone()), sending).await else {
+                return false;
+            };
             match status {
-                200..=299 => return Ok(()),
+                200..=299 => return true,
                 429 => {
                     let after = serde_json::from_slice::<Value>(&response).ok().and_then(|b| b["retry_after"].as_f64());
                     glib::timeout_future(Duration::from_secs_f64(after.unwrap_or(0.0).max(0.0))).await;
                     if !in_flight() {
-                        return Err(());
+                        return false;
                     }
                 }
-                _ => return Err(()),
+                _ => return false,
             }
         }
     }

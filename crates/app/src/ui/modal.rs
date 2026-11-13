@@ -943,7 +943,7 @@ impl App {
                 if let Some(form) = form.upgrade() {
                     form.task.take();
                 }
-                if sent.is_err()
+                if !sent
                     && let Some(this) = this.upgrade()
                     && this.account.state.borrow_mut().modal_submission.answered(nonce, false)
                 {
