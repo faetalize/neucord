@@ -434,9 +434,12 @@ impl App {
             self.fetch_command_indexes(&place, offer, typed, {
                 let this = Rc::downgrade(self);
                 Rc::new(move || {
-                    // The box may have moved on while the index came.
+                    // The box may have moved on while the index came. The
+                    // client's typed list asks again as the index store
+                    // changes, without `allowFetch` (31498), and its browser
+                    // fetches only as it opens: no fetch here either.
                     if let Some(this) = this.upgrade() {
-                        this.update_slash_popup();
+                        this.slash_popup(false);
                     }
                 })
             });
