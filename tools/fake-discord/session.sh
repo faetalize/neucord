@@ -9,7 +9,9 @@ mkdir -p $OUT
 export HOME=$E2E/home-$ACCOUNT
 mkdir -p $HOME/data $HOME/state $HOME/config $HOME/cache
 export XDG_DATA_HOME=$HOME/data XDG_STATE_HOME=$HOME/state XDG_CONFIG_HOME=$HOME/config XDG_CACHE_HOME=$HOME/cache
-export XDG_RUNTIME_DIR=$E2E/runtime-$RUN; rm -rf $XDG_RUNTIME_DIR; mkdir -p $XDG_RUNTIME_DIR; chmod 700 $XDG_RUNTIME_DIR
+# In /tmp, not target/: a Wayland socket's path must fit in 108 bytes, and a deep checkout's doesn't.
+export XDG_RUNTIME_DIR=$(mktemp -d /tmp/neucord-e2e.XXXXXX)
+trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
 export FAKE_LOG=$OUT/fake.log E2E_CMD=$OUT/cmd
 : > $FAKE_LOG; rm -f $E2E_CMD
 ip link set lo up
@@ -29,6 +31,11 @@ waitfor() { # <kind> <count>
   for i in $(seq 100); do
     [ "$(grep -c "\"kind\": \"$1\"" $FAKE_LOG)" -ge "$2" ] && return 0; sleep 0.3
   done; echo "timeout waiting for $1 $2" >> $OUT/run.log; return 1
+}
+waitreq() { # <method> <path or its start> <count>
+  for i in $(seq 100); do
+    [ "$(grep -cF "\"method\": \"$1\", \"path\": \"$2" $FAKE_LOG)" -ge "$3" ] && return 0; sleep 0.3
+  done; echo "timeout waiting for $1 $2 $3" >> $OUT/run.log; return 1
 }
 source $HERE/scenarios/$SCENARIO.sh
 kill $APP $MUTTER $FAKE 2>/dev/null
