@@ -13,7 +13,7 @@ use discord::notice::Notice;
 use discord::rest::{Reply, ReplyPing};
 use discord::scheduled;
 use discord::verification::Gate;
-use discord::{Channel, Message, Snowflake};
+use discord::{Channel, ChannelKind, Message, Snowflake};
 use gtk::glib;
 
 use super::App;
@@ -573,14 +573,22 @@ impl App {
             channel.map_or(0, |c| self.files_for_message(c).len()),
             channel.is_some_and(|c| self.waiting.of(c).is_some()),
         );
+        let announcement = {
+            let state = self.account.state.borrow();
+            let kind = channel.and_then(|c| state.find_channel(c)).map(|(_, c)| c.kind);
+            kind == Some(ChannelKind::Announcement)
+                && state.me().is_some_and(|me| chat_bar::announcement_composer(&state.experiments, me))
+        };
         let bar = Bar {
             open: channel.is_some() && self.composer_box.is_visible(),
             editing: self.editing().is_some(),
             recording: channel.is_some_and(|c| self.has_voice_draft(c)),
             command: self.slash.is_active(),
             empty,
+            customizable: self.chat_bar_customizable(),
+            announcement,
         };
-        let shown = chat_bar::shown(bar, Prefs { send: self.config.get(&config::SEND_BUTTON) });
+        let shown = chat_bar::shown(bar, self.chat_bar_prefs());
         self.gif_button.set_visible(shown.gif);
         self.sticker_button.set_visible(shown.sticker);
         self.emoji_button.set_visible(shown.emoji);
@@ -592,6 +600,23 @@ impl App {
         } else {
             self.length.show(None);
         }
+    }
+
+    /// The device's choice of buttons.
+    pub(super) fn chat_bar_prefs(&self) -> Prefs {
+        Prefs {
+            send: self.config.get(&config::SEND_BUTTON),
+            apps: self.config.get(&config::APPS_BUTTON),
+            emoji: self.config.get(&config::EMOJI_BUTTON),
+            gif: self.config.get(&config::GIF_BUTTON),
+            sticker: self.config.get(&config::STICKER_BUTTON),
+        }
+    }
+
+    /// Whether the account follows that choice ([`chat_bar::customizable`]).
+    pub(super) fn chat_bar_customizable(&self) -> bool {
+        let state = self.account.state.borrow();
+        state.me().is_some_and(|me| chat_bar::customizable(&state.experiments, me))
     }
 
     pub(super) fn update_length_indicator(&self) {

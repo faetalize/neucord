@@ -288,6 +288,19 @@ impl App {
         option_switch(self, &chat_box, "Show send message button", "", &config::SEND_BUTTON, |app, _| {
             app.refresh_chat_bar()
         });
+        // The client's advanced chat bar settings (`tP` in 960111), only for
+        // the accounts whose bar follows them; with no expression picker
+        // format, Neucord's is always Flexible, which shows all three.
+        if self.chat_bar_customizable() {
+            for (title, key) in [
+                ("Show apps button", &config::APPS_BUTTON),
+                ("Show emoji button", &config::EMOJI_BUTTON),
+                ("Show GIF button", &config::GIF_BUTTON),
+                ("Show sticker button", &config::STICKER_BUTTON),
+            ] {
+                option_switch(self, &chat_box, title, "", key, |app, _| app.refresh_chat_bar());
+            }
+        }
         let background = group("Background", "");
         option_switch(
             self,

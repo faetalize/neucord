@@ -36,6 +36,20 @@ pub const SEND_TYPING: Key = Key { group: "Chat", name: "send-typing", default: 
 /// the client's `AccessibilityStore`, off unless chosen).
 pub const SEND_BUTTON: Key = Key { group: "Chat", name: "send-button", default: false };
 
+/// The message box's Apps button (`appsButtonEnabled` in the client's
+/// `AccessibilityStore`, on unless chosen), which, like the three below,
+/// counts only for accounts in `2026-06-chat-bar-customization`.
+pub const APPS_BUTTON: Key = Key { group: "Chat", name: "apps-button", default: true };
+
+/// The emoji button (`emojiButtonEnabled`, on).
+pub const EMOJI_BUTTON: Key = Key { group: "Chat", name: "emoji-button", default: true };
+
+/// The GIF button (`gifButtonEnabled`, on).
+pub const GIF_BUTTON: Key = Key { group: "Chat", name: "gif-button", default: true };
+
+/// The sticker button (`stickerButtonEnabled`, on).
+pub const STICKER_BUTTON: Key = Key { group: "Chat", name: "sticker-button", default: true };
+
 /// Spelling is checked in the message box (`SpellcheckStore.enabled`, on
 /// unless turned off).
 pub const SPELLCHECK: Key = Key { group: "Chat", name: "spellcheck", default: true };
@@ -167,6 +181,9 @@ mod tests {
         assert!(!store.get(&OPEN_ON_STARTUP), "nothing is written to the session until asked");
         assert!(!store.get(&SEND_BUTTON), "as the client has it");
         assert!(store.get(&SPELLCHECK), "as the client has it");
+        for key in [&APPS_BUTTON, &EMOJI_BUTTON, &GIF_BUTTON, &STICKER_BUTTON] {
+            assert!(store.get(key), "{}: as the client has it", key.name);
+        }
         assert!(!dir.file().exists(), "reading creates nothing");
     }
 
