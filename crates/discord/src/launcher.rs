@@ -15,22 +15,10 @@ use crate::commands::{App, Command, CommandIndex, Origin, Place, RunFrom, Used, 
 
 /// The most apps Recents shows before View More (`lb`).
 pub const RECENTS: usize = 8;
-/// The most apps Apps in this Server shows before View More (`lL`).
-pub const SERVER_APPS: usize = 4;
-/// The commands search shows before View More (`lA`).
-pub const SEARCH_COMMANDS_SHOWN: usize = 4;
 
 /// The launcher's entrypoint from the message box (`s4.TEXT` in 500049),
 /// sent as a run's `source`.
 pub const SOURCE_TEXT: &str = "TEXT";
-
-/// "Learn More" under Have Questions? (984516), in the account's language.
-pub fn help_url(locale: &str) -> String {
-    format!(
-        "https://support-apps.discord.com/hc/{}/articles/26592957841303-How-to-Discover-and-Add-Apps",
-        locale.to_lowercase()
-    )
-}
 
 /// The section an app page was opened from, sent with its Send as
 /// `section_name` (`yK` in 500049).
@@ -309,16 +297,6 @@ pub fn page<'a>(
         popular
     });
     Page { recents, commands, popular }
-}
-
-/// What Copy Link copies (`V` in 342384, with nothing about the app fetched
-/// beyond the index): an activity's page, else the app's install link.
-pub fn link(app: &App, me: Snowflake) -> String {
-    if app.activity {
-        format!("https://discord.com/activities/{}?referrer_id={}", app.id.0, me.0)
-    } else {
-        format!("https://discord.com/oauth2/authorize?client_id={}", app.id.0)
-    }
 }
 
 #[cfg(test)]
@@ -619,19 +597,5 @@ mod tests {
         assert_eq!(data["options"], json!([{"type": 1, "name": "show", "options": []}]));
         let roll = page.commands.iter().find(|c| c.display_name == "roll").unwrap();
         assert_eq!(roll.data_at_once(None)["options"], json!([]));
-    }
-
-    #[test]
-    fn links_and_help() {
-        let index = index();
-        let dice = index.app(&place(Some(GUILD)), Snowflake(DICE.parse().unwrap())).unwrap();
-        assert_eq!(link(dice, ME), "https://discord.com/oauth2/authorize?client_id=200000000000000001");
-        let mut activity = dice.clone();
-        activity.activity = true;
-        assert_eq!(
-            link(&activity, ME),
-            "https://discord.com/activities/200000000000000001?referrer_id=100000000000000001"
-        );
-        assert!(help_url("en-US").contains("/hc/en-us/articles/"));
     }
 }

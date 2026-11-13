@@ -16,7 +16,7 @@ use discord::builtins::BuiltIn;
 use discord::cdn;
 use discord::commands::{self, App as CommandApp, Command, CommandIndex, Origin, Place, RunFrom, Used, command_type};
 use discord::launcher::{self, AppUsage, Section};
-use gtk::{gdk, gio, glib, pango};
+use gtk::{gdk, glib, pango};
 
 use super::App;
 use super::menus::{self, At, Entry, Item, Kind};
@@ -72,10 +72,6 @@ pub(super) struct Launcher {
     search: gtk::SearchEntry,
     /// The home page's sections, or the search results.
     home: gtk::Box,
-    /// The Commands found show whole (View More), until the search's first
-    /// character changes.
-    more_commands: Cell<bool>,
-    first: Cell<Option<char>>,
     /// Each page's refill, run again when an index or the use arrives.
     refills: RefCell<Vec<Rc<dyn Fn()>>>,
 }
@@ -242,19 +238,14 @@ impl Launcher {
             nav,
             search,
             home,
-            more_commands: Cell::new(false),
-            first: Cell::new(None),
             refills: RefCell::default(),
         });
         launcher.search.connect_changed({
             let launcher = Rc::downgrade(&launcher);
-            move |search| {
-                let Some(launcher) = launcher.upgrade() else { return };
-                let first = search.text().chars().next();
-                if first != launcher.first.replace(first) {
-                    launcher.more_commands.set(false);
+            move |_| {
+                if let Some(launcher) = launcher.upgrade() {
+                    launcher.fill_home();
                 }
-                launcher.fill_home();
             }
         });
         launcher.search.connect_stop_search({
@@ -361,15 +352,7 @@ impl Launcher {
     fn fill_sections(self: &Rc<Self>, recents: Vec<AppRow>, server: Option<Vec<AppRow>>, loading: bool, empty: bool) {
         // Recents: hidden while loading and when empty (`lb`).
         if !loading && !recents.is_empty() {
-            let more = (recents.len() > launcher::RECENTS).then(|| {
-                let (launcher, all) = (Rc::downgrade(self), recents.clone());
-                move || {
-                    if let Some(launcher) = launcher.upgrade() {
-                        launcher.open_list("Recents", all.clone(), Section::RecentApps);
-                    }
-                }
-            });
-            self.home.append(&header("Recents", more));
+            self.home.append(&header("Recents"));
             let tiles = gtk::Box::builder().spacing(6).build();
             for app in recents.iter().take(launcher::RECENTS) {
                 tiles.append(&self.tile(app, Section::RecentApps));
@@ -381,20 +364,12 @@ impl Launcher {
         if let Some(server) = server
             && (loading || !server.is_empty())
         {
-            let more = (!loading && server.len() > launcher::SERVER_APPS).then(|| {
-                let (launcher, all) = (Rc::downgrade(self), server.clone());
-                move || {
-                    if let Some(launcher) = launcher.upgrade() {
-                        launcher.open_list("Apps in this Server", all.clone(), Section::AppsInThisServer);
-                    }
-                }
-            });
-            self.home.append(&header("Apps in this Server", more));
+            self.home.append(&header("Apps in this Server"));
             if loading {
                 self.home.append(&spinner());
             } else {
                 let list = list();
-                for app in server.iter().take(launcher::SERVER_APPS) {
+                for app in &server {
                     list.append(&self.app_row(app, Section::AppsInThisServer));
                 }
                 self.home.append(&list);
@@ -402,8 +377,6 @@ impl Launcher {
         }
         if empty {
             self.home.append(&notice("Go find some things to do in search!"));
-        } else {
-            self.home.append(&self.footer());
         }
     }
 
@@ -415,20 +388,9 @@ impl Launcher {
             return;
         }
         if !commands.is_empty() {
-            let more = (commands.len() > launcher::SEARCH_COMMANDS_SHOWN).then(|| {
-                let launcher = Rc::downgrade(self);
-                move || {
-                    if let Some(launcher) = launcher.upgrade() {
-                        launcher.more_commands.set(!launcher.more_commands.get());
-                        launcher.fill_home();
-                    }
-                }
-            });
-            let label = if self.more_commands.get() { "View Less" } else { "View More" };
-            self.home.append(&header_with("Commands", more, label));
-            let shown = if self.more_commands.get() { commands.len() } else { launcher::SEARCH_COMMANDS_SHOWN };
+            self.home.append(&header("Commands"));
             let list = list();
-            for command in commands.iter().take(shown) {
+            for command in &commands {
                 let row = adw::ActionRow::builder()
                     .title(&command.name)
                     .subtitle(&command.description)
@@ -452,39 +414,13 @@ impl Launcher {
             self.home.append(&list);
         }
         if !apps.is_empty() {
-            self.home.append(&header("Apps", None::<fn()>));
+            self.home.append(&header("Apps"));
             let list = list();
             for app in &apps {
                 list.append(&self.app_row(app, Section::Search));
             }
             self.home.append(&list);
         }
-    }
-
-    /// "Have Questions?" (984516), under a home with something in it.
-    fn footer(&self) -> gtk::Box {
-        let footer = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).build();
-        footer.append(&gtk::Label::builder().label("Have Questions?").xalign(0.0).css_classes(["heading"]).build());
-        footer.append(
-            &gtk::Label::builder()
-                .label("Visit our help center to learn more about using and discovering apps on Discord.")
-                .xalign(0.0)
-                .wrap(true)
-                .css_classes(["dim-label"])
-                .build(),
-        );
-        let learn = gtk::Button::builder().label("Learn More").halign(gtk::Align::Start).build();
-        learn.connect_clicked({
-            let app = self.app.clone();
-            move |_| {
-                let Some(app) = app.upgrade() else { return };
-                let locale = app.account.state.borrow().settings.locale.clone();
-                let url = launcher::help_url(locale.as_deref().unwrap_or("en-US"));
-                gtk::UriLauncher::new(&url).launch(Some(&app.window), None::<&gio::Cancellable>, |_| {});
-            }
-        });
-        footer.append(&learn);
-        footer
     }
 
     /// An app's icon, `px` wide, asked for at `ask` (128, or 84 on its page)
@@ -566,17 +502,6 @@ impl Launcher {
         });
     }
 
-    /// A section's View More (`lH`): every item as a row.
-    fn open_list(self: &Rc<Self>, title: &str, apps: Vec<AppRow>, section: Section) {
-        let list = list();
-        for app in &apps {
-            list.append(&self.app_row(app, section));
-        }
-        let scroller =
-            gtk::ScrolledWindow::builder().child(&list).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build();
-        self.push(title, &scroller, None);
-    }
-
     /// Show `body` as a page with a back button, and `end` at the end of its
     /// header.
     fn push(&self, title: &str, body: &impl IsA<gtk::Widget>, end: Option<&gtk::Box>) {
@@ -605,22 +530,6 @@ impl Launcher {
 
         let end = gtk::Box::builder().spacing(6).build();
         if !app.built_in {
-            let link = gtk::Button::builder().icon_name("insert-link-symbolic").tooltip_text("Copy Link").build();
-            link.connect_clicked({
-                let (shell, id, channel) = (self.app.clone(), app.id, self.channel);
-                move |_| {
-                    let Some(shell) = shell.upgrade() else { return };
-                    let link = {
-                        let state = shell.account.state.borrow();
-                        let (Some(me), Some(place)) = (state.me(), state.command_place(channel)) else { return };
-                        let Some(app) = state.commands.app(&place, id) else { return };
-                        launcher::link(app, me)
-                    };
-                    shell.copy(&link);
-                    shell.toast("Link Copied!");
-                }
-            });
-            end.append(&link);
             // Only Copy App ID of the client's More shows here, so only
             // where that would.
             if self.app.upgrade().is_some_and(|a| a.account.state.borrow().settings.developer_mode) {
@@ -673,14 +582,11 @@ impl Launcher {
         let scroller =
             gtk::ScrolledWindow::builder().child(&body).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build();
 
-        // Sort By starts on Popular wherever it shows.
-        let popular_sort = Rc::new(Cell::new(true));
         let fill: Rc<dyn Fn()> = Rc::new({
-            let (launcher, commands, popular_sort, id) =
-                (Rc::downgrade(self), commands.downgrade(), popular_sort, app.id);
+            let (launcher, commands, id) = (Rc::downgrade(self), commands.downgrade(), app.id);
             move || {
                 let (Some(launcher), Some(commands)) = (launcher.upgrade(), commands.upgrade()) else { return };
-                launcher.fill_page(&commands, id, section, &popular_sort);
+                launcher.fill_page(&commands, id, section);
             }
         });
         fill();
@@ -689,13 +595,7 @@ impl Launcher {
     }
 
     /// The commands block of an app's page (`eA`).
-    fn fill_page(
-        self: &Rc<Self>,
-        block: &gtk::Box,
-        id: Snowflake,
-        section: Option<Section>,
-        popular_sort: &Rc<Cell<bool>>,
-    ) {
+    fn fill_page(self: &Rc<Self>, block: &gtk::Box, id: Snowflake, section: Option<Section>) {
         let data = self.read(|index, place, _, used, builtins| {
             let page = launcher::page(index, place, id, used, builtins);
             let app = if id == CommandApp::discord_built_in().id {
@@ -720,71 +620,21 @@ impl Launcher {
             return;
         }
         if !data.recents.is_empty() {
-            block.append(&header("Recents", None::<fn()>));
+            block.append(&header("Recents"));
             let list = list();
             for command in &data.recents {
                 list.append(&self.command_row(command, section));
             }
             block.append(&list);
         }
-        let top = gtk::Box::builder().spacing(6).build();
-        top.append(
-            &gtk::Label::builder().label("Use this app").xalign(0.0).hexpand(true).css_classes(["heading"]).build(),
-        );
-        let shown = match &data.popular {
-            Some(popular) => {
-                top.append(&self.sort_button(block, id, section, popular_sort));
-                if popular_sort.get() { popular } else { &data.commands }
-            }
-            None => &data.commands,
-        };
-        block.append(&top);
+        // In the client's default order: Popular where the app has one.
+        block.append(&header("Use this app"));
+        let shown = data.popular.as_ref().unwrap_or(&data.commands);
         let list = list();
         for command in shown {
             list.append(&self.command_row(command, section));
         }
         block.append(&list);
-    }
-
-    /// Sort By (`command-list-sort`): Popular or Alphabetical.
-    fn sort_button(
-        self: &Rc<Self>,
-        block: &gtk::Box,
-        id: Snowflake,
-        section: Option<Section>,
-        popular_sort: &Rc<Cell<bool>>,
-    ) -> gtk::MenuButton {
-        let state = if popular_sort.get() { "popular" } else { "alphabetical" };
-        let action = gio::SimpleAction::new_stateful("sort", Some(glib::VariantTy::STRING), &state.to_variant());
-        action.connect_activate({
-            let (launcher, block, popular_sort) = (Rc::downgrade(self), block.downgrade(), popular_sort.clone());
-            move |action, value| {
-                let Some(value) = value.and_then(|v| v.get::<String>()) else { return };
-                action.set_state(&value.to_variant());
-                popular_sort.set(value == "popular");
-                // After the menu has closed, as the button goes with the refill.
-                let (launcher, block, popular_sort) = (launcher.clone(), block.clone(), popular_sort.clone());
-                glib::idle_add_local_once(move || {
-                    if let (Some(launcher), Some(block)) = (launcher.upgrade(), block.upgrade()) {
-                        launcher.fill_page(&block, id, section, &popular_sort);
-                    }
-                });
-            }
-        });
-        let actions = gio::SimpleActionGroup::new();
-        actions.add_action(&action);
-        let menu = gio::Menu::new();
-        let choices = gio::Menu::new();
-        choices.append(Some("Popular"), Some("command-list.sort::popular"));
-        choices.append(Some("Alphabetical"), Some("command-list.sort::alphabetical"));
-        menu.append_section(Some("Sort By"), &choices);
-        let button = gtk::MenuButton::builder()
-            .label(if popular_sort.get() { "Popular" } else { "Alphabetical" })
-            .menu_model(&menu)
-            .css_classes(["flat"])
-            .build();
-        button.insert_action_group("command-list", Some(&actions));
-        button
     }
 
     /// A command of an app's page (`eu`): a chevron where it has options to
@@ -858,24 +708,9 @@ impl Launcher {
     }
 }
 
-/// A section's title, and its View More when there is more.
-fn header(title: &str, more: Option<impl Fn() + 'static>) -> gtk::Box {
-    header_with(title, more, "View More")
-}
-
-fn header_with(title: &str, more: Option<impl Fn() + 'static>, label: &str) -> gtk::Box {
-    let header = gtk::Box::builder().spacing(6).build();
-    header.append(&gtk::Label::builder().label(title).xalign(0.0).hexpand(true).css_classes(["heading"]).build());
-    if let Some(more) = more {
-        let button = gtk::Button::builder()
-            .label(label)
-            .tooltip_text(format!("View more {title}"))
-            .css_classes(["flat"])
-            .build();
-        button.connect_clicked(move |_| more());
-        header.append(&button);
-    }
-    header
+/// A section's title.
+fn header(title: &str) -> gtk::Label {
+    gtk::Label::builder().label(title).xalign(0.0).css_classes(["heading"]).build()
 }
 
 fn list() -> gtk::ListBox {
@@ -890,50 +725,9 @@ fn notice(text: &str) -> gtk::Label {
     gtk::Label::builder().label(text).wrap(true).margin_top(24).css_classes(["dim-label"]).build()
 }
 
-/// An app's description, two lines until Show More, which shows only when
-/// it runs past them.
-fn description(text: &str) -> gtk::Box {
-    let label = gtk::Label::builder()
-        .label(text)
-        .xalign(0.0)
-        .wrap(true)
-        .wrap_mode(pango::WrapMode::WordChar)
-        .lines(2)
-        .ellipsize(pango::EllipsizeMode::End)
-        .build();
-    let toggle = gtk::Button::builder()
-        .label("Show More")
-        .halign(gtk::Align::Start)
-        .visible(false)
-        .css_classes(["flat"])
-        .build();
-    toggle.connect_clicked({
-        let label = label.downgrade();
-        move |toggle| {
-            let Some(label) = label.upgrade() else { return };
-            let more = label.lines() == 2;
-            label.set_lines(if more { -1 } else { 2 });
-            label.set_ellipsize(if more { pango::EllipsizeMode::None } else { pango::EllipsizeMode::End });
-            toggle.set_label(if more { "Show Less" } else { "Show More" });
-        }
-    });
-    // Whether it runs past two lines is known once it is laid out.
-    label.add_tick_callback({
-        let toggle = toggle.downgrade();
-        move |label, _| {
-            if label.width() == 0 {
-                return glib::ControlFlow::Continue;
-            }
-            if let Some(toggle) = toggle.upgrade() {
-                toggle.set_visible(label.layout().is_ellipsized());
-            }
-            glib::ControlFlow::Break
-        }
-    });
-    let block = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).build();
-    block.append(&label);
-    block.append(&toggle);
-    block
+/// An app's description.
+fn description(text: &str) -> gtk::Label {
+    gtk::Label::builder().label(text).xalign(0.0).wrap(true).wrap_mode(pango::WrapMode::WordChar).build()
 }
 
 fn clear(container: &gtk::Box) {
