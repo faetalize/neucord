@@ -584,14 +584,6 @@ impl App {
             row.append(&field.error);
             slash.fields.append(&row);
         }
-        let attachments = command.needs_attachment();
-        slash.run.set_sensitive(!attachments);
-        if attachments {
-            slash.description.set_label(&format!(
-                "{} — This command needs a file, which Neucord can't attach to a command yet.",
-                app.name
-            ));
-        }
         let first = fields.first().map(|f| f.widget.clone());
         slash.active.replace(Some(Active {
             channel,
@@ -671,6 +663,8 @@ impl App {
             return Field { option: option.clone(), widget, read, error, choices: None };
         }
         let entry = gtk::Entry::builder().placeholder_text(placeholder(option)).activates_default(false).build();
+        // A file option holds its staged file's name, never typed text.
+        entry.set_sensitive(option.kind != option_type::ATTACHMENT);
         entry.connect_activate({
             let weak = weak.clone();
             move |_| {
@@ -911,7 +905,7 @@ impl App {
             let options = commands::run_options(&active.command, &values, &names, active.autocomplete.answers(), None);
             if let Some(first) = invalid {
                 Prepared::Invalid(first)
-            } else if active.command.needs_attachment() || state.session_id.is_empty() {
+            } else if state.session_id.is_empty() {
                 Prepared::Nothing
             } else if !state.can_send(active.channel) {
                 Prepared::NoticeBar
@@ -1184,6 +1178,7 @@ fn placeholder(option: &CommandOption) -> &'static str {
         option_type::CHANNEL => "#channel, or an id",
         option_type::INTEGER => "A whole number",
         option_type::NUMBER => "A number",
+        option_type::ATTACHMENT => "Neucord can't attach a file here yet",
         _ => "",
     }
 }

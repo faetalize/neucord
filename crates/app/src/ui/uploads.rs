@@ -79,8 +79,10 @@ struct Row {
     root: gtk::Box,
     name: gtk::Label,
     state: gtk::Label,
-    spoiler: gtk::ToggleButton,
-    edit: gtk::Button,
+    /// A message's files only: a command's or a form's have neither
+    /// (`canEdit: !1` in 914905).
+    spoiler: Option<gtk::ToggleButton>,
+    edit: Option<gtk::Button>,
     remove: gtk::Button,
 }
 
@@ -116,7 +118,7 @@ impl Upload {
     }
 
     /// Wait until the upload has ended, and say with what.
-    async fn ended(&self) -> Result<String, String> {
+    pub(super) async fn ended(&self) -> Result<String, String> {
         loop {
             match &*self.status.borrow() {
                 Status::Done(uploaded) => return Ok(uploaded.clone()),
@@ -133,7 +135,7 @@ impl Upload {
     /// Stop the upload, and take back what it has made: Discord holds a
     /// finished upload until a message names it, and the client says it's
     /// no longer wanted.
-    fn cancel(&self, rest: Option<Rest>) {
+    pub(super) fn cancel(&self, rest: Option<Rest>) {
         if let Some(task) = self.task.take() {
             task.abort();
         }
@@ -146,11 +148,30 @@ impl Upload {
 
     fn lock(&self, locked: bool) {
         let row = &self.row;
-        for button in [&row.edit, &row.remove] {
+        for button in row.edit.iter().chain([&row.remove]) {
             button.set_sensitive(!locked);
         }
-        row.spoiler.set_sensitive(!locked);
+        if let Some(spoiler) = &row.spoiler {
+            spoiler.set_sensitive(!locked);
+        }
     }
+}
+
+/// The file at `path`, as a browser's `File` would give it: its name, size
+/// and the type its name says. A folder is no file: like an empty one, it
+/// has nothing to send.
+pub(super) async fn file_at(path: gio::File) -> Option<File> {
+    let attributes = "standard::name,standard::size,standard::type";
+    let info = path.query_info_future(attributes, gio::FileQueryInfoFlags::NONE, glib::Priority::DEFAULT).await.ok()?;
+    let name = info.name().to_string_lossy().into_owned();
+    let size = if info.file_type() == gio::FileType::Regular { info.size().max(0) as u64 } else { 0 };
+    Some(File {
+        content_type: uploads::content_type(&name),
+        filename: name,
+        size,
+        data: Data::File(path),
+        original_md5: None,
+    })
 }
 
 /// A message waiting on its files.
@@ -253,14 +274,14 @@ async fn post(rest: &Rest, channel: Snowflake, message: &Outgoing<'_>, sent: &[S
 
 /// What a message calls its files, which the edit dialog may have changed:
 /// [`Sent`] borrows it.
-struct Details {
+pub(super) struct Details {
     names: Vec<String>,
     descriptions: Vec<Option<String>>,
     types: Vec<String>,
 }
 
 impl Details {
-    fn of(files: &[Rc<Upload>]) -> Self {
+    pub(super) fn of(files: &[Rc<Upload>]) -> Self {
         let (names, descriptions) =
             files.iter().map(|u| (u.name.borrow().clone(), u.description.borrow().clone())).unzip();
         let types = files.iter().map(|u| u.file.borrow().content_type.clone()).collect();
@@ -268,7 +289,7 @@ impl Details {
     }
 
     /// `files` as the message names them, by what Discord keeps each as.
-    fn sent<'a>(&'a self, files: &[Rc<Upload>], uploaded: &'a [String]) -> Vec<Sent<'a>> {
+    pub(super) fn sent<'a>(&'a self, files: &[Rc<Upload>], uploaded: &'a [String]) -> Vec<Sent<'a>> {
         files
             .iter()
             .enumerate()
@@ -282,6 +303,50 @@ impl Details {
             })
             .collect()
     }
+}
+
+/// An upload of `file` and its row, not started.
+fn upload_of(
+    channel: Snowflake,
+    file: File,
+    spoiler: Option<gtk::ToggleButton>,
+    edit: Option<gtk::Button>,
+    remove: &str,
+) -> Rc<Upload> {
+    let root = gtk::Box::builder().spacing(8).margin_start(12).margin_top(4).margin_bottom(4).build();
+    let name = gtk::Label::builder()
+        .label(&file.filename)
+        .xalign(0.0)
+        .hexpand(true)
+        .ellipsize(gtk::pango::EllipsizeMode::Middle)
+        .build();
+    let state = gtk::Label::builder().css_classes(["dim-label"]).ellipsize(gtk::pango::EllipsizeMode::End).build();
+    let remove =
+        gtk::Button::builder().icon_name("window-close-symbolic").tooltip_text(remove).css_classes(["flat"]).build();
+    root.append(&name);
+    root.append(&state);
+    if let Some(spoiler) = &spoiler {
+        root.append(spoiler);
+    }
+    if let Some(edit) = &edit {
+        root.append(edit);
+    }
+    root.append(&remove);
+    let upload = Rc::new(Upload {
+        channel,
+        name: RefCell::new(file.filename.clone()),
+        file: RefCell::new(file),
+        optimized: Cell::new(false),
+        spoiler: Cell::new(false),
+        description: RefCell::default(),
+        status: RefCell::new(Status::Uploading(0)),
+        attempts: Rc::default(),
+        task: RefCell::default(),
+        waiting: RefCell::default(),
+        row: Row { root, name, state, spoiler, edit, remove },
+    });
+    upload.set_status(Status::Uploading(0));
+    upload
 }
 
 impl App {
@@ -520,19 +585,7 @@ impl App {
     pub(super) async fn add_paths(self: &Rc<Self>, channel: Snowflake, paths: Vec<gio::File>) {
         let mut files = Vec::new();
         for path in paths {
-            let attributes = "standard::name,standard::size,standard::type";
-            let info = path.query_info_future(attributes, gio::FileQueryInfoFlags::NONE, glib::Priority::DEFAULT).await;
-            let Ok(info) = info else { continue };
-            let name = info.name().to_string_lossy().into_owned();
-            // A folder is no file; like an empty one, there is nothing to send.
-            let size = if info.file_type() == gio::FileType::Regular { info.size().max(0) as u64 } else { 0 };
-            files.push(File {
-                content_type: uploads::content_type(&name),
-                filename: name,
-                size,
-                data: Data::File(path),
-                original_md5: None,
-            });
+            files.extend(file_at(path).await);
         }
         self.add_files(channel, files).await;
     }
@@ -590,14 +643,6 @@ impl App {
     }
 
     fn new_upload(self: &Rc<Self>, channel: Snowflake, file: File) -> Rc<Upload> {
-        let root = gtk::Box::builder().spacing(8).margin_start(12).margin_top(4).margin_bottom(4).build();
-        let name = gtk::Label::builder()
-            .label(&file.filename)
-            .xalign(0.0)
-            .hexpand(true)
-            .ellipsize(gtk::pango::EllipsizeMode::Middle)
-            .build();
-        let state = gtk::Label::builder().css_classes(["dim-label"]).ellipsize(gtk::pango::EllipsizeMode::End).build();
         let spoiler = gtk::ToggleButton::builder()
             .icon_name("view-conceal-symbolic")
             .tooltip_text("Mark as spoiler")
@@ -608,37 +653,17 @@ impl App {
             .tooltip_text("Edit")
             .css_classes(["flat"])
             .build();
-        let remove = gtk::Button::builder()
-            .icon_name("window-close-symbolic")
-            .tooltip_text("Remove")
-            .css_classes(["flat"])
-            .build();
-        for widget in [name.upcast_ref::<gtk::Widget>(), state.upcast_ref(), spoiler.upcast_ref(), edit.upcast_ref()] {
-            root.append(widget);
-        }
-        root.append(&remove);
-        let upload = Rc::new(Upload {
-            channel,
-            name: RefCell::new(file.filename.clone()),
-            file: RefCell::new(file),
-            optimized: Cell::new(false),
-            spoiler: Cell::new(false),
-            description: RefCell::default(),
-            status: RefCell::new(Status::Uploading(0)),
-            attempts: Rc::default(),
-            task: RefCell::default(),
-            waiting: RefCell::default(),
-            row: Row { root, name, state, spoiler, edit, remove },
-        });
-        upload.set_status(Status::Uploading(0));
-        upload.row.spoiler.connect_toggled({
-            let upload = Rc::downgrade(&upload);
-            move |button| {
-                if let Some(upload) = upload.upgrade() {
-                    upload.spoiler.set(button.is_active());
+        let upload = upload_of(channel, file, Some(spoiler), Some(edit), "Remove");
+        if let Some(spoiler) = &upload.row.spoiler {
+            spoiler.connect_toggled({
+                let upload = Rc::downgrade(&upload);
+                move |button| {
+                    if let Some(upload) = upload.upgrade() {
+                        upload.spoiler.set(button.is_active());
+                    }
                 }
-            }
-        });
+            });
+        }
         upload.row.remove.connect_clicked({
             let (this, upload) = (Rc::downgrade(self), Rc::downgrade(&upload));
             move |_| {
@@ -647,14 +672,16 @@ impl App {
                 }
             }
         });
-        upload.row.edit.connect_clicked({
-            let (this, upload) = (Rc::downgrade(self), Rc::downgrade(&upload));
-            move |_| {
-                if let (Some(this), Some(upload)) = (this.upgrade(), upload.upgrade()) {
-                    this.edit_upload(&upload);
+        if let Some(edit) = &upload.row.edit {
+            edit.connect_clicked({
+                let (this, upload) = (Rc::downgrade(self), Rc::downgrade(&upload));
+                move |_| {
+                    if let (Some(this), Some(upload)) = (this.upgrade(), upload.upgrade()) {
+                        this.edit_upload(&upload);
+                    }
                 }
-            }
-        });
+            });
+        }
         upload
     }
 

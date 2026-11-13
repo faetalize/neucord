@@ -22,7 +22,7 @@ use crate::limits;
 use crate::limits::Limits;
 use crate::permissions::{self, Permissions};
 use crate::settings::Settings;
-use crate::uploads::Sent;
+use crate::uploads::{self, Sent};
 use crate::verification::Account;
 use crate::{Channel, ChannelKind, Guild, Snowflake};
 
@@ -250,6 +250,29 @@ pub struct CommandOption {
     /// `image`, `video`, `audio`; empty for anything (`p` in 168186 reads it
     /// only for that type).
     pub file_types: Vec<String>,
+}
+
+/// What a file option takes (`M1` in 424170), and what its box says (102077).
+impl CommandOption {
+    pub fn file_extensions(&self) -> Vec<String> {
+        uploads::extensions(&self.file_types)
+    }
+
+    pub fn takes_file(&self, filename: &str) -> bool {
+        uploads::takes(&self.file_extensions(), filename)
+    }
+
+    pub fn file_types_words(&self) -> Option<String> {
+        uploads::types_words(&self.file_types)
+    }
+
+    /// The empty box's words (`IJyOUf`, `JJzx48`).
+    pub fn file_prompt(&self) -> String {
+        match self.file_types_words() {
+            Some(types) => format!("Drag and drop or click to upload {types} file"),
+            None => "Drag and drop or click to upload file".to_owned(),
+        }
+    }
 }
 
 /// A step from a command to its sub-command.
@@ -1710,7 +1733,9 @@ const REQUIRED: &str = "This option is required. Specify a value.";
 /// 300541). `content` is the pill's value, none without a pill, which only
 /// a required option fails. An empty value passes with `allow_empty` (as a
 /// command starts), else fails as required, or, for an optional one, as its
-/// type ([`type_error`]).
+/// type ([`type_error`]). A file option's value is the name of the file
+/// staged for it: a staged file is all it asks, whether or not its upload
+/// has gone well (the run's staging finds that out).
 pub fn validate(
     option: &CommandOption,
     content: Option<&str>,
@@ -1780,6 +1805,7 @@ pub fn validate(
         USER | CHANNEL | ROLE | MENTIONABLE => {
             resolve(option.kind, typed, names).map(|_| ()).ok_or_else(|| type_error(option))
         }
+        ATTACHMENT => Ok(()),
         _ => invalid(),
     }
 }
@@ -1876,7 +1902,10 @@ pub type Values = BTreeMap<String, String>;
 /// each option that has text, with the value its type makes of it, inside the
 /// sub-command groups that lead to it. With `focused`, the option being
 /// autocompleted goes out marked, with what was typed so far as it is,
-/// spaces and all (`autocomplete.query`); the others are trimmed.
+/// spaces and all (`autocomplete.query`); the others are trimmed. A file
+/// option's text is its staged file's name: it goes as that file's place
+/// among the run's files, counted in the command's option order, and never
+/// in an autocomplete.
 pub fn run_options(
     command: &Command,
     values: &Values,
@@ -1886,8 +1915,9 @@ pub fn run_options(
 ) -> Result<Vec<Value>, String> {
     use option_type::*;
     let mut options = Vec::new();
+    let mut files = 0;
     for option in &command.options {
-        if matches!(option.kind, SUB_COMMAND | SUB_COMMAND_GROUP | ATTACHMENT) {
+        if matches!(option.kind, SUB_COMMAND | SUB_COMMAND_GROUP) {
             continue;
         }
         let is_focus = focused == Some(option.name.as_str());
@@ -1926,6 +1956,13 @@ pub fn run_options(
                     None if is_focus => json!(typed),
                     None => return Err(format!("Failed to resolve {typed}")),
                 }
+            }
+            ATTACHMENT => {
+                if focused.is_some() || typed.is_empty() {
+                    continue;
+                }
+                files += 1;
+                json!(files - 1)
             }
             BOOLEAN => match bool_of(typed) {
                 Some(b) => json!(b),
@@ -1972,6 +2009,18 @@ pub fn leaf_options(mut options: &[Value]) -> &[Value] {
         options = only["options"].as_array().map_or(&[], Vec::as_slice);
     }
     options
+}
+
+/// The file options of a run, by their place among its files: what
+/// `data.attachments` names in that order.
+pub fn file_options(options: &[Value]) -> Vec<&str> {
+    let mut files: Vec<(u64, &str)> = leaf_options(options)
+        .iter()
+        .filter(|o| o["type"].as_u64() == Some(u64::from(option_type::ATTACHMENT)))
+        .filter_map(|o| Some((o["value"].as_u64()?, o["name"].as_str()?)))
+        .collect();
+    files.sort_by_key(|(at, _)| *at);
+    files.into_iter().map(|(_, name)| name).collect()
 }
 
 /// What the other options held when an option asked for choices, which the
@@ -2045,12 +2094,6 @@ impl Command {
             options = vec![json!({ "type": step.kind, "name": step.name, "options": options })];
         }
         options
-    }
-
-    /// Whether the form can't take an option: files, which Neucord doesn't
-    /// attach to a command yet.
-    pub fn needs_attachment(&self) -> bool {
-        self.options.iter().any(|o| o.kind == option_type::ATTACHMENT && o.required)
     }
 }
 
@@ -3400,6 +3443,92 @@ mod tests {
                 json!({"type": 4, "name": "count", "value": " 3 ", "focused": true}),
             ]
         );
+    }
+
+    fn files_command(group: bool) -> CommandIndex {
+        let options = json!([
+            {"type": 11, "name": "a", "description": "", "required": true},
+            {"type": 3, "name": "note", "description": "", "autocomplete": true},
+            {"type": 11, "name": "b", "description": ""},
+            {"type": 11, "name": "c", "description": ""},
+        ]);
+        let options = if group {
+            json!([{"type": 2, "name": "files", "description": "", "options": [
+                {"type": 1, "name": "send", "description": "", "options": options}]}])
+        } else {
+            options
+        };
+        with(json!({ "options": options }))
+    }
+
+    #[test]
+    fn file_options_go_out_as_their_place_among_the_files() {
+        let values = |pairs: &[(&str, &str)]| -> Values {
+            pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+        };
+        let both = values(&[("c", "dog.png"), ("note", "x"), ("a", "cat.png"), ("b", "")]);
+        let commands = files_command(false);
+        let found = commands.find(&place(), command_type::CHAT, "");
+        let options = run_options(found[0].command, &both, &Nobody, &Autocompleted::default(), None).unwrap();
+        assert_eq!(
+            options,
+            [
+                json!({"type": 11, "name": "a", "value": 0}),
+                json!({"type": 3, "name": "note", "value": "x"}),
+                json!({"type": 11, "name": "c", "value": 1}),
+            ],
+            "b has no file and takes no number"
+        );
+        assert_eq!(file_options(&options), ["a", "c"]);
+        let only_c = values(&[("c", "dog.png")]);
+        let options = run_options(found[0].command, &only_c, &Nobody, &Autocompleted::default(), None).unwrap();
+        assert_eq!(options, [json!({"type": 11, "name": "c", "value": 0})]);
+        assert_eq!(file_options(&options), ["c"]);
+
+        let grouped = files_command(true);
+        let found = grouped.find(&place(), command_type::CHAT, "");
+        let options = run_options(found[0].command, &both, &Nobody, &Autocompleted::default(), None).unwrap();
+        assert_eq!(leaf_options(&options)[2], json!({"type": 11, "name": "c", "value": 1}));
+        assert_eq!(file_options(&options), ["a", "c"]);
+    }
+
+    #[test]
+    fn autocomplete_leaves_files_out() {
+        let commands = files_command(false);
+        let found = commands.find(&place(), command_type::CHAT, "");
+        let typed: Values = [("note".to_owned(), "he".to_owned())].into();
+        let mut with_file = typed.clone();
+        with_file.insert("a".into(), "cat.png".into());
+        let asking = |values: &Values| {
+            run_options(found[0].command, values, &Nobody, &Autocompleted::default(), Some("note")).unwrap()
+        };
+        assert!(asking(&with_file).iter().all(|o| o["type"] != 11));
+        assert_eq!(context_key(&asking(&with_file)), context_key(&asking(&typed)));
+    }
+
+    #[test]
+    fn a_file_option_is_valid_once_staged() {
+        let auto = Autocompleted::default();
+        let mut file = option(option_type::ATTACHMENT);
+        assert_eq!(validate(&file, None, false, &Nobody, &auto), Ok(()), "optional");
+        file.required = true;
+        assert_eq!(
+            validate(&file, None, false, &Nobody, &auto),
+            Err("This option is required. Specify a value.".into())
+        );
+        assert_eq!(validate(&file, Some("cat.png"), false, &Nobody, &auto), Ok(()));
+    }
+
+    #[test]
+    fn a_file_option_says_what_it_takes() {
+        let mut file = option(option_type::ATTACHMENT);
+        assert_eq!(file.file_prompt(), "Drag and drop or click to upload file");
+        assert!(file.takes_file("anything.bin"));
+        file.file_types = vec!["image".into(), ".pdf".into()];
+        assert_eq!(file.file_prompt(), "Drag and drop or click to upload image or .pdf file");
+        assert_eq!(file.file_types_words().as_deref(), Some("image or .pdf"));
+        assert!(file.takes_file("Scan.PDF") && file.takes_file("cat.webp") && !file.takes_file("notes.txt"));
+        assert_eq!(file.file_extensions()[0], "pdf");
     }
 
     #[test]
