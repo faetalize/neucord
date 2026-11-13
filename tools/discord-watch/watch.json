@@ -329,6 +329,7 @@
     "validateMessage"
   ],
   "stores": [
+    "AccessibilityStore",
     "ActiveJoinedThreadsStore",
     "ActiveThreadsStore",
     "ApplicationCommandAutocompleteStore",
@@ -369,6 +370,7 @@
     "SelfPresenceStore",
     "SlowmodeStore",
     "SortedVoiceStateStore",
+    "SpellcheckStore",
     "StickerMessagePreviewStore",
     "StickersPackStore",
     "StickersPersistedStore",
@@ -390,7 +392,8 @@
     "private channel hiding": ["2026-02-private-channel-hiding"],
     "attachment image ladder": ["2026-07-attachment-image-ladder"],
     "image sizes": ["targetWidth", "maxUpscale", "ladder"],
-    "lazy images": ["_lazyLoadIO", "rootMargin"]
+    "lazy images": ["_lazyLoadIO", "rootMargin"],
+    "message box menu": ["textarea-context", "submit-button"]
   },
   "constants": ["ACCOUNT_AGE", "FONT_SIZES", "MEMBER_AGE", "POLLS", "REPLYABLE", "UNDELETABLE", "USER_MESSAGE", "bannerHeight", "bannerWidth"],
   "protos": [
