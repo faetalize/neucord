@@ -877,8 +877,9 @@ impl App {
             let values = active.values();
             let mut invalid: Option<gtk::Widget> = None;
             for field in &active.fields {
-                let typed = values.get(&field.option.name).map(String::as_str).unwrap_or_default();
-                match commands::validate(&field.option, typed, &names, active.autocomplete.answers()) {
+                // The form drops text that is only spaces: an empty field is an option not given.
+                let typed = values.get(&field.option.name).map(String::as_str);
+                match commands::validate(&field.option, typed, false, &names, active.autocomplete.answers()) {
                     Ok(()) => field.error.set_visible(false),
                     Err(why) => {
                         invalid.get_or_insert_with(|| field.widget.clone());

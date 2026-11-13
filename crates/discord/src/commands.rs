@@ -836,6 +836,121 @@ pub fn settled<'a>(found: Vec<Found<'a>>, text: &str, terminated: bool) -> Vec<F
         .collect()
 }
 
+/// Which command typed text names (870748, with no command active): once
+/// the name is ended ([`query_of`]'s `terminated`), the one
+/// command named exactly so, when nothing else starts with that name and a
+/// space.
+pub fn typed_command<'a>(found: Vec<Found<'a>>, text: &str, terminated: bool) -> Option<&'a Command> {
+    if !terminated {
+        return None;
+    }
+    let text = text.trim();
+    let spaced = format!("{text} ");
+    let named: Vec<&Command> = found
+        .into_iter()
+        .map(|f| f.command)
+        .filter(|c| c.display_name == text || c.display_name.starts_with(&spaced))
+        .collect();
+    match named[..] {
+        [only] if only.display_name == text => Some(only),
+        _ => None,
+    }
+}
+
+/// When a popup list selects its first row by itself (`focusMode` in
+/// 133746's navigator).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Focus {
+    /// As soon as it shows (no `focusMode`): the suggestions, a pill's
+    /// choices and mentions, `/gif`'s and `/sticker`'s results.
+    #[default]
+    Auto,
+    /// Once something is typed (`AUTO_WHEN_FILTERED`): the options list.
+    WhenFiltered,
+}
+
+/// What Enter or Tab does with the popup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pick {
+    /// Enter on a row (`selectResult(index, true)`: `SEND` for the
+    /// integrations).
+    Send(usize),
+    /// Tab on a row (`INSERT`).
+    Insert(usize),
+    /// Tab with no row selected on a list that waits for typing: its first
+    /// row is selected, and nothing else happens.
+    Selected,
+}
+
+/// Which row of the box's popup is selected (31498 with 133746's
+/// navigator), one model for every list it shows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Selection {
+    focus: Focus,
+    index: Option<usize>,
+    /// What the navigator effect depends on: the list's type, its query,
+    /// whether it is loading and whether it shows.
+    last: Option<(String, String, bool, bool)>,
+}
+
+impl Selection {
+    /// The popup now shows `count` rows of `list` (its type) for `query`:
+    /// when the type, the query, the loading or whether it shows changed,
+    /// the first row is selected as `focus` allows (none while loading);
+    /// otherwise the selection stays, clamped to the rows.
+    pub fn listed(&mut self, list: &str, focus: Focus, query: &str, loading: bool, count: usize) {
+        self.focus = focus;
+        let shows = loading || count > 0;
+        let key = (list.to_owned(), query.to_owned(), loading, shows);
+        if self.last.as_ref() != Some(&key) {
+            let allowed = focus == Focus::Auto || !query.is_empty();
+            self.index = (shows && allowed && count > 0).then_some(0);
+            self.last = Some(key);
+        } else if let Some(index) = self.index {
+            self.index = count.checked_sub(1).map(|last| index.min(last));
+        }
+    }
+
+    /// Up (`by` -1) or Down (+1), wrapping at either end; with nothing
+    /// selected, Down takes the first and Up the last.
+    pub fn moved(&mut self, by: i32, count: usize) {
+        if count == 0 {
+            return;
+        }
+        self.index = Some(match (self.index, by < 0) {
+            (None, false) => 0,
+            (None, true) => count - 1,
+            (Some(i), false) => (i + 1) % count,
+            (Some(i), true) => i.checked_sub(1).unwrap_or(count - 1),
+        });
+    }
+
+    /// The pointer moved onto a row that isn't selected: none is
+    /// (`onResultHover`).
+    pub fn hovered(&mut self) {
+        self.index = None;
+    }
+
+    pub fn selected(&self) -> Option<usize> {
+        self.index
+    }
+
+    /// Enter or Tab (`onTabOrEnter`): the selected row, if it is one of
+    /// `count`; with none, Tab selects the first of a list that waits for
+    /// typing. `None` leaves the key to the box.
+    pub fn key(&mut self, enter: bool, count: usize) -> Option<Pick> {
+        match self.index {
+            Some(i) if i < count => Some(if enter { Pick::Send(i) } else { Pick::Insert(i) }),
+            Some(_) => None,
+            None if !enter && self.focus == Focus::WhenFiltered && count > 0 => {
+                self.index = Some(0);
+                Some(Pick::Selected)
+            }
+            None => None,
+        }
+    }
+}
+
 /// What the `/` suggestions may list (`applicationCommands` and `builtIns`
 /// in 264322's filters).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1394,11 +1509,27 @@ fn is_snowflake(text: &str) -> bool {
 }
 
 /// What `text` names for an option of `kind` (`A.f` in 224868, and the cases
-/// of `A` in 545152): an id as it is, else a `@user`, `@role` or `#channel`
-/// by its name.
+/// of `A` in 545152): the mention the box writes for a pick (`<@id>`,
+/// `<@!id>`, `<@&id>`, `<#id>`, of the kinds the option takes), an id as it
+/// is, else a `@user`, `@role` or `#channel` by its name.
 fn resolve(kind: u8, typed: &str, names: &dyn Names) -> Option<Snowflake> {
     use option_type::*;
     let typed = typed.trim();
+    let mention = |prefix: &str| {
+        let id = typed.strip_prefix(prefix)?.strip_suffix('>')?;
+        (!id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())).then(|| id.parse().ok().map(Snowflake))?
+    };
+    let user = || mention("<@!").or_else(|| mention("<@"));
+    let marked = match kind {
+        USER => user(),
+        ROLE => mention("<@&"),
+        MENTIONABLE => user().or_else(|| mention("<@&")),
+        CHANNEL => mention("<#"),
+        _ => None,
+    };
+    if marked.is_some() {
+        return marked;
+    }
     if is_snowflake(typed) {
         return typed.parse().ok().map(Snowflake);
     }
@@ -1442,19 +1573,36 @@ fn choice_named<'a>(choices: &'a [Choice], typed: &str) -> Option<&'a Choice> {
     choices.iter().find(|c| c.name == typed)
 }
 
-/// What the form can say is wrong with an option's text (`J` in 300541).
-pub fn validate(option: &CommandOption, typed: &str, names: &dyn Names, auto: &Autocompleted) -> Result<(), String> {
+const REQUIRED: &str = "This option is required. Specify a value.";
+
+/// What is wrong with an option's value, as the client says it (`J` in
+/// 300541). `content` is the pill's value, none without a pill, which only
+/// a required option fails. An empty value passes with `allow_empty` (as a
+/// command starts), else fails as required, or, for an optional one, as its
+/// type ([`type_error`]).
+pub fn validate(
+    option: &CommandOption,
+    content: Option<&str>,
+    allow_empty: bool,
+    names: &dyn Names,
+    auto: &Autocompleted,
+) -> Result<(), String> {
     use option_type::*;
-    let typed = typed.trim();
+    let Some(content) = content else { return if option.required { Err(REQUIRED.into()) } else { Ok(()) } };
+    let typed = content.trim();
     if typed.is_empty() {
-        return if option.required { Err("This option is required. Specify a value.".into()) } else { Ok(()) };
+        return match (allow_empty, option.required) {
+            (true, _) => Ok(()),
+            (false, true) => Err(REQUIRED.into()),
+            (false, false) => Err(type_error(option)),
+        };
     }
-    let invalid = |what: &str| Err(what.to_owned());
+    let invalid = || Err(type_error(option));
     match option.kind {
-        BOOLEAN => bool_of(typed).map(|_| ()).ok_or_else(|| "Pick either true or false.".into()),
+        BOOLEAN => bool_of(typed).map(|_| ()).ok_or_else(|| type_error(option)),
         STRING => {
             if let Some(choices) = &option.choices {
-                return choice_named(choices, typed).map(|_| ()).ok_or_else(|| "Not a valid choice.".into());
+                return choice_named(choices, typed).map(|_| ()).ok_or_else(|| type_error(option));
             }
             if option.autocomplete && auto.value_of(&option.name, typed).is_some() {
                 return Ok(());
@@ -1477,18 +1625,17 @@ pub fn validate(option: &CommandOption, typed: &str, names: &dyn Names, auto: &A
                     .iter()
                     .any(|c| c.name == typed && c.value.is_number())
                     .then_some(())
-                    .ok_or_else(|| "Not a valid choice.".into());
+                    .ok_or_else(|| type_error(option));
             }
             if option.autocomplete && auto.value_of(&option.name, typed).is_some_and(Value::is_number) {
                 return Ok(());
             }
-            let what = if option.kind == INTEGER { "Input a valid integer." } else { "Input a valid number." };
-            let Some(n) = number(typed) else { return invalid(what) };
+            let Some(n) = number(typed) else { return invalid() };
             if option.kind == INTEGER && (n.fract() != 0.0 || n.abs() > 9_007_199_254_740_991.0) {
-                return invalid(what);
+                return invalid();
             }
             if option.kind == NUMBER && n.abs() > 9_007_199_254_740_991.0 {
-                return invalid(what);
+                return invalid();
             }
             match (option.min_value, option.max_value) {
                 (Some(min), Some(max)) if n < min || n > max => {
@@ -1499,12 +1646,63 @@ pub fn validate(option: &CommandOption, typed: &str, names: &dyn Names, auto: &A
                 _ => Ok(()),
             }
         }
-        USER => resolve(USER, typed, names).map(|_| ()).ok_or_else(|| "Not a valid user.".into()),
-        CHANNEL => resolve(CHANNEL, typed, names).map(|_| ()).ok_or_else(|| "Not a valid channel.".into()),
-        ROLE => resolve(ROLE, typed, names).map(|_| ()).ok_or_else(|| "Not a valid role.".into()),
-        MENTIONABLE => resolve(MENTIONABLE, typed, names).map(|_| ()).ok_or_else(|| "Not a valid user or role.".into()),
-        _ => invalid("Not a valid value."),
+        USER | CHANNEL | ROLE | MENTIONABLE => {
+            resolve(option.kind, typed, names).map(|_| ()).ok_or_else(|| type_error(option))
+        }
+        _ => invalid(),
     }
+}
+
+/// What a value of the option's type that isn't one is told (`tE` in
+/// 73510).
+pub fn type_error(option: &CommandOption) -> String {
+    use option_type::*;
+    let words = match option.kind {
+        _ if option.choices.is_some() => "Not a valid choice.",
+        BOOLEAN => "Pick either true or false.",
+        CHANNEL => "Not a valid channel.",
+        INTEGER => "Input a valid integer.",
+        NUMBER => "Input a valid number.",
+        ROLE => "Not a valid role.",
+        USER => "Not a valid user.",
+        MENTIONABLE => "Not a valid user or role.",
+        _ => "Not a valid value.",
+    };
+    words.to_owned()
+}
+
+/// The choices a BOOLEAN option offers (`Ss` in 73510).
+pub fn boolean_choices() -> [Choice; 2] {
+    [Choice { name: "True".into(), value: json!(true) }, Choice { name: "False".into(), value: json!(false) }]
+}
+
+/// The choices that match `query`, best first (`queryChoice` in 997625):
+/// the name itself, then starting with it, containing it, containing each
+/// of its words, its letters in order; equals keep their order. Nothing
+/// typed lists them all.
+pub fn match_choices<'c>(choices: &'c [Choice], query: &str) -> Vec<&'c Choice> {
+    let query = query.to_lowercase();
+    let words: Vec<&str> = query.split([',', ' ']).collect();
+    let mut scored: Vec<(u8, &Choice)> = choices
+        .iter()
+        .filter_map(|choice| {
+            let name = choice.name.to_lowercase();
+            let score = if name.starts_with(&query) {
+                if name == query { 10 } else { 7 }
+            } else if name.contains(&query) {
+                5
+            } else if words.iter().all(|w| name.contains(w)) {
+                3
+            } else if fuzzy(&query, &name) {
+                1
+            } else {
+                0
+            };
+            (score > 0).then_some((score, choice))
+        })
+        .collect();
+    scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    scored.into_iter().map(|(_, choice)| choice).collect()
 }
 
 /// A limit as the client writes it (`x` in 300541, `toLocaleString` without
@@ -1767,6 +1965,11 @@ impl Command {
         let root = json!({"id": id, "application_id": application.to_string(), "type": kind, "name": "made-up",
                           "description": "", "guild_id": guild});
         leaf(&root, &root, Vec::new())
+    }
+
+    /// A root command from its JSON, without sub-commands.
+    pub(crate) fn of_json(root: &Value) -> Command {
+        leaf(root, root, Vec::new())
     }
 }
 
@@ -2716,15 +2919,18 @@ mod tests {
         let error = run_options(command, &values, &Nobody, &Autocompleted::default(), None).unwrap_err();
         assert!(error.contains("@nobody"));
         let option = &command.options[0];
-        assert_eq!(validate(option, "@nobody", &Nobody, &Autocompleted::default()), Err("Not a valid user.".into()));
-        assert_eq!(validate(option, "@ann", &Known, &Autocompleted::default()), Ok(()));
         assert_eq!(
-            validate(option, "600000000000000001", &Nobody, &Autocompleted::default()),
+            validate(option, Some("@nobody"), false, &Nobody, &Autocompleted::default()),
+            Err("Not a valid user.".into())
+        );
+        assert_eq!(validate(option, Some("@ann"), false, &Known, &Autocompleted::default()), Ok(()));
+        assert_eq!(
+            validate(option, Some("600000000000000001"), false, &Nobody, &Autocompleted::default()),
             Ok(()),
             "an id is always fine"
         );
         assert_eq!(
-            validate(option, "", &Known, &Autocompleted::default()),
+            validate(option, Some(""), false, &Known, &Autocompleted::default()),
             Err("This option is required. Specify a value.".into())
         );
     }
@@ -2764,7 +2970,7 @@ mod tests {
     fn values_are_checked_as_the_client_checks_them() {
         use option_type::*;
         let auto = Autocompleted::default();
-        let check = |o: &CommandOption, t: &str| validate(o, t, &Nobody, &auto);
+        let check = |o: &CommandOption, t: &str| validate(o, Some(t), false, &Nobody, &auto);
         assert_eq!(check(&option(BOOLEAN), "TRUE"), Ok(()));
         assert_eq!(check(&option(BOOLEAN), "yes"), Err("Pick either true or false.".into()));
         let mut count = option(INTEGER);
@@ -2796,17 +3002,137 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_option_an_empty_one_and_one_not_yet_left() {
+        let auto = Autocompleted::default();
+        let check = |o: &CommandOption, content, allow_empty| validate(o, content, allow_empty, &Nobody, &auto);
+        let mut count = option(option_type::INTEGER);
+        assert_eq!(check(&count, None, false), Ok(()), "an optional option without a pill");
+        assert_eq!(check(&count, Some(" "), false), Err("Input a valid integer.".into()), "empty, as its type");
+        assert_eq!(check(&count, Some(""), true), Ok(()), "as a command starts");
+        count.required = true;
+        assert_eq!(check(&count, None, false), Err("This option is required. Specify a value.".into()));
+        assert_eq!(check(&count, Some(""), false), Err("This option is required. Specify a value.".into()));
+        assert_eq!(check(&count, Some(""), true), Ok(()));
+        let mut size = option(option_type::STRING);
+        size.choices = Some(vec![Choice { name: "D6".into(), value: json!("6") }]);
+        assert_eq!(check(&size, Some(""), false), Err("Not a valid choice.".into()), "choices before the type");
+        for (kind, words) in [
+            (option_type::BOOLEAN, "Pick either true or false."),
+            (option_type::CHANNEL, "Not a valid channel."),
+            (option_type::NUMBER, "Input a valid number."),
+            (option_type::ROLE, "Not a valid role."),
+            (option_type::USER, "Not a valid user."),
+            (option_type::MENTIONABLE, "Not a valid user or role."),
+            (option_type::STRING, "Not a valid value."),
+        ] {
+            assert_eq!(type_error(&option(kind)), words);
+        }
+    }
+
+    #[test]
+    fn a_picked_mention_names_its_id() {
+        use option_type::*;
+        let id = Some(Snowflake(600_000_000_000_000_009));
+        assert_eq!(resolve(USER, "<@600000000000000009>", &Nobody), id);
+        assert_eq!(resolve(USER, "<@!600000000000000009>", &Nobody), id);
+        assert_eq!(resolve(ROLE, "<@&600000000000000009>", &Nobody), id);
+        assert_eq!(resolve(MENTIONABLE, "<@600000000000000009>", &Nobody), id);
+        assert_eq!(resolve(MENTIONABLE, "<@&600000000000000009>", &Nobody), id);
+        assert_eq!(resolve(CHANNEL, "<#600000000000000009>", &Nobody), id);
+        assert_eq!(resolve(USER, "<@&600000000000000009>", &Nobody), None, "a role isn't a user");
+        assert_eq!(resolve(ROLE, "<@600000000000000009>", &Nobody), None);
+        assert_eq!(resolve(CHANNEL, "<@600000000000000009>", &Nobody), None);
+        assert_eq!(resolve(USER, "<@nope>", &Nobody), None);
+        let auto = Autocompleted::default();
+        assert_eq!(validate(&option(USER), Some("<@600000000000000009>"), false, &Nobody, &auto), Ok(()));
+    }
+
+    #[test]
+    fn choices_match_as_the_client_scores_them() {
+        let choices: Vec<Choice> = ["apple pie", "Pineapple", "apple", "grape", "pie apple", "papaya"]
+            .into_iter()
+            .map(|n| Choice { name: n.into(), value: json!(n) })
+            .collect();
+        let names = |query| match_choices(&choices, query).into_iter().map(|c| c.name.as_str()).collect::<Vec<_>>();
+        // Exact 10, starts 7, contains 5, each word 3, letters in order 1; equals in order.
+        assert_eq!(names("apple"), ["apple", "apple pie", "Pineapple", "pie apple"]);
+        assert_eq!(names("APPLE PIE"), ["apple pie", "pie apple"]);
+        assert_eq!(names("pp"), ["apple pie", "Pineapple", "apple", "pie apple", "papaya"], "papaya by its letters");
+        assert_eq!(names("ppy"), ["papaya"]);
+        assert_eq!(names(""), ["apple pie", "Pineapple", "apple", "grape", "pie apple", "papaya"], "all, in order");
+        assert_eq!(boolean_choices().map(|c| c.name), ["True", "False"]);
+    }
+
+    #[test]
+    fn the_first_row_is_selected_as_a_list_shows_and_again_for_a_new_query() {
+        let mut selection = Selection::default();
+        selection.listed("choices", Focus::Auto, "", true, 0);
+        assert_eq!(selection.selected(), None, "none while loading");
+        selection.listed("choices", Focus::Auto, "", false, 3);
+        assert_eq!(selection.selected(), Some(0));
+        selection.moved(1, 3);
+        selection.listed("choices", Focus::Auto, "", false, 3);
+        assert_eq!(selection.selected(), Some(1), "kept while only the rows change");
+        selection.listed("choices", Focus::Auto, "", false, 1);
+        assert_eq!(selection.selected(), Some(0), "clamped");
+        selection.listed("choices", Focus::Auto, "a", false, 1);
+        assert_eq!(selection.selected(), Some(0), "a new query");
+        // The options list waits for typing.
+        selection.listed("options", Focus::WhenFiltered, "", false, 2);
+        assert_eq!(selection.selected(), None);
+        assert_eq!(selection.key(true, 2), None, "Enter is the box's");
+        assert_eq!(selection.key(false, 2), Some(Pick::Selected), "Tab selects the first");
+        assert_eq!(selection.selected(), Some(0));
+        selection.listed("options", Focus::WhenFiltered, "c", false, 2);
+        assert_eq!(selection.selected(), Some(0));
+    }
+
+    #[test]
+    fn moving_wraps_and_enter_sends_while_tab_inserts() {
+        let mut selection = Selection::default();
+        selection.listed("gifs", Focus::Auto, "cat", false, 3);
+        selection.moved(-1, 3);
+        assert_eq!(selection.selected(), Some(2), "up from the first is the last");
+        selection.moved(1, 3);
+        assert_eq!(selection.selected(), Some(0), "down from the last is the first");
+        assert_eq!(selection.key(true, 3), Some(Pick::Send(0)));
+        assert_eq!(selection.key(false, 3), Some(Pick::Insert(0)));
+        assert_eq!(selection.key(true, 0), None, "a row that isn't there");
+        selection.hovered();
+        assert_eq!(selection.key(true, 3), None);
+        assert_eq!(selection.key(false, 3), None, "Tab takes nothing either");
+        selection.moved(1, 3);
+        assert_eq!(selection.selected(), Some(0));
+    }
+
+    #[test]
+    fn a_command_typed_whole_becomes_active() {
+        let commands = loaded(&index());
+        let typed = |text: &str| {
+            let (query, terminated) = query_of(text);
+            let found = commands.find(&place(), command_type::CHAT, &query);
+            typed_command(found, &query, terminated).map(|c| c.display_name.clone())
+        };
+        assert_eq!(typed("roll ").as_deref(), Some("roll"));
+        assert_eq!(typed("roll"), None, "not ended");
+        assert_eq!(typed("stats "), None, "two sub-commands start with it");
+        assert_eq!(typed("stats show ").as_deref(), Some("stats show"));
+        assert_eq!(typed("roll count:3").as_deref(), Some("roll"));
+        assert_eq!(typed("roll 3 size:D6"), None, "roll 3 names nothing");
+    }
+
+    #[test]
     fn lengths_count_as_javascript_counts() {
         let auto = Autocompleted::default();
         let mut text = option(option_type::STRING);
         text.max_length = Some(4);
         assert_eq!(
-            validate(&text, "😀😀😀", &Nobody, &auto),
+            validate(&text, Some("😀😀😀"), false, &Nobody, &auto),
             Err("Enter 4 or fewer characters.".into()),
             "three emoji are six UTF-16 units"
         );
         (text.min_length, text.max_length) = (Some(2), None);
-        assert_eq!(validate(&text, "😀", &Nobody, &auto), Ok(()));
+        assert_eq!(validate(&text, Some("😀"), false, &Nobody, &auto), Ok(()));
     }
 
     #[test]
@@ -2823,7 +3149,7 @@ mod tests {
         let mut ratio = option(option_type::NUMBER);
         ratio.min_value = Some(0.12345);
         assert_eq!(
-            validate(&ratio, "0", &Nobody, &Autocompleted::default()),
+            validate(&ratio, Some("0"), false, &Nobody, &Autocompleted::default()),
             Err("Enter a number greater than or equal to 0.123.".into())
         );
     }
