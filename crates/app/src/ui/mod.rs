@@ -45,6 +45,7 @@ mod server_privacy;
 mod settings;
 mod sidebar;
 mod slash;
+mod spelling;
 mod state;
 mod stickers;
 mod switcher;
@@ -131,7 +132,9 @@ pub struct App {
     manage: RefCell<Option<(adw::Dialog, gtk::Label)>>,
     list: gtk::ListView,
     scroller: gtk::ScrolledWindow,
-    composer: gtk::TextView,
+    composer: sourceview::View,
+    /// Spellcheck over the composer's buffer.
+    spelling: libspelling::TextBufferAdapter,
     composer_box: gtk::Box,
     /// Opens the emoji picker.
     emoji_button: gtk::Button,
@@ -305,6 +308,7 @@ impl App {
         let selection = gtk::NoSelection::new(Some(blank.clone()));
         let config = Rc::new(Store::open(config::config_path()));
         let remembered = Rc::new(Store::open(config::state_path()));
+        let (composer, spelling) = spelling::composer(&config);
         let this = Rc::new(App {
             window,
             medium,
@@ -347,13 +351,8 @@ impl App {
             switch_items: gio::Menu::new(),
             manage: RefCell::default(),
             scroller: gtk::ScrolledWindow::builder().vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build(),
-            composer: gtk::TextView::builder()
-                .wrap_mode(gtk::WrapMode::WordChar)
-                .accepts_tab(false)
-                .hexpand(true)
-                .valign(gtk::Align::Center)
-                .css_classes(["composer-input"])
-                .build(),
+            composer,
+            spelling,
             composer_box: gtk::Box::builder().css_classes(["composer", "card-row"]).build(),
             emoji_button: gtk::Button::builder()
                 .icon_name("face-smile-symbolic")

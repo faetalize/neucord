@@ -18,8 +18,8 @@ use super::App;
 use super::chat::{self, MessageTarget};
 use super::{
     accounts, attachments, composer, create_thread, edits, emoji, forum, gifs, notify_menus, picker, poll_composer,
-    polls, profile, reactions, reactors, scheduling, server_privacy, sidebar, slash, stickers, threads, uploads,
-    viewer, voice,
+    polls, profile, reactions, reactors, scheduling, server_privacy, sidebar, slash, spelling, stickers, threads,
+    uploads, viewer, voice,
 };
 
 /// An item that copies or opens a link, shown when the link `$link` finds in
@@ -81,6 +81,10 @@ pub(super) enum Kind<T: 'static, C: 'static = App> {
     /// while it is open, such as the commands of the Apps item. It shows
     /// whenever the item does, empty or not.
     Live(fn(&Rc<C>, &Rc<T>, Live)),
+    /// A section another library builds and keeps up to date (the spelling
+    /// corrections), linked in as it is, in place of the item, whose label
+    /// doesn't show. Its actions are its own group's; `None` leaves nothing.
+    Linked(fn(&C, &T) -> Option<gio::MenuModel>),
 }
 
 /// What a [`Kind::Live`] submenu is made of: its entries change through
@@ -319,9 +323,9 @@ pub(super) const ATTACH: Table<()> = &[&[
 /// 194400) Neucord has, in its order, as the message menu has the desktop's
 /// Copy Link. Left out: Suggestions ▸ Slash Commands, which only toggles a
 /// mentioned bot's command suggestions (`e2` in 496533) Neucord doesn't
-/// make; the spelling groups; and the staff-only Fix Grammar, Translate and
-/// Transforms.
-pub(super) const COMPOSER: Table<()> = &[&[composer::SEND_BUTTON], &[uploads::PASTE_PLAIN]];
+/// make; Remove from Dictionary, which libspelling has no word for; and the
+/// staff-only Fix Grammar, Translate and Transforms.
+pub(super) const COMPOSER: Table<()> = &[&[composer::SEND_BUTTON], &[spelling::SPELLING], &[uploads::PASTE_PLAIN]];
 
 /// An emoji or sticker of the picker (`expression-picker`, 233503). The
 /// client offers Copy Emoji, Copy Emoji ID and Copy Emoji Image Link, or
@@ -411,6 +415,11 @@ fn fill<T: 'static, C: 'static>(
                             Live { menu: submenu.clone(), actions: actions.clone(), widgets: widgets.clone() },
                         );
                         section.append_submenu(Some(item.label), &submenu);
+                    }
+                    Kind::Linked(model) => {
+                        if let Some(model) = model(cx, target) {
+                            section.append_section(None, &model);
+                        }
                     }
                 },
                 Entry::Choices(choices) => {
@@ -849,7 +858,37 @@ mod tests {
 
     #[test]
     fn the_message_box_menu_follows_the_desktop_clients_order() {
-        // Send Message Button, then Paste as Plain Text (items 2 and 5 of 194400).
-        assert_eq!(names(COMPOSER), [["send-button"], ["paste-plain-text"]]);
+        // Send Message Button, the spelling groups, then Paste as Plain Text
+        // (items 2, 3–4 and 5 of 194400).
+        assert_eq!(names(COMPOSER), [["send-button"], ["spelling"], ["paste-plain-text"]]);
+    }
+
+    #[test]
+    fn a_linked_section_goes_in_as_it_is() {
+        const LINKED: Entry<Target, Cx> = Entry::Item(Item {
+            name: "linked",
+            label: "Not shown",
+            shows: |_, _| true,
+            kind: Kind::Linked(|_, target| {
+                (*target == "m").then(|| {
+                    let model = gio::Menu::new();
+                    model.append(Some("Theirs"), Some("theirs.act"));
+                    model.upcast()
+                })
+            }),
+        });
+        const TABLE: Table<Target, Cx> = &[&[SHOWN], &[LINKED], &[SHOWN]];
+        let cx = Rc::new(Cx::default());
+        let (menu, actions, _) = build(&cx, TABLE, "m");
+        assert_eq!(menu.n_items(), 3);
+        let linked = section(&section(menu.upcast_ref(), 1), 0);
+        assert_eq!(label(&linked, 0).as_deref(), Some("Theirs"));
+        let action: Option<String> =
+            linked.item_attribute_value(0, "action", Some(glib::VariantTy::STRING)).and_then(|v| v.get());
+        assert_eq!(action.as_deref(), Some("theirs.act"), "its own actions, not ours");
+        assert!(!actions.has_action("linked"));
+        // Without a model, its section is left out.
+        let (menu, _, _) = build(&cx, TABLE, "other");
+        assert_eq!(menu.n_items(), 2);
     }
 }

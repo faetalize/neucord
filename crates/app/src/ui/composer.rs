@@ -149,7 +149,16 @@ pub(super) struct MentionCtx {
 impl App {
     /// The message box floating under the list, with its mention popup and keys.
     pub(super) fn build_composer(self: &Rc<Self>, area: &gtk::Box) {
-        menus::extend(self, &self.composer, menus::COMPOSER, || (), |app, _| app.paste_opening());
+        menus::extend(
+            self,
+            &self.composer,
+            menus::COMPOSER,
+            || (),
+            |app, at| {
+                app.spelling_opening(at);
+                app.paste_opening();
+            },
+        );
         area.append(&self.composer_error);
         area.append(&self.notice_bar);
         self.reply_bar.append(&self.reply_label);
