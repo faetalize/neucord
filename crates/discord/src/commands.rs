@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Map, Value, json};
 
 use crate::permissions::{self, Permissions};
+use crate::uploads::Sent;
 use crate::verification::Account;
 use crate::{Channel, ChannelKind, Guild, Snowflake};
 
@@ -1401,13 +1402,17 @@ pub struct Run<'a> {
 impl Run<'_> {
     /// `POST /interactions` for running the command (`handleCommand` in
     /// 870801): `analytics_location` says it came from the suggestions
-    /// (`slash_ui`). A DM has no `guild_id`.
-    pub fn body(&self) -> Value {
-        self.body_of(APPLICATION_COMMAND, true)
+    /// (`slash_ui`). A DM has no `guild_id`. `data.attachments` names the
+    /// run's uploaded files, `[]` when there are none, since `A` in 545152
+    /// always passes its list on.
+    pub fn body(&self, files: &[Sent<'_>]) -> Value {
+        let mut body = self.body_of(APPLICATION_COMMAND, true);
+        body["data"]["attachments"] = files.iter().enumerate().map(|(i, file)| file.body(i)).collect();
+        body
     }
 
     /// The same for asking an app to autocomplete an option (`WL` in
-    /// 721768), which has no analytics fields.
+    /// 721768), which has no analytics fields and no `attachments`.
     pub fn autocomplete_body(&self) -> Value {
         self.body_of(APPLICATION_COMMAND_AUTOCOMPLETE, false)
     }
@@ -1740,7 +1745,7 @@ mod tests {
             data: command.data(Vec::new(), Some(target)),
             nonce: Snowflake(5),
         };
-        let body = run.body();
+        let body = run.body(&[]);
         assert_eq!(body["application_id"], app.id.to_string());
         let data = &body["data"];
         assert_eq!((data["type"].as_u64(), data["name"].as_str()), (Some(3), Some("Reroll")));
@@ -2198,7 +2203,7 @@ mod tests {
             data,
             nonce: Snowflake(9),
         };
-        let body = run.body();
+        let body = run.body(&[]);
         assert_eq!(body["type"], 2);
         assert_eq!(body["application_id"], APP);
         assert_eq!(body["guild_id"], "100000000000000010");
@@ -2217,17 +2222,48 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["application_command", "guild_id", "id", "name", "options", "type", "version"]
+            ["application_command", "attachments", "guild_id", "id", "name", "options", "type", "version"]
                 .iter()
                 .filter(|k| **k != "guild_id")
                 .copied()
                 .collect::<Vec<_>>()
         );
         let dm = Run { guild: None, ..run };
-        assert!(dm.body().get("guild_id").is_none(), "a DM has none, not null");
+        assert!(dm.body(&[]).get("guild_id").is_none(), "a DM has none, not null");
         let asking = dm.autocomplete_body();
         assert_eq!(asking["type"], 4);
         assert!(asking.get("analytics_location").is_none());
+    }
+
+    #[test]
+    fn a_run_names_its_files_even_without_any() {
+        let commands = loaded(&index());
+        let place = place();
+        let run = |command: &Command, target| Run {
+            application: command.application,
+            guild: Some(GUILD_ID),
+            channel: CHANNEL,
+            session: "session",
+            data: command.data(Vec::new(), target),
+            nonce: Snowflake(9),
+        };
+        let (roll, _) = commands.get(&place, command_type::CHAT, "400000000000000001").unwrap();
+        assert_eq!(run(roll, None).body(&[])["data"]["attachments"], json!([]));
+        let (reroll, _) = commands.get(&place, command_type::MESSAGE, "400000000000000004").unwrap();
+        assert_eq!(run(reroll, Some(Snowflake(7))).body(&[])["data"]["attachments"], json!([]));
+        assert!(run(roll, None).autocomplete_body()["data"].get("attachments").is_none());
+        let file = Sent {
+            filename: "a.png",
+            uploaded_filename: "u/a.png",
+            description: None,
+            spoiler: false,
+            content_type: "image/png",
+            voice: None,
+        };
+        assert_eq!(
+            run(roll, None).body(&[file])["data"]["attachments"],
+            json!([{"id": "0", "filename": "a.png", "uploaded_filename": "u/a.png", "original_content_type": "image/png"}])
+        );
     }
 
     #[test]

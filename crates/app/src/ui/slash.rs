@@ -844,7 +844,7 @@ impl App {
                             channel: active.channel,
                             command: Box::new(active.command.clone()),
                             app: active.app.clone(),
-                            body: run.body(),
+                            body: run.body(&[]),
                             nonce,
                         }
                     }
@@ -896,7 +896,7 @@ impl App {
                         data: command.data(Vec::new(), Some(subject.target)),
                         nonce,
                     };
-                    let body = run.body();
+                    let body = run.body(&[]);
                     Prepared::Go { command: Box::new(command), app, body, nonce }
                 }
                 None => Prepared::Nothing,
