@@ -22,6 +22,17 @@ pub const SEARCH_DEBOUNCE_MS: u32 = 250;
 /// How many suggestions the client asks for.
 const SUGGESTIONS: u8 = 5;
 
+/// How long the GIF button pulses after a GIF is favourited, from any star:
+/// each favourite restarts it (`er` in 4025).
+pub const PULSE_MS: u32 = 2000;
+
+/// Whether "Added to Favorites" shows on the GIF button while it pulses,
+/// with the account holding `favorites` after the add: only for the first
+/// two (`er` in 4025).
+pub fn favorited_hint(favorites: usize) -> bool {
+    favorites <= 2
+}
+
 /// The results list asks for suggestions once it has scrolled to within this
 /// many pixels of its end, counted from the bottom of what is showing
 /// (`handleScroll` in 884037: `scrollHeight - scrollTop <= 1180`).
@@ -758,6 +769,12 @@ mod tests {
         picker.open(&tiles[0]);
         picker.answered_trending(Some(vec![gif("3")]));
         assert_eq!(picker.selection(&gif("3")), Some(json!({"id": "3", "q": ""})));
+    }
+
+    #[test]
+    fn the_favourited_hint_is_for_the_first_two_favourites() {
+        assert!([0, 1, 2].into_iter().all(favorited_hint));
+        assert!(!favorited_hint(3) && !favorited_hint(100));
     }
 
     #[test]

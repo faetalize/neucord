@@ -21,7 +21,7 @@ use std::time::Duration;
 use adw::prelude::*;
 use discord::Snowflake;
 use discord::animation::Subject;
-use discord::gifs::{Gif, Kind, Picker, Request, Screen, Tile, Typed};
+use discord::gifs::{Gif, Kind, PULSE_MS, Picker, Request, Screen, Tile, Typed, favorited_hint};
 use gtk::glib;
 
 use super::App;
@@ -81,6 +81,7 @@ struct Session {
 
 impl App {
     pub(super) fn build_gifs(self: &Rc<Self>) {
+        self.gif_hint.set_parent(&self.gif_button);
         self.gif_button.connect_clicked({
             let this = Rc::downgrade(self);
             move |button| {
@@ -90,6 +91,45 @@ impl App {
                 }
             }
         });
+    }
+
+    /// Pulse the GIF button after a GIF is favourited, from any star (`er` in
+    /// 4025): its content blinks once (style.css), and it pulses until
+    /// [`PULSE_MS`] after the last favourite. One meanwhile only restarts the
+    /// timer, so the blink doesn't replay. A hidden button, which the client
+    /// hasn't mounted, doesn't pulse.
+    pub(super) fn pulse_gif_button(self: &Rc<Self>) {
+        if !self.gif_button.is_visible() {
+            return;
+        }
+        let running = self.gif_pulse.borrow_mut().take();
+        match running {
+            Some(running) => running.remove(),
+            None => self.gif_button.add_css_class("pulse"),
+        }
+        let this = Rc::downgrade(self);
+        let source = glib::timeout_add_local_once(Duration::from_millis(PULSE_MS.into()), move || {
+            let Some(this) = this.upgrade() else { return };
+            this.gif_pulse.borrow_mut().take();
+            this.gif_button.remove_css_class("pulse");
+            this.refresh_gif_hint();
+        });
+        *self.gif_pulse.borrow_mut() = Some(source);
+        self.refresh_gif_hint();
+    }
+
+    /// Show "Added to Favorites" over the GIF button while it pulses, for the
+    /// account's first two favourite GIFs (`er` in 4025). Favourites not loaded
+    /// yet aren't the account's count, and saved nothing.
+    pub(super) fn refresh_gif_hint(&self) {
+        let shows = self.gif_pulse.borrow().is_some() && self.gif_button.is_mapped() && {
+            let state = self.account.state.borrow();
+            state.frecency_sync.is_loaded() && favorited_hint(state.frecency.favorite_gifs.len())
+        };
+        match shows {
+            true => self.gif_hint.popup(),
+            false => self.gif_hint.popdown(),
+        }
     }
 
     /// Open the picker over `parent`, for GIFs to send in `channel`. The

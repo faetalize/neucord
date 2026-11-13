@@ -38,7 +38,8 @@ what arrived, IDENTIFY's key order and properties first.
   last that doesn't close it), `gif` (opens the GIF picker),
   `gif-search <q>`, `gif-pick <n>`, `gif-shift-pick <n>`, `gif-star <n>`
   (the nth GIF shown, or its star), `gif-tile <n>` (the nth front page
-  tile), `gif-back`, `quit`. It edits the copy by exact strings
+  tile), `gif-back`, `gif-hint [png]` (prints whether the GIF button
+  pulses and shows "Added to Favorites", and shoots the hint), `quit`. It edits the copy by exact strings
   and stops on the first that no longer matches: when the code it patches
   moves, update the string. The module it adds is only built here, so a
   change to what it calls needs a run to show it still builds.
@@ -47,7 +48,7 @@ what arrived, IDENTIFY's key order and properties first.
   `waitreq <method> <path> <count>` (wait for requests to a path, or to
   paths starting with it). `full` walks the DM list, a DM's attach menu and
   a server channel; `gifs` picks GIFs from a search, Trending and the
-  Favorites; `reopen` and `lazy` relaunch on the same data
+  Favorites, and favourites three; `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).
 
 Add the endpoints, events and commands a change needs here, in the same pull

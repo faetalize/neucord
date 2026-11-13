@@ -1,4 +1,5 @@
-# The GIF picker: what a pick reports (POST /gifs/select). Read fake.log with
+# The GIF picker: what a pick reports (POST /gifs/select), and the GIF
+# button's pulse after a favourite. Read fake.log with
 # analyse.py: a select and its message are in flight together, so they may
 # arrive in either order.
 waitfor identify 1
@@ -32,11 +33,23 @@ cmd "gif-tile 1"
 sleep 1
 cmd "gif-pick 0"
 waitreq POST /api/v9/gifs/select 4
-# A favourite reports nothing: star one, then pick it from the Favorites tile.
+# Favouriting pulses the GIF button, with "Added to Favorites" over it for
+# the first two favourites and not the third. The 0.6 s blink is checked by eye.
 cmd "gif"
 cmd "gif-search cat"
 sleep 2
 cmd "gif-star 0"
+cmd "gif-hint $OUT/hint-1.png"
+sleep 2
+cmd "gif-hint"
+cmd "gif-star 1"
+cmd "gif-hint"
+sleep 2
+cmd "gif-star 2"
+cmd "gif-hint"
+cmd "shot $OUT/hint-3-window.png"
+sleep 2
+# A favourite reports nothing: pick one from the Favorites tile.
 cmd "gif-back"
 sleep 1
 cmd "gif-tile 0"

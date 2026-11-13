@@ -200,7 +200,7 @@ impl App {
 
 # The GIF picker: `gif` opens it, `gif-search <q>` types into its search, `gif-pick <n>`, `gif-shift-pick <n>`
 # and `gif-star <n>` press the nth GIF shown or its star, `gif-tile <n>` the nth front page tile, `gif-back`
-# its back button.
+# its back button; `gif-hint [png]` prints whether "Added to Favorites" and the pulse show, and shoots the hint.
 edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(gif) if gif.starts_with("gif") => self.e2e_gif(gif, parts.next()),
             Some("quit") => {''')
 edit("crates/app/src/ui/menus.rs", "    pub(super) fn shift_held(&self) -> bool {\n",
@@ -226,7 +226,17 @@ impl App {
         if command == "gif" {
             return self.gif_button.emit_clicked();
         }
-        let Some(popover) = popover_on(self.gif_button.upcast_ref()) else { return eprintln!("e2e: no GIF picker") };
+        if command == "gif-hint" {
+            eprintln!("e2e: hint {} pulse {}", self.gif_hint.is_mapped(), self.gif_button.has_css_class("pulse"));
+            if let Some(path) = arg.filter(|_| self.gif_hint.is_mapped()) {
+                shot(&self.gif_hint, path);
+            }
+            return;
+        }
+        let mut popovers: Vec<gtk::Popover> = Vec::new();
+        widgets(self.gif_button.upcast_ref(), &mut popovers);
+        let picker = popovers.into_iter().find(|p| p.is_mapped() && p != &self.gif_hint);
+        let Some(popover) = picker else { return eprintln!("e2e: no GIF picker") };
         let n: usize = arg.and_then(|n| n.parse().ok()).unwrap_or(0);
         let mut all: Vec<gtk::Button> = Vec::new();
         widgets(popover.upcast_ref(), &mut all);
