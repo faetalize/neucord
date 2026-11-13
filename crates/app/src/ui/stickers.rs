@@ -252,13 +252,11 @@ impl App {
         });
     }
 
-    /// Show the sticker button and the waiting sticker as they are now for
-    /// the open channel.
+    /// Show the message box's buttons and the waiting sticker as they are
+    /// now for the open channel.
     pub(super) fn refresh_stickers(self: &Rc<Self>) {
         let channel = self.sticker_channel();
-        self.sticker_button.set_visible(channel.is_some());
-        // The GIF button shows wherever the sticker button does.
-        self.gif_button.set_visible(channel.is_some());
+        self.refresh_chat_bar();
         let waiting = channel.and_then(|c| self.waiting.of(c));
         self.waiting.bar.set_visible(waiting.is_some());
         if let Some(listed) = waiting {

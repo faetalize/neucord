@@ -5,6 +5,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use adw::prelude::*;
+use discord::chat_bar::{self, Bar};
 use discord::cooldowns::{Slowmode, bypasses_slowmode, wait_words};
 use discord::emoji::{Intention, Item as Emoji, locked_notice};
 use discord::limits::{LengthCount, TooLong, message_length};
@@ -500,6 +501,26 @@ impl App {
     }
 
     /// Draw the length indicator for what the box holds now.
+    /// Show the message box's buttons and its count as the client's bar has
+    /// them for the open channel.
+    pub(super) fn refresh_chat_bar(&self) {
+        let channel = self.account.state.borrow().channel;
+        let shown = chat_bar::shown(Bar {
+            open: channel.is_some() && self.composer_box.is_visible(),
+            editing: self.editing().is_some(),
+            recording: channel.is_some_and(|c| self.has_voice_draft(c)),
+            command: self.slash.is_active(),
+        });
+        self.gif_button.set_visible(shown.gif);
+        self.sticker_button.set_visible(shown.sticker);
+        self.emoji_button.set_visible(shown.emoji);
+        if shown.count {
+            self.update_length_indicator();
+        } else {
+            self.length.show(None);
+        }
+    }
+
     pub(super) fn update_length_indicator(&self) {
         let buffer = self.composer.buffer();
         let length = message_length(&buffer.text(&buffer.start_iter(), &buffer.end_iter(), false));

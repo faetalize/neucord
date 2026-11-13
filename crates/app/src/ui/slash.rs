@@ -546,6 +546,7 @@ impl App {
         slash.active.replace(Some(Active { channel, command, app, fields, autocomplete: Autocomplete::default() }));
         slash.bar.set_visible(true);
         self.composer.set_sensitive(false);
+        self.refresh_chat_bar();
         if let Some(first) = first {
             first.grab_focus();
         } else {
@@ -583,6 +584,7 @@ impl App {
         self.slash.active.take();
         self.slash.bar.set_visible(false);
         self.composer.set_sensitive(true);
+        self.refresh_chat_bar();
         self.composer.grab_focus();
     }
 
