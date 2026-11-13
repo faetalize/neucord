@@ -197,3 +197,70 @@ impl App {
     }
 }
 """)
+
+# The GIF picker: `gif` opens it, `gif-search <q>` types into its search, `gif-pick <n>`, `gif-shift-pick <n>`
+# and `gif-star <n>` press the nth GIF shown or its star, `gif-tile <n>` the nth front page tile, `gif-back`
+# its back button.
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(gif) if gif.starts_with("gif") => self.e2e_gif(gif, parts.next()),
+            Some("quit") => {''')
+edit("crates/app/src/ui/menus.rs", "    pub(super) fn shift_held(&self) -> bool {\n",
+     "    pub(super) fn shift_held(&self) -> bool {\n        if super::e2e::SHIFT.get() {\n            return true;\n        }\n")
+open(f"{root}/crates/app/src/ui/e2e.rs", "a").write(r"""
+thread_local! {
+    pub(super) static SHIFT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn widgets<T: IsA<gtk::Widget>>(widget: &gtk::Widget, found: &mut Vec<T>) {
+    let mut child = widget.first_child();
+    while let Some(c) = child {
+        if let Ok(t) = c.clone().downcast::<T>() {
+            found.push(t);
+        }
+        widgets(&c, found);
+        child = c.next_sibling();
+    }
+}
+
+impl App {
+    fn e2e_gif(self: &Rc<Self>, command: &str, arg: Option<&str>) {
+        if command == "gif" {
+            return self.gif_button.emit_clicked();
+        }
+        let Some(popover) = popover_on(self.gif_button.upcast_ref()) else { return eprintln!("e2e: no GIF picker") };
+        let n: usize = arg.and_then(|n| n.parse().ok()).unwrap_or(0);
+        let mut all: Vec<gtk::Button> = Vec::new();
+        widgets(popover.upcast_ref(), &mut all);
+        let face = |b: &gtk::Button| b.child().is_some_and(|c| c.is::<gtk::Picture>() || c.is::<gtk::Image>());
+        let gifs: Vec<_> = all.iter().filter(|b| b.has_css_class("flat") && face(b)).collect();
+        let tiles: Vec<_> = all.iter().filter(|b| b.has_css_class("flat") && b.child().is_some_and(|c| c.is::<gtk::Overlay>())).collect();
+        let stars: Vec<_> = all.iter().filter(|b| b.has_css_class("osd") && b.has_css_class("circular")).collect();
+        let press = |list: &[&gtk::Button]| match list.get(n) {
+            Some(b) => b.emit_clicked(),
+            None => eprintln!("e2e: no {command} {n}"),
+        };
+        match command {
+            "gif-search" => {
+                let mut entries: Vec<gtk::SearchEntry> = Vec::new();
+                widgets(popover.upcast_ref(), &mut entries);
+                match entries.first() {
+                    Some(entry) => entry.set_text(arg.unwrap_or_default()),
+                    None => eprintln!("e2e: no search entry"),
+                }
+            }
+            "gif-pick" => press(&gifs),
+            "gif-shift-pick" => {
+                SHIFT.set(true);
+                press(&gifs);
+                SHIFT.set(false);
+            }
+            "gif-star" => press(&stars),
+            "gif-tile" => press(&tiles),
+            "gif-back" => match all.iter().find(|b| b.icon_name().as_deref() == Some("go-previous-symbolic")) {
+                Some(b) => b.emit_clicked(),
+                None => eprintln!("e2e: no back button"),
+            },
+            other => eprintln!("e2e: unknown {other}"),
+        }
+    }
+}
+""")

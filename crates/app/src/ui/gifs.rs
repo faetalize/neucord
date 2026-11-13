@@ -6,9 +6,9 @@
 //! which it leaves alone (the client's `isGif` branch in `handleSendMessage`,
 //! 699344). With Shift it puts the link in the box instead.
 //!
-//! Left out: the client's `POST /gifs/select` after each pick (`g4`, 497685),
-//! which only reports which result was chosen for which search, and Neucord
-//! sends no analytics (#92).
+//! A pick of a result that has an id, Shift or not, and whatever becomes of
+//! the message, then reports it with `POST /gifs/select` (`g4`, 497685); a
+//! favourite has none. The client's analytics around it are left out (#92).
 //!
 //! A star on each GIF favourites it, or takes it back out, and the front
 //! page leads with the Favorites (`439401`, `649529`); a favourite whose
@@ -315,6 +315,17 @@ impl Session {
             let (this, found) = (self.clone(), found.clone());
             move |_| {
                 if let Some(app) = this.app.upgrade() {
+                    // The client reports the pick once `onSelectGIF` has only started the send,
+                    // which waits on `handleSendMessage`'s promises (699344), so the report leaves first.
+                    let selection = this.view.borrow().selection(&found);
+                    let rest = app.account.state.borrow().rest.clone();
+                    if let (Some(body), Some(rest)) = (selection, rest) {
+                        glib::spawn_future_local(async move {
+                            if let Err(e) = rest.select_gif(body).await {
+                                eprintln!("gifs: {e}");
+                            }
+                        });
+                    }
                     app.pick_gif(this.channel, &found);
                 }
                 if let Some(handle) = &*this.handle.borrow() {

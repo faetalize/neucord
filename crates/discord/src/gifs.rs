@@ -6,7 +6,7 @@
 //! The requests are made only when [`Picker`] says so, and each is built here
 //! so that its query is the client's, field for field and in its order.
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::cdn;
 use crate::frecency::{FavoriteGif, GifFormat, MAX_FAVORITE_GIFS_BYTES, favorite_gifs_size};
@@ -70,8 +70,9 @@ impl Request {
 /// A GIF of the results, or a favourite.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Gif {
-    /// The provider's id; none for a favourite.
-    pub id: String,
+    /// The provider's id as the answer gave it, a string or a number, which
+    /// a pick reports as it is (`id: o` in 821102); none for a favourite.
+    pub id: Option<Value>,
     /// The link a pick sends as the message, and Copy Link copies. A
     /// favourite is filed under it.
     pub url: String,
@@ -87,14 +88,13 @@ pub struct Gif {
 impl Gif {
     fn from_value(value: &Value) -> Option<Gif> {
         let id = match &value["id"] {
-            Value::String(id) => id.clone(),
-            Value::Number(id) => id.to_string(),
+            id @ (Value::String(_) | Value::Number(_)) => id.clone(),
             _ => return None,
         };
         let size = |field: &str| value[field].as_u64().unwrap_or(0) as u32;
         let src = value["src"].as_str()?.to_owned();
         Some(Gif {
-            id,
+            id: Some(id),
             url: value["url"].as_str()?.to_owned(),
             video: has_extension(&src, &["mp4", "webm"]),
             src,
@@ -112,7 +112,7 @@ impl Gif {
     /// A favourite, as the favourites list shows it.
     fn from_favorite(favorite: &FavoriteGif) -> Gif {
         Gif {
-            id: String::new(),
+            id: None,
             url: favorite.url.clone(),
             video: favorite.format == GifFormat::Video || has_extension(&favorite.src, &["mp4", "webm"]),
             src: favorite.src.clone(),
@@ -540,6 +540,14 @@ impl Picker {
         self.gifs = Some(gifs.unwrap_or_default());
     }
 
+    /// What a pick of `gif` reports (`g4` in 497685, from `selectItem` in
+    /// 884037, Shift or not, whatever becomes of the message): its id and the
+    /// search the shown results answer, `""` for Trending. A GIF without an
+    /// id, a favourite, reports nothing.
+    pub fn selection(&self, gif: &Gif) -> Option<Value> {
+        Some(json!({"id": gif.id.clone()?, "q": self.result_query}))
+    }
+
     /// The answer to the trending request.
     pub fn answered_trending(&mut self, gifs: Option<Vec<Gif>>) {
         if self.page == Some(Kind::TrendingGifs) {
@@ -609,7 +617,7 @@ mod tests {
             {"id": 8, "url": "https://example.test/view/8", "src": "https://example.test/8.webp"},
             {"id": "9", "src": "//example.test/9.webp"},
         ]));
-        assert_eq!(gifs.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(), ["7", "8"]);
+        assert_eq!(gifs.iter().map(|g| g.id.clone()).collect::<Vec<_>>(), [Some(json!("7")), Some(json!(8))]);
         assert_eq!(gifs[0].url, "https://example.test/view/7");
         assert_eq!(gifs[0].preview(), "https://example.test/7.webp");
         assert_eq!(gifs[1].preview(), "https://example.test/8.webp");
@@ -718,6 +726,55 @@ mod tests {
         picker.typed("cat");
         picker.answered("cat", Some(vec![gif("1")]));
         assert!(matches!(picker.screen(), Screen::Results { suggestions, .. } if suggestions.is_empty()));
+    }
+
+    #[test]
+    fn a_pick_reports_the_gifs_id_and_the_search_its_results_answer() {
+        let mut picker = Picker::default();
+        picker.typed("cat");
+        picker.answered("cat", Some(vec![gif("7")]));
+        // In the client's field order.
+        assert_eq!(picker.selection(&gif("7")).unwrap().to_string(), r#"{"id":"7","q":"cat"}"#);
+        // A search still waiting leaves the shown results, and what they answer.
+        picker.typed("dog");
+        assert_eq!(picker.selection(&gif("7")), Some(json!({"id": "7", "q": "cat"})));
+
+        let tiles = Tiles::parse(&json!({
+            "categories": [{"name": "happy", "src": "//example.test/h.webp"}],
+            "gifs": [{"id": "1", "url": "u", "src": "//example.test/t.webp"}],
+        }));
+        picker.clear();
+        picker.open(&tiles[1]);
+        picker.answered("happy", Some(vec![gif("1")]));
+        assert_eq!(picker.selection(&gif("1")), Some(json!({"id": "1", "q": "happy"})));
+
+        // A suggestion starts over, as `handleSelectSuggestion` does.
+        picker.clear();
+        picker.searched("kitten", Kind::Search);
+        picker.answered("kitten", Some(vec![gif("2")]));
+        assert_eq!(picker.selection(&gif("2")), Some(json!({"id": "2", "q": "kitten"})));
+
+        picker.clear();
+        picker.open(&tiles[0]);
+        picker.answered_trending(Some(vec![gif("3")]));
+        assert_eq!(picker.selection(&gif("3")), Some(json!({"id": "3", "q": ""})));
+    }
+
+    #[test]
+    fn a_numeric_id_goes_back_as_a_number() {
+        let mut picker = Picker::default();
+        picker.typed("cat");
+        let gifs = Gif::list(&json!([{"id": 8, "url": "https://example.test/view/8", "src": "//example.test/8.webp"}]));
+        picker.answered("cat", Some(gifs.clone()));
+        assert_eq!(picker.selection(&gifs[0]).unwrap().to_string(), r#"{"id":8,"q":"cat"}"#);
+    }
+
+    #[test]
+    fn a_favourite_reports_nothing() {
+        let mut picker = Picker::default();
+        picker.favorites();
+        let listed = favorites_for(&[held("https://example.test/view/1", 1)], "");
+        assert_eq!(picker.selection(&listed[0]), None);
     }
 
     fn result(src: &str, gif_src: &str) -> Gif {

@@ -492,6 +492,38 @@ def save_settings(kind, body):
     return 200, {"settings": settings_answer(kind), "out_of_date": False}
 
 
+def fake_gif(n, id=None):
+    """A made-up result of the GIF endpoints; `id` overrides the string id, as an answer may carry a number."""
+    return {"id": f"fake-gif-{n}" if id is None else id, "url": f"https://gifs.example/view/fake-{n}",
+            "src": f"//127.0.0.1:{PORT}/attachments/gifs/{n}.png", "width": 300, "height": 200}
+
+
+@route("GET", r"/gifs/trending")
+def gif_tiles(body):
+    return 200, {"categories": [{"name": "happy", "src": f"//127.0.0.1:{PORT}/attachments/gifs/0.png"}],
+                 "gifs": [fake_gif(1)]}
+
+
+@route("GET", r"/gifs/trending-gifs")
+def gifs_trending(body):
+    return 200, [fake_gif(1), fake_gif(2)]
+
+
+@route("GET", r"/gifs/search")
+def gifs_search(body):
+    return 200, [fake_gif(3), fake_gif(4, id=4004), fake_gif(5), fake_gif(6)]
+
+
+@route("GET", r"/gifs/suggest")
+def gifs_suggest(body):
+    return 200, ["kitten", "cats"]
+
+
+@route("POST", r"/gifs/select")
+def gifs_select(body):
+    return 204, None
+
+
 # The nonces turned down once, under FAKE_INTERACTION=429.
 LIMITED = set()
 

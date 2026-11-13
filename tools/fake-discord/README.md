@@ -22,7 +22,8 @@ what arrived, IDENTIFY's key order and properties first.
   account and the bot's DM; `POST /interactions` answers on the gateway as
   the app would, or as `FAKE_INTERACTION=fail|silent|429|modal|iframe` says.
   Both settings protos are kept, and a save merges into them field by field
-  as Discord's does. `FAKE_VARIANTS="hiding=1,voice=1,ladder=1,lazy=1,upload=1"`
+  as Discord's does. The GIF endpoints answer made-up results, one with a
+  numeric id, and take a pick's `POST /gifs/select`. `FAKE_VARIANTS="hiding=1,voice=1,ladder=1,lazy=1,upload=1"`
   assigns Apex experiments by name, `FAKE_REIDENTIFY=<s>` sends op 9 after
   that many seconds to force a second IDENTIFY, `FAKE_NEW_TOKEN` puts an
   `auth_token` in READY.
@@ -34,7 +35,10 @@ what arrived, IDENTIFY's key order and properties first.
   `suggestions [png]` (prints the autocomplete's rows, `*` on the selected
   one), `pick <n>` (accepts row n), `reply [message id]` (the newest
   message without one), `confirm [response]` (the open alert's, else its
-  last that doesn't close it), `quit`. It edits the copy by exact strings
+  last that doesn't close it), `gif` (opens the GIF picker),
+  `gif-search <q>`, `gif-pick <n>`, `gif-shift-pick <n>`, `gif-star <n>`
+  (the nth GIF shown, or its star), `gif-tile <n>` (the nth front page
+  tile), `gif-back`, `quit`. It edits the copy by exact strings
   and stops on the first that no longer matches: when the code it patches
   moves, update the string. The module it adds is only built here, so a
   change to what it calls needs a run to show it still builds.
@@ -42,7 +46,8 @@ what arrived, IDENTIFY's key order and properties first.
   `waitfor <kind> <count>` (wait for the fake to log something) and
   `waitreq <method> <path> <count>` (wait for requests to a path, or to
   paths starting with it). `full` walks the DM list, a DM's attach menu and
-  a server channel; `reopen` and `lazy` relaunch on the same data
+  a server channel; `gifs` picks GIFs from a search, Trending and the
+  Favorites; `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).
 
 Add the endpoints, events and commands a change needs here, in the same pull
