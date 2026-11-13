@@ -52,5 +52,10 @@ cmd "apps"
 sleep 2
 cmd "launcher-shot $OUT/dm.png"
 cmd "launcher-rows"
+# A built-in in the search of the launcher still open.
+cmd "launcher-search shrug"
+sleep 1
+cmd "launcher-rows"
+cmd "launcher-shot $OUT/launcher-builtin.png"
 cmd "quit"
 sleep 1

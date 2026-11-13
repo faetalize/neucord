@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use adw::prelude::*;
 use discord::Snowflake;
+use discord::builtins::BuiltIn;
 use discord::cdn;
 use discord::commands::{self, App as CommandApp, Command, CommandIndex, Origin, Place, RunFrom, Used, command_type};
 use discord::launcher::{self, AppUsage, Section};
@@ -145,12 +146,6 @@ struct PageData {
     commands: Vec<CommandRow>,
     popular: Option<Vec<CommandRow>>,
     loading: bool,
-}
-
-/// The built-in commands search and the "Discord Built-In" page list
-/// (`includeBuiltIn` in 621377): none until Neucord has them.
-fn builtins() -> &'static [Command] {
-    &[]
 }
 
 impl App {
@@ -320,16 +315,16 @@ impl Launcher {
     }
 
     /// Read the indexes and the use for this channel.
-    fn read<R>(
-        &self,
-        read: impl FnOnce(&CommandIndex, &Place, &AppUsage, &Used, &'static [Command]) -> R,
-    ) -> Option<R> {
+    fn read<R>(&self, read: impl FnOnce(&CommandIndex, &Place, &AppUsage, &Used, &[Command]) -> R) -> Option<R> {
         let app = self.app.upgrade()?;
+        // The built-ins the search and the "Discord Built-In" page list
+        // (`includeBuiltIn` in 621377): those offered here.
+        let builtins = app.builtin_commands(self.channel, commands::BuiltIns::All);
         let used = app.command_use();
         let usage = app.account.state.borrow_mut().frecency.stores.app_use(now_ms() as u64);
         let state = app.account.state.borrow();
         let place = state.command_place(self.channel)?;
-        Some(read(&state.commands, &place, &usage, &used, builtins()))
+        Some(read(&state.commands, &place, &usage, &used, &builtins))
     }
 
     fn fill_home(self: &Rc<Self>) {
@@ -842,8 +837,22 @@ impl Launcher {
 
     /// Send (`ep`): run the command at once with no options, with the
     /// section the page was opened from (`MJ` in 735991), then close.
+    /// A built-in runs as the box would run it with nothing typed (a text
+    /// one posts what it makes), or, with options to fill in, goes in the
+    /// box.
     fn send(&self, id: &str, section: Option<Section>) {
         let Some(app) = self.app.upgrade() else { return };
+        if BuiltIn::from_id(id).is_some() {
+            let command = app.builtin_commands(self.channel, commands::BuiltIns::All).into_iter().find(|c| c.id == id);
+            match command {
+                Some(command) if command.options.iter().any(|o| o.required) => {
+                    self.fill_in(id, launcher::filled_in(Origin::Launcher))
+                }
+                Some(command) => _ = app.run_built_in(self.channel, &command, &[]),
+                None => {}
+            }
+            return app.close_launcher();
+        }
         app.run_at_once(self.channel, command_type::CHAT, id, None, launcher::sent(section));
         app.close_launcher();
     }
