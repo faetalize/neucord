@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
+use crate::limits;
 use crate::permissions::{self, Permissions};
 use crate::uploads::Sent;
 use crate::verification::Account;
@@ -1185,12 +1186,15 @@ pub fn validate(option: &CommandOption, typed: &str, names: &dyn Names, auto: &A
             if option.autocomplete && auto.value_of(&option.name, typed).is_some() {
                 return Ok(());
             }
-            let length = typed.chars().count() as u64;
+            // JavaScript's `.length`: UTF-16 units, as a message counts.
+            let length = limits::message_length(typed) as u64;
             match (option.min_length, option.max_length) {
-                (Some(min), Some(max)) if min == max && length != min => Err(format!("Enter {min}")),
-                (Some(min), Some(max)) if length < min || length > max => Err(format!("Enter between {min} and {max}")),
-                (Some(min), _) if length < min => Err(format!("Enter {min} or more")),
-                (_, Some(max)) if length > max => Err(format!("Enter {max} or fewer")),
+                (Some(min), Some(max)) if min == max && length != min => Err(format!("Enter {min} characters.")),
+                (Some(min), Some(max)) if length < min || length > max => {
+                    Err(format!("Enter between {min} and {max} characters."))
+                }
+                (Some(min), _) if length < min => Err(format!("Enter {min} or more characters.")),
+                (_, Some(max)) if length > max => Err(format!("Enter {max} or fewer characters.")),
                 _ => Ok(()),
             }
         }
@@ -1215,10 +1219,10 @@ pub fn validate(option: &CommandOption, typed: &str, names: &dyn Names, auto: &A
             }
             match (option.min_value, option.max_value) {
                 (Some(min), Some(max)) if n < min || n > max => {
-                    Err(format!("Enter a number between {} and {}", plain(min), plain(max)))
+                    Err(format!("Enter a number between {} and {}.", plain(min), plain(max)))
                 }
-                (Some(min), _) if n < min => Err(format!("Enter a number greater than or equal to {}", plain(min))),
-                (_, Some(max)) if n > max => Err(format!("Enter a number less than or equal to {}", plain(max))),
+                (Some(min), _) if n < min => Err(format!("Enter a number greater than or equal to {}.", plain(min))),
+                (_, Some(max)) if n > max => Err(format!("Enter a number less than or equal to {}.", plain(max))),
                 _ => Ok(()),
             }
         }
@@ -1230,9 +1234,37 @@ pub fn validate(option: &CommandOption, typed: &str, names: &dyn Names, auto: &A
     }
 }
 
-/// A limit as `toLocaleString` writes it without grouping.
+/// A limit as the client writes it (`x` in 300541, `toLocaleString` without
+/// grouping): the number's shortest decimal form, rounded half away from zero
+/// to at most three decimals, with its sign even where that leaves a zero.
 fn plain(n: f64) -> String {
-    if n.fract() == 0.0 { format!("{}", n as i64) } else { n.to_string() }
+    let shortest = n.abs().to_string();
+    let (whole, fraction) = shortest.split_once('.').unwrap_or((&shortest, ""));
+    let kept = fraction.len().min(3);
+    let mut digits: Vec<u8> = whole.bytes().chain(fraction.bytes().take(3)).collect();
+    if fraction.as_bytes().get(3).is_some_and(|d| *d >= b'5') {
+        match digits.iter().rposition(|d| *d != b'9') {
+            Some(at) => {
+                digits[at] += 1;
+                digits[at + 1..].fill(b'0');
+            }
+            None => {
+                digits.fill(b'0');
+                digits.insert(0, b'1');
+            }
+        }
+    }
+    let mut text: String = digits.into_iter().map(char::from).collect();
+    let point = text.len() - kept;
+    let decimals = text[point..].trim_end_matches('0').len();
+    text.truncate(point + decimals);
+    if decimals > 0 {
+        text.insert(point, '.');
+    }
+    if n.is_sign_negative() {
+        text.insert(0, '-');
+    }
+    text
 }
 
 /// What the user entered, option name to text.
@@ -1241,7 +1273,8 @@ pub type Values = BTreeMap<String, String>;
 /// The options of a run in the form interactions carry (`T` in `A`, 545152):
 /// each option that has text, with the value its type makes of it, inside the
 /// sub-command groups that lead to it. With `focused`, the option being
-/// autocompleted goes out with what was typed so far and is marked.
+/// autocompleted goes out marked, with what was typed so far as it is,
+/// spaces and all (`autocomplete.query`); the others are trimmed.
 pub fn run_options(
     command: &Command,
     values: &Values,
@@ -1256,13 +1289,13 @@ pub fn run_options(
             continue;
         }
         let is_focus = focused == Some(option.name.as_str());
-        let Some(typed) = values.get(&option.name) else {
+        let Some(as_typed) = values.get(&option.name) else {
             if is_focus {
                 options.push(json!({ "type": option.kind, "name": option.name, "value": "", "focused": true }));
             }
             continue;
         };
-        let typed = typed.trim();
+        let typed = as_typed.trim();
         let value: Value = match option.kind {
             STRING => {
                 let mut value = option
@@ -1272,7 +1305,7 @@ pub fn run_options(
                     .map(|c| c.value.clone())
                     .filter(Value::is_string);
                 if value.is_none() && option.choices.is_none() && option.autocomplete {
-                    value = if is_focus { Some(json!(typed)) } else { auto.value_of(&option.name, typed).cloned() };
+                    value = if is_focus { Some(json!(as_typed)) } else { auto.value_of(&option.name, typed).cloned() };
                 }
                 if value.is_none() {
                     value = Some(json!(typed));
@@ -1307,7 +1340,7 @@ pub fn run_options(
                     .and_then(|c| choice_named(c, typed).map(|c| c.value.clone()).filter(Value::is_number));
                 let by_autocomplete = || {
                     if option.autocomplete {
-                        if is_focus { Some(json!(typed)) } else { auto.value_of(&option.name, typed).cloned() }
+                        if is_focus { Some(json!(as_typed)) } else { auto.value_of(&option.name, typed).cloned() }
                     } else {
                         None
                     }
@@ -2162,22 +2195,87 @@ mod tests {
         (count.min_value, count.max_value) = (Some(1.0), Some(10.0));
         assert_eq!(check(&count, "5"), Ok(()));
         assert_eq!(check(&count, "5.5"), Err("Input a valid integer.".into()));
-        assert_eq!(check(&count, "11"), Err("Enter a number between 1 and 10".into()));
-        assert_eq!(check(&count, "0"), Err("Enter a number between 1 and 10".into()));
+        assert_eq!(check(&count, "11"), Err("Enter a number between 1 and 10.".into()));
+        assert_eq!(check(&count, "0"), Err("Enter a number between 1 and 10.".into()));
         let mut ratio = option(NUMBER);
         ratio.min_value = Some(0.5);
-        assert_eq!(check(&ratio, "0.25"), Err("Enter a number greater than or equal to 0.5".into()));
+        assert_eq!(check(&ratio, "0.25"), Err("Enter a number greater than or equal to 0.5.".into()));
         assert_eq!(check(&ratio, "abc"), Err("Input a valid number.".into()));
+        (ratio.min_value, ratio.max_value) = (None, Some(10.0));
+        assert_eq!(check(&ratio, "11"), Err("Enter a number less than or equal to 10.".into()));
         let mut text = option(STRING);
         (text.min_length, text.max_length) = (Some(2), Some(4));
-        assert_eq!(check(&text, "a"), Err("Enter between 2 and 4".into()));
+        assert_eq!(check(&text, "a"), Err("Enter between 2 and 4 characters.".into()));
         assert_eq!(check(&text, "abcd"), Ok(()));
         text.min_length = Some(4);
-        assert_eq!(check(&text, "abc"), Err("Enter 4".into()));
+        assert_eq!(check(&text, "abc"), Err("Enter 4 characters.".into()));
+        text.min_length = None;
+        assert_eq!(check(&text, "abcde"), Err("Enter 4 or fewer characters.".into()));
+        (text.min_length, text.max_length) = (Some(2), None);
+        assert_eq!(check(&text, "a"), Err("Enter 2 or more characters.".into()));
         let mut picked = option(STRING);
         picked.choices = Some(vec![Choice { name: "One".into(), value: json!("1") }]);
         assert_eq!(check(&picked, "One"), Ok(()));
         assert_eq!(check(&picked, "1"), Err("Not a valid choice.".into()), "the name is what is typed");
+    }
+
+    #[test]
+    fn lengths_count_as_javascript_counts() {
+        let auto = Autocompleted::default();
+        let mut text = option(option_type::STRING);
+        text.max_length = Some(4);
+        assert_eq!(
+            validate(&text, "😀😀😀", &Nobody, &auto),
+            Err("Enter 4 or fewer characters.".into()),
+            "three emoji are six UTF-16 units"
+        );
+        (text.min_length, text.max_length) = (Some(2), None);
+        assert_eq!(validate(&text, "😀", &Nobody, &auto), Ok(()));
+    }
+
+    #[test]
+    fn limits_read_as_the_client_writes_them() {
+        // `toLocaleString` without grouping: at most three decimals, from the shortest form.
+        assert_eq!(plain(10.0), "10");
+        assert_eq!(plain(2.5), "2.5");
+        assert_eq!(plain(0.12345), "0.123");
+        assert_eq!(plain(1.0005), "1.001");
+        assert_eq!(plain(999.9999), "1000");
+        assert_eq!(plain(0.1 + 0.2), "0.3");
+        assert_eq!(plain(-0.0001), "-0");
+        assert_eq!(plain(-2.5), "-2.5");
+        let mut ratio = option(option_type::NUMBER);
+        ratio.min_value = Some(0.12345);
+        assert_eq!(
+            validate(&ratio, "0", &Nobody, &Autocompleted::default()),
+            Err("Enter a number greater than or equal to 0.123.".into())
+        );
+    }
+
+    #[test]
+    fn the_focused_option_goes_out_as_typed() {
+        let commands = with(json!({"options": [
+            {"type": 3, "name": "fruit", "description": "Which", "required": true, "autocomplete": true},
+            {"type": 4, "name": "count", "description": "How many", "autocomplete": true},
+        ]}));
+        let found = commands.find(&place(), command_type::CHAT, "");
+        let command = found[0].command;
+        let values: Values = [("fruit".to_owned(), "ap ".to_owned()), ("count".to_owned(), " 3 ".to_owned())].into();
+        let asking = |focused| run_options(command, &values, &Nobody, &Autocompleted::default(), Some(focused));
+        assert_eq!(
+            asking("fruit").unwrap(),
+            [
+                json!({"type": 3, "name": "fruit", "value": "ap ", "focused": true}),
+                json!({"type": 4, "name": "count", "value": 3}),
+            ]
+        );
+        assert_eq!(
+            asking("count").unwrap(),
+            [
+                json!({"type": 3, "name": "fruit", "value": "ap"}),
+                json!({"type": 4, "name": "count", "value": " 3 ", "focused": true}),
+            ]
+        );
     }
 
     #[test]

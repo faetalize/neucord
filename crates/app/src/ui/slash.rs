@@ -668,14 +668,17 @@ impl App {
         let ask = {
             let mut slot = self.slash.active.borrow_mut();
             let Some(active) = slot.as_mut() else { return };
-            let values = active.values();
+            // The option asking goes out as typed, even as spaces alone, which `values` leaves out
+            // (`autocomplete.query` in 545152's `A`).
+            let query = active.fields.iter().find(|f| f.option.name == option).map(|f| (f.read)()).unwrap_or_default();
+            let mut values = active.values();
+            values.insert(option.to_owned(), query.clone());
             let state = self.account.state.borrow();
             let names = Resolver { state: &state, channel: active.channel };
             let options =
                 commands::run_options(&active.command, &values, &names, active.autocomplete.answers(), Some(option));
             match (options, state.rest.clone()) {
                 (Ok(options), Some(rest)) => {
-                    let query = values.get(option).map(|v| v.trim().to_owned()).unwrap_or_default();
                     let nonce = Snowflake::now();
                     if active.autocomplete.request(nonce, option, &query, &commands::context_key(&options)) {
                         let guild = state.find_channel(active.channel).and_then(|(guild, _)| guild.map(|g| g.id));
@@ -741,7 +744,7 @@ impl App {
             let Some(active) = slot.as_ref() else { return };
             let Some(field) = active.fields.iter().find(|f| f.option.name == option) else { return };
             let Some(choices) = &field.choices else { return };
-            let query = (field.read)().trim().to_owned();
+            let query = (field.read)();
             let answers = active.autocomplete.answers();
             let list = answers.choices(option, &query).unwrap_or_else(|| answers.latest(option));
             let shown: Vec<String> = list.iter().map(|c| c.name.clone()).collect();
