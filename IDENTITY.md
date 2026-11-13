@@ -24,7 +24,10 @@ presents as something else.
   from Discord or generate itself.
 - No `/science`, no experiment exposures, no analytics of any kind. The
   client reports what it shows and does; Neucord doesn't, and the README
-  promises it.
+  promises it. The one such report it makes is the GIF picker's
+  `POST /gifs/select` (the picked result's id and its search), which the
+  client sends with every pick of a result, so a pick goes out as the
+  client's does.
 - A request the client doesn't make is not sent. A field, header or op is
   added only as the client sends it, in its order and when it does.
 

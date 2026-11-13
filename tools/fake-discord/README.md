@@ -15,10 +15,11 @@ and properties first.
 
 - **`fake_discord.py`**: REST and a `zlib-stream` gateway on 127.0.0.1:8099,
   with READY, `READY_SUPPLEMENTAL`, a server, DMs and the rest a session
-  needs. `FAKE_VARIANTS="hiding=1,voice=1,ladder=1,lazy=1,upload=1"` assigns
-  Apex experiments by name, `FAKE_REIDENTIFY=<s>` sends op 9 after that many
-  seconds to force a second IDENTIFY, `FAKE_NEW_TOKEN` puts an `auth_token` in
-  READY.
+  needs, and made-up GIF results (one with a numeric id) that log a pick's
+  `POST /gifs/select`. `FAKE_VARIANTS="hiding=1,voice=1,ladder=1,lazy=1,upload=1,chatbar=1"`
+  assigns Apex experiments by name, `FAKE_REIDENTIFY=<s>` sends op 9 after
+  that many seconds to force a second IDENTIFY, `FAKE_NEW_TOKEN` puts an
+  `auth_token` in READY.
 - **`patch.py`**: points the copy's API, gateway and CDN at the fake, and adds
   a command file the scenario writes to: `home`, `guild <id>`,
   `channel <id>`, `attach`, `shot <png>`, `popover <png>`, `quit`. It edits

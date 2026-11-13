@@ -400,7 +400,8 @@ changed for unrelated reasons only needs a note in the issue.
   link as the message at once, with a reply, leaving the box, its files and a
   waiting sticker alone, or with Shift puts it in the box (`nd` in 989161,
   anchor `source_object: "GIF Picker"`; `handleSendMessage` in 699344, anchor
-  `isGif`).
+  `isGif`). Either way a result with an id is reported, `{id, q}` (`g4` in
+  497685).
 - **When a popout asks for a profile, and what** (`profile.rs`,
   `ui/profile.rs`). The endpoints, the query's field names, `UserProfileStore`
   and `NoteStore` are watched; their values and when to ask aren't. A mouse

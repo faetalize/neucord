@@ -55,6 +55,7 @@ NAMES = {
     "ladder": "2026-07-attachment-image-ladder",
     "lazy": "2026-02-lazy-load-all-images",
     "upload": "2026-09-nitro-file-upload-rollout",
+    "chatbar": "2026-06-chat-bar-customization",
 }
 LADDER = json.dumps({"ladder": [64, 128, 256], "maxUpscale": 1.1, "minSnapDownDpr": 2})
 
@@ -207,6 +208,22 @@ def read_frame(rfile):
 IDENTIFIES = [0]
 
 
+def gif(n, id=None):
+    """A made-up GIF result; `id` replaces its string id, as an answer may carry a number."""
+    return {"id": f"fake-gif-{n}" if id is None else id, "url": f"https://gifs.example/view/fake-{n}",
+            "src": f"//127.0.0.1:{PORT}/attachments/gifs/{n}.png", "width": 300, "height": 200}
+
+
+# What the GIF picker's endpoints answer, by path.
+GIFS = {
+    "/gifs/trending": lambda: {"categories": [{"name": "happy", "src": f"//127.0.0.1:{PORT}/attachments/gifs/0.png"}],
+                               "gifs": [gif(1)]},
+    "/gifs/trending-gifs": lambda: [gif(1), gif(2)],
+    "/gifs/search": lambda: [gif(3), gif(4, id=4004), gif(5)],
+    "/gifs/suggest": lambda: ["kitten", "cats"],
+}
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -223,6 +240,9 @@ class Handler(BaseHTTPRequestHandler):
             body = png(int(query.get("width", 1200)) // 4, int(query.get("height", 800)) // 4)
             return self.send(200, body, "image/png")
         self.record()
+        route = path.split("?")[0].removeprefix("/api/v9")
+        if route in GIFS:
+            return self.send(200, json.dumps(GIFS[route]()).encode())
         if "/messages" in path.split("?")[0]:
             channel = path.split("/channels/")[1].split("/")[0]
             return self.send(200, json.dumps(messages(channel)).encode())
@@ -231,7 +251,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self.record()
         n = int(self.headers.get("Content-Length", 0))
-        self.rfile.read(n)
+        body = self.rfile.read(n)
+        if self.path == "/api/v9/gifs/select":
+            log(kind="body", path=self.path, body=json.loads(body), at=time.time())
+            return self.send(204, b"")
         self.send(404, b'{"message":"Unknown","code":0}')
 
     do_PUT = do_PATCH = do_DELETE = do_POST

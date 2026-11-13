@@ -126,6 +126,10 @@ textview.composer-input, textview.composer-input text { background: none; }
 .reply-ping { font-weight: bold; padding: 2px 8px; }
 .reply-ping:checked { background: none; color: var(--accent-color); }
 .composer-error { margin: 6px 12px 0 12px; font-size: 0.9em; }
+/* The GIF button's content blinks once after a GIF is favourited
+   (`pulseButton` in the client's 799357 stylesheet). */
+@keyframes neucord-pulse { from { opacity: 0.3; } 50% { opacity: 1; } to { opacity: 0.3; } }
+button.pulse > * { animation: neucord-pulse 600ms ease; }
 
 /* Presence, on avatars in a boxed list: a ring the colour of the row behind
    it. Cards are translucent, so the ring is the card over the window. */
