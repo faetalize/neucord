@@ -11,6 +11,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use soup::prelude::*;
 
+use crate::builtins;
 use crate::commands::Target;
 use crate::endpoints::{Call, call};
 use crate::forum::Search;
@@ -186,11 +187,20 @@ struct Sending<'a> {
     original_md5: Option<&'a str>,
     /// `Authorization` is sent empty (see [`Rest::adding_account`]).
     blank_authorization: bool,
+    /// Why, for the server's audit log: `X-Audit-Log-Reason`, sent even
+    /// empty, as 620632 sets it for any reason that isn't null.
+    audit_log_reason: Option<&'a str>,
 }
 
 impl Default for Sending<'_> {
     fn default() -> Self {
-        Sending { retry_rate_limit: true, failed: 0, original_md5: None, blank_authorization: false }
+        Sending {
+            retry_rate_limit: true,
+            failed: 0,
+            original_md5: None,
+            blank_authorization: false,
+            audit_log_reason: None,
+        }
     }
 }
 
@@ -821,6 +831,50 @@ impl Rest {
         self.request(call!(OPEN_DM), Some(json!({ "recipients": [user] }))).await
     }
 
+    /// Set our nickname in `guild`, empty to reset it (/nick,
+    /// `changeNickname` in 715943): the nickname Discord answers with.
+    pub async fn change_nickname(&self, guild: Snowflake, nick: &str) -> Result<Option<String>, Error> {
+        let answer: Value = self.request(call!(CHANGE_NICKNAME, guild), Some(builtins::nick_body(nick))).await?;
+        Ok(answer["nick"].as_str().map(str::to_owned))
+    }
+
+    /// Kick `user` from `guild` (/kick, `kickUser` in 778858).
+    pub async fn kick(&self, guild: Snowflake, user: Snowflake, reason: &str) -> Result<(), Error> {
+        self.request(kick_call(guild, user, reason), None).await
+    }
+
+    /// Ban `user` from `guild`, deleting what they sent in the last
+    /// `delete_message_seconds` (/ban, `banUser` in 778858).
+    pub async fn ban(
+        &self,
+        guild: Snowflake,
+        user: Snowflake,
+        delete_message_seconds: u64,
+        reason: &str,
+    ) -> Result<(), Error> {
+        let body = builtins::ban_body(delete_message_seconds);
+        let sending = Sending { audit_log_reason: Some(reason), ..Sending::default() };
+        let (status, response) = self.send_with(call!(BAN_MEMBER, guild, user), Some(body), sending).await?;
+        Self::answer(status, &response)
+    }
+
+    /// Time `user` out in `guild` until `until`, ISO 8601 (/timeout,
+    /// `setCommunicationDisabledUntil` in 778858). Discord answers with the
+    /// member, which comes as an event too.
+    pub async fn time_out(&self, guild: Snowflake, user: Snowflake, until: &str, reason: &str) -> Result<(), Error> {
+        let body = builtins::timeout_body(until);
+        let sending = Sending { audit_log_reason: Some(reason), ..Sending::default() };
+        let (status, response) = self.send_with(call!(EDIT_MEMBER, guild, user), Some(body), sending).await?;
+        Self::answer::<Value>(status, &response).map(drop)
+    }
+
+    /// Leave the group DM `channel`, telling its members unless `silent`
+    /// (/leave, `closePrivateChannel` in 308528).
+    pub async fn leave_group(&self, channel: Snowflake, silent: bool) -> Result<(), Error> {
+        let _: Value = self.request(leave_group_call(channel, silent), None).await?;
+        Ok(())
+    }
+
     /// Send a friend request by username.
     pub async fn send_friend_request(&self, username: &str) -> Result<(), Error> {
         let body = json!({ "username": username, "discriminator": null });
@@ -873,12 +927,8 @@ impl Rest {
         failed: u32,
         original_md5: Option<&str>,
     ) -> Result<(u32, glib::Bytes), Error> {
-        self.send_with(
-            call,
-            body,
-            Sending { retry_rate_limit: false, failed, original_md5, blank_authorization: false },
-        )
-        .await
+        self.send_with(call, body, Sending { retry_rate_limit: false, failed, original_md5, ..Sending::default() })
+            .await
     }
 
     /// `PUT` to an upload URL, which is Google's and not Discord's: it takes
@@ -994,6 +1044,9 @@ impl Rest {
             if let Some(md5) = options.original_md5.filter(|md5| is_md5(md5)) {
                 headers.replace("X-Discord-Original-MD5", md5);
             }
+            if let Some(reason) = options.audit_log_reason {
+                headers.replace("X-Audit-Log-Reason", &builtins::audit_reason(reason));
+            }
             if let Some((key, captcha)) = &answer {
                 headers.replace("X-Captcha-Key", key);
                 if let Some(rqtoken) = &captcha.rqtoken {
@@ -1097,6 +1150,16 @@ fn remove_reaction_call(
     let user = user.map_or_else(|| "@me".to_owned(), |u| u.to_string());
     let location = glib::uri_escape_string(location.name(), None::<&str>, false);
     call!(REMOVE_REACTION, channel, message, emoji, user).query(&format!("location={location}&burst=false"))
+}
+
+/// /kick's request: its query always holds `reason`.
+fn kick_call(guild: Snowflake, user: Snowflake, reason: &str) -> Call {
+    call!(KICK_MEMBER, guild, user).query(&builtins::kick_query(reason))
+}
+
+/// /leave's request: its query always holds `silent`.
+fn leave_group_call(channel: Snowflake, silent: bool) -> Call {
+    call!(CLOSE_CHANNEL, channel).query(&builtins::leave_query(silent))
 }
 
 /// The request that joins a thread: `location` is its only query field.
@@ -1670,5 +1733,30 @@ mod tests {
         let other = save_answer(400, br#"{"code":50035}"#, None).unwrap_err();
         assert!(matches!(other, SaveError::Other(crate::Error::Http { status: 400, .. })));
         assert!(matches!(save_answer(500, b"", None).unwrap_err(), SaveError::Other(_)));
+    }
+}
+
+/// The built-ins' requests, apart from the shared tests' imports.
+#[cfg(test)]
+mod built_in_tests {
+    use super::*;
+
+    #[test]
+    fn the_built_ins_requests_read_like_the_clients() {
+        let (guild, user) = (Snowflake(5), Snowflake(6));
+        let nick = call!(CHANGE_NICKNAME, guild);
+        assert_eq!((nick.method(), nick.path()), ("PATCH", "/guilds/5/members/@me/nick"));
+        // `reason` is there even when none was typed.
+        let kick = kick_call(guild, user, "");
+        assert_eq!((kick.method(), kick.path()), ("DELETE", "/guilds/5/members/6?reason="));
+        assert_eq!(kick_call(guild, user, "spam & more").path(), "/guilds/5/members/6?reason=spam%20%26%20more");
+        let ban = call!(BAN_MEMBER, guild, user);
+        assert_eq!((ban.method(), ban.path()), ("PUT", "/guilds/5/bans/6"));
+        let timeout = call!(EDIT_MEMBER, guild, user);
+        assert_eq!((timeout.method(), timeout.path()), ("PATCH", "/guilds/5/members/6"));
+        let leave = leave_group_call(Snowflake(7), false);
+        assert_eq!((leave.method(), leave.path()), ("DELETE", "/channels/7?silent=false"));
+        assert_eq!(leave_group_call(Snowflake(7), true).path(), "/channels/7?silent=true");
+        assert_eq!(Sending::default().audit_log_reason, None, "only /ban and /timeout give a reason");
     }
 }

@@ -116,6 +116,19 @@ impl User {
     pub fn non_user_bot(&self) -> bool {
         self.system || (self.bot && self.discriminator.as_deref() == Some("0000"))
     }
+
+    /// `username#1234`, or the username alone for an account with no
+    /// discriminator that counts (`0`, a webhook's `0000`): `getUserTag` in
+    /// 427262, in its default full mode without the `@`.
+    pub fn tag(&self) -> String {
+        if self.username.is_empty() {
+            return "???".into();
+        }
+        match self.discriminator.as_deref() {
+            Some(d) if d != "0" && d != "0000" => format!("{}#{d}", self.username),
+            _ => self.username.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -683,6 +696,12 @@ impl Guild {
 
     pub fn role(&self, id: Snowflake) -> Option<&Role> {
         self.roles.iter().find(|r| r.id == id)
+    }
+
+    /// The highest of `roles` (`AT` in 7864): `@everyone` last, then by
+    /// position, the older (smaller id) above on a tie.
+    pub fn highest_role<'a>(&self, roles: impl IntoIterator<Item = &'a Role>) -> Option<&'a Role> {
+        roles.into_iter().min_by_key(|r| (r.id == self.id, std::cmp::Reverse(r.position), r.id))
     }
 
     /// A role was created or changed.
@@ -1601,6 +1620,16 @@ mod tests {
         assert!(!with(serde_json::json!({"bot": true, "discriminator": "0"})).non_user_bot());
         assert!(!with(serde_json::json!({"discriminator": "0000"})).non_user_bot());
         assert!(with(serde_json::json!({"system": true})).non_user_bot());
+    }
+
+    #[test]
+    fn tags_show_a_discriminator_only_when_it_counts() {
+        let user = |json: Value| serde_json::from_value::<User>(json).unwrap();
+        assert_eq!(user(serde_json::json!({"id": "1", "username": "pat", "discriminator": "1234"})).tag(), "pat#1234");
+        assert_eq!(user(serde_json::json!({"id": "1", "username": "pat", "discriminator": "0"})).tag(), "pat");
+        assert_eq!(user(serde_json::json!({"id": "1", "username": "hook", "discriminator": "0000"})).tag(), "hook");
+        assert_eq!(user(serde_json::json!({"id": "1", "username": "pat"})).tag(), "pat");
+        assert_eq!(user(serde_json::json!({"id": "1", "username": "", "discriminator": "1234"})).tag(), "???");
     }
 
     #[test]

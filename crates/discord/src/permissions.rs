@@ -23,7 +23,7 @@ use std::ops::{BitAnd, BitOr};
 use serde::{Deserialize, Deserializer};
 
 use crate::verification::{self, Account};
-use crate::{Channel, ChannelKind, Guild, Message};
+use crate::{Channel, ChannelKind, Guild, Message, Snowflake, User};
 
 /// A set of Discord's permission bits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -492,6 +492,59 @@ pub fn can_reply(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i6
                 && g.timed_out_until.is_none_or(|until| until <= now)
                 && (!channel.is_archived() || can_unarchive(g, channel, me, now))
         })
+}
+
+/// Whether we may act on `target`, a member of `guild`, with `permission`
+/// (`canManageUser` in 576705): never the owner; `permission` in the server
+/// as a whole; and we own the server, or our highest role is above theirs,
+/// which it always is when they have none or we don't know theirs
+/// (`target_roles` none: `HJ` in 488926 finds no member). Highest and above
+/// go by [`Guild::highest_role`] (`wO` in 488926, `zA` in 7864).
+pub fn can_manage(
+    guild: &Guild,
+    me: &Account,
+    target: Snowflake,
+    target_roles: Option<&[Snowflake]>,
+    permission: Permissions,
+    now: i64,
+) -> bool {
+    if guild.owner_id == Some(target) || !in_guild(guild, me, now).contains(permission) {
+        return false;
+    }
+    if guild.owner_id == Some(me.id) {
+        return true;
+    }
+    let highest = |roles: &[Snowflake]| guild.highest_role(roles.iter().filter_map(|&id| guild.role(id)));
+    let Some(ours) = highest(&guild.my_roles) else { return false };
+    match target_roles.and_then(highest) {
+        None => true,
+        Some(theirs) => guild.highest_role([ours, theirs]).is_some_and(|h| h.id == ours.id && ours.id != theirs.id),
+    }
+}
+
+/// Whether /timeout may time `target` out (`b` in 838111): someone we know
+/// (`target` none: not in the client's `UserStore`), not Discord's own or a
+/// webhook's account, not the owner, without Administrator from
+/// `@everyone` and their roles (`$3` in 488926; the 2FA cut there is only
+/// ever ours), and [`can_manage`] with Moderate Members.
+pub fn can_time_out(
+    guild: &Guild,
+    me: &Account,
+    target: Option<&User>,
+    target_roles: Option<&[Snowflake]>,
+    now: i64,
+) -> bool {
+    let Some(target) = target else { return false };
+    let everyone = guild.role(guild.id).map_or(Permissions::DEFAULT_EVERYONE, |r| r.permissions);
+    let theirs = target_roles
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|&id| guild.role(id))
+        .fold(everyone, |p, r| p | r.permissions);
+    !target.non_user_bot()
+        && guild.owner_id != Some(target.id)
+        && !theirs.contains(Permissions::ADMINISTRATOR)
+        && can_manage(guild, me, target.id, target_roles, Permissions::MODERATE_MEMBERS, now)
 }
 
 /// Whether we may reopen an archived `thread` (`lK` in 406704): a locked one
@@ -1294,5 +1347,68 @@ mod tests {
         assert_eq!(parse(json!(1024)), VIEW);
         assert_eq!(parse(json!(null)), Permissions::NONE);
         assert!(serde_json::from_value::<Permissions>(json!("lots")).is_err());
+    }
+
+    /// A server where `@everyone` has `everyone`; Mod (position 3), Member
+    /// (2) and Helper (2, a larger id) give nothing more.
+    fn ranked(everyone: Permissions, mine: &[u64]) -> Guild {
+        let mut guild: Guild = serde_json::from_value(json!({
+            "id": GUILD.to_string(), "name": "G", "owner_id": "2",
+            "roles": [
+                {"id": GUILD.to_string(), "name": "@everyone", "permissions": everyone.0.to_string()},
+                {"id": "40", "name": "Mod", "permissions": "0", "position": 3},
+                {"id": "41", "name": "Member", "permissions": "0", "position": 2},
+                {"id": "42", "name": "Helper", "permissions": "0", "position": 2},
+                {"id": "43", "name": "Admin", "permissions": Permissions::ADMINISTRATOR.0.to_string(), "position": 1},
+            ],
+        }))
+        .unwrap();
+        guild.my_roles = mine.iter().map(|&id| Snowflake(id)).collect();
+        guild
+    }
+
+    #[test]
+    fn managing_needs_a_higher_role() {
+        let kick = Permissions::KICK_MEMBERS;
+        let target = Snowflake(6);
+        let can = |guild: &Guild, roles: Option<&[u64]>| {
+            let roles: Option<Vec<Snowflake>> = roles.map(|r| r.iter().map(|&id| Snowflake(id)).collect());
+            can_manage(guild, &me(), target, roles.as_deref(), kick, 0)
+        };
+        let guild = ranked(kick, &[40]);
+        assert!(can(&guild, Some(&[41])), "above");
+        assert!(!can(&guild, Some(&[40])), "the same role");
+        assert!(can(&guild, Some(&[])), "they have none");
+        assert!(can(&guild, None), "their roles unknown");
+        assert!(!can(&ranked(kick, &[41]), Some(&[40])), "below");
+        // The same position: the older role is above.
+        assert!(can(&ranked(kick, &[41]), Some(&[42])));
+        assert!(!can(&ranked(kick, &[42]), Some(&[41])));
+        assert!(!can(&ranked(kick, &[]), None), "we have no role");
+        assert!(!can(&ranked(Permissions::NONE, &[40]), Some(&[41])), "the permission missing");
+        assert!(!can_manage(&guild, &me(), Snowflake(2), None, kick, 0), "never the owner");
+        let mut owned = ranked(Permissions::NONE, &[]);
+        owned.owner_id = Some(ME);
+        assert!(can(&owned, Some(&[40])), "we own it");
+    }
+
+    #[test]
+    fn timeouts_spare_admins_owners_and_webhooks() {
+        let guild = ranked(Permissions::MODERATE_MEMBERS, &[40]);
+        let user = |json: serde_json::Value| serde_json::from_value::<User>(json).unwrap();
+        let pat = user(json!({"id": "6", "username": "pat"}));
+        let roles = [Snowflake(41)];
+        let out = |target: Option<&User>, roles: Option<&[Snowflake]>| can_time_out(&guild, &me(), target, roles, 0);
+        assert!(out(Some(&pat), Some(&roles)));
+        assert!(!out(None, Some(&roles)), "someone nobody knows");
+        assert!(!out(Some(&pat), Some(&[Snowflake(43)])), "an administrator, whatever their rank");
+        let hook = user(json!({"id": "6", "username": "hook", "bot": true, "discriminator": "0000"}));
+        assert!(!out(Some(&hook), Some(&roles)));
+        let owner = user(json!({"id": "2", "username": "own"}));
+        assert!(!out(Some(&owner), None));
+        assert!(!can_time_out(&ranked(Permissions::NONE, &[40]), &me(), Some(&pat), Some(&roles), 0));
+        // Administrator on `@everyone` makes everyone one.
+        let everyone_admin = ranked(Permissions::MODERATE_MEMBERS | Permissions::ADMINISTRATOR, &[40]);
+        assert!(!can_time_out(&everyone_admin, &me(), Some(&pat), Some(&roles), 0));
     }
 }

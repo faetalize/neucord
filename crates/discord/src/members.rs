@@ -59,11 +59,7 @@ impl Guild {
 
     /// A member's colour: that of their highest role with one.
     pub fn member_colour(&self, roles: &[Snowflake]) -> Option<RoleColour> {
-        let highest = roles
-            .iter()
-            .filter_map(|&id| self.role(id))
-            .filter(|r| r.color > 0)
-            .min_by_key(|r| (r.id == self.id, std::cmp::Reverse(r.position), r.id))?;
+        let highest = self.highest_role(roles.iter().filter_map(|&id| self.role(id)).filter(|r| r.color > 0))?;
         self.role_colour(highest)
     }
 }

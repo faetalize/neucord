@@ -512,7 +512,11 @@ impl CommandIndex {
         let text = query.text.to_lowercase();
         let words: Vec<&str> = text.split(' ').collect();
         let apps = if query.offer.apps { self.usable(place, &[query.kind]) } else { Vec::new() };
-        let builtins = query.builtins.iter().filter(|c| c.kind == query.kind).map(|c| (App::built_in(), c));
+        let builtins = query
+            .builtins
+            .iter()
+            .filter(|c| c.kind == query.kind && query.offer.builtins.lists(c))
+            .map(|c| (App::built_in(), c));
         let mut found: Vec<Found<'a>> = apps
             .into_iter()
             .chain(builtins)
@@ -974,6 +978,13 @@ pub enum BuiltIns {
     TextOnly,
 }
 
+impl BuiltIns {
+    /// Whether `command`, a built-in, is listed (`F` in 12115).
+    fn lists(self, command: &Command) -> bool {
+        self == BuiltIns::All || command.builtin.is_some_and(|b| b.input() != Input::Action)
+    }
+}
+
 /// What the message box's `/` offers (`ta` in 496533, and the bare `/`'s
 /// browser, `ed` in 989161): while a reply is pending
 /// (`canOnlyUseTextCommands`), no app's commands and only the built-ins
@@ -1001,6 +1012,71 @@ pub fn suggestions<'a>(
     let mut found = settled(found, &query, terminated);
     found.truncate(SUGGESTIONS);
     found
+}
+
+/// A section of what a bare `/` lists.
+#[derive(Clone, Copy, Debug)]
+pub enum Heading<'a> {
+    /// The commands used most (`gZ["-2"]` in 12115).
+    FrequentlyUsed,
+    /// An app's commands, or the built-ins under [`App::built_in`].
+    App(&'a App),
+}
+
+impl Heading<'_> {
+    pub fn title(&self) -> &str {
+        match self {
+            Heading::FrequentlyUsed => "Frequently Used",
+            Heading::App(app) => &app.name,
+        }
+    }
+}
+
+/// One section of [`browse`].
+#[derive(Clone, Debug)]
+pub struct Browsed<'a> {
+    pub heading: Heading<'a>,
+    pub commands: Vec<Found<'a>>,
+}
+
+/// What a bare `/` lists: the client's command browser (`ed` in 989161,
+/// through `XC` and `ei` in 264322), the commands `offer` and `builtins`
+/// allow in sections. The used most come first when any count here (at most
+/// [`FREQUENTLY_USED`], by score, each still in its own section too), then
+/// each app's under its name, the apps by name, then the built-ins last;
+/// each section's by name. Unlike a typed list it isn't cut at
+/// [`SUGGESTIONS`].
+pub fn browse<'a>(
+    index: &'a CommandIndex,
+    place: &Place,
+    offer: Offer,
+    builtins: &'a [Command],
+    used: &Used,
+) -> Vec<Browsed<'a>> {
+    let found = index.query(place, Query { kind: command_type::CHAT, text: "", offer, builtins, used: None });
+    let (built, apps): (Vec<Found<'a>>, Vec<Found<'a>>) = found.into_iter().partition(|f| f.command.is_built_in());
+    let listed = |app: &'a App, commands: Vec<&'a Command>| Browsed {
+        heading: Heading::App(app),
+        commands: commands.into_iter().map(|command| Found { command, app, score: 0 }).collect(),
+    };
+    let mut sections: Vec<Browsed<'a>> =
+        by_app(apps).into_iter().map(|(app, commands)| listed(app, commands)).collect();
+    if !built.is_empty() {
+        let mut commands: Vec<&Command> = built.iter().map(|f| f.command).collect();
+        commands.sort_by(|a, b| natural(&a.display_name, &b.display_name));
+        sections.push(listed(App::built_in(), commands));
+    }
+    let shown: Vec<Found<'a>> = sections.iter().flat_map(|s| s.commands.iter().copied()).collect();
+    let commands: Vec<&Command> = shown.iter().map(|f| f.command).collect();
+    let frequent: Vec<Found<'a>> = used
+        .frequently_used(&commands, place.guild)
+        .into_iter()
+        .filter_map(|c| shown.iter().find(|f| std::ptr::eq(f.command, c)).copied())
+        .collect();
+    if !frequent.is_empty() {
+        sections.insert(0, Browsed { heading: Heading::FrequentlyUsed, commands: frequent });
+    }
+    sections
 }
 
 /// What decides, apart from the place, whether age-restricted commands are
@@ -1955,6 +2031,37 @@ impl Run<'_> {
             body["analytics_location"] = json!("slash_ui");
         }
         body
+    }
+}
+
+impl Command {
+    /// A built-in as the client defines it (12115, 743361): a slash command
+    /// of no app, its name never translated, with no rules of its own.
+    pub(crate) fn built_in(builtin: BuiltIn, description: &str, options: Vec<CommandOption>) -> Command {
+        Command {
+            id: builtin.id().into(),
+            application: Snowflake(0),
+            kind: command_type::CHAT,
+            version: None,
+            guild: None,
+            name: builtin.name().into(),
+            display_name: builtin.name().into(),
+            description: description.into(),
+            display_description: description.into(),
+            options,
+            path: Vec::new(),
+            popularity: None,
+            builtin: Some(builtin),
+            root: Value::Null,
+            root_id: json!(builtin.id()),
+            root_name: builtin.name().into(),
+            nsfw: false,
+            dm_permission: None,
+            contexts: None,
+            integration_types: None,
+            default_member_permissions: None,
+            permissions: Vec::new(),
+        }
     }
 }
 
@@ -3323,5 +3430,108 @@ mod tests {
         assert_eq!(reason_text(Some(2), None).as_deref(), Some("The application didn't respond in time"));
         assert_eq!(reason_text(Some(1), Some("Dicey")), None);
         assert_eq!(reason_text(None, None), None);
+    }
+
+    /// The built-ins beside the apps' commands, in the walk and the bare `/`.
+    mod built_ins {
+        use super::*;
+
+        fn all() -> Vec<Command> {
+            BuiltIn::ALL.into_iter().map(|b| b.command(2000)).collect()
+        }
+
+        fn listed(
+            commands: &CommandIndex,
+            place: &Place,
+            typed: &str,
+            offer: Offer,
+            builtins: &[Command],
+        ) -> Vec<String> {
+            suggestions(commands, place, typed, offer, builtins, &Used::default())
+                .iter()
+                .map(|f| f.command.display_name.clone())
+                .collect()
+        }
+
+        #[test]
+        fn built_ins_need_no_use_application_commands() {
+            let commands = loaded(&index());
+            let builtins = all();
+            let barred = Place { base_access: false, can_send: false, ..place() };
+            assert_eq!(listed(&commands, &barred, "shr", Offer::ALL, &builtins)[0], "shrug");
+            let found = suggestions(&commands, &barred, "roll", Offer::ALL, &builtins, &Used::default());
+            assert!(found.iter().all(|f| f.command.is_built_in()), "no app's");
+            assert_eq!(listed(&commands, &place(), "roll", Offer::ALL, &builtins)[0], "roll", "with the permission");
+        }
+
+        #[test]
+        fn a_reply_lists_only_the_built_ins_that_write_or_search() {
+            let commands = loaded(&index());
+            let builtins = all();
+            let found = listed(&commands, &place(), "", offer(true), &builtins);
+            assert_eq!(found, ["gif", "me", "shrug", "spoiler", "sticker", "tableflip", "tts", "unflip"]);
+            assert_eq!(listed(&commands, &place(), "kick", offer(true), &builtins), [""; 0]);
+            assert_eq!(listed(&commands, &place(), "kick", offer(false), &builtins), ["kick"]);
+        }
+
+        #[test]
+        fn a_word_of_built_in_lists_them_all() {
+            let commands = loaded(&index());
+            let builtins = all();
+            let query =
+                |text| Query { kind: command_type::CHAT, text, offer: Offer::ALL, builtins: &builtins, used: None };
+            let found: Vec<Found> =
+                commands.query(&place(), query("built")).into_iter().filter(|f| f.command.is_built_in()).collect();
+            assert_eq!(found.len(), BuiltIn::ALL.len());
+            assert!(found.iter().all(|f| f.score == 5 && f.app.name == "Built-In"));
+            let inside = commands.query(&place(), query("in"));
+            assert!(inside.iter().filter(|f| f.command.is_built_in()).all(|f| f.score <= 6));
+        }
+
+        #[test]
+        fn settled_keeps_built_ins() {
+            let commands = loaded(&index());
+            assert_eq!(listed(&commands, &place(), "shrug ", Offer::ALL, &all()), ["shrug"]);
+            assert_eq!(listed(&commands, &place(), "shrug message:hi", Offer::ALL, &all()), ["shrug"]);
+        }
+
+        fn titles(sections: &[Browsed<'_>]) -> Vec<String> {
+            sections.iter().map(|s| s.heading.title().to_owned()).collect()
+        }
+
+        fn shown<'a>(section: &Browsed<'a>) -> Vec<&'a str> {
+            names(&section.commands)
+        }
+
+        #[test]
+        fn a_bare_slash_lists_each_app_then_the_built_ins() {
+            let commands = loaded(&index());
+            let builtins = vec![BuiltIn::Spoiler.command(2000), BuiltIn::Gif.command(2000), BuiltIn::Me.command(2000)];
+            let sections = browse(&commands, &place(), Offer::ALL, &builtins, &Used::default());
+            assert_eq!(titles(&sections), ["Dicey", "Built-In"]);
+            assert_eq!(shown(&sections[0]), ["roll", "stats reset all", "stats show"]);
+            assert_eq!(shown(&sections[1]), ["gif", "me", "spoiler"], "by name");
+            assert_eq!(sections[1].commands[0].app.name, "Built-In");
+            // While replying, only the built-ins.
+            let replying = browse(&commands, &place(), offer(true), &builtins, &Used::default());
+            assert_eq!(titles(&replying), ["Built-In"]);
+        }
+
+        #[test]
+        fn the_most_used_come_first_and_stay_in_their_section() {
+            let commands = loaded(&index());
+            let builtins = vec![BuiltIn::Shrug.command(2000), BuiltIn::Gif.command(2000)];
+            let used = used(&[("-1", 4.0), ("400000000000000002\0show", 9.0)], &["-1", "400000000000000002\0show"]);
+            let sections = browse(&commands, &place(), Offer::ALL, &builtins, &used);
+            assert_eq!(titles(&sections), ["Frequently Used", "Dicey", "Built-In"]);
+            assert_eq!(shown(&sections[0]), ["stats show", "shrug"], "by score");
+            assert_eq!(sections[0].commands[1].app.name, "Built-In");
+            assert_eq!(shown(&sections[2]), ["gif", "shrug"]);
+            // Nothing used here: no section.
+            assert_eq!(
+                titles(&browse(&commands, &place(), Offer::ALL, &builtins, &Used::default())),
+                ["Dicey", "Built-In"]
+            );
+        }
     }
 }

@@ -40,7 +40,7 @@ pub const NEAR_END: f64 = 1180.0;
 
 /// `encodeURIComponent`, which is how the client's HTTP layer writes a query
 /// value: everything but letters, digits and ``-_.!~*'()`` is escaped.
-fn component(value: &str) -> String {
+pub(crate) fn component(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&byte) {
