@@ -5,8 +5,10 @@ mod account;
 mod accounts;
 mod attachments;
 mod background;
+mod builtins;
 mod captcha;
 mod chat;
+mod command_files;
 mod components;
 mod composer;
 mod connection;
@@ -20,16 +22,20 @@ mod forum_post;
 mod friends;
 mod gifs;
 mod identity;
+mod integrations;
+mod launcher;
 mod login;
 mod media_frame;
 mod members;
 mod menus;
 mod message_row;
+mod modal;
 mod notify;
 mod notify_menus;
 mod own_status;
 mod panes;
 mod picker;
+mod pills;
 mod poll_composer;
 mod polls;
 mod privacy;
@@ -137,6 +143,9 @@ pub struct App {
     composer_box: gtk::Box,
     /// Opens the emoji picker.
     emoji_button: gtk::Button,
+    /// Opens the app launcher.
+    apps_button: gtk::Button,
+    launcher: launcher::Slot,
     /// Sends what Enter sends, where the user chose to have it.
     send_button: gtk::Button,
     /// Between the expression buttons and the send button, which it follows.
@@ -169,6 +178,8 @@ pub struct App {
     thread_expiry: RefCell<Option<glib::SourceId>>,
     /// Saves the folds no request carried, fifteen seconds after the last.
     fold_save: RefCell<Option<glib::SourceId>>,
+    /// Apps' forms open on the window.
+    modal_forms: RefCell<Vec<Rc<modal::Form>>>,
     /// Threads we started and are waiting for the gateway to bring.
     thread_waiters: RefCell<Vec<(Snowflake, async_channel::Sender<()>)>>,
     /// The post list a forum or media channel shows.
@@ -183,6 +194,8 @@ pub struct App {
     /// The token being completed (char offset of its start) and the
     /// candidates shown, row-aligned.
     mention: RefCell<composer::MentionCtx>,
+    /// `/gif`'s and `/sticker`'s results, over the box.
+    integration: integrations::View,
     /// "Replying to …" above the composer, with the ping toggle.
     reply_bar: gtk::Box,
     reply_label: gtk::Label,
@@ -357,6 +370,13 @@ impl App {
                 .valign(gtk::Align::Center)
                 .css_classes(["flat", "circular"])
                 .build(),
+            apps_button: gtk::Button::builder()
+                .icon_name("view-app-grid-symbolic")
+                .tooltip_text("Apps")
+                .valign(gtk::Align::Center)
+                .css_classes(["flat", "circular"])
+                .build(),
+            launcher: launcher::Slot::default(),
             send_button: gtk::Button::builder()
                 .icon_name("mail-send-symbolic")
                 .tooltip_text("Send Message")
@@ -407,6 +427,7 @@ impl App {
             timeout_end: RefCell::default(),
             thread_expiry: RefCell::default(),
             fold_save: RefCell::default(),
+            modal_forms: RefCell::default(),
             thread_waiters: RefCell::default(),
             forum: forum::Page::new(),
             post_form: RefCell::default(),
@@ -424,6 +445,7 @@ impl App {
                 .build(),
             mention_list: gtk::ListBox::builder().css_classes(["navigation-sidebar"]).build(),
             mention: RefCell::default(),
+            integration: integrations::View::new(),
             reply_bar: gtk::Box::builder().spacing(8).visible(false).css_classes(["reply-bar"]).build(),
             reply_label: gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(pango::EllipsizeMode::End).build(),
             reply_ping: gtk::ToggleButton::builder()

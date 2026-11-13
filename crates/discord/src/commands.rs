@@ -9,15 +9,20 @@
 //! the commands it can run as slash commands (type 1); the user and message
 //! commands of the Apps menus are the same index.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
+use crate::builtins::{BuiltIn, Input, Integration};
 use crate::gates::Gates;
+use crate::limits;
 use crate::limits::Limits;
 use crate::permissions::{self, Permissions};
 use crate::settings::Settings;
+use crate::uploads::{self, Sent};
 use crate::verification::Account;
 use crate::{Channel, ChannelKind, Guild, Snowflake};
 
@@ -41,6 +46,8 @@ pub mod command_type {
     pub const CHAT: u8 = 1;
     pub const USER: u8 = 2;
     pub const MESSAGE: u8 = 3;
+    /// An activity's launch command (878014).
+    pub const PRIMARY_ENTRY_POINT: u8 = 4;
 }
 
 /// `APPLICATION_COMMAND` and `APPLICATION_COMMAND_AUTOCOMPLETE` in 127258's
@@ -89,18 +96,81 @@ impl Target {
     }
 }
 
-/// An app in an index (`descriptor` in 264322).
+/// An app in an index (`descriptor` in 264322, of what `q` keeps:
+/// `description, icon, id, name, bot, flags, embedded_surfaces`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct App {
     pub id: Snowflake,
-    /// The bot's name, else the app's.
+    /// The bot's name, else the app's: what the suggestions show.
     pub name: String,
+    /// The app's own name, which the launcher shows and searches.
+    pub app_name: String,
     pub description: String,
     pub icon: Option<String>,
     /// The bot user the app's messages come from.
     pub bot: Option<Snowflake>,
+    /// That bot's avatar, when the index gives the bot whole.
+    pub bot_avatar: Option<String>,
+    /// `ApplicationFlags`.
+    pub flags: u64,
+    /// It runs as an activity: `embedded_surfaces` has `MAIN` (0; `W` in
+    /// 878014).
+    pub activity: bool,
     /// Who may use the app, where the server limited it.
     permissions: Vec<Rule>,
+}
+
+/// The section built-ins are listed under (`G` in 12115): no bot, no rules,
+/// and a description no text can be found in.
+static BUILT_IN: LazyLock<App> = LazyLock::new(|| App {
+    id: Snowflake(0),
+    name: "Built-In".into(),
+    app_name: "Built-In".into(),
+    description: String::new(),
+    icon: None,
+    bot: None,
+    bot_avatar: None,
+    flags: 0,
+    activity: false,
+    permissions: Vec::new(),
+});
+
+/// The app the launcher lists built-ins under (`N3` in 735991, whose id is
+/// the built-ins' `"-1"`): only its name and description show.
+static DISCORD_BUILT_IN: LazyLock<App> = LazyLock::new(|| App {
+    name: "Discord Built-In".into(),
+    app_name: "Discord Built-In".into(),
+    description: "Built-in commands for everyday use".into(),
+    ..BUILT_IN.clone()
+});
+
+impl App {
+    /// `ApplicationFlags` (`PROMOTED` 1 << 29, `PARTNER` 1 << 30).
+    const PROMOTED: u64 = 1 << 29;
+    const PARTNER: u64 = 1 << 30;
+
+    pub fn partner(&self) -> bool {
+        self.flags & Self::PARTNER != 0
+    }
+
+    pub fn promoted(&self) -> bool {
+        self.flags & Self::PROMOTED != 0
+    }
+
+    /// What built-ins are listed as.
+    pub fn built_in() -> &'static App {
+        &BUILT_IN
+    }
+
+    /// What the launcher lists built-ins as.
+    pub fn discord_built_in() -> &'static App {
+        &DISCORD_BUILT_IN
+    }
+
+    /// Whether this stands for the built-ins rather than an app.
+    pub fn is_built_in(&self) -> bool {
+        self.id == BUILT_IN.id
+    }
 }
 
 /// One allow or deny of a command or app (`ec` in 264322).
@@ -174,6 +244,35 @@ pub struct CommandOption {
     pub max_value: Option<f64>,
     pub min_length: Option<u64>,
     pub max_length: Option<u64>,
+    /// The kinds of channel a `CHANNEL` option takes (`channelTypes`).
+    pub channel_types: Option<Vec<u64>>,
+    /// What an `ATTACHMENT` option takes: extensions with their dot, or
+    /// `image`, `video`, `audio`; empty for anything (`p` in 168186 reads it
+    /// only for that type).
+    pub file_types: Vec<String>,
+}
+
+/// What a file option takes (`M1` in 424170), and what its box says (102077).
+impl CommandOption {
+    pub fn file_extensions(&self) -> Vec<String> {
+        uploads::extensions(&self.file_types)
+    }
+
+    pub fn takes_file(&self, filename: &str) -> bool {
+        uploads::takes(&self.file_extensions(), filename)
+    }
+
+    pub fn file_types_words(&self) -> Option<String> {
+        uploads::types_words(&self.file_types)
+    }
+
+    /// The empty box's words (`IJyOUf`, `JJzx48`).
+    pub fn file_prompt(&self) -> String {
+        match self.file_types_words() {
+            Some(types) => format!("Drag and drop or click to upload {types} file"),
+            None => "Drag and drop or click to upload file".to_owned(),
+        }
+    }
 }
 
 /// A step from a command to its sub-command.
@@ -202,6 +301,10 @@ pub struct Command {
     pub display_description: String,
     pub options: Vec<CommandOption>,
     pub path: Vec<Step>,
+    /// The root's place among Discord's most used (`global_popularity_rank`).
+    pub popularity: Option<u64>,
+    /// The client's own command this is, which runs without an app.
+    pub builtin: Option<BuiltIn>,
     /// The root as the client sends it back with a run: `application_command`.
     root: Value,
     root_id: Value,
@@ -373,18 +476,21 @@ impl CommandIndex {
             .any(|key| self.slots.get(&key).is_some_and(|s| s.fetching))
     }
 
-    /// What to fetch to list commands for `place` (`query` in 264322 with
-    /// `allowFetch`): its server's or DM's index where that has apps, and the
-    /// account's.
-    pub fn to_fetch(&mut self, place: &Place, now: Instant) -> Vec<Target> {
+    /// What to fetch to list commands for `place` (264322 with `allowFetch`):
+    /// its server's or DM's index where that has apps, and the account's,
+    /// only where apps' commands are offered. That is the bare `/`'s browser
+    /// (`ee` and `et`), and the Apps menus', with nothing `typed`; the typed
+    /// list (`query`) asks for the account's index whatever is offered, and
+    /// for the server's only with View Channel and Use Application Commands.
+    pub fn to_fetch(&mut self, place: &Place, now: Instant, offer: Offer, typed: &str) -> Vec<Target> {
         let mut targets = Vec::new();
-        if place.has_context_index() {
+        if offer.apps && (typed.is_empty() || place.base_access) && place.has_context_index() {
             let target = place.guild.map_or(Target::Channel(place.channel), Target::Guild);
             if self.wants(target, now) {
                 targets.push(target);
             }
         }
-        if self.wants(Target::User, now) {
+        if (offer.apps || !typed.is_empty()) && self.wants(Target::User, now) {
             targets.push(Target::User);
         }
         targets
@@ -394,25 +500,25 @@ impl CommandIndex {
         self.slots.get(&key).and_then(|s| s.loaded.as_ref()).map_or(&[], |l| &l.sections)
     }
 
-    /// The commands of `kind` that may be run in `place`, matching `text`
-    /// (the words after `/`), best first.
-    pub fn find(&self, place: &Place, kind: u8, text: &str) -> Vec<Found<'_>> {
+    /// The commands of `kinds` that may be used in `place`, each with the app
+    /// it is listed under (`er` in 264322, through `zl`): the server's (or
+    /// DM's) index only with View Channel and Use Application Commands, and
+    /// an app the account has too under the account's listing, with its
+    /// commands first and then those only the place's index has.
+    pub(crate) fn usable(&self, place: &Place, kinds: &[u8]) -> Vec<(&App, &Command)> {
         let context = if place.base_access && place.has_context_index() {
             place.context().map_or(&[][..], |c| self.sections(Key::Context(c)))
         } else {
             &[]
         };
         let user = self.sections(Key::User);
-        let mut found = Vec::new();
         let mut apps: Vec<Snowflake> = context.iter().chain(user).map(|s| s.app.id).collect();
         apps.sort();
         apps.dedup();
-        let query = text.to_lowercase();
-        let words: Vec<&str> = query.split(' ').collect();
+        let mut usable = Vec::new();
         for app in apps {
             let (in_context, in_user) =
                 (context.iter().find(|s| s.app.id == app), user.iter().find(|s| s.app.id == app));
-            // The account's own listing of an app comes first, then what only the place's has.
             let (descriptor, commands): (&App, Vec<&Command>) = match (in_context, in_user) {
                 (Some(c), Some(u)) => {
                     let rest = c.commands.iter().filter(|c| !u.commands.iter().any(|u| u.id == c.id));
@@ -423,36 +529,91 @@ impl CommandIndex {
             };
             let allowed_for_user = descriptor_allows(&descriptor.permissions, place);
             let allowed_in_channel = channel_allows(&descriptor.permissions, place);
+            let installed = Installed { guild: in_context.is_some(), user: in_user.is_some() };
             for command in commands {
-                let access = place.access(
-                    command,
-                    kind,
-                    Installed { guild: in_context.is_some(), user: in_user.is_some() },
-                    allowed_for_user,
-                    allowed_in_channel,
-                    descriptor.bot,
-                );
-                if access != Access::Allowed {
-                    continue;
-                }
-                let score = score(command, descriptor, &query, &words);
-                if let Some(score) = score {
-                    found.push(Found { command, app: descriptor, score });
+                let allowed = kinds.contains(&command.kind)
+                    && place.access(
+                        command,
+                        command.kind,
+                        installed,
+                        allowed_for_user,
+                        allowed_in_channel,
+                        descriptor.bot,
+                    ) == Access::Allowed;
+                if allowed {
+                    usable.push((descriptor, command));
                 }
             }
         }
-        found.sort_by(|a, b| {
-            a.score
-                .cmp(&b.score)
-                .then_with(|| natural(&a.command.display_name, &b.command.display_name))
-                .then_with(|| natural(&a.app.name, &b.app.name))
-        });
+        usable
+    }
+
+    /// What `query` finds in `place`, best first: the apps' commands where
+    /// they are offered, and the built-ins it names.
+    pub fn query<'a>(&'a self, place: &Place, query: Query<'_, 'a>) -> Vec<Found<'a>> {
+        let text = query.text.to_lowercase();
+        let words: Vec<&str> = text.split(' ').collect();
+        let apps = if query.offer.apps { self.usable(place, &[query.kind]) } else { Vec::new() };
+        let builtins = query
+            .builtins
+            .iter()
+            .filter(|c| c.kind == query.kind && query.offer.builtins.lists(c))
+            .map(|c| (App::built_in(), c));
+        let mut found: Vec<Found<'a>> = apps
+            .into_iter()
+            .chain(builtins)
+            .filter_map(|(app, command)| score(command, app, &text, &words).map(|score| Found { command, app, score }))
+            .collect();
+        let used = query.used.filter(|_| !query.text.is_empty());
+        found.sort_by(|a, b| order(a, b, used, place.guild));
         found
+    }
+
+    /// The apps' commands of `kind` that may be run in `place`, matching
+    /// `text` (the words after `/`), best first.
+    pub fn find(&self, place: &Place, kind: u8, text: &str) -> Vec<Found<'_>> {
+        self.query(place, Query { kind, text, offer: Offer::ALL, builtins: &[], used: None })
     }
 
     /// The command `id` of `kind` that may be used in `place`, with its app.
     pub fn get(&self, place: &Place, kind: u8, id: &str) -> Option<(&Command, &App)> {
         self.find(place, kind, "").into_iter().find(|f| f.command.id == id).map(|f| (f.command, f.app))
+    }
+
+    /// The apps with a command of `kinds` that may be used in `place`, under
+    /// the account's listing where both indexes have one, by name: the
+    /// sections `er` (264322) gives the launcher (`cu` in 842209).
+    pub fn apps(&self, place: &Place, kinds: &[u8]) -> Vec<&App> {
+        let mut apps: Vec<&App> = Vec::new();
+        for (app, _) in self.usable(place, kinds) {
+            if !apps.iter().any(|a| a.id == app.id) {
+                apps.push(app);
+            }
+        }
+        apps.sort_by(|a, b| natural(&a.name, &b.name));
+        apps
+    }
+
+    /// Of [`Self::apps`], those in the server's own index (`lL` in 621377
+    /// reads `ON(guild_id)`): none outside a server.
+    pub fn server_apps(&self, place: &Place, kinds: &[u8]) -> Vec<&App> {
+        let Some(guild) = place.guild else { return Vec::new() };
+        let server = self.sections(Key::Context(guild));
+        self.apps(place, kinds).into_iter().filter(|app| server.iter().any(|s| s.app.id == app.id)).collect()
+    }
+
+    /// `application`'s slash commands that may be used in `place`, by name
+    /// (`ea` in 264322 for an unscored section): an app page's "Use this
+    /// app".
+    pub fn app_commands(&self, place: &Place, application: Snowflake) -> Vec<&Command> {
+        let mut commands: Vec<&Command> = self
+            .usable(place, &[command_type::CHAT])
+            .into_iter()
+            .filter(|(app, _)| app.id == application)
+            .map(|(_, command)| command)
+            .collect();
+        commands.sort_by(|a, b| natural(&a.display_name, &b.display_name));
+        commands
     }
 
     /// The app listed for `application` in `place`, wherever it is installed.
@@ -462,6 +623,98 @@ impl CommandIndex {
             .into_iter()
             .flatten()
             .find_map(|key| self.sections(key).iter().find(|s| s.app.id == application).map(|s| &s.app))
+    }
+}
+
+/// What a list of commands asks for (the filters and query of `er` in
+/// 264322).
+#[derive(Clone, Copy, Debug)]
+pub struct Query<'t, 'b> {
+    pub kind: u8,
+    /// The words after `/`, as [`query_of`] leaves them; empty for all.
+    pub text: &'t str,
+    pub offer: Offer,
+    /// The built-ins offered here, listed beside the apps' commands.
+    pub builtins: &'b [Command],
+    /// How much each command is used, which orders equal matches once
+    /// something is typed.
+    pub used: Option<&'t Used>,
+}
+
+/// The order of every list of commands: the better match, then, with
+/// something typed, the one used more (`er` in 264322 sorts by use only
+/// with a `scoreMethod`, which every caller passes only for a query), then
+/// the name, then an app's command before a built-in of the same name (the
+/// client sorts each section, then lists Built-In last), then the app's
+/// name.
+fn order(a: &Found<'_>, b: &Found<'_>, used: Option<&Used>, guild: Option<Snowflake>) -> Ordering {
+    let by_use = || match used {
+        Some(used) => {
+            used.score(b.command, guild).partial_cmp(&used.score(a.command, guild)).unwrap_or(Ordering::Equal)
+        }
+        None => Ordering::Equal,
+    };
+    a.score
+        .cmp(&b.score)
+        .then_with(by_use)
+        .then_with(|| natural(&a.command.display_name, &b.command.display_name))
+        .then_with(|| a.command.is_built_in().cmp(&b.command.is_built_in()))
+        .then_with(|| natural(&a.app.name, &b.app.name))
+}
+
+/// How many commands a Frequently Used section lists (`XC` in 264322).
+pub const FREQUENTLY_USED: usize = 5;
+
+/// What a command's use is filed under (`_` in 26909): a built-in by its
+/// (negative) id, a command registered to a server and run in one as
+/// `"<id>:<server>"`, any other by its id. A sub-command's id holds its path,
+/// NUL-separated, as `Lz` (168186) makes it.
+pub fn usage_key(command: &Command, guild: Option<Snowflake>) -> String {
+    // `0 > Number(id)`: a NUL-joined id is NaN, never negative.
+    let built_in = command.id.strip_prefix('-').is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()));
+    let registered = command.guild.as_ref().is_some_and(|g| !g.is_null());
+    match guild {
+        Some(guild) if !built_in && registered => format!("{}:{}", command.id, guild.0),
+        _ => command.id.clone(),
+    }
+}
+
+/// Of the keys used most, those that count in `guild` (`RG` in 26909): a
+/// server's own commands only there, the rest anywhere, without the server.
+pub fn place_keys(top: &[String], guild: Option<Snowflake>) -> Vec<String> {
+    top.iter()
+        .filter(|key| {
+            !key.contains(':') || guild.is_some_and(|g| key.split(':').nth(1) == Some(g.0.to_string().as_str()))
+        })
+        .map(|key| key.split(':').next().unwrap_or_default().to_owned())
+        .collect()
+}
+
+/// How much the account uses each command (`ApplicationCommandFrecencyStore`).
+#[derive(Clone, Debug, Default)]
+pub struct Used {
+    /// `getScore`, by [`usage_key`].
+    pub scores: HashMap<String, f64>,
+    /// `frequently`: the 100 keys with the best frecency, best first.
+    pub top: Vec<String>,
+}
+
+impl Used {
+    /// `getScoreWithoutLoadingLatest`: 0 for what was never used.
+    pub fn score(&self, command: &Command, guild: Option<Snowflake>) -> f64 {
+        self.scores.get(&usage_key(command, guild)).copied().unwrap_or(0.0)
+    }
+
+    /// The Frequently Used section (`XC` in 264322): of `listed` (what the
+    /// place offers, in the order shown unsearched), those among the keys
+    /// used most that count here, by score (not rank), at most
+    /// [`FREQUENTLY_USED`].
+    pub fn frequently_used<'a>(&self, listed: &[&'a Command], guild: Option<Snowflake>) -> Vec<&'a Command> {
+        let keys = place_keys(&self.top, guild);
+        let mut frequent: Vec<&Command> = listed.iter().copied().filter(|c| keys.contains(&c.id)).collect();
+        frequent.sort_by(|a, b| self.score(b, guild).partial_cmp(&self.score(a, guild)).unwrap_or(Ordering::Equal));
+        frequent.truncate(FREQUENTLY_USED);
+        frequent
     }
 }
 
@@ -507,7 +760,7 @@ pub fn by_app<'a>(found: Vec<Found<'a>>) -> Vec<(&'a App, Vec<&'a Command>)> {
 
 /// `Intl.Collator` with `sensitivity: accent, numeric` (264322's `H`): case
 /// doesn't matter and digits count as numbers.
-fn natural(a: &str, b: &str) -> std::cmp::Ordering {
+pub(crate) fn natural(a: &str, b: &str) -> Ordering {
     fn chunks(text: &str) -> Vec<(bool, String)> {
         let mut chunks: Vec<(bool, String)> = Vec::new();
         for c in text.to_lowercase().chars() {
@@ -665,6 +918,245 @@ pub fn settled<'a>(found: Vec<Found<'a>>, text: &str, terminated: bool) -> Vec<F
         .collect()
 }
 
+/// Which command typed text names (870748, with no command active): once
+/// the name is ended ([`query_of`]'s `terminated`), the one
+/// command named exactly so, when nothing else starts with that name and a
+/// space.
+pub fn typed_command<'a>(found: Vec<Found<'a>>, text: &str, terminated: bool) -> Option<&'a Command> {
+    if !terminated {
+        return None;
+    }
+    let text = text.trim();
+    let spaced = format!("{text} ");
+    let named: Vec<&Command> = found
+        .into_iter()
+        .map(|f| f.command)
+        .filter(|c| c.display_name == text || c.display_name.starts_with(&spaced))
+        .collect();
+    match named[..] {
+        [only] if only.display_name == text => Some(only),
+        _ => None,
+    }
+}
+
+/// When a popup list selects its first row by itself (`focusMode` in
+/// 133746's navigator).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Focus {
+    /// As soon as it shows (no `focusMode`): the suggestions, a pill's
+    /// choices and mentions, `/gif`'s and `/sticker`'s results.
+    #[default]
+    Auto,
+    /// Once something is typed (`AUTO_WHEN_FILTERED`): the options list.
+    WhenFiltered,
+}
+
+/// What Enter or Tab does with the popup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pick {
+    /// Enter on a row (`selectResult(index, true)`: `SEND` for the
+    /// integrations).
+    Send(usize),
+    /// Tab on a row (`INSERT`).
+    Insert(usize),
+    /// Tab with no row selected on a list that waits for typing: its first
+    /// row is selected, and nothing else happens.
+    Selected,
+}
+
+/// Which row of the box's popup is selected (31498 with 133746's
+/// navigator), one model for every list it shows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Selection {
+    focus: Focus,
+    index: Option<usize>,
+    /// What the navigator effect depends on: the list's type, its query,
+    /// whether it is loading and whether it shows.
+    last: Option<(String, String, bool, bool)>,
+}
+
+impl Selection {
+    /// The popup now shows `count` rows of `list` (its type) for `query`:
+    /// when the type, the query, the loading or whether it shows changed,
+    /// the first row is selected as `focus` allows (none while loading);
+    /// otherwise the selection stays, clamped to the rows.
+    pub fn listed(&mut self, list: &str, focus: Focus, query: &str, loading: bool, count: usize) {
+        self.focus = focus;
+        let shows = loading || count > 0;
+        let key = (list.to_owned(), query.to_owned(), loading, shows);
+        if self.last.as_ref() != Some(&key) {
+            let allowed = focus == Focus::Auto || !query.is_empty();
+            self.index = (shows && allowed && count > 0).then_some(0);
+            self.last = Some(key);
+        } else if let Some(index) = self.index {
+            self.index = count.checked_sub(1).map(|last| index.min(last));
+        }
+    }
+
+    /// Up (`by` -1) or Down (+1), wrapping at either end; with nothing
+    /// selected, Down takes the first and Up the last.
+    pub fn moved(&mut self, by: i32, count: usize) {
+        if count == 0 {
+            return;
+        }
+        self.index = Some(match (self.index, by < 0) {
+            (None, false) => 0,
+            (None, true) => count - 1,
+            (Some(i), false) => (i + 1) % count,
+            (Some(i), true) => i.checked_sub(1).unwrap_or(count - 1),
+        });
+    }
+
+    /// The pointer moved onto a row that isn't selected: none is
+    /// (`onResultHover`).
+    pub fn hovered(&mut self) {
+        self.index = None;
+    }
+
+    pub fn selected(&self) -> Option<usize> {
+        self.index
+    }
+
+    /// Enter or Tab (`onTabOrEnter`): the selected row, if it is one of
+    /// `count`; with none, Tab selects the first of a list that waits for
+    /// typing. `None` leaves the key to the box.
+    pub fn key(&mut self, enter: bool, count: usize) -> Option<Pick> {
+        match self.index {
+            Some(i) if i < count => Some(if enter { Pick::Send(i) } else { Pick::Insert(i) }),
+            Some(_) => None,
+            None if !enter && self.focus == Focus::WhenFiltered && count > 0 => {
+                self.index = Some(0);
+                Some(Pick::Selected)
+            }
+            None => None,
+        }
+    }
+}
+
+/// What the `/` suggestions may list (`applicationCommands` and `builtIns`
+/// in 264322's filters).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Offer {
+    /// Apps' commands.
+    pub apps: bool,
+    pub builtins: BuiltIns,
+}
+
+impl Offer {
+    /// The filters' defaults, which the Apps menus keep.
+    pub const ALL: Offer = Offer { apps: true, builtins: BuiltIns::All };
+}
+
+/// Which built-ins are listed (`n` in 210978).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuiltIns {
+    All,
+    /// Those that write the message, and the two that search
+    /// (`ONLY_TEXT`).
+    TextOnly,
+}
+
+impl BuiltIns {
+    /// Whether `command`, a built-in, is listed (`F` in 12115).
+    fn lists(self, command: &Command) -> bool {
+        self == BuiltIns::All || command.builtin.is_some_and(|b| b.input() != Input::Action)
+    }
+}
+
+/// What the message box's `/` offers (`ta` in 496533, and the bare `/`'s
+/// browser, `ed` in 989161): while a reply is pending
+/// (`canOnlyUseTextCommands`), no app's commands and only the built-ins
+/// that write text (`NEW_TEXT_ONLY`).
+pub fn offer(replying: bool) -> Offer {
+    if replying { Offer { apps: false, builtins: BuiltIns::TextOnly } } else { Offer::ALL }
+}
+
+/// The suggestions for `typed`, the text after `/` (`queryResults` of `B`
+/// in 496533): the apps' commands as `offer` says and `builtins`, equal
+/// matches by `used`, settled on the command's name once typing moved on,
+/// at most [`SUGGESTIONS`].
+pub fn suggestions<'a>(
+    index: &'a CommandIndex,
+    place: &Place,
+    typed: &str,
+    offer: Offer,
+    builtins: &'a [Command],
+    used: &Used,
+) -> Vec<Found<'a>> {
+    let (query, terminated) = query_of(typed);
+    let query_text = query.as_str();
+    let found =
+        index.query(place, Query { kind: command_type::CHAT, text: query_text, offer, builtins, used: Some(used) });
+    let mut found = settled(found, &query, terminated);
+    found.truncate(SUGGESTIONS);
+    found
+}
+
+/// A section of what a bare `/` lists.
+#[derive(Clone, Copy, Debug)]
+pub enum Heading<'a> {
+    /// The commands used most (`gZ["-2"]` in 12115).
+    FrequentlyUsed,
+    /// An app's commands, or the built-ins under [`App::built_in`].
+    App(&'a App),
+}
+
+impl Heading<'_> {
+    pub fn title(&self) -> &str {
+        match self {
+            Heading::FrequentlyUsed => "Frequently Used",
+            Heading::App(app) => &app.name,
+        }
+    }
+}
+
+/// One section of [`browse`].
+#[derive(Clone, Debug)]
+pub struct Browsed<'a> {
+    pub heading: Heading<'a>,
+    pub commands: Vec<Found<'a>>,
+}
+
+/// What a bare `/` lists: the client's command browser (`ed` in 989161,
+/// through `XC` and `ei` in 264322), the commands `offer` and `builtins`
+/// allow in sections. The used most come first when any count here (at most
+/// [`FREQUENTLY_USED`], by score, each still in its own section too), then
+/// each app's under its name, the apps by name, then the built-ins last;
+/// each section's by name. Unlike a typed list it isn't cut at
+/// [`SUGGESTIONS`].
+pub fn browse<'a>(
+    index: &'a CommandIndex,
+    place: &Place,
+    offer: Offer,
+    builtins: &'a [Command],
+    used: &Used,
+) -> Vec<Browsed<'a>> {
+    let found = index.query(place, Query { kind: command_type::CHAT, text: "", offer, builtins, used: None });
+    let (built, apps): (Vec<Found<'a>>, Vec<Found<'a>>) = found.into_iter().partition(|f| f.command.is_built_in());
+    let listed = |app: &'a App, commands: Vec<&'a Command>| Browsed {
+        heading: Heading::App(app),
+        commands: commands.into_iter().map(|command| Found { command, app, score: 0 }).collect(),
+    };
+    let mut sections: Vec<Browsed<'a>> =
+        by_app(apps).into_iter().map(|(app, commands)| listed(app, commands)).collect();
+    if !built.is_empty() {
+        let mut commands: Vec<&Command> = built.iter().map(|f| f.command).collect();
+        commands.sort_by(|a, b| natural(&a.display_name, &b.display_name));
+        sections.push(listed(App::built_in(), commands));
+    }
+    let shown: Vec<Found<'a>> = sections.iter().flat_map(|s| s.commands.iter().copied()).collect();
+    let commands: Vec<&Command> = shown.iter().map(|f| f.command).collect();
+    let frequent: Vec<Found<'a>> = used
+        .frequently_used(&commands, place.guild)
+        .into_iter()
+        .filter_map(|c| shown.iter().find(|f| std::ptr::eq(f.command, c)).copied())
+        .collect();
+    if !frequent.is_empty() {
+        sections.insert(0, Browsed { heading: Heading::FrequentlyUsed, commands: frequent });
+    }
+    sections
+}
+
 /// What decides, apart from the place, whether age-restricted commands are
 /// offered (`p` in 240591).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -684,6 +1176,14 @@ impl NsfwRules {
             by_nsfw_level: limits.servers_by_nsfw_level(),
         }
     }
+}
+
+/// Whether listing `typed` (the text after `/`) needs how much commands are
+/// used, which the settings proto of type 2 holds: the bare `/`'s browser
+/// loads it as it opens (`F` in 56494), a typed list once an app's command
+/// matches (`er` in 264322 loads it only then).
+pub fn loads_use(index: &CommandIndex, place: &Place, typed: &str, offer: Offer) -> bool {
+    typed.is_empty() || (offer.apps && !index.find(place, command_type::CHAT, &query_of(typed).0).is_empty())
 }
 
 /// Where a command would run, as far as its availability goes (`Bh` in 240591).
@@ -995,6 +1495,12 @@ fn option_of(option: &Value) -> CommandOption {
         max_value: option["max_value"].as_f64(),
         min_length: option["min_length"].as_u64(),
         max_length: option["max_length"].as_u64(),
+        channel_types: option["channel_types"].as_array().map(|t| t.iter().filter_map(Value::as_u64).collect()),
+        file_types: if option["type"].as_u64() == Some(u64::from(option_type::ATTACHMENT)) {
+            option["file_types"].as_array().into_iter().flatten().filter_map(text).map(str::to_owned).collect()
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -1042,6 +1548,8 @@ fn leaf(root: &Value, command: &Value, path: Vec<Step>) -> Command {
             .to_owned(),
         options: command["options"].as_array().map(|o| o.iter().map(option_of).collect()).unwrap_or_default(),
         path,
+        popularity: root["global_popularity_rank"].as_u64(),
+        builtin: None,
         root: root.clone(),
         root_id: root["id"].clone(),
         root_name: text(&root["name"]).unwrap_or_default().to_owned(),
@@ -1106,13 +1614,18 @@ fn parse_index(index: &Value, me: Snowflake) -> Loaded {
         let Some(id) = app["id"].as_str().and_then(|s| s.parse().ok()).map(Snowflake) else { continue };
         let bot = app["bot"]["id"].as_str().or_else(|| app["bot_id"].as_str()).and_then(|s| s.parse().ok());
         let name = text(&app["bot"]["username"]).or_else(|| text(&app["name"])).unwrap_or_default().to_owned();
+        let surfaces = app["embedded_surfaces"].as_array().into_iter().flatten();
         sections.push(Section {
             app: App {
                 id,
                 name,
+                app_name: text(&app["name"]).unwrap_or_default().to_owned(),
                 description: text(&app["description"]).unwrap_or_default().to_owned(),
                 icon: text(&app["icon"]).map(str::to_owned),
                 bot: bot.map(Snowflake),
+                bot_avatar: text(&app["bot"]["avatar"]).map(str::to_owned),
+                flags: app["flags"].as_u64().unwrap_or(0),
+                activity: surfaces.into_iter().any(|s| s.as_u64() == Some(0)),
                 permissions: if app["permissions"].is_null() { Vec::new() } else { rules(&app["permissions"], me) },
             },
             commands: Vec::new(),
@@ -1150,11 +1663,27 @@ fn is_snowflake(text: &str) -> bool {
 }
 
 /// What `text` names for an option of `kind` (`A.f` in 224868, and the cases
-/// of `A` in 545152): an id as it is, else a `@user`, `@role` or `#channel`
-/// by its name.
+/// of `A` in 545152): the mention the box writes for a pick (`<@id>`,
+/// `<@!id>`, `<@&id>`, `<#id>`, of the kinds the option takes), an id as it
+/// is, else a `@user`, `@role` or `#channel` by its name.
 fn resolve(kind: u8, typed: &str, names: &dyn Names) -> Option<Snowflake> {
     use option_type::*;
     let typed = typed.trim();
+    let mention = |prefix: &str| {
+        let id = typed.strip_prefix(prefix)?.strip_suffix('>')?;
+        (!id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())).then(|| id.parse().ok().map(Snowflake))?
+    };
+    let user = || mention("<@!").or_else(|| mention("<@"));
+    let marked = match kind {
+        USER => user(),
+        ROLE => mention("<@&"),
+        MENTIONABLE => user().or_else(|| mention("<@&")),
+        CHANNEL => mention("<#"),
+        _ => None,
+    };
+    if marked.is_some() {
+        return marked;
+    }
     if is_snowflake(typed) {
         return typed.parse().ok().map(Snowflake);
     }
@@ -1198,29 +1727,51 @@ fn choice_named<'a>(choices: &'a [Choice], typed: &str) -> Option<&'a Choice> {
     choices.iter().find(|c| c.name == typed)
 }
 
-/// What the form can say is wrong with an option's text (`J` in 300541).
-pub fn validate(option: &CommandOption, typed: &str, names: &dyn Names, auto: &Autocompleted) -> Result<(), String> {
+const REQUIRED: &str = "This option is required. Specify a value.";
+
+/// What is wrong with an option's value, as the client says it (`J` in
+/// 300541). `content` is the pill's value, none without a pill, which only
+/// a required option fails. An empty value passes with `allow_empty` (as a
+/// command starts), else fails as required, or, for an optional one, as its
+/// type ([`type_error`]). A file option's value is the name of the file
+/// staged for it: a staged file is all it asks, whether or not its upload
+/// has gone well (the run's staging finds that out).
+pub fn validate(
+    option: &CommandOption,
+    content: Option<&str>,
+    allow_empty: bool,
+    names: &dyn Names,
+    auto: &Autocompleted,
+) -> Result<(), String> {
     use option_type::*;
-    let typed = typed.trim();
+    let Some(content) = content else { return if option.required { Err(REQUIRED.into()) } else { Ok(()) } };
+    let typed = content.trim();
     if typed.is_empty() {
-        return if option.required { Err("This option is required. Specify a value.".into()) } else { Ok(()) };
+        return match (allow_empty, option.required) {
+            (true, _) => Ok(()),
+            (false, true) => Err(REQUIRED.into()),
+            (false, false) => Err(type_error(option)),
+        };
     }
-    let invalid = |what: &str| Err(what.to_owned());
+    let invalid = || Err(type_error(option));
     match option.kind {
-        BOOLEAN => bool_of(typed).map(|_| ()).ok_or_else(|| "Pick either true or false.".into()),
+        BOOLEAN => bool_of(typed).map(|_| ()).ok_or_else(|| type_error(option)),
         STRING => {
             if let Some(choices) = &option.choices {
-                return choice_named(choices, typed).map(|_| ()).ok_or_else(|| "Not a valid choice.".into());
+                return choice_named(choices, typed).map(|_| ()).ok_or_else(|| type_error(option));
             }
             if option.autocomplete && auto.value_of(&option.name, typed).is_some() {
                 return Ok(());
             }
-            let length = typed.chars().count() as u64;
+            // JavaScript's `.length`: UTF-16 units, as a message counts.
+            let length = limits::message_length(typed) as u64;
             match (option.min_length, option.max_length) {
-                (Some(min), Some(max)) if min == max && length != min => Err(format!("Enter {min}")),
-                (Some(min), Some(max)) if length < min || length > max => Err(format!("Enter between {min} and {max}")),
-                (Some(min), _) if length < min => Err(format!("Enter {min} or more")),
-                (_, Some(max)) if length > max => Err(format!("Enter {max} or fewer")),
+                (Some(min), Some(max)) if min == max && length != min => Err(format!("Enter {min} characters.")),
+                (Some(min), Some(max)) if length < min || length > max => {
+                    Err(format!("Enter between {min} and {max} characters."))
+                }
+                (Some(min), _) if length < min => Err(format!("Enter {min} or more characters.")),
+                (_, Some(max)) if length > max => Err(format!("Enter {max} or fewer characters.")),
                 _ => Ok(()),
             }
         }
@@ -1230,39 +1781,118 @@ pub fn validate(option: &CommandOption, typed: &str, names: &dyn Names, auto: &A
                     .iter()
                     .any(|c| c.name == typed && c.value.is_number())
                     .then_some(())
-                    .ok_or_else(|| "Not a valid choice.".into());
+                    .ok_or_else(|| type_error(option));
             }
             if option.autocomplete && auto.value_of(&option.name, typed).is_some_and(Value::is_number) {
                 return Ok(());
             }
-            let what = if option.kind == INTEGER { "Input a valid integer." } else { "Input a valid number." };
-            let Some(n) = number(typed) else { return invalid(what) };
+            let Some(n) = number(typed) else { return invalid() };
             if option.kind == INTEGER && (n.fract() != 0.0 || n.abs() > 9_007_199_254_740_991.0) {
-                return invalid(what);
+                return invalid();
             }
             if option.kind == NUMBER && n.abs() > 9_007_199_254_740_991.0 {
-                return invalid(what);
+                return invalid();
             }
             match (option.min_value, option.max_value) {
                 (Some(min), Some(max)) if n < min || n > max => {
-                    Err(format!("Enter a number between {} and {}", plain(min), plain(max)))
+                    Err(format!("Enter a number between {} and {}.", plain(min), plain(max)))
                 }
-                (Some(min), _) if n < min => Err(format!("Enter a number greater than or equal to {}", plain(min))),
-                (_, Some(max)) if n > max => Err(format!("Enter a number less than or equal to {}", plain(max))),
+                (Some(min), _) if n < min => Err(format!("Enter a number greater than or equal to {}.", plain(min))),
+                (_, Some(max)) if n > max => Err(format!("Enter a number less than or equal to {}.", plain(max))),
                 _ => Ok(()),
             }
         }
-        USER => resolve(USER, typed, names).map(|_| ()).ok_or_else(|| "Not a valid user.".into()),
-        CHANNEL => resolve(CHANNEL, typed, names).map(|_| ()).ok_or_else(|| "Not a valid channel.".into()),
-        ROLE => resolve(ROLE, typed, names).map(|_| ()).ok_or_else(|| "Not a valid role.".into()),
-        MENTIONABLE => resolve(MENTIONABLE, typed, names).map(|_| ()).ok_or_else(|| "Not a valid user or role.".into()),
-        _ => invalid("Not a valid value."),
+        USER | CHANNEL | ROLE | MENTIONABLE => {
+            resolve(option.kind, typed, names).map(|_| ()).ok_or_else(|| type_error(option))
+        }
+        ATTACHMENT => Ok(()),
+        _ => invalid(),
     }
 }
 
-/// A limit as `toLocaleString` writes it without grouping.
+/// What a value of the option's type that isn't one is told (`tE` in
+/// 73510).
+pub fn type_error(option: &CommandOption) -> String {
+    use option_type::*;
+    let words = match option.kind {
+        _ if option.choices.is_some() => "Not a valid choice.",
+        BOOLEAN => "Pick either true or false.",
+        CHANNEL => "Not a valid channel.",
+        INTEGER => "Input a valid integer.",
+        NUMBER => "Input a valid number.",
+        ROLE => "Not a valid role.",
+        USER => "Not a valid user.",
+        MENTIONABLE => "Not a valid user or role.",
+        _ => "Not a valid value.",
+    };
+    words.to_owned()
+}
+
+/// The choices a BOOLEAN option offers (`Ss` in 73510).
+pub fn boolean_choices() -> [Choice; 2] {
+    [Choice { name: "True".into(), value: json!(true) }, Choice { name: "False".into(), value: json!(false) }]
+}
+
+/// The choices that match `query`, best first (`queryChoice` in 997625):
+/// the name itself, then starting with it, containing it, containing each
+/// of its words, its letters in order; equals keep their order. Nothing
+/// typed lists them all.
+pub fn match_choices<'c>(choices: &'c [Choice], query: &str) -> Vec<&'c Choice> {
+    let query = query.to_lowercase();
+    let words: Vec<&str> = query.split([',', ' ']).collect();
+    let mut scored: Vec<(u8, &Choice)> = choices
+        .iter()
+        .filter_map(|choice| {
+            let name = choice.name.to_lowercase();
+            let score = if name.starts_with(&query) {
+                if name == query { 10 } else { 7 }
+            } else if name.contains(&query) {
+                5
+            } else if words.iter().all(|w| name.contains(w)) {
+                3
+            } else if fuzzy(&query, &name) {
+                1
+            } else {
+                0
+            };
+            (score > 0).then_some((score, choice))
+        })
+        .collect();
+    scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    scored.into_iter().map(|(_, choice)| choice).collect()
+}
+
+/// A limit as the client writes it (`x` in 300541, `toLocaleString` without
+/// grouping): the number's shortest decimal form, rounded half away from zero
+/// to at most three decimals, with its sign even where that leaves a zero.
 fn plain(n: f64) -> String {
-    if n.fract() == 0.0 { format!("{}", n as i64) } else { n.to_string() }
+    let shortest = n.abs().to_string();
+    let (whole, fraction) = shortest.split_once('.').unwrap_or((&shortest, ""));
+    let kept = fraction.len().min(3);
+    let mut digits: Vec<u8> = whole.bytes().chain(fraction.bytes().take(3)).collect();
+    if fraction.as_bytes().get(3).is_some_and(|d| *d >= b'5') {
+        match digits.iter().rposition(|d| *d != b'9') {
+            Some(at) => {
+                digits[at] += 1;
+                digits[at + 1..].fill(b'0');
+            }
+            None => {
+                digits.fill(b'0');
+                digits.insert(0, b'1');
+            }
+        }
+    }
+    let mut text: String = digits.into_iter().map(char::from).collect();
+    let point = text.len() - kept;
+    let decimals = text[point..].trim_end_matches('0').len();
+    text.truncate(point + decimals);
+    if decimals > 0 {
+        text.insert(point, '.');
+    }
+    if n.is_sign_negative() {
+        text.insert(0, '-');
+    }
+    text
 }
 
 /// What the user entered, option name to text.
@@ -1271,7 +1901,11 @@ pub type Values = BTreeMap<String, String>;
 /// The options of a run in the form interactions carry (`T` in `A`, 545152):
 /// each option that has text, with the value its type makes of it, inside the
 /// sub-command groups that lead to it. With `focused`, the option being
-/// autocompleted goes out with what was typed so far and is marked.
+/// autocompleted goes out marked, with what was typed so far as it is,
+/// spaces and all (`autocomplete.query`); the others are trimmed. A file
+/// option's text is its staged file's name: it goes as that file's place
+/// among the run's files, counted in the command's option order, and never
+/// in an autocomplete.
 pub fn run_options(
     command: &Command,
     values: &Values,
@@ -1281,18 +1915,19 @@ pub fn run_options(
 ) -> Result<Vec<Value>, String> {
     use option_type::*;
     let mut options = Vec::new();
+    let mut files = 0;
     for option in &command.options {
-        if matches!(option.kind, SUB_COMMAND | SUB_COMMAND_GROUP | ATTACHMENT) {
+        if matches!(option.kind, SUB_COMMAND | SUB_COMMAND_GROUP) {
             continue;
         }
         let is_focus = focused == Some(option.name.as_str());
-        let Some(typed) = values.get(&option.name) else {
+        let Some(as_typed) = values.get(&option.name) else {
             if is_focus {
                 options.push(json!({ "type": option.kind, "name": option.name, "value": "", "focused": true }));
             }
             continue;
         };
-        let typed = typed.trim();
+        let typed = as_typed.trim();
         let value: Value = match option.kind {
             STRING => {
                 let mut value = option
@@ -1302,7 +1937,7 @@ pub fn run_options(
                     .map(|c| c.value.clone())
                     .filter(Value::is_string);
                 if value.is_none() && option.choices.is_none() && option.autocomplete {
-                    value = if is_focus { Some(json!(typed)) } else { auto.value_of(&option.name, typed).cloned() };
+                    value = if is_focus { Some(json!(as_typed)) } else { auto.value_of(&option.name, typed).cloned() };
                 }
                 if value.is_none() {
                     value = Some(json!(typed));
@@ -1322,6 +1957,13 @@ pub fn run_options(
                     None => return Err(format!("Failed to resolve {typed}")),
                 }
             }
+            ATTACHMENT => {
+                if focused.is_some() || typed.is_empty() {
+                    continue;
+                }
+                files += 1;
+                json!(files - 1)
+            }
             BOOLEAN => match bool_of(typed) {
                 Some(b) => json!(b),
                 None if typed.is_empty() && !is_focus => continue,
@@ -1337,7 +1979,7 @@ pub fn run_options(
                     .and_then(|c| choice_named(c, typed).map(|c| c.value.clone()).filter(Value::is_number));
                 let by_autocomplete = || {
                     if option.autocomplete {
-                        if is_focus { Some(json!(typed)) } else { auto.value_of(&option.name, typed).cloned() }
+                        if is_focus { Some(json!(as_typed)) } else { auto.value_of(&option.name, typed).cloned() }
                     } else {
                         None
                     }
@@ -1355,11 +1997,7 @@ pub fn run_options(
         }
         options.push(entry);
     }
-    // Sub-command groups wrap the options, innermost first.
-    for step in command.path.iter().rev() {
-        options = vec![json!({ "type": step.kind, "name": step.name, "options": options })];
-    }
-    Ok(options)
+    Ok(command.inside_path(options))
 }
 
 /// The options of a run without the sub-command groups around them
@@ -1371,6 +2009,18 @@ pub fn leaf_options(mut options: &[Value]) -> &[Value] {
         options = only["options"].as_array().map_or(&[], Vec::as_slice);
     }
     options
+}
+
+/// The file options of a run, by their place among its files: what
+/// `data.attachments` names in that order.
+pub fn file_options(options: &[Value]) -> Vec<&str> {
+    let mut files: Vec<(u64, &str)> = leaf_options(options)
+        .iter()
+        .filter(|o| o["type"].as_u64() == Some(u64::from(option_type::ATTACHMENT)))
+        .filter_map(|o| Some((o["value"].as_u64()?, o["name"].as_str()?)))
+        .collect();
+    files.sort_by_key(|(at, _)| *at);
+    files.into_iter().map(|(_, name)| name).collect()
 }
 
 /// What the other options held when an option asked for choices, which the
@@ -1391,6 +2041,24 @@ pub fn context_key(options: &[Value]) -> String {
 }
 
 impl Command {
+    /// The root command's id, which Copy Command ID copies; none for a
+    /// built-in.
+    pub fn root_id(&self) -> Option<Snowflake> {
+        self.root_id.as_str()?.parse().ok().map(Snowflake)
+    }
+
+    pub fn is_built_in(&self) -> bool {
+        self.builtin.is_some()
+    }
+
+    /// The search a built-in runs, for `/gif` and `/sticker`.
+    pub fn integration(&self) -> Option<Integration> {
+        match self.builtin?.input() {
+            Input::Integration(integration) => Some(integration),
+            Input::Text | Input::Action => None,
+        }
+    }
+
     /// The command's `data` in an interaction (`R` in 545152): its root's id,
     /// version and name, the options of the run, and the root itself.
     pub fn data(&self, options: Vec<Value>, target: Option<Snowflake>) -> Value {
@@ -1412,11 +2080,61 @@ impl Command {
         Value::Object(data)
     }
 
-    /// Whether the form can't take an option: files, which Neucord doesn't
-    /// attach to a command yet.
-    pub fn needs_attachment(&self) -> bool {
-        self.options.iter().any(|o| o.kind == option_type::ATTACHMENT && o.required)
+    /// `data` of a run with no options: the launcher's Send (`MJ` in 735991
+    /// passes no `optionValues`, which `T` in 545152 still puts inside the
+    /// sub-command's path) and the Apps menus' user and message commands.
+    pub fn data_at_once(&self, target: Option<Snowflake>) -> Value {
+        self.data(self.inside_path(Vec::new()), target)
     }
+
+    /// `options` inside the sub-command and group this command is, innermost
+    /// first.
+    fn inside_path(&self, mut options: Vec<Value>) -> Vec<Value> {
+        for step in self.path.iter().rev() {
+            options = vec![json!({ "type": step.kind, "name": step.name, "options": options })];
+        }
+        options
+    }
+}
+
+/// Where a command was started from (`CommandOrigin`, `iw` in 392054).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Origin {
+    /// The `/` suggestions and everything else that starts one in the box.
+    #[default]
+    Chat,
+    /// An app page's command, filled in in the box (`APPLICATION_LAUNCHER`).
+    Launcher,
+    /// An app page's Send (`APP_LAUNCHER_APPLICATION_VIEW`).
+    LauncherView,
+}
+
+impl Origin {
+    /// `analytics_location` (`j` in 545152, `Oh` in 392054).
+    pub fn location(self) -> &'static str {
+        match self {
+            Origin::Chat => "slash_ui",
+            Origin::Launcher => "app_launcher",
+            Origin::LauncherView => "app_launcher_application_view",
+        }
+    }
+}
+
+/// What a run says about where it came from (`A` in 545152): the origin and
+/// source `ApplicationCommandStore` kept as the command was started, and the
+/// launcher section its Send was pressed in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunFrom {
+    pub origin: Origin,
+    /// `section_name`.
+    pub section: Option<&'static str>,
+    /// `source`: the launcher's entrypoint (`s4` in 500049).
+    pub source: Option<&'static str>,
+}
+
+impl RunFrom {
+    /// The `/` suggestions, the form and the Apps menus.
+    pub const CHAT: RunFrom = RunFrom { origin: Origin::Chat, section: None, source: None };
 }
 
 /// Where a run is sent from.
@@ -1427,18 +2145,23 @@ pub struct Run<'a> {
     pub session: &'a str,
     pub data: Value,
     pub nonce: Snowflake,
+    pub from: RunFrom,
 }
 
 impl Run<'_> {
     /// `POST /interactions` for running the command (`handleCommand` in
-    /// 870801): `analytics_location` says it came from the suggestions
-    /// (`slash_ui`). A DM has no `guild_id`.
-    pub fn body(&self) -> Value {
-        self.body_of(APPLICATION_COMMAND, true)
+    /// 870801): `analytics_location` from the origin, then `section_name`
+    /// and `source` when there are any. A DM has no `guild_id`.
+    /// `data.attachments` names the run's uploaded files, `[]` when there are
+    /// none, since `A` in 545152 always passes its list on.
+    pub fn body(&self, files: &[Sent<'_>]) -> Value {
+        let mut body = self.body_of(APPLICATION_COMMAND, true);
+        body["data"]["attachments"] = files.iter().enumerate().map(|(i, file)| file.body(i)).collect();
+        body
     }
 
     /// The same for asking an app to autocomplete an option (`WL` in
-    /// 721768), which has no analytics fields.
+    /// 721768), which has no analytics fields and no `attachments`.
     pub fn autocomplete_body(&self) -> Value {
         self.body_of(APPLICATION_COMMAND_AUTOCOMPLETE, false)
     }
@@ -1456,9 +2179,61 @@ impl Run<'_> {
             body["guild_id"] = json!(guild.to_string());
         }
         if analytics {
-            body["analytics_location"] = json!("slash_ui");
+            body["analytics_location"] = json!(self.from.origin.location());
+            if let Some(section) = self.from.section {
+                body["section_name"] = json!(section);
+            }
+            if let Some(source) = self.from.source {
+                body["source"] = json!(source);
+            }
         }
         body
+    }
+}
+
+impl Command {
+    /// A built-in as the client defines it (12115, 743361): a slash command
+    /// of no app, its name never translated, with no rules of its own.
+    pub(crate) fn built_in(builtin: BuiltIn, description: &str, options: Vec<CommandOption>) -> Command {
+        Command {
+            id: builtin.id().into(),
+            application: Snowflake(0),
+            kind: command_type::CHAT,
+            version: None,
+            guild: None,
+            name: builtin.name().into(),
+            display_name: builtin.name().into(),
+            description: description.into(),
+            display_description: description.into(),
+            options,
+            path: Vec::new(),
+            popularity: None,
+            builtin: Some(builtin),
+            root: Value::Null,
+            root_id: json!(builtin.id()),
+            root_name: builtin.name().into(),
+            nsfw: false,
+            dm_permission: None,
+            contexts: None,
+            integration_types: None,
+            default_member_permissions: None,
+            permissions: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Command {
+    /// A command as an index would give it, for other modules' tests.
+    pub(crate) fn made_up(id: &str, kind: u8, application: u64, guild: Option<&str>) -> Command {
+        let root = json!({"id": id, "application_id": application.to_string(), "type": kind, "name": "made-up",
+                          "description": "", "guild_id": guild});
+        leaf(&root, &root, Vec::new())
+    }
+
+    /// A root command from its JSON, without sub-commands.
+    pub(crate) fn of_json(root: &Value) -> Command {
+        leaf(root, root, Vec::new())
     }
 }
 
@@ -1770,8 +2545,9 @@ mod tests {
             session: "s",
             data: command.data(Vec::new(), Some(target)),
             nonce: Snowflake(5),
+            from: RunFrom::CHAT,
         };
-        let body = run.body();
+        let body = run.body(&[]);
         assert_eq!(body["application_id"], app.id.to_string());
         let data = &body["data"];
         assert_eq!((data["type"].as_u64(), data["name"].as_str()), (Some(3), Some("Reroll")));
@@ -1807,6 +2583,153 @@ mod tests {
     }
 
     #[test]
+    fn the_index_gives_what_the_launcher_pills_and_files_read() {
+        let commands = loaded(&json!({
+            "applications": [
+                {"id": APP, "name": "Dicey", "description": "", "flags": (1u64 << 29) | (1 << 30),
+                 "embedded_surfaces": [0], "bot": {"id": "300000000000000001", "username": "Dice Roller", "avatar": "abc"}},
+                {"id": "200000000000000002", "name": "Zed", "description": "", "bot_id": "300000000000000002"},
+            ],
+            "application_commands": [
+                {"id": "400000000000000001", "application_id": APP, "type": 1, "name": "roll", "description": "",
+                 "global_popularity_rank": 1, "options": [
+                    {"type": 7, "name": "where", "description": "", "channel_types": [0, 5]},
+                    {"type": 11, "name": "file", "description": "", "file_types": ["image", ".pdf"]},
+                    {"type": 3, "name": "note", "description": "", "file_types": [".txt"]}]},
+                {"id": "400000000000000002", "application_id": "200000000000000002", "type": 1, "name": "zap",
+                 "description": ""},
+            ]
+        }));
+        let found = commands.find(&place(), command_type::CHAT, "");
+        let (roll, dicey) = (found[0].command, found[0].app);
+        assert_eq!((dicey.name.as_str(), dicey.app_name.as_str()), ("Dice Roller", "Dicey"));
+        assert_eq!(dicey.bot_avatar.as_deref(), Some("abc"));
+        assert!(dicey.partner() && dicey.promoted() && dicey.activity);
+        let zed = found[1].app;
+        assert!(!zed.partner() && !zed.promoted() && !zed.activity && zed.bot_avatar.is_none());
+        assert_eq!((roll.popularity, found[1].command.popularity), (Some(1), None));
+        assert_eq!(roll.root_id(), Some(Snowflake(400_000_000_000_000_001)));
+        assert_eq!(roll.options[0].channel_types, Some(vec![0, 5]));
+        assert_eq!(roll.options[1].file_types, ["image", ".pdf"]);
+        assert!(roll.options[2].file_types.is_empty(), "only a file option takes file types");
+        assert!(!roll.is_built_in() && roll.integration().is_none());
+    }
+
+    #[test]
+    fn an_apps_command_comes_before_a_built_in_of_the_same_name() {
+        let commands = loaded(&index());
+        let base = commands.find(&place(), command_type::CHAT, "roll")[0].command.clone();
+        let builtin = |b: BuiltIn, name: &str| Command {
+            id: b.id().into(),
+            name: name.into(),
+            display_name: name.into(),
+            description: String::new(),
+            display_description: String::new(),
+            options: Vec::new(),
+            builtin: Some(b),
+            ..base.clone()
+        };
+        let builtins = [builtin(BuiltIn::Shrug, "roll"), builtin(BuiltIn::Gif, "gif")];
+        let query = |text| Query { kind: command_type::CHAT, text, offer: Offer::ALL, builtins: &builtins, used: None };
+        let found = commands.query(&place(), query("roll"));
+        assert_eq!(names(&found), ["roll", "roll", "stats reset all", "stats show"], "the app's description has roll");
+        assert_eq!((found[0].command.builtin, found[1].command.builtin), (None, Some(BuiltIn::Shrug)));
+        assert_eq!(found[1].app.name, "Built-In");
+        let found = commands.query(&place(), query("gi"));
+        assert_eq!(found[0].command.integration(), Some(Integration::Gif));
+        // Without apps' commands, only the built-ins.
+        let none = Offer { apps: false, builtins: BuiltIns::TextOnly };
+        let found = commands.query(&place(), Query { offer: none, ..query("") });
+        assert_eq!(names(&found), ["gif", "roll"]);
+        // The menus' `find` lists no built-ins.
+        assert_eq!(names(&commands.find(&place(), command_type::CHAT, "gi")), [""; 0]);
+    }
+
+    #[test]
+    fn a_command_is_filed_under_its_id_or_its_server() {
+        let server = Some(Snowflake(500));
+        let global = Command::made_up("910", 1, 900, None);
+        assert_eq!(usage_key(&global, server), "910");
+        let own = Command::made_up("913", 1, 900, Some("500"));
+        assert_eq!(usage_key(&own, server), "913:500");
+        assert_eq!(usage_key(&own, None), "913", "in a DM");
+        let sub = Command { id: "913\0show".into(), ..own.clone() };
+        assert_eq!(usage_key(&sub, server), "913\0show:500");
+        let builtin = Command { id: "-1".into(), builtin: Some(BuiltIn::Shrug), ..own };
+        assert_eq!(usage_key(&builtin, server), "-1");
+    }
+
+    #[test]
+    fn only_this_servers_and_global_uses_count_here() {
+        let top = ["1", "2:500", "3:600", "-1"].map(String::from);
+        assert_eq!(place_keys(&top, Some(Snowflake(500))), ["1", "2", "-1"]);
+        assert_eq!(place_keys(&top, None), ["1", "-1"]);
+    }
+
+    fn used(scores: &[(&str, f64)], top: &[&str]) -> Used {
+        Used {
+            scores: scores.iter().map(|(k, s)| (k.to_string(), *s)).collect(),
+            top: top.iter().map(|k| k.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn equal_matches_go_by_use() {
+        let commands = loaded(&index());
+        let query = |text, used| Query { kind: command_type::CHAT, text, offer: Offer::ALL, builtins: &[], used };
+        // Both sub-commands of stats start with "stats": a tie the use breaks.
+        let reset = "400000000000000002\0reset\0all";
+        let more = used(&[(reset, 0.5), ("400000000000000002\0show", 0.2)], &[]);
+        assert_eq!(names(&commands.query(&place(), query("stats", None))), ["stats reset all", "stats show"]);
+        let less = used(&[("400000000000000002\0show", 0.5)], &[]);
+        assert_eq!(names(&commands.query(&place(), query("stats", Some(&less)))), ["stats show", "stats reset all"]);
+        assert_eq!(names(&commands.query(&place(), query("stats", Some(&more)))), ["stats reset all", "stats show"]);
+        // A better match beats use: "roll" starts with "ro"; the stats are only Dicey's description ("rolls").
+        let stats = used(&[("400000000000000002\0show", 9.0)], &[]);
+        assert_eq!(names(&commands.query(&place(), query("ro", Some(&stats))))[0], "roll");
+        // Nothing typed: by name, whatever is used.
+        assert_eq!(names(&commands.query(&place(), query("", Some(&less)))), ["roll", "stats reset all", "stats show"]);
+    }
+
+    #[test]
+    fn a_list_needs_the_use_when_it_opens_bare_or_finds_an_apps_command() {
+        let commands = loaded(&index());
+        assert!(loads_use(&commands, &place(), "", offer(false)), "the bare / browser");
+        assert!(loads_use(&commands, &place(), "", offer(true)), "replying, too");
+        assert!(loads_use(&commands, &place(), "ro", offer(false)));
+        assert!(!loads_use(&commands, &place(), "qqq", offer(false)), "nothing matched");
+        assert!(!loads_use(&commands, &place(), "ro", offer(true)), "no app's commands while replying");
+    }
+
+    #[test]
+    fn frequently_used_goes_by_score_not_rank() {
+        let commands = loaded(&index());
+        let found = commands.find(&place(), command_type::CHAT, "");
+        let listed: Vec<&Command> = found.iter().map(|f| f.command).collect();
+        let (roll, show) = ("400000000000000001", "400000000000000002\0show");
+        // Roll ranks first (its frecency is higher), but show scores more.
+        let use_of = used(&[(roll, 1.0), (show, 3.0)], &[roll, show]);
+        let frequent = use_of.frequently_used(&listed, Some(GUILD_ID));
+        assert_eq!(frequent.iter().map(|c| c.display_name.as_str()).collect::<Vec<_>>(), ["stats show", "roll"]);
+        // Not used: not there. Ties keep the listed order.
+        let tie = used(&[(roll, 1.0), (show, 1.0)], &[show, roll]);
+        let frequent = tie.frequently_used(&listed, Some(GUILD_ID));
+        assert_eq!(frequent.iter().map(|c| c.display_name.as_str()).collect::<Vec<_>>(), ["roll", "stats show"]);
+        // A server's own command used in another server isn't offered here.
+        let elsewhere = used(&[], &["400000000000000001:600"]);
+        assert!(elsewhere.frequently_used(&listed, Some(GUILD_ID)).is_empty());
+        // At most five.
+        let many: Vec<Command> = (0..7).map(|n| Command::made_up(&n.to_string(), 1, 1, None)).collect();
+        let many_listed: Vec<&Command> = many.iter().collect();
+        let keys: Vec<String> = (0..7).map(|n| n.to_string()).collect();
+        let all = Used { scores: keys.iter().map(|k| (k.clone(), 1.0)).collect(), top: keys };
+        assert_eq!(all.frequently_used(&many_listed, None).len(), FREQUENTLY_USED);
+        // Used but not offered here (a message command) isn't listed.
+        let reroll = used(&[("400000000000000004", 5.0)], &["400000000000000004"]);
+        assert!(reroll.frequently_used(&listed, Some(GUILD_ID)).is_empty());
+    }
+
+    #[test]
     fn typing_moves_on_from_the_name() {
         assert_eq!(query_of("roll"), ("roll".into(), false));
         assert_eq!(query_of("roll "), ("roll".into(), true));
@@ -1823,6 +2746,52 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_offers_no_apps_commands() {
+        let commands = loaded(&index());
+        assert_eq!(
+            names(&suggestions(&commands, &place(), "sta", offer(false), &[], &Used::default())),
+            ["stats reset all", "stats show"]
+        );
+        for typed in ["", "sta", "roll ", "dice"] {
+            assert_eq!(
+                names(&suggestions(&commands, &place(), typed, offer(true), &[], &Used::default())),
+                [""; 0],
+                "/{typed}"
+            );
+        }
+        assert_eq!(offer(true), Offer { apps: false, builtins: BuiltIns::TextOnly });
+    }
+
+    #[test]
+    fn a_reply_fetches_no_server_index() {
+        const NOTHING: [Target; 0] = [];
+        let now = Instant::now();
+        let mut dm = place();
+        dm.guild = None;
+        dm.recipient = Some((Snowflake(1), true));
+        for place in [place(), dm] {
+            let mut commands = CommandIndex::default();
+            assert_eq!(commands.to_fetch(&place, now, offer(true), ""), NOTHING, "a bare / fetches nothing");
+            assert_eq!(commands.to_fetch(&place, now, offer(true), "ro"), [Target::User], "only the account's");
+            assert_eq!(commands.to_fetch(&place, now, offer(true), "rol"), NOTHING, "under way");
+            commands.loaded(Target::User, &json!({"applications": [], "application_commands": []}), ME);
+            assert_eq!(commands.to_fetch(&place, now, offer(true), "roll"), NOTHING, "current");
+        }
+    }
+
+    #[test]
+    fn without_use_application_commands_only_a_bare_slash_fetches_the_servers_index() {
+        let now = Instant::now();
+        let mut place = place();
+        place.base_access = false;
+        let mut commands = CommandIndex::default();
+        assert_eq!(commands.to_fetch(&place, now, Offer::ALL, "ro"), [Target::User]);
+        let mut commands = CommandIndex::default();
+        let both = [Target::Guild(GUILD_ID), Target::User];
+        assert_eq!(commands.to_fetch(&place, now, Offer::ALL, ""), both, "the browser's fetch doesn't look");
+    }
+
+    #[test]
     fn a_thread_and_a_dm_without_a_bot_have_no_server_index() {
         let mut place = place();
         place.guild = None;
@@ -1832,8 +2801,8 @@ mod tests {
         assert_eq!(place.context(), Some(CHANNEL));
         let mut commands = CommandIndex::default();
         let now = Instant::now();
-        assert_eq!(commands.to_fetch(&place, now), [Target::Channel(CHANNEL), Target::User]);
-        assert!(commands.to_fetch(&place, now).is_empty(), "both are under way");
+        assert_eq!(commands.to_fetch(&place, now, Offer::ALL, ""), [Target::Channel(CHANNEL), Target::User]);
+        assert!(commands.to_fetch(&place, now, Offer::ALL, "").is_empty(), "both are under way");
     }
 
     #[test]
@@ -2215,15 +3184,18 @@ mod tests {
         let error = run_options(command, &values, &Nobody, &Autocompleted::default(), None).unwrap_err();
         assert!(error.contains("@nobody"));
         let option = &command.options[0];
-        assert_eq!(validate(option, "@nobody", &Nobody, &Autocompleted::default()), Err("Not a valid user.".into()));
-        assert_eq!(validate(option, "@ann", &Known, &Autocompleted::default()), Ok(()));
         assert_eq!(
-            validate(option, "600000000000000001", &Nobody, &Autocompleted::default()),
+            validate(option, Some("@nobody"), false, &Nobody, &Autocompleted::default()),
+            Err("Not a valid user.".into())
+        );
+        assert_eq!(validate(option, Some("@ann"), false, &Known, &Autocompleted::default()), Ok(()));
+        assert_eq!(
+            validate(option, Some("600000000000000001"), false, &Nobody, &Autocompleted::default()),
             Ok(()),
             "an id is always fine"
         );
         assert_eq!(
-            validate(option, "", &Known, &Autocompleted::default()),
+            validate(option, Some(""), false, &Known, &Autocompleted::default()),
             Err("This option is required. Specify a value.".into())
         );
     }
@@ -2254,6 +3226,8 @@ mod tests {
             max_value: None,
             min_length: None,
             max_length: None,
+            channel_types: None,
+            file_types: Vec::new(),
         }
     }
 
@@ -2261,29 +3235,300 @@ mod tests {
     fn values_are_checked_as_the_client_checks_them() {
         use option_type::*;
         let auto = Autocompleted::default();
-        let check = |o: &CommandOption, t: &str| validate(o, t, &Nobody, &auto);
+        let check = |o: &CommandOption, t: &str| validate(o, Some(t), false, &Nobody, &auto);
         assert_eq!(check(&option(BOOLEAN), "TRUE"), Ok(()));
         assert_eq!(check(&option(BOOLEAN), "yes"), Err("Pick either true or false.".into()));
         let mut count = option(INTEGER);
         (count.min_value, count.max_value) = (Some(1.0), Some(10.0));
         assert_eq!(check(&count, "5"), Ok(()));
         assert_eq!(check(&count, "5.5"), Err("Input a valid integer.".into()));
-        assert_eq!(check(&count, "11"), Err("Enter a number between 1 and 10".into()));
-        assert_eq!(check(&count, "0"), Err("Enter a number between 1 and 10".into()));
+        assert_eq!(check(&count, "11"), Err("Enter a number between 1 and 10.".into()));
+        assert_eq!(check(&count, "0"), Err("Enter a number between 1 and 10.".into()));
         let mut ratio = option(NUMBER);
         ratio.min_value = Some(0.5);
-        assert_eq!(check(&ratio, "0.25"), Err("Enter a number greater than or equal to 0.5".into()));
+        assert_eq!(check(&ratio, "0.25"), Err("Enter a number greater than or equal to 0.5.".into()));
         assert_eq!(check(&ratio, "abc"), Err("Input a valid number.".into()));
+        (ratio.min_value, ratio.max_value) = (None, Some(10.0));
+        assert_eq!(check(&ratio, "11"), Err("Enter a number less than or equal to 10.".into()));
         let mut text = option(STRING);
         (text.min_length, text.max_length) = (Some(2), Some(4));
-        assert_eq!(check(&text, "a"), Err("Enter between 2 and 4".into()));
+        assert_eq!(check(&text, "a"), Err("Enter between 2 and 4 characters.".into()));
         assert_eq!(check(&text, "abcd"), Ok(()));
         text.min_length = Some(4);
-        assert_eq!(check(&text, "abc"), Err("Enter 4".into()));
+        assert_eq!(check(&text, "abc"), Err("Enter 4 characters.".into()));
+        text.min_length = None;
+        assert_eq!(check(&text, "abcde"), Err("Enter 4 or fewer characters.".into()));
+        (text.min_length, text.max_length) = (Some(2), None);
+        assert_eq!(check(&text, "a"), Err("Enter 2 or more characters.".into()));
         let mut picked = option(STRING);
         picked.choices = Some(vec![Choice { name: "One".into(), value: json!("1") }]);
         assert_eq!(check(&picked, "One"), Ok(()));
         assert_eq!(check(&picked, "1"), Err("Not a valid choice.".into()), "the name is what is typed");
+    }
+
+    #[test]
+    fn a_missing_option_an_empty_one_and_one_not_yet_left() {
+        let auto = Autocompleted::default();
+        let check = |o: &CommandOption, content, allow_empty| validate(o, content, allow_empty, &Nobody, &auto);
+        let mut count = option(option_type::INTEGER);
+        assert_eq!(check(&count, None, false), Ok(()), "an optional option without a pill");
+        assert_eq!(check(&count, Some(" "), false), Err("Input a valid integer.".into()), "empty, as its type");
+        assert_eq!(check(&count, Some(""), true), Ok(()), "as a command starts");
+        count.required = true;
+        assert_eq!(check(&count, None, false), Err("This option is required. Specify a value.".into()));
+        assert_eq!(check(&count, Some(""), false), Err("This option is required. Specify a value.".into()));
+        assert_eq!(check(&count, Some(""), true), Ok(()));
+        let mut size = option(option_type::STRING);
+        size.choices = Some(vec![Choice { name: "D6".into(), value: json!("6") }]);
+        assert_eq!(check(&size, Some(""), false), Err("Not a valid choice.".into()), "choices before the type");
+        for (kind, words) in [
+            (option_type::BOOLEAN, "Pick either true or false."),
+            (option_type::CHANNEL, "Not a valid channel."),
+            (option_type::NUMBER, "Input a valid number."),
+            (option_type::ROLE, "Not a valid role."),
+            (option_type::USER, "Not a valid user."),
+            (option_type::MENTIONABLE, "Not a valid user or role."),
+            (option_type::STRING, "Not a valid value."),
+        ] {
+            assert_eq!(type_error(&option(kind)), words);
+        }
+    }
+
+    #[test]
+    fn a_picked_mention_names_its_id() {
+        use option_type::*;
+        let id = Some(Snowflake(600_000_000_000_000_009));
+        assert_eq!(resolve(USER, "<@600000000000000009>", &Nobody), id);
+        assert_eq!(resolve(USER, "<@!600000000000000009>", &Nobody), id);
+        assert_eq!(resolve(ROLE, "<@&600000000000000009>", &Nobody), id);
+        assert_eq!(resolve(MENTIONABLE, "<@600000000000000009>", &Nobody), id);
+        assert_eq!(resolve(MENTIONABLE, "<@&600000000000000009>", &Nobody), id);
+        assert_eq!(resolve(CHANNEL, "<#600000000000000009>", &Nobody), id);
+        assert_eq!(resolve(USER, "<@&600000000000000009>", &Nobody), None, "a role isn't a user");
+        assert_eq!(resolve(ROLE, "<@600000000000000009>", &Nobody), None);
+        assert_eq!(resolve(CHANNEL, "<@600000000000000009>", &Nobody), None);
+        assert_eq!(resolve(USER, "<@nope>", &Nobody), None);
+        let auto = Autocompleted::default();
+        assert_eq!(validate(&option(USER), Some("<@600000000000000009>"), false, &Nobody, &auto), Ok(()));
+    }
+
+    #[test]
+    fn choices_match_as_the_client_scores_them() {
+        let choices: Vec<Choice> = ["apple pie", "Pineapple", "apple", "grape", "pie apple", "papaya"]
+            .into_iter()
+            .map(|n| Choice { name: n.into(), value: json!(n) })
+            .collect();
+        let names = |query| match_choices(&choices, query).into_iter().map(|c| c.name.as_str()).collect::<Vec<_>>();
+        // Exact 10, starts 7, contains 5, each word 3, letters in order 1; equals in order.
+        assert_eq!(names("apple"), ["apple", "apple pie", "Pineapple", "pie apple"]);
+        assert_eq!(names("APPLE PIE"), ["apple pie", "pie apple"]);
+        assert_eq!(names("pp"), ["apple pie", "Pineapple", "apple", "pie apple", "papaya"], "papaya by its letters");
+        assert_eq!(names("ppy"), ["papaya"]);
+        assert_eq!(names(""), ["apple pie", "Pineapple", "apple", "grape", "pie apple", "papaya"], "all, in order");
+        assert_eq!(boolean_choices().map(|c| c.name), ["True", "False"]);
+    }
+
+    #[test]
+    fn the_first_row_is_selected_as_a_list_shows_and_again_for_a_new_query() {
+        let mut selection = Selection::default();
+        selection.listed("choices", Focus::Auto, "", true, 0);
+        assert_eq!(selection.selected(), None, "none while loading");
+        selection.listed("choices", Focus::Auto, "", false, 3);
+        assert_eq!(selection.selected(), Some(0));
+        selection.moved(1, 3);
+        selection.listed("choices", Focus::Auto, "", false, 3);
+        assert_eq!(selection.selected(), Some(1), "kept while only the rows change");
+        selection.listed("choices", Focus::Auto, "", false, 1);
+        assert_eq!(selection.selected(), Some(0), "clamped");
+        selection.listed("choices", Focus::Auto, "a", false, 1);
+        assert_eq!(selection.selected(), Some(0), "a new query");
+        // The options list waits for typing.
+        selection.listed("options", Focus::WhenFiltered, "", false, 2);
+        assert_eq!(selection.selected(), None);
+        assert_eq!(selection.key(true, 2), None, "Enter is the box's");
+        assert_eq!(selection.key(false, 2), Some(Pick::Selected), "Tab selects the first");
+        assert_eq!(selection.selected(), Some(0));
+        selection.listed("options", Focus::WhenFiltered, "c", false, 2);
+        assert_eq!(selection.selected(), Some(0));
+    }
+
+    #[test]
+    fn moving_wraps_and_enter_sends_while_tab_inserts() {
+        let mut selection = Selection::default();
+        selection.listed("gifs", Focus::Auto, "cat", false, 3);
+        selection.moved(-1, 3);
+        assert_eq!(selection.selected(), Some(2), "up from the first is the last");
+        selection.moved(1, 3);
+        assert_eq!(selection.selected(), Some(0), "down from the last is the first");
+        assert_eq!(selection.key(true, 3), Some(Pick::Send(0)));
+        assert_eq!(selection.key(false, 3), Some(Pick::Insert(0)));
+        assert_eq!(selection.key(true, 0), None, "a row that isn't there");
+        selection.hovered();
+        assert_eq!(selection.key(true, 3), None);
+        assert_eq!(selection.key(false, 3), None, "Tab takes nothing either");
+        selection.moved(1, 3);
+        assert_eq!(selection.selected(), Some(0));
+    }
+
+    #[test]
+    fn a_command_typed_whole_becomes_active() {
+        let commands = loaded(&index());
+        let typed = |text: &str| {
+            let (query, terminated) = query_of(text);
+            let found = commands.find(&place(), command_type::CHAT, &query);
+            typed_command(found, &query, terminated).map(|c| c.display_name.clone())
+        };
+        assert_eq!(typed("roll ").as_deref(), Some("roll"));
+        assert_eq!(typed("roll"), None, "not ended");
+        assert_eq!(typed("stats "), None, "two sub-commands start with it");
+        assert_eq!(typed("stats show ").as_deref(), Some("stats show"));
+        assert_eq!(typed("roll count:3").as_deref(), Some("roll"));
+        assert_eq!(typed("roll 3 size:D6"), None, "roll 3 names nothing");
+    }
+
+    #[test]
+    fn lengths_count_as_javascript_counts() {
+        let auto = Autocompleted::default();
+        let mut text = option(option_type::STRING);
+        text.max_length = Some(4);
+        assert_eq!(
+            validate(&text, Some("😀😀😀"), false, &Nobody, &auto),
+            Err("Enter 4 or fewer characters.".into()),
+            "three emoji are six UTF-16 units"
+        );
+        (text.min_length, text.max_length) = (Some(2), None);
+        assert_eq!(validate(&text, Some("😀"), false, &Nobody, &auto), Ok(()));
+    }
+
+    #[test]
+    fn limits_read_as_the_client_writes_them() {
+        // `toLocaleString` without grouping: at most three decimals, from the shortest form.
+        assert_eq!(plain(10.0), "10");
+        assert_eq!(plain(2.5), "2.5");
+        assert_eq!(plain(0.12345), "0.123");
+        assert_eq!(plain(1.0005), "1.001");
+        assert_eq!(plain(999.9999), "1000");
+        assert_eq!(plain(0.1 + 0.2), "0.3");
+        assert_eq!(plain(-0.0001), "-0");
+        assert_eq!(plain(-2.5), "-2.5");
+        let mut ratio = option(option_type::NUMBER);
+        ratio.min_value = Some(0.12345);
+        assert_eq!(
+            validate(&ratio, Some("0"), false, &Nobody, &Autocompleted::default()),
+            Err("Enter a number greater than or equal to 0.123.".into())
+        );
+    }
+
+    #[test]
+    fn the_focused_option_goes_out_as_typed() {
+        let commands = with(json!({"options": [
+            {"type": 3, "name": "fruit", "description": "Which", "required": true, "autocomplete": true},
+            {"type": 4, "name": "count", "description": "How many", "autocomplete": true},
+        ]}));
+        let found = commands.find(&place(), command_type::CHAT, "");
+        let command = found[0].command;
+        let values: Values = [("fruit".to_owned(), "ap ".to_owned()), ("count".to_owned(), " 3 ".to_owned())].into();
+        let asking = |focused| run_options(command, &values, &Nobody, &Autocompleted::default(), Some(focused));
+        assert_eq!(
+            asking("fruit").unwrap(),
+            [
+                json!({"type": 3, "name": "fruit", "value": "ap ", "focused": true}),
+                json!({"type": 4, "name": "count", "value": 3}),
+            ]
+        );
+        assert_eq!(
+            asking("count").unwrap(),
+            [
+                json!({"type": 3, "name": "fruit", "value": "ap"}),
+                json!({"type": 4, "name": "count", "value": " 3 ", "focused": true}),
+            ]
+        );
+    }
+
+    fn files_command(group: bool) -> CommandIndex {
+        let options = json!([
+            {"type": 11, "name": "a", "description": "", "required": true},
+            {"type": 3, "name": "note", "description": "", "autocomplete": true},
+            {"type": 11, "name": "b", "description": ""},
+            {"type": 11, "name": "c", "description": ""},
+        ]);
+        let options = if group {
+            json!([{"type": 2, "name": "files", "description": "", "options": [
+                {"type": 1, "name": "send", "description": "", "options": options}]}])
+        } else {
+            options
+        };
+        with(json!({ "options": options }))
+    }
+
+    #[test]
+    fn file_options_go_out_as_their_place_among_the_files() {
+        let values = |pairs: &[(&str, &str)]| -> Values {
+            pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+        };
+        let both = values(&[("c", "dog.png"), ("note", "x"), ("a", "cat.png"), ("b", "")]);
+        let commands = files_command(false);
+        let found = commands.find(&place(), command_type::CHAT, "");
+        let options = run_options(found[0].command, &both, &Nobody, &Autocompleted::default(), None).unwrap();
+        assert_eq!(
+            options,
+            [
+                json!({"type": 11, "name": "a", "value": 0}),
+                json!({"type": 3, "name": "note", "value": "x"}),
+                json!({"type": 11, "name": "c", "value": 1}),
+            ],
+            "b has no file and takes no number"
+        );
+        assert_eq!(file_options(&options), ["a", "c"]);
+        let only_c = values(&[("c", "dog.png")]);
+        let options = run_options(found[0].command, &only_c, &Nobody, &Autocompleted::default(), None).unwrap();
+        assert_eq!(options, [json!({"type": 11, "name": "c", "value": 0})]);
+        assert_eq!(file_options(&options), ["c"]);
+
+        let grouped = files_command(true);
+        let found = grouped.find(&place(), command_type::CHAT, "");
+        let options = run_options(found[0].command, &both, &Nobody, &Autocompleted::default(), None).unwrap();
+        assert_eq!(leaf_options(&options)[2], json!({"type": 11, "name": "c", "value": 1}));
+        assert_eq!(file_options(&options), ["a", "c"]);
+    }
+
+    #[test]
+    fn autocomplete_leaves_files_out() {
+        let commands = files_command(false);
+        let found = commands.find(&place(), command_type::CHAT, "");
+        let typed: Values = [("note".to_owned(), "he".to_owned())].into();
+        let mut with_file = typed.clone();
+        with_file.insert("a".into(), "cat.png".into());
+        let asking = |values: &Values| {
+            run_options(found[0].command, values, &Nobody, &Autocompleted::default(), Some("note")).unwrap()
+        };
+        assert!(asking(&with_file).iter().all(|o| o["type"] != 11));
+        assert_eq!(context_key(&asking(&with_file)), context_key(&asking(&typed)));
+    }
+
+    #[test]
+    fn a_file_option_is_valid_once_staged() {
+        let auto = Autocompleted::default();
+        let mut file = option(option_type::ATTACHMENT);
+        assert_eq!(validate(&file, None, false, &Nobody, &auto), Ok(()), "optional");
+        file.required = true;
+        assert_eq!(
+            validate(&file, None, false, &Nobody, &auto),
+            Err("This option is required. Specify a value.".into())
+        );
+        assert_eq!(validate(&file, Some("cat.png"), false, &Nobody, &auto), Ok(()));
+    }
+
+    #[test]
+    fn a_file_option_says_what_it_takes() {
+        let mut file = option(option_type::ATTACHMENT);
+        assert_eq!(file.file_prompt(), "Drag and drop or click to upload file");
+        assert!(file.takes_file("anything.bin"));
+        file.file_types = vec!["image".into(), ".pdf".into()];
+        assert_eq!(file.file_prompt(), "Drag and drop or click to upload image or .pdf file");
+        assert_eq!(file.file_types_words().as_deref(), Some("image or .pdf"));
+        assert!(file.takes_file("Scan.PDF") && file.takes_file("cat.webp") && !file.takes_file("notes.txt"));
+        assert_eq!(file.file_extensions()[0], "pdf");
     }
 
     #[test]
@@ -2308,8 +3553,9 @@ mod tests {
             session: "session",
             data,
             nonce: Snowflake(9),
+            from: RunFrom::CHAT,
         };
-        let body = run.body();
+        let body = run.body(&[]);
         assert_eq!(body["type"], 2);
         assert_eq!(body["application_id"], APP);
         assert_eq!(body["guild_id"], "100000000000000010");
@@ -2328,17 +3574,49 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["application_command", "guild_id", "id", "name", "options", "type", "version"]
+            ["application_command", "attachments", "guild_id", "id", "name", "options", "type", "version"]
                 .iter()
                 .filter(|k| **k != "guild_id")
                 .copied()
                 .collect::<Vec<_>>()
         );
         let dm = Run { guild: None, ..run };
-        assert!(dm.body().get("guild_id").is_none(), "a DM has none, not null");
+        assert!(dm.body(&[]).get("guild_id").is_none(), "a DM has none, not null");
         let asking = dm.autocomplete_body();
         assert_eq!(asking["type"], 4);
         assert!(asking.get("analytics_location").is_none());
+    }
+
+    #[test]
+    fn a_run_names_its_files_even_without_any() {
+        let commands = loaded(&index());
+        let place = place();
+        let run = |command: &Command, target| Run {
+            application: command.application,
+            guild: Some(GUILD_ID),
+            channel: CHANNEL,
+            session: "session",
+            data: command.data(Vec::new(), target),
+            nonce: Snowflake(9),
+            from: RunFrom::CHAT,
+        };
+        let (roll, _) = commands.get(&place, command_type::CHAT, "400000000000000001").unwrap();
+        assert_eq!(run(roll, None).body(&[])["data"]["attachments"], json!([]));
+        let (reroll, _) = commands.get(&place, command_type::MESSAGE, "400000000000000004").unwrap();
+        assert_eq!(run(reroll, Some(Snowflake(7))).body(&[])["data"]["attachments"], json!([]));
+        assert!(run(roll, None).autocomplete_body()["data"].get("attachments").is_none());
+        let file = Sent {
+            filename: "a.png",
+            uploaded_filename: "u/a.png",
+            description: None,
+            spoiler: false,
+            content_type: "image/png",
+            voice: None,
+        };
+        assert_eq!(
+            run(roll, None).body(&[file])["data"]["attachments"],
+            json!([{"id": "0", "filename": "a.png", "uploaded_filename": "u/a.png", "original_content_type": "image/png"}])
+        );
     }
 
     #[test]
@@ -2398,5 +3676,108 @@ mod tests {
         assert_eq!(reason_text(Some(2), None).as_deref(), Some("The application didn't respond in time"));
         assert_eq!(reason_text(Some(1), Some("Dicey")), None);
         assert_eq!(reason_text(None, None), None);
+    }
+
+    /// The built-ins beside the apps' commands, in the walk and the bare `/`.
+    mod built_ins {
+        use super::*;
+
+        fn all() -> Vec<Command> {
+            BuiltIn::ALL.into_iter().map(|b| b.command(2000)).collect()
+        }
+
+        fn listed(
+            commands: &CommandIndex,
+            place: &Place,
+            typed: &str,
+            offer: Offer,
+            builtins: &[Command],
+        ) -> Vec<String> {
+            suggestions(commands, place, typed, offer, builtins, &Used::default())
+                .iter()
+                .map(|f| f.command.display_name.clone())
+                .collect()
+        }
+
+        #[test]
+        fn built_ins_need_no_use_application_commands() {
+            let commands = loaded(&index());
+            let builtins = all();
+            let barred = Place { base_access: false, can_send: false, ..place() };
+            assert_eq!(listed(&commands, &barred, "shr", Offer::ALL, &builtins)[0], "shrug");
+            let found = suggestions(&commands, &barred, "roll", Offer::ALL, &builtins, &Used::default());
+            assert!(found.iter().all(|f| f.command.is_built_in()), "no app's");
+            assert_eq!(listed(&commands, &place(), "roll", Offer::ALL, &builtins)[0], "roll", "with the permission");
+        }
+
+        #[test]
+        fn a_reply_lists_only_the_built_ins_that_write_or_search() {
+            let commands = loaded(&index());
+            let builtins = all();
+            let found = listed(&commands, &place(), "", offer(true), &builtins);
+            assert_eq!(found, ["gif", "me", "shrug", "spoiler", "sticker", "tableflip", "tts", "unflip"]);
+            assert_eq!(listed(&commands, &place(), "kick", offer(true), &builtins), [""; 0]);
+            assert_eq!(listed(&commands, &place(), "kick", offer(false), &builtins), ["kick"]);
+        }
+
+        #[test]
+        fn a_word_of_built_in_lists_them_all() {
+            let commands = loaded(&index());
+            let builtins = all();
+            let query =
+                |text| Query { kind: command_type::CHAT, text, offer: Offer::ALL, builtins: &builtins, used: None };
+            let found: Vec<Found> =
+                commands.query(&place(), query("built")).into_iter().filter(|f| f.command.is_built_in()).collect();
+            assert_eq!(found.len(), BuiltIn::ALL.len());
+            assert!(found.iter().all(|f| f.score == 5 && f.app.name == "Built-In"));
+            let inside = commands.query(&place(), query("in"));
+            assert!(inside.iter().filter(|f| f.command.is_built_in()).all(|f| f.score <= 6));
+        }
+
+        #[test]
+        fn settled_keeps_built_ins() {
+            let commands = loaded(&index());
+            assert_eq!(listed(&commands, &place(), "shrug ", Offer::ALL, &all()), ["shrug"]);
+            assert_eq!(listed(&commands, &place(), "shrug message:hi", Offer::ALL, &all()), ["shrug"]);
+        }
+
+        fn titles(sections: &[Browsed<'_>]) -> Vec<String> {
+            sections.iter().map(|s| s.heading.title().to_owned()).collect()
+        }
+
+        fn shown<'a>(section: &Browsed<'a>) -> Vec<&'a str> {
+            names(&section.commands)
+        }
+
+        #[test]
+        fn a_bare_slash_lists_each_app_then_the_built_ins() {
+            let commands = loaded(&index());
+            let builtins = vec![BuiltIn::Spoiler.command(2000), BuiltIn::Gif.command(2000), BuiltIn::Me.command(2000)];
+            let sections = browse(&commands, &place(), Offer::ALL, &builtins, &Used::default());
+            assert_eq!(titles(&sections), ["Dicey", "Built-In"]);
+            assert_eq!(shown(&sections[0]), ["roll", "stats reset all", "stats show"]);
+            assert_eq!(shown(&sections[1]), ["gif", "me", "spoiler"], "by name");
+            assert_eq!(sections[1].commands[0].app.name, "Built-In");
+            // While replying, only the built-ins.
+            let replying = browse(&commands, &place(), offer(true), &builtins, &Used::default());
+            assert_eq!(titles(&replying), ["Built-In"]);
+        }
+
+        #[test]
+        fn the_most_used_come_first_and_stay_in_their_section() {
+            let commands = loaded(&index());
+            let builtins = vec![BuiltIn::Shrug.command(2000), BuiltIn::Gif.command(2000)];
+            let used = used(&[("-1", 4.0), ("400000000000000002\0show", 9.0)], &["-1", "400000000000000002\0show"]);
+            let sections = browse(&commands, &place(), Offer::ALL, &builtins, &used);
+            assert_eq!(titles(&sections), ["Frequently Used", "Dicey", "Built-In"]);
+            assert_eq!(shown(&sections[0]), ["stats show", "shrug"], "by score");
+            assert_eq!(sections[0].commands[1].app.name, "Built-In");
+            assert_eq!(shown(&sections[2]), ["gif", "shrug"]);
+            // Nothing used here: no section.
+            assert_eq!(
+                titles(&browse(&commands, &place(), Offer::ALL, &builtins, &Used::default())),
+                ["Dicey", "Built-In"]
+            );
+        }
     }
 }

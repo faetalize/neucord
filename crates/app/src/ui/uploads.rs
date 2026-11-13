@@ -79,8 +79,10 @@ struct Row {
     root: gtk::Box,
     name: gtk::Label,
     state: gtk::Label,
-    spoiler: gtk::ToggleButton,
-    edit: gtk::Button,
+    /// A message's files only: a command's or a form's have neither
+    /// (`canEdit: !1` in 914905).
+    spoiler: Option<gtk::ToggleButton>,
+    edit: Option<gtk::Button>,
     remove: gtk::Button,
 }
 
@@ -116,7 +118,7 @@ impl Upload {
     }
 
     /// Wait until the upload has ended, and say with what.
-    async fn ended(&self) -> Result<String, String> {
+    pub(super) async fn ended(&self) -> Result<String, String> {
         loop {
             match &*self.status.borrow() {
                 Status::Done(uploaded) => return Ok(uploaded.clone()),
@@ -133,7 +135,12 @@ impl Upload {
     /// Stop the upload, and take back what it has made: Discord holds a
     /// finished upload until a message names it, and the client says it's
     /// no longer wanted.
-    fn cancel(&self, rest: Option<Rest>) {
+    /// The file's name, as a command's file pill shows it.
+    pub(super) fn name(&self) -> String {
+        self.file.borrow().filename.clone()
+    }
+
+    pub(super) fn cancel(&self, rest: Option<Rest>) {
         if let Some(task) = self.task.take() {
             task.abort();
         }
@@ -146,11 +153,61 @@ impl Upload {
 
     fn lock(&self, locked: bool) {
         let row = &self.row;
-        for button in [&row.edit, &row.remove] {
+        for button in row.edit.iter().chain([&row.remove]) {
             button.set_sensitive(!locked);
         }
-        row.spoiler.set_sensitive(!locked);
+        if let Some(spoiler) = &row.spoiler {
+            spoiler.set_sensitive(!locked);
+        }
     }
+
+    /// Its row, to put where it shows.
+    pub(super) fn row(&self) -> &gtk::Box {
+        &self.row.root
+    }
+}
+
+/// Wait for every one of `files` to be uploaded, and say what Discord keeps
+/// each by, or fail as soon as one has failed or been taken back, without
+/// trying any again: 358579's `A` without its second argument, under a
+/// `Promise.all`. The others go on.
+pub(super) async fn staged(files: &[Rc<Upload>]) -> Result<Vec<String>, ()> {
+    loop {
+        let mut uploaded = Vec::new();
+        for upload in files {
+            match &*upload.status.borrow() {
+                Status::Done(name) => uploaded.push(name.clone()),
+                Status::Failed(..) | Status::Canceled => return Err(()),
+                Status::Uploading(_) => {}
+            }
+        }
+        if uploaded.len() == files.len() {
+            return Ok(uploaded);
+        }
+        let (tx, rx) = async_channel::bounded(files.len());
+        for upload in files.iter().filter(|u| matches!(*u.status.borrow(), Status::Uploading(_))) {
+            upload.waiting.borrow_mut().push(tx.clone());
+        }
+        drop(tx);
+        let _ = rx.recv().await;
+    }
+}
+
+/// The file at `path`, as a browser's `File` would give it: its name, size
+/// and the type its name says. A folder is no file: like an empty one, it
+/// has nothing to send.
+pub(super) async fn file_at(path: gio::File) -> Option<File> {
+    let attributes = "standard::name,standard::size,standard::type";
+    let info = path.query_info_future(attributes, gio::FileQueryInfoFlags::NONE, glib::Priority::DEFAULT).await.ok()?;
+    let name = info.name().to_string_lossy().into_owned();
+    let size = if info.file_type() == gio::FileType::Regular { info.size().max(0) as u64 } else { 0 };
+    Some(File {
+        content_type: uploads::content_type(&name),
+        filename: name,
+        size,
+        data: Data::File(path),
+        original_md5: None,
+    })
 }
 
 /// A message waiting on its files.
@@ -168,9 +225,25 @@ impl Sending {
     }
 }
 
+/// A file added to an app's form: its channel's `InteractionModal` draft
+/// in the client, under the form's `custom_id` (257249 `R`).
+pub(super) struct FormUpload {
+    pub(super) channel: Snowflake,
+    pub(super) custom_id: String,
+    /// What the field's state names it by.
+    pub(super) id: String,
+    pub(super) upload: Rc<Upload>,
+}
+
 /// What the message box has attached, by channel, and the tray showing it.
 pub(super) struct Drafts {
     files: RefCell<HashMap<Snowflake, Vec<Rc<Upload>>>>,
+    /// Forms' files, kept across closing and reopening until a submit
+    /// succeeds, in the order they were added.
+    pub(super) forms: RefCell<Vec<FormUpload>>,
+    /// A command's files while its run waits on them, which ending the
+    /// command leaves going.
+    pub(super) commands: RefCell<Vec<Rc<Upload>>>,
     /// Channels with a message waiting on its files.
     sending: RefCell<HashMap<Snowflake, Rc<Sending>>>,
     tray: gtk::Box,
@@ -199,6 +272,8 @@ impl Drafts {
         };
         Drafts {
             files: RefCell::default(),
+            forms: RefCell::default(),
+            commands: RefCell::default(),
             sending: RefCell::default(),
             tray: gtk::Box::builder().orientation(gtk::Orientation::Vertical).visible(false).build(),
             attach: attach_button(),
@@ -236,14 +311,16 @@ pub(super) struct Outgoing<'a> {
     pub(super) sticker: Option<Snowflake>,
     /// An ISO 8601 time, for a message Discord posts then, not now.
     pub(super) at: Option<&'a str>,
+    /// Read aloud (`/tts`). A scheduled message carries no `tts`.
+    pub(super) tts: bool,
 }
 
 /// Post the message with `sent`, uploaded already, or have Discord post it later.
 async fn post(rest: &Rest, channel: Snowflake, message: &Outgoing<'_>, sent: &[Sent<'_>]) -> Result<(), Stopped> {
-    let Outgoing { text, reply, sticker, at } = *message;
+    let Outgoing { text, reply, sticker, at, tts } = *message;
     match at {
         // The gateway echoes a message back, which is what adds it to the list; a scheduled one isn't posted yet.
-        None => rest.send_message(channel, text, reply, sent, sticker).await.map(drop),
+        None => rest.send_message(channel, text, reply, sent, sticker, tts).await.map(drop),
         Some(at) => rest.schedule_message(channel, at, text, reply, sent, sticker, None).await,
     }
     .map_err(Stopped::Send)
@@ -251,14 +328,14 @@ async fn post(rest: &Rest, channel: Snowflake, message: &Outgoing<'_>, sent: &[S
 
 /// What a message calls its files, which the edit dialog may have changed:
 /// [`Sent`] borrows it.
-struct Details {
+pub(super) struct Details {
     names: Vec<String>,
     descriptions: Vec<Option<String>>,
     types: Vec<String>,
 }
 
 impl Details {
-    fn of(files: &[Rc<Upload>]) -> Self {
+    pub(super) fn of(files: &[Rc<Upload>]) -> Self {
         let (names, descriptions) =
             files.iter().map(|u| (u.name.borrow().clone(), u.description.borrow().clone())).unzip();
         let types = files.iter().map(|u| u.file.borrow().content_type.clone()).collect();
@@ -266,7 +343,7 @@ impl Details {
     }
 
     /// `files` as the message names them, by what Discord keeps each as.
-    fn sent<'a>(&'a self, files: &[Rc<Upload>], uploaded: &'a [String]) -> Vec<Sent<'a>> {
+    pub(super) fn sent<'a>(&'a self, files: &[Rc<Upload>], uploaded: &'a [String]) -> Vec<Sent<'a>> {
         files
             .iter()
             .enumerate()
@@ -280,6 +357,50 @@ impl Details {
             })
             .collect()
     }
+}
+
+/// An upload of `file` and its row, not started.
+fn upload_of(
+    channel: Snowflake,
+    file: File,
+    spoiler: Option<gtk::ToggleButton>,
+    edit: Option<gtk::Button>,
+    remove: &str,
+) -> Rc<Upload> {
+    let root = gtk::Box::builder().spacing(8).margin_start(12).margin_top(4).margin_bottom(4).build();
+    let name = gtk::Label::builder()
+        .label(&file.filename)
+        .xalign(0.0)
+        .hexpand(true)
+        .ellipsize(gtk::pango::EllipsizeMode::Middle)
+        .build();
+    let state = gtk::Label::builder().css_classes(["dim-label"]).ellipsize(gtk::pango::EllipsizeMode::End).build();
+    let remove =
+        gtk::Button::builder().icon_name("window-close-symbolic").tooltip_text(remove).css_classes(["flat"]).build();
+    root.append(&name);
+    root.append(&state);
+    if let Some(spoiler) = &spoiler {
+        root.append(spoiler);
+    }
+    if let Some(edit) = &edit {
+        root.append(edit);
+    }
+    root.append(&remove);
+    let upload = Rc::new(Upload {
+        channel,
+        name: RefCell::new(file.filename.clone()),
+        file: RefCell::new(file),
+        optimized: Cell::new(false),
+        spoiler: Cell::new(false),
+        description: RefCell::default(),
+        status: RefCell::new(Status::Uploading(0)),
+        attempts: Rc::default(),
+        task: RefCell::default(),
+        waiting: RefCell::default(),
+        row: Row { root, name, state, spoiler, edit, remove },
+    });
+    upload.set_status(Status::Uploading(0));
+    upload
 }
 
 impl App {
@@ -306,13 +427,15 @@ impl App {
         let drafts = &self.drafts;
         let channel = self.attach_channel();
         // The menu holds more than files: it shows wherever anything in it does.
+        // A command's app icon takes its place (`eY` in 699344).
         drafts.attach.set_visible(
-            channel.is_some()
+            (channel.is_some()
                 || self.voice_channel().is_some()
                 || self.poll_channel().is_some()
                 || self.schedule_channel().is_some()
                 || self.thread_channel().is_some()
-                || self.apps_channel().is_some(),
+                || self.apps_channel().is_some())
+                && !self.slash.is_active(),
         );
         self.refresh_schedule_bar();
         while let Some(child) = drafts.tray.first_child() {
@@ -328,7 +451,8 @@ impl App {
             upload.lock(sending.as_ref().is_some_and(|s| s.has(upload)));
             drafts.tray.append(&upload.row.root);
         }
-        drafts.tray.set_visible(!files.is_empty());
+        // A command in the box takes the tray's place (102077).
+        drafts.tray.set_visible(!files.is_empty() && !self.slash.is_active());
         self.refresh_stickers();
         self.refresh_voice();
         self.refresh_post_files();
@@ -392,8 +516,13 @@ impl App {
             let this = Rc::downgrade(self);
             move |view| {
                 let Some(this) = this.upgrade() else { return };
-                let Some((pasted, _)) = this.composer_paste() else { return };
-                if pasted != Pasted::Text {
+                // With a command in the box, a file goes to its file option (84046),
+                // which takes one without Attach Files (`nS` in 989161).
+                let pasted = match this.slash.is_active() {
+                    true => Some(this.clipboard_pasted().0),
+                    false => this.composer_paste().map(|(pasted, _)| pasted),
+                };
+                if let Some(pasted) = pasted.filter(|p| *p != Pasted::Text) {
                     view.stop_signal_emission_by_name("paste-clipboard");
                     this.paste_files(pasted == Pasted::Files);
                 }
@@ -406,10 +535,15 @@ impl App {
     /// pastes text alone.
     fn composer_paste(&self) -> Option<(Pasted, bool)> {
         self.attach_channel()?;
+        Some(self.clipboard_pasted())
+    }
+
+    /// What a paste of the clipboard holds, and whether it holds text.
+    fn clipboard_pasted(&self) -> (Pasted, bool) {
         let formats = self.composer.clipboard().formats();
         let text = formats.contains_type(glib::Type::STRING);
         let files = formats.contains_type(gdk::FileList::static_type());
-        Some((pasted(files, formats.contains_type(gdk::Texture::static_type()), text), text))
+        (pasted(files, formats.contains_type(gdk::Texture::static_type()), text), text)
     }
 
     /// Let the menu's Paste attach the image or files on the clipboard, as
@@ -448,7 +582,8 @@ impl App {
         let target = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
         target.connect_accept({
             let this = Rc::downgrade(self);
-            move |_, _| this.upgrade().is_some_and(|this| this.attach_channel().is_some())
+            // Not while a command is in the box, whose own boxes take files (738876).
+            move |_, _| this.upgrade().is_some_and(|this| this.attach_channel().is_some() && !this.slash.is_active())
         });
         target.connect_drop({
             let this = Rc::downgrade(self);
@@ -487,7 +622,11 @@ impl App {
     }
 
     fn paste_files(self: &Rc<Self>, files: bool) {
-        let Some(channel) = self.attach_channel() else { return };
+        let command = self.slash.is_active();
+        let channel = self.attach_channel();
+        if !command && channel.is_none() {
+            return;
+        }
         let clipboard = self.composer.clipboard();
         let this = self.clone();
         glib::spawn_future_local(async move {
@@ -497,8 +636,19 @@ impl App {
                 else {
                     return;
                 };
-                if let Ok(list) = value.get::<gdk::FileList>() {
-                    this.add_paths(channel, list.files()).await;
+                let Ok(list) = value.get::<gdk::FileList>() else { return };
+                match (command, channel) {
+                    (true, _) => {
+                        let first = list.files().into_iter().next();
+                        if let Some(file) = match first {
+                            Some(path) => file_at(path).await,
+                            None => None,
+                        } {
+                            this.paste_command_file(file);
+                        }
+                    }
+                    (false, Some(channel)) => this.add_paths(channel, list.files()).await,
+                    (false, None) => {}
                 }
             } else if let Ok(Some(texture)) = clipboard.read_texture_future().await {
                 let bytes = texture.save_to_png_bytes();
@@ -509,28 +659,30 @@ impl App {
                     data: Data::Memory(bytes),
                     original_md5: None,
                 };
-                this.add_files(channel, vec![image]).await;
+                match (command, channel) {
+                    (true, _) => this.paste_command_file(image),
+                    (false, Some(channel)) => this.add_files(channel, vec![image]).await,
+                    (false, None) => {}
+                }
             }
         });
+    }
+
+    /// Forget the message's files in `channel` as a command takes the box
+    /// (102077's `clearAll`): uploads stop, and nothing is asked of Discord.
+    pub(super) fn forget_message_files(self: &Rc<Self>, channel: Snowflake) {
+        let files = self.drafts.files.borrow_mut().remove(&channel).unwrap_or_default();
+        for upload in files {
+            upload.cancel(None);
+        }
+        self.refresh_attach();
     }
 
     /// Add what `paths` hold.
     pub(super) async fn add_paths(self: &Rc<Self>, channel: Snowflake, paths: Vec<gio::File>) {
         let mut files = Vec::new();
         for path in paths {
-            let attributes = "standard::name,standard::size,standard::type";
-            let info = path.query_info_future(attributes, gio::FileQueryInfoFlags::NONE, glib::Priority::DEFAULT).await;
-            let Ok(info) = info else { continue };
-            let name = info.name().to_string_lossy().into_owned();
-            // A folder is no file; like an empty one, there is nothing to send.
-            let size = if info.file_type() == gio::FileType::Regular { info.size().max(0) as u64 } else { 0 };
-            files.push(File {
-                content_type: uploads::content_type(&name),
-                filename: name,
-                size,
-                data: Data::File(path),
-                original_md5: None,
-            });
+            files.extend(file_at(path).await);
         }
         self.add_files(channel, files).await;
     }
@@ -588,14 +740,6 @@ impl App {
     }
 
     fn new_upload(self: &Rc<Self>, channel: Snowflake, file: File) -> Rc<Upload> {
-        let root = gtk::Box::builder().spacing(8).margin_start(12).margin_top(4).margin_bottom(4).build();
-        let name = gtk::Label::builder()
-            .label(&file.filename)
-            .xalign(0.0)
-            .hexpand(true)
-            .ellipsize(gtk::pango::EllipsizeMode::Middle)
-            .build();
-        let state = gtk::Label::builder().css_classes(["dim-label"]).ellipsize(gtk::pango::EllipsizeMode::End).build();
         let spoiler = gtk::ToggleButton::builder()
             .icon_name("view-conceal-symbolic")
             .tooltip_text("Mark as spoiler")
@@ -606,37 +750,17 @@ impl App {
             .tooltip_text("Edit")
             .css_classes(["flat"])
             .build();
-        let remove = gtk::Button::builder()
-            .icon_name("window-close-symbolic")
-            .tooltip_text("Remove")
-            .css_classes(["flat"])
-            .build();
-        for widget in [name.upcast_ref::<gtk::Widget>(), state.upcast_ref(), spoiler.upcast_ref(), edit.upcast_ref()] {
-            root.append(widget);
-        }
-        root.append(&remove);
-        let upload = Rc::new(Upload {
-            channel,
-            name: RefCell::new(file.filename.clone()),
-            file: RefCell::new(file),
-            optimized: Cell::new(false),
-            spoiler: Cell::new(false),
-            description: RefCell::default(),
-            status: RefCell::new(Status::Uploading(0)),
-            attempts: Rc::default(),
-            task: RefCell::default(),
-            waiting: RefCell::default(),
-            row: Row { root, name, state, spoiler, edit, remove },
-        });
-        upload.set_status(Status::Uploading(0));
-        upload.row.spoiler.connect_toggled({
-            let upload = Rc::downgrade(&upload);
-            move |button| {
-                if let Some(upload) = upload.upgrade() {
-                    upload.spoiler.set(button.is_active());
+        let upload = upload_of(channel, file, Some(spoiler), Some(edit), "Remove");
+        if let Some(spoiler) = &upload.row.spoiler {
+            spoiler.connect_toggled({
+                let upload = Rc::downgrade(&upload);
+                move |button| {
+                    if let Some(upload) = upload.upgrade() {
+                        upload.spoiler.set(button.is_active());
+                    }
                 }
-            }
-        });
+            });
+        }
         upload.row.remove.connect_clicked({
             let (this, upload) = (Rc::downgrade(self), Rc::downgrade(&upload));
             move |_| {
@@ -645,14 +769,68 @@ impl App {
                 }
             }
         });
-        upload.row.edit.connect_clicked({
-            let (this, upload) = (Rc::downgrade(self), Rc::downgrade(&upload));
-            move |_| {
-                if let (Some(this), Some(upload)) = (this.upgrade(), upload.upgrade()) {
-                    this.edit_upload(&upload);
+        if let Some(edit) = &upload.row.edit {
+            edit.connect_clicked({
+                let (this, upload) = (Rc::downgrade(self), Rc::downgrade(&upload));
+                move |_| {
+                    if let (Some(this), Some(upload)) = (this.upgrade(), upload.upgrade()) {
+                        this.edit_upload(&upload);
+                    }
                 }
-            }
-        });
+            });
+        }
+        upload
+    }
+
+    /// A command's or a form's file (`setFile` with `allowOptimization: !1`,
+    /// 102077 and 232430): never converted, with no spoiler or edit button,
+    /// and a remove button (tooltip `remove`) that calls `removed`, which
+    /// decides what taking it back does. Its upload starts at once, unless
+    /// `CloudUpload.upload` (48325) would turn it down before any request:
+    /// then it shows why and never asks. The client draws nothing for that;
+    /// the row's words are Neucord's and change no request.
+    pub(super) fn plain_upload(
+        self: &Rc<Self>,
+        channel: Snowflake,
+        file: File,
+        remove: &str,
+        removed: impl Fn() + 'static,
+    ) -> Rc<Upload> {
+        self.lone_upload(channel, file, remove, removed, false)
+    }
+
+    /// [`plain_upload`](Self::plain_upload) for a file pasted into a command,
+    /// which may be converted as a message's is (565150's default).
+    pub(super) fn pasted_upload(
+        self: &Rc<Self>,
+        channel: Snowflake,
+        file: File,
+        remove: &str,
+        removed: impl Fn() + 'static,
+    ) -> Rc<Upload> {
+        self.lone_upload(channel, file, remove, removed, true)
+    }
+
+    fn lone_upload(
+        self: &Rc<Self>,
+        channel: Snowflake,
+        file: File,
+        remove: &str,
+        removed: impl Fn() + 'static,
+        convert: bool,
+    ) -> Rc<Upload> {
+        let limits = {
+            let state = self.account.state.borrow();
+            state.limits().uploads(state.find_channel(channel).and_then(|(guild, _)| guild))
+        };
+        let checked = uploads::check_upload(&limits, file.size);
+        let upload = upload_of(channel, file, None, None, remove);
+        upload.optimized.set(!convert);
+        upload.row.remove.connect_clicked(move |_| removed());
+        match checked {
+            Ok(()) => self.start_upload(&upload),
+            Err(refusal) => upload.set_status(Status::Failed(refusal.body(), false)),
+        }
         upload
     }
 
@@ -895,6 +1073,9 @@ impl App {
     pub(super) fn discard_drafts(&self) {
         for upload in self.drafts.files.borrow().values().flatten() {
             upload.cancel(None);
+        }
+        for form in self.drafts.forms.take() {
+            form.upload.cancel(None);
         }
         self.drafts.files.borrow_mut().clear();
         self.drafts.sending.borrow_mut().clear();

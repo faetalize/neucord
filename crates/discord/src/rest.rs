@@ -11,6 +11,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use soup::prelude::*;
 
+use crate::builtins;
 use crate::commands::Target;
 use crate::endpoints::{Call, call};
 use crate::forum::Search;
@@ -186,11 +187,20 @@ struct Sending<'a> {
     original_md5: Option<&'a str>,
     /// `Authorization` is sent empty (see [`Rest::adding_account`]).
     blank_authorization: bool,
+    /// Why, for the server's audit log: `X-Audit-Log-Reason`, sent even
+    /// empty, as 620632 sets it for any reason that isn't null.
+    audit_log_reason: Option<&'a str>,
 }
 
 impl Default for Sending<'_> {
     fn default() -> Self {
-        Sending { retry_rate_limit: true, failed: 0, original_md5: None, blank_authorization: false }
+        Sending {
+            retry_rate_limit: true,
+            failed: 0,
+            original_md5: None,
+            blank_authorization: false,
+            audit_log_reason: None,
+        }
     }
 }
 
@@ -350,6 +360,12 @@ impl Rest {
         Ok(Gif::list(&answer))
     }
 
+    /// `/gif`'s search, with its own query ([`crate::gifs::command_query`]).
+    pub async fn gifs_command_search(&self, query: &str) -> Result<Vec<Gif>, Error> {
+        let answer: Value = self.request(call!(GIFS_SEARCH).query(&crate::gifs::command_query(query)), None).await?;
+        Ok(Gif::list(&answer))
+    }
+
     pub async fn gifs_suggest(&self, query: &str) -> Result<Vec<String>, Error> {
         let answer: Value =
             self.request(call!(GIFS_SUGGEST).query(&Request::Suggest(query.to_owned()).query()), None).await?;
@@ -365,7 +381,7 @@ impl Rest {
     }
 
     /// Post `content`, the uploaded `attachments` and a `sticker`, which
-    /// with any one of them may be all of it.
+    /// with any one of them may be all of it, read aloud with `tts`.
     pub async fn send_message(
         &self,
         channel: Snowflake,
@@ -373,8 +389,10 @@ impl Rest {
         reply: Option<Reply>,
         attachments: &[Sent<'_>],
         sticker: Option<Snowflake>,
+        tts: bool,
     ) -> Result<Message, Error> {
-        let body = message_body(channel, content, &Snowflake::now().to_string(), 0, reply, attachments, sticker);
+        let nonce = Snowflake::now().to_string();
+        let body = message_body(channel, content, &nonce, 0, reply, attachments, sticker, tts);
         self.request(call!(SEND_MESSAGE, channel), Some(body)).await
     }
 
@@ -387,7 +405,7 @@ impl Rest {
         recording: Sent<'_>,
     ) -> Result<Message, Error> {
         let flags = Message::IS_VOICE_MESSAGE;
-        let body = message_body(channel, "", &Snowflake::now().to_string(), flags, reply, &[recording], None);
+        let body = message_body(channel, "", &Snowflake::now().to_string(), flags, reply, &[recording], None, false);
         self.request(call!(SEND_MESSAGE, channel), Some(body)).await
     }
 
@@ -672,6 +690,35 @@ impl Rest {
         }
     }
 
+    /// Submit an app's form: `POST /interactions` with `body`
+    /// ([`crate::modal::Submit::body`]), as 969508 posts it, with no timeout
+    /// of its own (the form's 10 s is the caller's). A 429 sends the same
+    /// body again after its `retry_after`, as often as Discord says so, while
+    /// `in_flight()` (the client: until the form closes; Neucord also stops
+    /// once this nonce is no longer the submit in flight, so an old nonce
+    /// never goes again). Dropping the future aborts the request, as the
+    /// form's abort signal does. Whether Discord took it, which is all a
+    /// success means.
+    pub async fn submit_modal(&self, body: Value, in_flight: impl Fn() -> bool) -> bool {
+        loop {
+            let sending = Sending { retry_rate_limit: false, ..Sending::default() };
+            let Ok((status, response)) = self.send_with(call!(INTERACT), Some(body.clone()), sending).await else {
+                return false;
+            };
+            match status {
+                200..=299 => return true,
+                429 => {
+                    let after = serde_json::from_slice::<Value>(&response).ok().and_then(|b| b["retry_after"].as_f64());
+                    glib::timeout_future(Duration::from_secs_f64(after.unwrap_or(0.0).max(0.0))).await;
+                    if !in_flight() {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+    }
+
     /// Ask an app for choices to an option (`WL` in 721768): the same
     /// request, given three seconds, and its answer comes on the gateway.
     pub async fn autocomplete(&self, body: Value) -> Result<(), Failure> {
@@ -792,6 +839,50 @@ impl Rest {
         self.request(call!(OPEN_DM), Some(json!({ "recipients": [user] }))).await
     }
 
+    /// Set our nickname in `guild`, empty to reset it (/nick,
+    /// `changeNickname` in 715943): the nickname Discord answers with.
+    pub async fn change_nickname(&self, guild: Snowflake, nick: &str) -> Result<Option<String>, Error> {
+        let answer: Value = self.request(call!(CHANGE_NICKNAME, guild), Some(builtins::nick_body(nick))).await?;
+        Ok(answer["nick"].as_str().map(str::to_owned))
+    }
+
+    /// Kick `user` from `guild` (/kick, `kickUser` in 778858).
+    pub async fn kick(&self, guild: Snowflake, user: Snowflake, reason: &str) -> Result<(), Error> {
+        self.request(kick_call(guild, user, reason), None).await
+    }
+
+    /// Ban `user` from `guild`, deleting what they sent in the last
+    /// `delete_message_seconds` (/ban, `banUser` in 778858).
+    pub async fn ban(
+        &self,
+        guild: Snowflake,
+        user: Snowflake,
+        delete_message_seconds: u64,
+        reason: &str,
+    ) -> Result<(), Error> {
+        let body = builtins::ban_body(delete_message_seconds);
+        let sending = Sending { audit_log_reason: Some(reason), ..Sending::default() };
+        let (status, response) = self.send_with(call!(BAN_MEMBER, guild, user), Some(body), sending).await?;
+        Self::answer(status, &response)
+    }
+
+    /// Time `user` out in `guild` until `until`, ISO 8601 (/timeout,
+    /// `setCommunicationDisabledUntil` in 778858). Discord answers with the
+    /// member, which comes as an event too.
+    pub async fn time_out(&self, guild: Snowflake, user: Snowflake, until: &str, reason: &str) -> Result<(), Error> {
+        let body = builtins::timeout_body(until);
+        let sending = Sending { audit_log_reason: Some(reason), ..Sending::default() };
+        let (status, response) = self.send_with(call!(EDIT_MEMBER, guild, user), Some(body), sending).await?;
+        Self::answer::<Value>(status, &response).map(drop)
+    }
+
+    /// Leave the group DM `channel`, telling its members unless `silent`
+    /// (/leave, `closePrivateChannel` in 308528).
+    pub async fn leave_group(&self, channel: Snowflake, silent: bool) -> Result<(), Error> {
+        let _: Value = self.request(leave_group_call(channel, silent), None).await?;
+        Ok(())
+    }
+
     /// Send a friend request by username.
     pub async fn send_friend_request(&self, username: &str) -> Result<(), Error> {
         let body = json!({ "username": username, "discriminator": null });
@@ -844,12 +935,8 @@ impl Rest {
         failed: u32,
         original_md5: Option<&str>,
     ) -> Result<(u32, glib::Bytes), Error> {
-        self.send_with(
-            call,
-            body,
-            Sending { retry_rate_limit: false, failed, original_md5, blank_authorization: false },
-        )
-        .await
+        self.send_with(call, body, Sending { retry_rate_limit: false, failed, original_md5, ..Sending::default() })
+            .await
     }
 
     /// `PUT` to an upload URL, which is Google's and not Discord's: it takes
@@ -965,6 +1052,9 @@ impl Rest {
             if let Some(md5) = options.original_md5.filter(|md5| is_md5(md5)) {
                 headers.replace("X-Discord-Original-MD5", md5);
             }
+            if let Some(reason) = options.audit_log_reason {
+                headers.replace("X-Audit-Log-Reason", &builtins::audit_reason(reason));
+            }
             if let Some((key, captcha)) = &answer {
                 headers.replace("X-Captcha-Key", key);
                 if let Some(rqtoken) = &captcha.rqtoken {
@@ -1070,6 +1160,16 @@ fn remove_reaction_call(
     call!(REMOVE_REACTION, channel, message, emoji, user).query(&format!("location={location}&burst=false"))
 }
 
+/// /kick's request: its query always holds `reason`.
+fn kick_call(guild: Snowflake, user: Snowflake, reason: &str) -> Call {
+    call!(KICK_MEMBER, guild, user).query(&builtins::kick_query(reason))
+}
+
+/// /leave's request: its query always holds `silent`.
+fn leave_group_call(channel: Snowflake, silent: bool) -> Call {
+    call!(CLOSE_CHANNEL, channel).query(&builtins::leave_query(silent))
+}
+
 /// The request that joins a thread: `location` is its only query field.
 fn join_thread_call(thread: Snowflake, location: &str) -> Call {
     let location = glib::uri_escape_string(location, None::<&str>, false);
@@ -1106,7 +1206,15 @@ fn vote_body(answers: &[u32]) -> Value {
     json!({ "answer_ids": answers.iter().map(u32::to_string).collect::<Vec<_>>() })
 }
 
+/// Whether the message box holds nothing a message could carry: no text
+/// but spaces, no file and no sticker (`G` in 4025, which greys the send
+/// button; Enter sends nothing then either).
+pub fn nothing_to_send(text: &str, files: usize, sticker: bool) -> bool {
+    text.trim().is_empty() && files == 0 && !sticker
+}
+
 /// What sending a message sends, as `_sendMessage` in 138399 builds it.
+#[expect(clippy::too_many_arguments, reason = "the parts of one message")]
 fn message_body(
     channel: Snowflake,
     content: &str,
@@ -1115,11 +1223,12 @@ fn message_body(
     reply: Option<Reply>,
     attachments: &[Sent<'_>],
     sticker: Option<Snowflake>,
+    tts: bool,
 ) -> Value {
     let mut body = json!({
         "content": content,
         "nonce": nonce,
-        "tts": false,
+        "tts": tts,
         "flags": flags,
     });
     if let Some(reply) = reply {
@@ -1190,7 +1299,7 @@ fn edit_scheduled_body(content: &str, flags: u64) -> Value {
 
 /// What posting a poll sends: an empty message with the `poll`.
 fn poll_body(channel: Snowflake, nonce: &str, poll: Value) -> Value {
-    let mut body = message_body(channel, "", nonce, 0, None, &[], None);
+    let mut body = message_body(channel, "", nonce, 0, None, &[], None, false);
     body["poll"] = poll;
     body
 }
@@ -1263,8 +1372,8 @@ mod tests {
 
     use super::{
         Captcha, Page, Reply, ReplyPing, add_reaction_call, archived_threads_call, base_headers, create_post_call,
-        edit_body, edit_scheduled_body, is_md5, join_thread_call, leave_thread_call, message_body, poll_body,
-        rate_limit_wait, reactors_call, remove_reaction_call, save_answer, schedule_body, vote_body,
+        edit_body, edit_scheduled_body, is_md5, join_thread_call, leave_thread_call, message_body, nothing_to_send,
+        poll_body, rate_limit_wait, reactors_call, remove_reaction_call, save_answer, schedule_body, vote_body,
     };
     use crate::endpoints::call;
     use crate::model::Emoji;
@@ -1391,17 +1500,17 @@ mod tests {
             content_type: "image/png",
             voice: None,
         };
-        let body = message_body(Snowflake(9), "", "1", 0, None, &[sent("a.png"), sent("b.png")], None);
+        let body = message_body(Snowflake(9), "", "1", 0, None, &[sent("a.png"), sent("b.png")], None, false);
         assert_eq!(body["content"], "", "files alone are a message");
         assert_eq!(
             (body["attachments"][0]["id"].as_str(), body["attachments"][1]["id"].as_str()),
             (Some("0"), Some("1"))
         );
         assert_eq!(body["attachments"][1]["filename"], "b.png");
-        assert!(message_body(Snowflake(9), "hi", "1", 0, None, &[], None).get("attachments").is_none());
+        assert!(message_body(Snowflake(9), "hi", "1", 0, None, &[], None, false).get("attachments").is_none());
         // A reply to a message goes with the files.
         let reply = Reply { to: Snowflake(3), guild: None, ping: true };
-        let body = message_body(Snowflake(9), "hi", "1", 0, Some(reply), &[sent("a.png")], None);
+        let body = message_body(Snowflake(9), "hi", "1", 0, Some(reply), &[sent("a.png")], None, false);
         assert_eq!(body["message_reference"], json!({ "message_id": "3", "channel_id": "9" }));
         assert_eq!(body["attachments"].as_array().map(Vec::len), Some(1));
     }
@@ -1409,9 +1518,9 @@ mod tests {
     #[test]
     fn a_sticker_goes_by_id_alone_or_with_text_a_reply_and_files() {
         // `_sendMessage` (138399) adds `sticker_ids` to the same body, whatever else is in it.
-        let body = message_body(Snowflake(9), "", "1", 0, None, &[], Some(Snowflake(5)));
+        let body = message_body(Snowflake(9), "", "1", 0, None, &[], Some(Snowflake(5)), false);
         assert_eq!((body["content"].as_str(), body["sticker_ids"].clone()), (Some(""), json!(["5"])));
-        assert!(message_body(Snowflake(9), "", "1", 0, None, &[], None).get("sticker_ids").is_none());
+        assert!(message_body(Snowflake(9), "", "1", 0, None, &[], None, false).get("sticker_ids").is_none());
         let reply = Reply { to: Snowflake(3), guild: Some(Snowflake(2)), ping: false };
         let sent = Sent {
             filename: "a.png",
@@ -1421,7 +1530,7 @@ mod tests {
             content_type: "image/png",
             voice: None,
         };
-        let body = message_body(Snowflake(9), "hi", "1", 0, Some(reply), &[sent], Some(Snowflake(5)));
+        let body = message_body(Snowflake(9), "hi", "1", 0, Some(reply), &[sent], Some(Snowflake(5)), false);
         assert_eq!((body["content"].as_str(), body["sticker_ids"].clone()), (Some("hi"), json!(["5"])));
         assert_eq!(body["message_reference"]["message_id"], "3");
         assert_eq!(body["attachments"].as_array().map(Vec::len), Some(1));
@@ -1437,12 +1546,27 @@ mod tests {
             content_type: "audio/ogg",
             voice: Some(Voice { duration_secs: 3.0, waveform: "AAEC" }),
         };
-        let body = message_body(Snowflake(9), "", "1", Message::IS_VOICE_MESSAGE, None, &[recording], None);
+        let body = message_body(Snowflake(9), "", "1", Message::IS_VOICE_MESSAGE, None, &[recording], None, false);
         assert_eq!(body["flags"], 8192);
         assert_eq!(body["content"], "");
         assert_eq!(body["attachments"][0]["duration_secs"], 3.0);
         assert_eq!(body["attachments"][0]["waveform"], "AAEC");
-        assert_eq!(message_body(Snowflake(9), "hi", "1", 0, None, &[], None)["flags"], 0);
+        assert_eq!(message_body(Snowflake(9), "hi", "1", 0, None, &[], None, false)["flags"], 0);
+    }
+
+    #[test]
+    fn a_message_is_read_aloud_only_when_asked() {
+        assert_eq!(message_body(Snowflake(9), "hi", "1", 0, None, &[], None, false)["tts"], false);
+        assert_eq!(message_body(Snowflake(9), "hi", "1", 0, None, &[], None, true)["tts"], true);
+    }
+
+    #[test]
+    fn spaces_alone_are_nothing_to_send() {
+        assert!(nothing_to_send("", 0, false));
+        assert!(nothing_to_send(" \n\t ", 0, false));
+        assert!(!nothing_to_send(" hi ", 0, false));
+        assert!(!nothing_to_send("", 1, false), "a file alone goes");
+        assert!(!nothing_to_send("  ", 0, true), "a waiting sticker alone goes");
     }
 
     #[test]
@@ -1617,5 +1741,30 @@ mod tests {
         let other = save_answer(400, br#"{"code":50035}"#, None).unwrap_err();
         assert!(matches!(other, SaveError::Other(crate::Error::Http { status: 400, .. })));
         assert!(matches!(save_answer(500, b"", None).unwrap_err(), SaveError::Other(_)));
+    }
+}
+
+/// The built-ins' requests, apart from the shared tests' imports.
+#[cfg(test)]
+mod built_in_tests {
+    use super::*;
+
+    #[test]
+    fn the_built_ins_requests_read_like_the_clients() {
+        let (guild, user) = (Snowflake(5), Snowflake(6));
+        let nick = call!(CHANGE_NICKNAME, guild);
+        assert_eq!((nick.method(), nick.path()), ("PATCH", "/guilds/5/members/@me/nick"));
+        // `reason` is there even when none was typed.
+        let kick = kick_call(guild, user, "");
+        assert_eq!((kick.method(), kick.path()), ("DELETE", "/guilds/5/members/6?reason="));
+        assert_eq!(kick_call(guild, user, "spam & more").path(), "/guilds/5/members/6?reason=spam%20%26%20more");
+        let ban = call!(BAN_MEMBER, guild, user);
+        assert_eq!((ban.method(), ban.path()), ("PUT", "/guilds/5/bans/6"));
+        let timeout = call!(EDIT_MEMBER, guild, user);
+        assert_eq!((timeout.method(), timeout.path()), ("PATCH", "/guilds/5/members/6"));
+        let leave = leave_group_call(Snowflake(7), false);
+        assert_eq!((leave.method(), leave.path()), ("DELETE", "/channels/7?silent=false"));
+        assert_eq!(leave_group_call(Snowflake(7), true).path(), "/channels/7?silent=true");
+        assert_eq!(Sending::default().audit_log_reason, None, "only /ban and /timeout give a reason");
     }
 }

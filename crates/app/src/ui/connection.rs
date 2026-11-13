@@ -20,6 +20,7 @@ impl App {
     /// answered its requests.
     pub(super) fn leave_account(self: &Rc<Self>) -> Option<Rest> {
         let (rest, notified) = self.account.leave();
+        self.close_modal_forms();
         super::identity::end();
         self.withdraw_notifications(notified);
         // Folds it hadn't saved are not the next account's to send.
@@ -31,7 +32,8 @@ impl App {
         self.refresh_typing();
         self.set_reply(None);
         self.end_edit();
-        self.cancel_command();
+        self.close_launcher();
+        self.end_command(super::slash::Keep::Nothing);
         self.refresh_command_status();
         self.discard_drafts();
         rest
@@ -232,9 +234,14 @@ impl App {
                     self.on_threads(guild_id, |g| g.set_thread_member(thread, member))
                 }
                 Event::MemberUpdate { guild_id, member } => self.on_member(guild_id, member),
-                Event::Members { guild_id, members, not_found } => {
+                Event::Members { guild_id, members, not_found, users } => {
+                    let searched = !users.is_empty();
                     let (open, changed) = {
                         let mut state = self.account.state.borrow_mut();
+                        for user in users {
+                            state.users.entry(user.id.0).or_insert_with(|| user.display_name().to_owned());
+                            state.whole_users.insert(user.id.0, user);
+                        }
                         let changed = state.members.add(guild_id, members, &not_found);
                         (state.guild == Some(guild_id), changed)
                     };
@@ -242,6 +249,10 @@ impl App {
                     if open && changed {
                         self.refresh_rows();
                         self.refresh_member_rows();
+                    }
+                    // A pill's member list redraws as its search is answered.
+                    if open && searched {
+                        self.members_found();
                     }
                 }
                 Event::MemberList(update) => self.on_member_list(*update),
@@ -262,6 +273,7 @@ impl App {
                     if let Some(guild) = self.account.state.borrow_mut().guilds.iter_mut().find(|g| g.id == guild_id) {
                         guild.stickers = stickers;
                     }
+                    self.stickers_changed();
                 }
                 Event::RoleUpdate { guild_id, role } => {
                     if let Some(guild) = self.account.state.borrow_mut().guilds.iter_mut().find(|g| g.id == guild_id) {
@@ -289,7 +301,13 @@ impl App {
                 Event::TypingStart { channel_id, user_id, user } => self.on_typing(channel_id, user_id, user.as_ref()),
                 Event::MessageCreate(message) => self.on_message(*message),
                 Event::MessageUpdate(edit) => self.on_message_update(edit),
-                Event::Interaction { nonce, outcome, reason } => self.on_interaction(nonce, outcome, reason),
+                Event::Interaction { nonce, outcome, reason } => {
+                    // A form's submit first: the app's reply message ends no form.
+                    if !self.modal_answered(nonce, outcome) {
+                        self.on_interaction(nonce, outcome, reason);
+                    }
+                }
+                Event::Modal(modal) => self.on_modal(*modal),
                 Event::InteractionCreated { nonce } => self.command_created(nonce),
                 Event::Autocomplete { nonce, choices } => self.on_autocomplete(nonce, &choices),
                 Event::CommandIndexChanged { guild, version } => self.command_index_changed(guild, version),
@@ -466,6 +484,8 @@ impl App {
     pub(super) fn on_ready(self: &Rc<Self>, ready: Ready) {
         // A new session: what we hold for each channel may have missed events.
         self.account.timelines.borrow_mut().held.opened();
+        // `CONNECTION_OPEN` closes the app launcher.
+        self.close_launcher();
         self.forum_new_session();
         self.account.state.borrow_mut().reactors.clear();
         let Ready {
@@ -539,6 +559,7 @@ impl App {
             let migrated = std::mem::take(&mut state.migrating);
             state.persisted = true;
             state.users.insert(user.id.0, user.display_name().to_string());
+            state.whole_users.insert(user.id.0, user.clone());
             state.me = Some(user.clone());
             ((store.flatten(), migrated), was_ready, offline_save)
         };
@@ -569,8 +590,10 @@ impl App {
         self.usage_connected();
         let me = self.account.state.borrow().me.as_ref().map(|u| u.display_name().to_owned()).unwrap_or_default();
         self.me_label.set_label(&me);
+        // A new session has no command (`CONNECTION_OPEN` in 861382); its line goes with it.
+        self.end_command(super::slash::Keep::Nothing);
         // READY may bring other Nitro, which changes the length limit.
-        self.update_length_indicator();
+        self.refresh_chat_bar();
         self.refresh_typing();
         // Not out from under a login that adds another account.
         if self.login_origin.get() != Origin::Beside || !self.on_login_page() {

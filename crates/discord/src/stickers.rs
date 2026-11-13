@@ -167,6 +167,28 @@ pub struct Found {
     pub locked: Vec<Entry>,
 }
 
+/// How many stickers `/sticker` lists (`slice(0, 8)` in 496533's `te`).
+pub const COMMAND_RESULTS: usize = 8;
+
+/// A sticker `/sticker` lists.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hit {
+    pub entry: Entry,
+    /// The value it matched by (the client's comparator): its name, tag,
+    /// emoji, or its server's or pack's name.
+    pub matched: String,
+    /// Its server's or pack's name, which the row ends with.
+    pub source: Option<String>,
+}
+
+impl Hit {
+    /// What its row says it is "Similar to:", when it matched by something
+    /// other than its name, lowercased (`eL` in 927659).
+    pub fn similar_to(&self) -> Option<&str> {
+        (self.matched != self.entry.listed.sticker.name.to_lowercase()).then_some(self.matched.as_str())
+    }
+}
+
 /// The stickers the open channel's account has.
 pub struct Library {
     pub servers: Vec<Section>,
@@ -187,11 +209,37 @@ impl Library {
         limits: &Limits,
         place: &Place,
     ) -> Library {
+        Library::of(guilds, packs, limits, place, false)
+    }
+
+    /// Every server's stickers whatever Use External Emojis says, in the
+    /// order `guilds` come (the account's, as the client's `StickersStore`
+    /// keeps them), then the packs: what `/sticker` and a search read
+    /// (`getStickerMetadataArrays`, 898578). Each still says whether we may
+    /// send it here.
+    pub fn searchable<'a>(
+        guilds: impl IntoIterator<Item = &'a Guild>,
+        packs: &[Pack],
+        limits: &Limits,
+        place: &Place,
+    ) -> Library {
+        Library::of(guilds, packs, limits, place, true)
+    }
+
+    fn of<'a>(
+        guilds: impl IntoIterator<Item = &'a Guild>,
+        packs: &[Pack],
+        limits: &Limits,
+        place: &Place,
+        every_server: bool,
+    ) -> Library {
         let entry = |listed: &Listed| Entry { status: limits.sticker(&listed.origin, place), listed: listed.clone() };
         let mut guild_names = Vec::new();
         let servers = guilds
             .into_iter()
-            .filter(|guild| place.guild.is_none() || place.external_emojis || place.guild == Some(guild.id))
+            .filter(|guild| {
+                every_server || place.guild.is_none() || place.external_emojis || place.guild == Some(guild.id)
+            })
             .filter(|guild| !guild.stickers.is_empty())
             .map(|guild| {
                 guild_names.push((guild.id, guild.name.clone()));
@@ -221,51 +269,12 @@ impl Library {
         .map(|(_, name)| name.as_str())
     }
 
-    /// Stickers matching `query`, best first, as `queryStickers` ranks them:
-    /// each of a sticker's names scores by how well the query fits it (the
-    /// whole name 10, its start 7, anywhere in it 5; a tag or the emoji it
-    /// names don't match in the middle) times a weight (its name 11, its
-    /// server's or pack's name 8, the emoji its tag names 6, its tag 1), and
-    /// the best counts. What we may send comes first and what Nitro would
-    /// unlock after; the rest isn't offered. A sticker that was used is
-    /// scaled by its score over a hundred (`scores`, by sticker id, as
-    /// [`crate::usage::History::scores`] has them), which can also lower it.
+    /// Stickers matching `query`, best first, as `queryStickers` (997625)
+    /// ranks them: what we may send comes first and what Nitro would unlock
+    /// after; the rest isn't offered.
     pub fn search(&self, query: &str, scores: &HashMap<String, f64>) -> Found {
-        let query = query.to_lowercase();
-        let mut scored: Vec<(f64, &Entry)> = Vec::new();
-        for entry in self.all() {
-            let sticker = &entry.listed.sticker;
-            let mut names = vec![(Match::Name, sticker.name.trim().to_lowercase(), 11)];
-            if let Some(source) = self.source_name(entry.listed.origin) {
-                let guild = matches!(entry.listed.origin, Origin::Guild { .. });
-                // A pack's stickers carry no tags, and a server sticker's
-                // server name only counts with a tag, as in the client.
-                if !guild || entry.listed.tags.is_some() {
-                    names.push((Match::Name, source.trim().to_lowercase(), 8));
-                }
-            }
-            if let Origin::Guild { .. } = entry.listed.origin
-                && let Some(tags) = &entry.listed.tags
-            {
-                let tags = tags.trim().to_lowercase();
-                if let Some(e) = emoji::unicode(&tags) {
-                    names.push((Match::Other, e.glyph.to_owned(), 6));
-                }
-                names.push((Match::Other, tags, 1));
-            }
-            let fit = names.iter().map(|(kind, value, weight)| weight * kind.fit(value, &query)).max().unwrap_or(0);
-            let score = match scores.get(&sticker.id.0.to_string()) {
-                Some(used) => f64::from(fit) * used / 100.0,
-                None => f64::from(fit),
-            };
-            if score > 0.0 {
-                scored.push((score, entry));
-            }
-        }
-        // A stable sort, so equals keep the picker's order.
-        scored.sort_by(|(a, _), (b, _)| b.total_cmp(a));
         let mut found = Found::default();
-        for (_, entry) in scored {
+        for (_, entry, _) in self.scored(query, scores) {
             match entry.status {
                 Ok(()) => found.unlocked.push(entry.clone()),
                 Err(StickerUnavailable::Nitro) => found.locked.push(entry.clone()),
@@ -274,10 +283,92 @@ impl Library {
         }
         found
     }
+
+    /// What `/sticker` lists for its query, `text` as typed (`te` in
+    /// 496533): of what [`Self::scored`] ranks, what we may send now, at
+    /// most [`COMMAND_RESULTS`]. An empty query lists nothing.
+    pub fn command_results(&self, text: &str, scores: &HashMap<String, f64>) -> Vec<Hit> {
+        if text.is_empty() {
+            return Vec::new();
+        }
+        self.scored(text, scores)
+            .into_iter()
+            .filter(|(_, entry, _)| entry.status.is_ok())
+            .take(COMMAND_RESULTS)
+            .map(|(_, entry, matched)| Hit {
+                source: self.source_name(entry.listed.origin).map(str::to_owned),
+                entry: entry.clone(),
+                matched,
+            })
+            .collect()
+    }
+
+    /// Every sticker `query` matches, best first, with its score and the
+    /// value that won (the client's comparator). Each of a sticker's values
+    /// scores by how well the query fits it (whole 10, its start 7, anywhere
+    /// in it 5; a tag or the emoji it names don't match in the middle) times
+    /// a weight (its name 11, its server's or pack's name 8, the emoji its
+    /// tag names 6, its tag 1), and the best counts, the first on a tie. A
+    /// sticker that was used is scaled by its score over a hundred (`scores`,
+    /// by sticker id, as [`crate::usage::History::scores`] has them), which
+    /// can also lower it. Only the query is folded (`sS`, 23339), and only
+    /// for its start and anywhere: the values are matched as stored, which
+    /// for a pack's name is as named (514983), so a name with capitals never
+    /// matches whole.
+    fn scored(&self, query: &str, scores: &HashMap<String, f64>) -> Vec<(f64, &Entry, String)> {
+        let whole = query.to_lowercase();
+        let folded = crate::switcher::fold(&whole);
+        let mut scored = Vec::new();
+        for entry in self.all() {
+            let sticker = &entry.listed.sticker;
+            // In the stores' order: 41237 for a server's, 514983 for a pack's.
+            let mut values = vec![(Match::Name, sticker.name.trim().to_lowercase(), 11)];
+            match (entry.listed.origin, &entry.listed.tags) {
+                // A server sticker's tag and server name only count with a tag.
+                (Origin::Guild { .. }, Some(tags)) => {
+                    let tags = tags.trim().to_lowercase();
+                    let emoji = emoji::unicode(&tags).map(|e| e.glyph.to_owned());
+                    values.push((Match::Other, tags, 1));
+                    if let Some(source) = self.source_name(entry.listed.origin).map(|s| s.trim().to_lowercase())
+                        && !source.is_empty()
+                    {
+                        values.push((Match::Name, source, 8));
+                    }
+                    if let Some(emoji) = emoji {
+                        values.push((Match::Other, emoji, 6));
+                    }
+                }
+                (Origin::Guild { .. }, None) => {}
+                (Origin::Pack { .. }, _) => {
+                    if let Some(source) = self.source_name(entry.listed.origin) {
+                        values.push((Match::Name, source.to_owned(), 8));
+                    }
+                }
+            }
+            let mut best: Option<(u32, String)> = None;
+            for (kind, value, weight) in values {
+                let fit = weight * kind.fit(&value, &whole, &folded);
+                if fit > best.as_ref().map_or(0, |(score, _)| *score) {
+                    best = Some((fit, value));
+                }
+            }
+            let Some((fit, value)) = best else { continue };
+            let score = match scores.get(&sticker.id.0.to_string()) {
+                Some(used) => f64::from(fit) * used / 100.0,
+                None => f64::from(fit),
+            };
+            if score > 0.0 {
+                scored.push((score, entry, value));
+            }
+        }
+        // A stable sort, so equals keep the library's order.
+        scored.sort_by(|(a, ..), (b, ..)| b.total_cmp(a));
+        scored
+    }
 }
 
-/// Whether a name may match in the middle of it: the client allows that for
-/// a sticker's, a server's and a pack's name only.
+/// Whether a value may match in the middle of it: the client allows that
+/// for a sticker's, a server's and a pack's name only.
 #[derive(Clone, Copy)]
 enum Match {
     Name,
@@ -285,12 +376,15 @@ enum Match {
 }
 
 impl Match {
-    fn fit(self, value: &str, query: &str) -> u32 {
-        if value == query {
+    /// `whole` is the lowercased query, `folded` the same folded; the
+    /// client's start and anywhere regexes ignore case.
+    fn fit(self, value: &str, whole: &str, folded: &str) -> u32 {
+        let lower = value.to_lowercase();
+        if value == whole {
             10
-        } else if value.starts_with(query) {
+        } else if lower.starts_with(folded) {
             7
-        } else if matches!(self, Match::Name) && value.contains(query) {
+        } else if matches!(self, Match::Name) && lower.contains(folded) {
             5
         } else {
             0
@@ -437,5 +531,135 @@ mod tests {
         // `Away` names waving (tagged) but not lost (untagged, and unavailable anyway).
         assert_eq!(names(&lib.search("away", &HashMap::new()).unlocked), ["waving"]);
         assert_eq!(names(&lib.search("home", &HashMap::new()).unlocked), ["wave"]);
+    }
+
+    fn plain_library(guilds: &[&Guild], packs: &[Pack]) -> Library {
+        let experiments = Experiments::default();
+        let nitro = Nitro::from_user(&json!({}));
+        let limits = Limits { nitro: &nitro, experiments: &experiments, me: Snowflake(7) };
+        Library::new(guilds.iter().copied(), packs, &limits, &open(Some(1), true, true))
+    }
+
+    #[test]
+    fn a_query_with_accents_matches_as_the_client_folds_it() {
+        let home = guild(
+            1,
+            "Home",
+            json!([
+                {"id": "10", "name": "cafe latte", "available": true},
+                {"id": "11", "name": "café", "available": true},
+                {"id": "12", "name": "Crème brûlée", "available": true},
+            ]),
+        );
+        let lib = plain_library(&[&home], &[]);
+        // The query alone is folded for its start and anywhere in a name:
+        // "café" scores 10 on itself and 7 on "cafe latte".
+        assert_eq!(names(&lib.search("café", &HashMap::new()).unlocked), ["café", "cafe latte"]);
+        assert_eq!(names(&lib.search("CAFÉ", &HashMap::new()).unlocked), ["café", "cafe latte"]);
+        // The names aren't folded, so an accented name matches only whole or
+        // before its accents, as in the client.
+        for query in ["creme", "crème", "brûl"] {
+            assert_eq!(names(&lib.search(query, &HashMap::new()).unlocked), Vec::<&str>::new(), "{query}");
+        }
+        assert_eq!(names(&lib.search("cr", &HashMap::new()).unlocked), ["Crème brûlée"]);
+    }
+
+    #[test]
+    fn a_pack_name_with_capitals_matches_only_from_its_start() {
+        let home = guild(1, "Home", json!([{"id": "10", "name": "wavy thing", "available": true}]));
+        let packs = Pack::list(&json!({"sticker_packs": [
+            {"id": "70", "name": "Wavy", "stickers": [{"id": "71", "name": "hello", "pack_id": "70"}]},
+            {"id": "80", "name": "calm", "stickers": [{"id": "81", "name": "rest", "pack_id": "80"}]},
+        ]}));
+        let lib = plain_library(&[&home], &packs);
+        // "Wavy" isn't the lowercased query, so hello scores 7*8 = 56 under wavy thing's 7*11 = 77.
+        assert_eq!(names(&lib.search("wavy", &HashMap::new()).unlocked), ["wavy thing", "hello"]);
+        // A pack named in lower case still matches whole: 10*8 = 80.
+        assert_eq!(names(&lib.search("calm", &HashMap::new()).unlocked), ["rest"]);
+        // Matching from its start or anywhere ignores case.
+        assert_eq!(names(&lib.search("avy", &HashMap::new()).unlocked), ["wavy thing", "hello"]);
+    }
+
+    fn limits_with(nitro: bool, run: impl FnOnce(&Limits) -> Library) -> Library {
+        let experiments = Experiments::default();
+        let nitro = Nitro::from_user(&json!({"perks": {"active_perks_bitmask": [if nitro { 1u64 << 3 } else { 0 }]}}));
+        run(&Limits { nitro: &nitro, experiments: &experiments, me: Snowflake(7) })
+    }
+
+    fn hit_names(hits: &[Hit]) -> Vec<&str> {
+        hits.iter().map(|h| h.entry.listed.sticker.name.as_str()).collect()
+    }
+
+    #[test]
+    fn the_sticker_command_offers_at_most_eight_sendable_stickers_best_first() {
+        let many: Vec<Value> = (0..10)
+            .map(|i| json!({"id": (100 + i).to_string(), "name": format!("cat {i}"), "available": true}))
+            .collect();
+        let here = guild(1, "Home", Value::Array(many));
+        let there = guild(2, "Away", json!([{"id": "20", "name": "cat", "available": true}]));
+        let lib =
+            limits_with(false, |limits| Library::searchable([&here, &there], &[], limits, &open(Some(1), true, true)));
+        let hits = lib.command_results("cat", &HashMap::new());
+        // Away's whole match would come first, but it needs Nitro here.
+        assert_eq!(hits.len(), COMMAND_RESULTS);
+        assert_eq!(hit_names(&hits)[..2], ["cat 0", "cat 1"]);
+        assert!(hits.iter().all(|h| h.entry.status.is_ok()));
+        assert!(lib.command_results("", &HashMap::new()).is_empty(), "an empty query lists nothing");
+    }
+
+    #[test]
+    fn the_sticker_command_searches_every_server_whatever_use_external_emojis_says() {
+        let lib = limits_with(true, |limits| {
+            let here = guild(1, "Home", json!([{"id": "10", "name": "wave", "tags": "wave", "available": true}]));
+            let there = guild(2, "Away", json!([{"id": "20", "name": "waving", "tags": "smile", "available": true}]));
+            Library::searchable([&here, &there], &[], limits, &open(Some(1), false, true))
+        });
+        assert_eq!(lib.servers.len(), 2);
+        assert_eq!(hit_names(&lib.command_results("wav", &HashMap::new())), ["wave", "waving"]);
+    }
+
+    #[test]
+    fn the_sticker_command_breaks_ties_in_the_order_it_is_given() {
+        let lib = limits_with(true, |limits| {
+            let here = guild(1, "Home", json!([{"id": "10", "name": "wave", "available": true}]));
+            let there = guild(2, "Away", json!([{"id": "20", "name": "wave", "available": true}]));
+            Library::searchable([&there, &here], &[], limits, &open(Some(1), true, true))
+        });
+        let hits = lib.command_results("wave", &HashMap::new());
+        assert_eq!(
+            hits.iter().map(|h| h.entry.listed.sticker.id.0).collect::<Vec<_>>(),
+            [20, 10],
+            "no own server first"
+        );
+        assert_eq!(hits[0].source.as_deref(), Some("Away"));
+    }
+
+    #[test]
+    fn a_sticker_says_what_it_matched_when_not_its_name() {
+        let lib = limits_with(true, |limits| {
+            let here = guild(
+                1,
+                "Home",
+                json!([
+                    {"id": "10", "name": "Wave", "tags": "smile", "available": true},
+                    {"id": "11", "name": "plain", "tags": "plain", "available": true},
+                ]),
+            );
+            let packs = Pack::list(&json!({"sticker_packs": [
+                {"id": "70", "name": "Wavy Pals", "stickers": [{"id": "71", "name": "hello", "pack_id": "70"}]},
+            ]}));
+            Library::searchable([&here], &packs, limits, &open(Some(1), true, true))
+        });
+        let similar = |query: &str| {
+            lib.command_results(query, &HashMap::new())
+                .iter()
+                .map(|h| h.similar_to().map(str::to_owned))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(similar("wave"), [None], "its own name, whatever its case");
+        assert_eq!(similar("smi"), [Some("smile".to_owned())]);
+        assert_eq!(similar("😄"), [Some("😄".to_owned())]);
+        assert_eq!(similar("hom"), [Some("home".to_owned()), Some("home".to_owned())]);
+        assert_eq!(similar("pals"), [Some("Wavy Pals".to_owned())], "a pack's name with its capitals");
     }
 }

@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use discord::held::Opening;
 use discord::history::{AROUND_PAGE, Around, KINETIC_INPUT, Load, Loadable, Position, SCROLL_INPUT, Viewport};
+use discord::interaction::Target;
 use discord::notifications;
 use discord::read_state::starts_unread;
 use discord::rest::Page;
@@ -34,8 +35,6 @@ use crate::{render, timelines};
 const FLASH: std::time::Duration = std::time::Duration::from_secs(2);
 /// Space between the last message and the composer, as around the composer.
 const COMPOSER_GAP: i32 = 12;
-/// Consecutive messages by one author within this window share a header.
-const GROUP_WINDOW_SECS: i64 = 7 * 60;
 
 /// What a message's menu acts on.
 pub(super) struct MessageTarget {
@@ -450,7 +449,7 @@ impl App {
         if open {
             self.resolve_mentions(&message.content);
         }
-        let blocked = self.account.state.borrow().relationships.is_blocked(message.author.id);
+        let blocked = message.is_blocked_by(|id| self.account.state.borrow().relationships.is_blocked(id));
         store.append(&timelines::boxed(message));
         if blocked {
             self.rebind_blocked_run(&store, store.n_items() - 1);
@@ -596,7 +595,8 @@ impl App {
         let divided = self.fill_divider(parts, &message, previous.as_ref());
         let (run, revealed) = {
             let state = self.account.state.borrow();
-            let run = timelines::run_at(&messages, position, |m| state.relationships.is_blocked(m.author.id));
+            let run =
+                timelines::run_at(&messages, position, |m| m.is_blocked_by(|id| state.relationships.is_blocked(id)));
             (run, run.is_some_and(|r| state.revealed_blocked.contains(&r.first)))
         };
         match run {
@@ -775,7 +775,7 @@ impl App {
     fn rebind_blocked_run(self: &Rc<Self>, store: &gio::ListStore, position: u32) {
         let run = {
             let state = self.account.state.borrow();
-            timelines::run_at(store, position, |m| state.relationships.is_blocked(m.author.id))
+            timelines::run_at(store, position, |m| m.is_blocked_by(|id| state.relationships.is_blocked(id)))
         };
         if let Some(run) = run {
             self.rebind(store, run.start, 1);
@@ -799,6 +799,8 @@ impl App {
     /// around it is asked for, not the newest, as the client does when a
     /// link or a search result takes it there.
     pub(super) fn select_channel_at(self: &Rc<Self>, id: Snowflake, target: Option<Snowflake>) {
+        // `CHANNEL_SELECT` closes the app launcher.
+        self.close_launcher();
         self.track_channel_use(id);
         let (title, forum, rest, left) = {
             let mut state = self.account.state.borrow_mut();
@@ -838,6 +840,12 @@ impl App {
         }
         if self.reply.borrow().as_ref().is_some_and(|r| r.channel != id) {
             self.set_reply(None);
+        }
+        // The box's text is the next channel's too: its line, as text, names the command again there if it can
+        // (`CHANNEL_SELECT` resets the client's command).
+        if left.is_some() {
+            self.end_command(super::slash::Keep::Text);
+            self.update_mention_popup();
         }
         if self.editing.borrow().as_ref().is_some_and(|e| e.message.channel_id != id) {
             self.end_edit();
@@ -1410,7 +1418,7 @@ impl App {
     }
 
     /// The users we know and the open guild's channels.
-    fn names(&self) -> Names {
+    pub(super) fn names(&self) -> Names {
         let state = self.account.state.borrow();
         let channels = state
             .guild
@@ -1478,6 +1486,7 @@ impl App {
             for user in users {
                 let name = user.display_name().to_string();
                 renamed |= state.users.insert(user.id.0, name.clone()).is_some_and(|old| old != name);
+                state.whole_users.insert(user.id.0, user.clone());
             }
         }
         // Rows on screen keep the old name until they're filled in again, as
@@ -1610,6 +1619,16 @@ fn attach_message_menu(this: &std::rc::Weak<App>, item: &gtk::ListItem, cell: &M
             (open.clone(), row.downgrade(), this.clone(), item.downgrade(), cell.downgrade());
         move |x, y| {
             let row = row.upgrade();
+            // On a user of the line above an app's answer it is theirs.
+            if let (Some(row), Some(this), Some(item), Some(cell)) =
+                (&row, this.upgrade(), item.upgrade(), cell.upgrade())
+                && let Some((anchor, user)) = executed_at(&cell, row, x, y)
+                && let Some(message) = item.item().and_downcast::<glib::BoxedAnyObject>()
+            {
+                let channel = message.borrow::<Message>().channel_id;
+                this.user_menu(this.user_target(user, channel, anchor), row.upcast_ref(), At::Point(x, y));
+                return;
+            }
             // On the author's name or avatar it is theirs, as in the client.
             if let (Some(row), Some(this), Some(item), Some(cell)) =
                 (&row, this.upgrade(), item.upgrade(), cell.upgrade())
@@ -1653,6 +1672,14 @@ fn author_at(cell: &MessageRow, row: &gtk::Box, x: f64, y: f64) -> Option<gtk::W
     } else {
         None
     }
+}
+
+/// The avatar or name at `(x, y)` in `row` on the line above `cell`'s app
+/// answer, and whose it is.
+fn executed_at(cell: &MessageRow, row: &gtk::Box, x: f64, y: f64) -> Option<(gtk::Widget, User)> {
+    let hit = row.pick(x, y, gtk::PickFlags::DEFAULT)?;
+    let users = cell.parts().executed_users.borrow();
+    users.iter().find(|(widget, _)| hit == *widget || hit.is_ancestor(widget)).cloned()
 }
 
 /// Open the author's profile when their name or avatar is clicked.
@@ -1714,7 +1741,7 @@ fn group_start(messages: &gio::ListStore, position: u32) -> Option<Snowflake> {
     let mut message = timelines::message_at(messages, at)?;
     while let Some(before) = at.checked_sub(1) {
         let previous = timelines::message_at(messages, before)?;
-        if !is_grouped(&message, Some(&previous)) {
+        if !message.groups_under(Some(&previous)) {
             break;
         }
         (at, message) = (before, previous);
@@ -1867,18 +1894,6 @@ fn forward_time(time: &glib::DateTime) -> String {
     time.format(pattern).map(String::from).unwrap_or_default()
 }
 
-pub(super) fn is_grouped(message: &Message, previous: Option<&Message>) -> bool {
-    let Some(previous) = previous.filter(|p| p.is_user_message()) else { return false };
-    // A reply always shows what it answers, under a full header.
-    if previous.author.id != message.author.id || message.reply_to().is_some() {
-        return false;
-    }
-    match (parse_time(&previous.timestamp), parse_time(&message.timestamp)) {
-        (Some(a), Some(b)) => b.difference(&a).as_seconds() < GROUP_WINDOW_SECS && a.ymd() == b.ymd(),
-        _ => false,
-    }
-}
-
 impl App {
     /// `text` naming `user` in `channel`, in the colour of their highest role.
     fn name_label(&self, channel: Snowflake, user: &discord::User, text: &str) -> gtk::Label {
@@ -1913,7 +1928,7 @@ impl App {
             row.set_visible(false);
             return;
         }
-        let grouped = kind == Kind::Normal && is_grouped(message, previous);
+        let grouped = kind == Kind::Normal && message.groups_under(previous);
         if !grouped {
             parts.group.set(message.id.0);
         }
@@ -1966,11 +1981,22 @@ impl App {
         let epoch = self.row_epoch.get();
         let changed = parts.shown.borrow().as_ref().is_none_or(|(was, at)| *at != epoch || was != message);
         let reply_to = message.reply_to();
-        // Discord didn't resolve what this answers, but it may have loaded since.
-        let unresolved = reply_to.is_some() && matches!(message.referenced_message, Referenced::Unresolved);
+        let executed = discord::interaction::executed(message);
+        let ran_on = executed.as_ref().is_some_and(|e| matches!(e.target, Some(Target::Message(_))));
+        // Discord didn't resolve what this answers or was run on, but it may
+        // have loaded since.
+        let unresolved = (reply_to.is_some() || ran_on) && matches!(message.referenced_message, Referenced::Unresolved);
         if changed || unresolved {
-            if let Some(old) = parts.reply.take() {
+            for old in [parts.reply.take(), parts.executed.take()].into_iter().flatten() {
                 row.remove(&old);
+            }
+            parts.executed_users.borrow_mut().clear();
+            // Above the header, under a reply line (491182).
+            if let Some(executed) = &executed {
+                let (line, users) = self.executed_line(message, executed, messages);
+                row.prepend(&line);
+                parts.executed.replace(Some(line));
+                parts.executed_users.replace(users);
             }
             if let Some(to) = reply_to {
                 let preview = self.reply_preview(message, to, messages);
@@ -2339,6 +2365,25 @@ impl App {
     fn reply_preview(self: &Rc<Self>, message: &Message, to: Snowflake, messages: &gio::ListStore) -> gtk::Widget {
         let preview = gtk::Box::builder().spacing(6).css_classes(["reply-preview"]).build();
         preview.append(&gtk::Box::builder().valign(gtk::Align::End).css_classes(["reply-spine"]).build());
+        self.quote_into(&preview, message, to, messages, "mail-reply-sender-symbolic");
+        self.jump_on_click(&preview, message, to);
+        preview.upcast()
+    }
+
+    /// Append to `line` what a line above `message` shows of the message it
+    /// references, `to`: its author's avatar (`glyph` for a blocked author)
+    /// and name and the start of what they said, or why it can't. Returns the
+    /// author's avatar and name, with whose they are.
+    fn quote_into(
+        self: &Rc<Self>,
+        line: &gtk::Box,
+        message: &Message,
+        to: Snowflake,
+        messages: &gio::ListStore,
+        glyph: &str,
+    ) -> Vec<(gtk::Widget, User)> {
+        let preview = line;
+        let mut users = Vec::new();
         let found;
         let original = match &message.referenced_message {
             Referenced::Message(original) => Some(original.as_ref()),
@@ -2364,17 +2409,21 @@ impl App {
                 // their avatar or words.
                 let blocked = self.account.state.borrow().relationships.is_blocked(original.author.id);
                 if blocked {
-                    preview.append(&gtk::Image::from_icon_name("mail-reply-sender-symbolic"));
+                    preview.append(&gtk::Image::from_icon_name(glyph));
                 } else {
                     let state = self.account.state.borrow();
                     let server = state.avatar_in(original.channel_id, original.author.id);
-                    preview.append(&avatar_widget_in(&original.author, 16, Some(&self.images), server, Row::None));
+                    let avatar = avatar_widget_in(&original.author, 16, Some(&self.images), server, Row::None);
+                    preview.append(&avatar);
+                    users.push((avatar, original.author.clone()));
                 }
                 // Discord marks replies that pinged the author with an @.
                 let pinged = message.mentions.iter().any(|u| u.id == original.author.id);
                 let called = self.account.state.borrow().name_in(original.channel_id, &original.author);
                 let name = format!("{}{}", if pinged { "@" } else { "" }, called);
-                preview.append(&self.name_label(original.channel_id, &original.author, &name));
+                let label = self.name_label(original.channel_id, &original.author, &name);
+                preview.append(&label);
+                users.push((label.upcast(), original.author.clone()));
                 let names = self.message_names(original);
                 // A forward reads as what it forwards.
                 let content = original.forwarded().map_or_else(|| original.content.clone(), |f| f.content);
@@ -2383,9 +2432,7 @@ impl App {
                     _ if blocked => "Blocked message".to_owned(),
                     _ if let Kind::System(system) = self.message_kind(original) => system.text(),
                     Some(line) => line.to_owned(),
-                    // The official client's wording for messages with no text.
-                    None if !original.sticker_items.is_empty() => "Click to see sticker".to_owned(),
-                    None => "Click to see attachment".to_owned(),
+                    None => original.reply_placeholder().to_owned(),
                 };
                 preview.append(&snippet(&text, &["reply-snippet"]));
             }
@@ -2397,21 +2444,124 @@ impl App {
                 preview.append(&snippet(text, &["reply-snippet", "missing"]));
             }
         }
-        if !matches!(message.referenced_message, Referenced::Deleted) {
-            preview.set_cursor_from_name(Some("pointer"));
-            let click = gtk::GestureClick::new();
+        users
+    }
+
+    /// Make a click on `line` jump to the message `message` references, `to`,
+    /// unless it was deleted.
+    fn jump_on_click(self: &Rc<Self>, line: &gtk::Box, message: &Message, to: Snowflake) {
+        if matches!(message.referenced_message, Referenced::Deleted) {
+            return;
+        }
+        line.set_cursor_from_name(Some("pointer"));
+        let click = gtk::GestureClick::new();
+        click.connect_released({
+            let this = Rc::downgrade(self);
+            let channel = message.channel_id;
+            move |_, _, _, _| {
+                if let Some(this) = this.upgrade() {
+                    this.jump_to(channel, to);
+                }
+            }
+        });
+        line.add_controller(click);
+    }
+
+    /// The line above an app's answer: who ran which command, and on what
+    /// (`ExecutedCommand`, 267508), starting where a reply line's text does.
+    /// The command's name is a plain label: the client opens the run's
+    /// options from it, which takes a request Neucord doesn't send. Returns
+    /// the avatars and names on it, with whose they are.
+    fn executed_line(
+        self: &Rc<Self>,
+        message: &Message,
+        executed: &discord::interaction::Executed,
+        messages: &gio::ListStore,
+    ) -> (gtk::Widget, Vec<(gtk::Widget, User)>) {
+        use discord::interaction::Ran;
+        let line = gtk::Box::builder().spacing(6).css_classes(["reply-preview"]).build();
+        line.append(&gtk::Box::builder().css_classes(["reply-spine"]).opacity(0.0).build());
+        // A blocked runner's line, as the client counts it, shows a glyph
+        // for every avatar on it.
+        let blocked = message.is_blocked_by(|id| self.account.state.borrow().relationships.is_blocked(id));
+        let mut users = self.line_user(&line, message.channel_id, executed.user, blocked);
+        let words = |text: &str| gtk::Label::builder().label(text).css_classes(["reply-snippet"]).build();
+        let command = |name: &str, icon: bool| {
+            let command = gtk::Box::builder().spacing(2).css_classes(["reply-snippet"]).build();
+            if icon {
+                command.append(&gtk::Image::from_icon_name("view-app-grid-symbolic"));
+            }
+            command.append(&gtk::Label::builder().label(name).ellipsize(gtk::pango::EllipsizeMode::End).build());
+            command
+        };
+        match &executed.what {
+            Ran::Activity => line.append(&words("started an activity")),
+            Ran::Slash(name) | Ran::EntryPoint(name) => {
+                line.append(&words("used"));
+                line.append(&command(name, true));
+            }
+            Ran::Plain(name) => {
+                line.append(&words("used"));
+                line.append(&command(name, false));
+            }
+        }
+        match executed.target {
+            Some(Target::User(user)) => {
+                line.append(&gtk::Image::from_icon_name("go-next-symbolic"));
+                users.extend(self.line_user(&line, message.channel_id, user, blocked));
+            }
+            Some(Target::Message(to)) => {
+                line.append(&gtk::Image::from_icon_name("go-next-symbolic"));
+                let quote = gtk::Box::builder().spacing(6).hexpand(true).build();
+                users.extend(self.quote_into(&quote, message, to, messages, "chat-message-new-symbolic"));
+                self.jump_on_click(&quote, message, to);
+                line.append(&quote);
+            }
+            None => {}
+        }
+        (line.upcast(), users)
+    }
+
+    /// Append `user`'s avatar (a glyph if `blocked`) and name to `line`, each
+    /// opening their profile, and return them.
+    fn line_user(
+        self: &Rc<Self>,
+        line: &gtk::Box,
+        channel: Snowflake,
+        user: &User,
+        blocked: bool,
+    ) -> Vec<(gtk::Widget, User)> {
+        let mut widgets: Vec<gtk::Widget> = Vec::new();
+        if blocked {
+            line.append(&gtk::Image::from_icon_name("mail-reply-sender-symbolic"));
+        } else {
+            let state = self.account.state.borrow();
+            let server = state.avatar_in(channel, user.id);
+            widgets.push(avatar_widget_in(user, 16, Some(&self.images), server, Row::None));
+        }
+        let name = self.account.state.borrow().name_in(channel, user);
+        widgets.push(self.name_label(channel, user, &name).upcast());
+        for widget in &widgets {
+            line.append(widget);
+            widget.set_cursor_from_name(Some("pointer"));
+            let click = gtk::GestureClick::builder().button(gdk::BUTTON_PRIMARY).build();
             click.connect_released({
-                let this = Rc::downgrade(self);
-                let channel = message.channel_id;
+                let (this, user, anchor) = (Rc::downgrade(self), user.clone(), widget.downgrade());
                 move |_, _, _, _| {
-                    if let Some(this) = this.upgrade() {
-                        this.jump_to(channel, to);
+                    if let (Some(this), Some(anchor)) = (this.upgrade(), anchor.upgrade()) {
+                        this.show_profile(&this.user_target(user.clone(), channel, anchor), false);
                     }
                 }
             });
-            preview.add_controller(click);
+            widget.add_controller(click);
         }
-        preview.upcast()
+        widgets.into_iter().map(|widget| (widget, user.clone())).collect()
+    }
+
+    /// `user` in `channel`, for a profile or a menu pointing at `anchor`.
+    fn user_target(&self, user: User, channel: Snowflake, anchor: gtk::Widget) -> super::profile::UserTarget {
+        let guild = self.account.state.borrow().find_channel(channel).and_then(|(guild, _)| guild.map(|g| g.id));
+        super::profile::UserTarget { user, guild, channel: Some(channel), presence: None, anchor }
     }
 }
 

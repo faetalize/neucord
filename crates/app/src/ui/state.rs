@@ -14,7 +14,7 @@ use discord::gifs::Tiles;
 use discord::interaction::Failure;
 use discord::limits::{Limits, Nitro};
 use discord::member_list::{self, MemberLists};
-use discord::members::{Members, RoleColour};
+use discord::members::{MemberSearch, Members, RoleColour};
 use discord::notice::Notice;
 use discord::notification_edit::{self, BulkAck};
 use discord::notifications::{Level, NotificationSettings, Place};
@@ -199,12 +199,19 @@ pub(super) struct State {
     pub(super) commands: discord::commands::CommandIndex,
     /// Commands we ran that their app hasn't answered, by nonce.
     pub(super) running: HashMap<Snowflake, super::slash::Running>,
+    /// What was typed and picked in apps' forms, by modal `custom_id`.
+    pub(super) modal_drafts: HashMap<String, discord::modal::Draft>,
+    /// The last form submit, which only one may be in flight.
+    pub(super) modal_submission: discord::modal::Submission,
     /// Display names by user id, accumulated from every user we see plus lazy
     /// `GET /users/{id}` lookups, so mentions resolve even for people no longer
     /// in the server.
     pub(super) users: HashMap<u64, String>,
     /// User ids we have already tried to fetch, to avoid repeat requests.
     pub(super) fetched_users: std::collections::HashSet<u64>,
+    /// The users themselves as last seen whole (the client's `UserStore`),
+    /// which the built-ins' checks and Clyde's lines read.
+    pub(super) whole_users: HashMap<u64, User>,
     /// Who reacted with what, as far as we know.
     pub(super) reactors: discord::reactions::Reactors,
     /// The profiles popouts asked for, and our notes on people.
@@ -260,6 +267,12 @@ pub(super) struct State {
     pub(super) typing: Typing,
     /// Other people's roles in each server.
     pub(super) members: Members,
+    /// The pills' searches of servers' members by name.
+    pub(super) member_search: MemberSearch,
+    /// `/gif`'s searches, kept for the session (`IntegrationQueryStore`).
+    pub(super) gif_commands: discord::gifs::CommandSearches,
+    /// `/gif`'s one debounce (`eb`), which nothing cancels.
+    pub(super) gif_command_wait: Option<glib::SourceId>,
     /// What the gateway is subscribed to for each server.
     pub(super) subscriptions: Subscriptions,
     /// The rows of the member lists we asked for.

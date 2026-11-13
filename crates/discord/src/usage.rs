@@ -13,6 +13,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::Snowflake;
+use crate::commands::{self, Command, Used, command_type};
+use crate::launcher::AppUsage;
 use crate::protobuf::{Value, build, int32, packed};
 
 const DAY_MS: i64 = 86_400_000;
@@ -38,10 +41,14 @@ pub enum Kind {
     Sticker,
     /// A server or channel opened, by id (205761).
     Channel,
+    /// A command run, by [`crate::commands::usage_key`]
+    /// (`ApplicationCommandFrecencyStore`, 26909).
+    Command,
+    /// An app whose slash command was run, by id (`ApplicationFrecencyStore`,
+    /// 630248).
+    Application,
 }
 
-/// The most entries a save carries (`Mr`, 761821, as 416380 calls it).
-const SAVED: usize = 100;
 /// The most recent uses kept of each thing, and scored.
 const MAX_SAMPLES: usize = 10;
 
@@ -51,7 +58,25 @@ impl Kind {
         match self {
             Kind::Emoji | Kind::Reaction => 42,
             Kind::Sticker => 20,
-            Kind::Channel => 100,
+            Kind::Channel | Kind::Command | Kind::Application => 100,
+        }
+    }
+
+    /// What a use's weight is multiplied by (`computeBonus` over 100): a
+    /// command's store has a bonus of 1 where every other has 100, so its
+    /// scores are a hundredth of the others'.
+    fn bonus(self) -> f64 {
+        match self {
+            Kind::Command => 1.0 / 100.0,
+            _ => 1.0,
+        }
+    }
+
+    /// The most entries a save carries (`Mr`, 761821, as 416380 calls it).
+    fn saved(self) -> usize {
+        match self {
+            Kind::Command => 500,
+            _ => 100,
         }
     }
 
@@ -139,17 +164,19 @@ impl History {
     /// Score what has no score, and forget what scores nothing (`compute`).
     fn compute(&mut self, now_ms: u64) {
         let kind = self.kind;
+        let bonus = kind.bonus();
         let max_total = self.entries.iter().map(|(_, e)| e.total_uses).max();
         self.entries.retain_mut(|(_, entry)| {
             if entry.frecency != -1 {
                 return true;
             }
+            // Added up use by use, in floats, as the client does: a hundredth
+            // at a time doesn't sum to what the whole would.
             entry.score = entry
                 .recent_uses
                 .iter()
                 .take(MAX_SAMPLES)
-                .map(|&at| kind.weight((now_ms as i64 - at as i64) / DAY_MS))
-                .sum::<i64>() as f64;
+                .fold(0.0, |score, &at| score + bonus * kind.weight((now_ms as i64 - at as i64) / DAY_MS) as f64);
             if entry.score <= 0.0 {
                 return false;
             }
@@ -182,16 +209,23 @@ impl History {
         self.entries.iter().map(|(key, entry)| (key.clone(), entry.score)).collect()
     }
 
-    /// What a save carries: at most 100 entries, the ones used last if
-    /// there are more (`Mr`), as `FrecencyItem`s by key.
+    /// Each thing's latest use (`max(getEntry(key).recentUses)`).
+    pub fn latest(&mut self, now_ms: u64) -> HashMap<String, u64> {
+        self.compute(now_ms);
+        self.entries.iter().filter_map(|(key, entry)| Some((key.clone(), *entry.recent_uses.iter().max()?))).collect()
+    }
+
+    /// What a save carries: at most as many entries as the kind saves, the
+    /// ones used last if there are more (`Mr`), as `FrecencyItem`s by key.
     fn saved(&mut self, now_ms: u64) -> Vec<(&str, Vec<u8>)> {
         self.compute(now_ms);
+        let saved = self.kind.saved();
         let mut kept: Vec<&(String, Entry)> = self.entries.iter().collect();
-        if kept.len() > SAVED {
+        if kept.len() > saved {
             // lodash's `sortBy` puts what has no use last, and the order is then turned around.
             kept.sort_by_key(|(_, e)| e.recent_uses.last().map_or((1, 0), |&at| (0, at)));
             kept.reverse();
-            kept.truncate(SAVED);
+            kept.truncate(saved);
         }
         kept.into_iter()
             .map(|(key, entry)| {
@@ -288,6 +322,11 @@ struct Persisted {
     reactions: Vec<(String, u64)>,
     stickers: Vec<(String, u64)>,
     channels: Vec<(String, u64)>,
+    // A file written before commands were counted has none.
+    #[serde(default)]
+    commands: Vec<(String, u64)>,
+    #[serde(default)]
+    applications: Vec<(String, u64)>,
 }
 
 /// Every kind of use recorded, and the fields of `FrecencyUserSettings` a
@@ -298,6 +337,8 @@ pub struct Stores {
     pub reactions: Store,
     pub stickers: Store,
     pub channels: Store,
+    pub commands: Store,
+    pub applications: Store,
 }
 
 impl Default for Stores {
@@ -307,6 +348,8 @@ impl Default for Stores {
             reactions: Store::new(Kind::Reaction),
             stickers: Store::new(Kind::Sticker),
             channels: Store::new(Kind::Channel),
+            commands: Store::new(Kind::Command),
+            applications: Store::new(Kind::Application),
         }
     }
 }
@@ -314,6 +357,8 @@ impl Default for Stores {
 // FrecencyUserSettings.
 const STICKER_FRECENCY: u32 = 4;
 const EMOJI_FRECENCY: u32 = 6;
+const APPLICATION_COMMAND_FRECENCY: u32 = 7;
+const APPLICATION_FRECENCY: u32 = 9;
 const GUILD_AND_CHANNEL_FRECENCY: u32 = 12;
 const EMOJI_REACTION_FRECENCY: u32 = 13;
 
@@ -324,6 +369,8 @@ pub struct Sent {
     reactions: usize,
     stickers: usize,
     channels: usize,
+    commands: usize,
+    applications: usize,
 }
 
 impl Stores {
@@ -333,12 +380,42 @@ impl Stores {
             || self.reactions.has_pending()
             || self.stickers.has_pending()
             || self.channels.has_pending()
+            || self.commands.has_pending()
+            || self.applications.has_pending()
     }
 
     /// Whether a use other than a server or channel opened waits: those
     /// alone don't make the first save load the settings (`R`, 416380).
     pub fn has_pending_beyond_channels(&self) -> bool {
-        self.emoji.has_pending() || self.reactions.has_pending() || self.stickers.has_pending()
+        self.emoji.has_pending()
+            || self.reactions.has_pending()
+            || self.stickers.has_pending()
+            || self.commands.has_pending()
+            || self.applications.has_pending()
+    }
+
+    /// `command` was run where `guild` is (`APPLICATION_COMMAND_USED`):
+    /// the command counts, and for a slash command its app too (630248
+    /// counts `CHAT` and `PRIMARY_ENTRY_POINT` commands of an app not
+    /// launching, which Neucord never is), a built-in's being `-1`.
+    pub fn command_used(&mut self, command: &Command, guild: Option<Snowflake>, now_ms: u64) {
+        self.commands.track(&commands::usage_key(command, guild), now_ms);
+        if matches!(command.kind, command_type::CHAT | command_type::PRIMARY_ENTRY_POINT) {
+            let app = if command.is_built_in() { "-1".to_owned() } else { command.application.0.to_string() };
+            self.applications.track(&app, now_ms);
+        }
+    }
+
+    /// How much each command is used, for ordering them.
+    pub fn command_use(&mut self, now_ms: u64) -> Used {
+        let history = &mut self.commands.history;
+        Used { scores: history.scores(now_ms), top: history.frequently(now_ms, |_| true) }
+    }
+
+    /// How much each app is used, for the launcher's orders.
+    pub fn app_use(&mut self, now_ms: u64) -> AppUsage {
+        let history = &mut self.applications.history;
+        AppUsage { scores: history.scores(now_ms), latest: history.latest(now_ms) }
     }
 
     /// The messages a save carries for what is pending, by field of
@@ -352,6 +429,8 @@ impl Stores {
             reactions: self.reactions.pending.len(),
             stickers: self.stickers.pending.len(),
             channels: self.channels.pending.len(),
+            commands: self.commands.pending.len(),
+            applications: self.applications.pending.len(),
         };
         let mut groups = Vec::new();
         if self.stickers.has_pending() {
@@ -364,6 +443,13 @@ impl Stores {
         if self.channels.has_pending() {
             groups.push((GUILD_AND_CHANNEL_FRECENCY, self.channels.message(now_ms, true)));
         }
+        // Both keyed by strings: a sub-command's key holds its path.
+        if self.commands.has_pending() {
+            groups.push((APPLICATION_COMMAND_FRECENCY, self.commands.message(now_ms, false)));
+        }
+        if self.applications.has_pending() {
+            groups.push((APPLICATION_FRECENCY, self.applications.message(now_ms, false)));
+        }
         groups.sort_by_key(|(number, _)| *number);
         (groups, sent)
     }
@@ -374,6 +460,8 @@ impl Stores {
         self.reactions.sent(sent.reactions);
         self.stickers.sent(sent.stickers);
         self.channels.sent(sent.channels);
+        self.commands.sent(sent.commands);
+        self.applications.sent(sent.applications);
     }
 
     pub fn pending_json(&self) -> String {
@@ -382,6 +470,8 @@ impl Stores {
             reactions: self.reactions.pending.clone(),
             stickers: self.stickers.pending.clone(),
             channels: self.channels.pending.clone(),
+            commands: self.commands.pending.clone(),
+            applications: self.applications.pending.clone(),
         };
         serde_json::to_string(&persisted).unwrap_or_default()
     }
@@ -397,6 +487,8 @@ impl Stores {
         self.stickers.pending = valid(persisted.stickers);
         self.channels.pending =
             valid(persisted.channels).into_iter().filter(|(key, _)| key.parse::<u64>().is_ok()).collect();
+        self.commands.pending = valid(persisted.commands);
+        self.applications.pending = valid(persisted.applications);
     }
 }
 
@@ -527,14 +619,109 @@ mod tests {
     }
 
     #[test]
+    fn a_command_counts_a_hundredth_of_an_emoji() {
+        let three = vec![("k".to_owned(), usage(3, &[NOW - 5 * DAY; 3])), ("rival".to_owned(), usage(1, &[NOW]))];
+        let mut commands = History::new(Kind::Command);
+        commands.overwrite(&three, &[]);
+        assert_eq!(commands.scores(NOW)["k"], 2.1, "3 × 70 × 0.01");
+        // Frecency ceil(3 × 2.1 / 3) = 3 beats the rival's ceil(1 × 1 / 1) = 1.
+        assert_eq!(commands.frequently(NOW, |_| true), ["k", "rival"]);
+        let item = build(&[(1, Value::Varint(3)), (2, packed(&[NOW - 5 * DAY; 3])), (3, int32(3)), (4, int32(2))]);
+        assert_eq!(commands.saved(NOW)[0], ("k", item));
+        let mut emoji = History::new(Kind::Emoji);
+        emoji.overwrite(&three, &[]);
+        assert_eq!(emoji.scores(NOW)["k"], 210.0);
+    }
+
+    #[test]
+    fn a_command_score_adds_up_as_the_client_adds_it() {
+        let mut commands = History::new(Kind::Command);
+        commands.overwrite(&[("k".to_owned(), usage(10, &[NOW - 5 * DAY; 10]))], &[]);
+        assert_eq!(commands.scores(NOW)["k"], 7.000000000000001, "summed a hundredth at a time");
+        let saved = commands.saved(NOW);
+        let item = build(&[(1, Value::Varint(10)), (2, packed(&[NOW - 5 * DAY; 10])), (3, int32(8)), (4, int32(7))]);
+        assert_eq!(saved[0].1, item, "frecency ceil(10 × 7.000000000000001 / 10) = 8");
+    }
+
+    #[test]
+    fn a_slash_command_counts_for_its_app_and_a_user_command_doesnt() {
+        let mut stores = Stores::default();
+        stores.command_used(&Command::made_up("910", command_type::CHAT, 900, None), Some(Snowflake(500)), NOW);
+        stores.command_used(&Command::made_up("913", command_type::CHAT, 900, Some("500")), Some(Snowflake(500)), NOW);
+        stores.command_used(&Command::made_up("916", command_type::USER, 900, None), None, NOW);
+        stores.command_used(&Command::made_up("917", command_type::MESSAGE, 700, None), None, NOW);
+        let keys = |store: &Store| store.pending().iter().map(|(k, _)| k.clone()).collect::<Vec<_>>();
+        assert_eq!(keys(&stores.commands), ["910", "913:500", "916", "917"]);
+        assert_eq!(keys(&stores.applications), ["900", "900"]);
+        let mut shrug = Command::made_up("-1", command_type::CHAT, 0, None);
+        shrug.builtin = Some(crate::builtins::BuiltIn::Shrug);
+        stores.command_used(&shrug, Some(Snowflake(500)), NOW);
+        assert_eq!(keys(&stores.applications)[2], "-1", "a built-in's app");
+        let used = stores.command_use(NOW);
+        assert_eq!(used.scores["913:500"], 1.0, "used today: 100 × 0.01");
+        assert_eq!(used.top.len(), 5);
+        let apps = stores.app_use(NOW);
+        assert_eq!((apps.scores["900"], apps.latest["900"]), (200.0, NOW), "an app counts whole");
+    }
+
+    #[test]
+    fn a_save_keeps_the_five_hundred_commands_used_last() {
+        let many = |n: u64| -> Vec<(String, Usage)> {
+            (1..=n).map(|k| (k.to_string(), usage(1, &[NOW - 1000 + k]))).collect()
+        };
+        let mut commands = History::new(Kind::Command);
+        commands.overwrite(&many(530), &[]);
+        let saved = commands.saved(NOW);
+        assert_eq!(saved.len(), 500);
+        assert!(saved.iter().all(|(key, _)| key.parse::<u64>().unwrap() > 30), "the 30 used first go");
+        let mut apps = History::new(Kind::Application);
+        apps.overwrite(&many(130), &[]);
+        assert_eq!(apps.saved(NOW).len(), 100);
+    }
+
+    #[test]
+    fn a_command_or_app_use_makes_the_first_look_load() {
+        let mut stores = Stores::default();
+        stores.commands.track("910", NOW);
+        assert!(stores.has_pending_beyond_channels());
+        let mut stores = Stores::default();
+        stores.applications.track("900", NOW);
+        assert!(stores.has_pending_beyond_channels() && stores.has_pending());
+    }
+
+    #[test]
+    fn a_pending_file_from_before_commands_still_restores() {
+        let mut stores = Stores::default();
+        stores.restore_pending(r#"{"emoji":[["a",5]],"reactions":[],"stickers":[],"channels":[]}"#);
+        assert_eq!(stores.emoji.pending(), [("a".to_owned(), 5)]);
+        stores.commands.track("913\0show:500", 6);
+        stores.applications.track("900", 7);
+        let mut again = Stores::default();
+        again.restore_pending(&stores.pending_json());
+        assert_eq!(again.commands.pending(), [("913\0show:500".to_owned(), 6)]);
+        assert_eq!(again.applications.pending(), [("900".to_owned(), 7)]);
+    }
+
+    #[test]
     fn a_save_carries_the_whole_history_of_what_was_used() {
         let mut stores = Stores::default();
         stores.emoji.track("thumbsup", NOW);
         stores.reactions.track("thumbsup", NOW);
         stores.channels.track("123", NOW);
+        stores.commands.track("123\0set:500", NOW);
+        stores.applications.track("900", NOW);
         let (groups, sent) = stores.before_send(NOW);
         let numbers: Vec<u32> = groups.iter().map(|(n, _)| *n).collect();
-        assert_eq!(numbers, [EMOJI_FRECENCY, GUILD_AND_CHANNEL_FRECENCY, EMOJI_REACTION_FRECENCY]);
+        assert_eq!(
+            numbers,
+            [
+                EMOJI_FRECENCY,
+                APPLICATION_COMMAND_FRECENCY,
+                APPLICATION_FRECENCY,
+                GUILD_AND_CHANNEL_FRECENCY,
+                EMOJI_REACTION_FRECENCY
+            ]
+        );
         // One use, its time, a frecency of 100 and its score.
         let item = build(&[(1, Value::Varint(1)), (2, packed(&[NOW])), (3, int32(100)), (4, int32(100))]);
         let map = |key: Value| {
@@ -542,7 +729,12 @@ mod tests {
             build(&[(1, Value::Bytes(entry))])
         };
         assert_eq!(groups[0].1, map(Value::Bytes(b"thumbsup".to_vec())));
-        assert_eq!(groups[1].1, map(Value::Fixed64(123)), "a channel's key is an id");
+        assert_eq!(groups[3].1, map(Value::Fixed64(123)), "a channel's key is an id");
+        // A command's use weighs a hundredth: score 1, frecency 1.
+        let command = build(&[(1, Value::Varint(1)), (2, packed(&[NOW])), (3, int32(1)), (4, int32(1))]);
+        let entry = build(&[(1, Value::Bytes(b"123\0set:500".to_vec())), (2, Value::Bytes(command))]);
+        assert_eq!(groups[1].1, build(&[(1, Value::Bytes(entry))]), "a command's key is a string, NUL and all");
+        assert_eq!(groups[2].1, map(Value::Bytes(b"900".to_vec())));
         stores.saved(sent);
         assert!(!stores.has_pending());
         assert!(stores.before_send(NOW).0.is_empty(), "nothing pending, nothing sent");

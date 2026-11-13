@@ -21,14 +21,13 @@ use std::time::Duration;
 use adw::prelude::*;
 use discord::Snowflake;
 use discord::animation::Subject;
-use discord::gifs::{self, Gif, Kind, PULSE_MS, Picker, Request, Screen, Tile, Typed, favorited_hint};
+use discord::gifs::{Gif, Kind, PULSE_MS, Picker, Request, Screen, Tile, Typed, favorited_hint};
 use gtk::glib;
 
 use super::App;
 use super::menus::{self, Entry as MenuEntry, Item as MenuItem, Kind as MenuKind};
 use super::picker::{self, Handle, Hooks, Row, Spec, Target};
 use super::uploads::Stopped;
-use crate::config;
 
 /// GIFs to a row.
 const COLUMNS: usize = 3;
@@ -92,24 +91,6 @@ impl App {
                 }
             }
         });
-    }
-
-    /// Show the GIF button as [`gifs::button_shown`] says for the open
-    /// channel.
-    pub(super) fn refresh_gif_button(&self) {
-        let shown = gifs::button_shown(
-            self.sticker_channel().is_some(),
-            self.recording_here(),
-            self.gif_button_customizable(),
-            self.config.get(&config::GIF_BUTTON),
-        );
-        self.gif_button.set_visible(shown);
-    }
-
-    /// Whether the account may turn the GIF button off on this device.
-    pub(super) fn gif_button_customizable(&self) -> bool {
-        let state = self.account.state.borrow();
-        state.me().is_some_and(|me| gifs::button_customizable(&state.experiments, me))
     }
 
     /// Pulse the GIF button after a GIF is favourited, from any star (`er` in
@@ -252,7 +233,7 @@ impl App {
         self.set_reply(None);
         let (this, link) = (self.clone(), link.to_owned());
         glib::spawn_future_local(async move {
-            match rest.send_message(channel, &link, reply, &[], None).await {
+            match rest.send_message(channel, &link, reply, &[], None, false).await {
                 Ok(_) => this.message_sent(channel),
                 Err(e) => {
                     this.message_stopped(channel, &Stopped::Send(e));

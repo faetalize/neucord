@@ -212,19 +212,21 @@ impl Refusal {
         }
     }
 
+    /// Sizes as `P` in 518960 and `WQ` in 382287 write them, with `Hb`.
     pub fn body(&self) -> String {
         match self {
             Refusal::Empty => "File cannot be empty".to_owned(),
-            Refusal::TooLarge { max } => format!("Max file size is {} please.", size_words(*max)),
-            Refusal::TotalTooLarge { max } => format!("Total message size must be less than {}", size_words(*max)),
+            Refusal::TooLarge { max } => format!("Max file size is {} please.", filesize(*max)),
+            Refusal::TotalTooLarge { max } => format!("Total message size must be less than {}", filesize(*max)),
             Refusal::TooMany { max } => format!("You can only upload {max} files at a time!"),
         }
     }
 }
 
-/// A size as the client writes it: `20 MB`, with mebibytes.
+const MIB: u64 = 1024 * 1024;
+
+/// A file's size in its row: `20 MB`, with mebibytes.
 pub fn size_words(bytes: u64) -> String {
-    const MIB: u64 = 1024 * 1024;
     match bytes {
         b if b >= 1024 * MIB && b % (1024 * MIB) == 0 => format!("{} GB", b / (1024 * MIB)),
         b if b >= MIB && b % MIB == 0 => format!("{} MB", b / MIB),
@@ -232,6 +234,138 @@ pub fn size_words(bytes: u64) -> String {
         b if b >= 1024 => format!("{:.1} KB", b as f64 / 1024.0),
         b => format!("{b} B"),
     }
+}
+
+/// A size as humanize's `filesize` writes it (796873, which `Hb` in 453771
+/// calls): base 1024, two decimals from a kilobyte on, `,` grouping, so
+/// `20.00 MB`, `512 bytes`: every limit the client's refusals name.
+pub fn filesize(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["bytes", "KB", "MB", "GB", "TB", "PB"];
+    if bytes == 0 {
+        return "0 bytes".to_owned();
+    }
+    let unit = (0..UNITS.len()).find(|&u| (bytes as f64) < 1024f64.powi(u as i32 + 1)).unwrap_or(UNITS.len() - 1);
+    let value = bytes as f64 / 1024f64.powi(unit as i32);
+    let decimals = if unit == 0 { 0 } else { 2 };
+    // `numberFormat`: the whole part of the rounded value, grouped, then
+    // the decimals of what is left of the unrounded one.
+    let rounded = format!("{value:.decimals$}");
+    let whole = rounded.split('.').next().unwrap_or_default();
+    let mut grouped = String::new();
+    for (i, digit) in whole.chars().enumerate() {
+        if i > 0 && (whole.len() - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    if decimals > 0 {
+        let rest = format!("{:.decimals$}", (value - whole.parse::<f64>().unwrap_or_default()).abs());
+        grouped.push('.');
+        grouped.push_str(&rest[2..]);
+    }
+    format!("{grouped} {}", UNITS[unit])
+}
+
+/// What a command file (and a modal's) is refused for before any request,
+/// though nothing checked it when it was picked: `CloudUpload.upload`
+/// (48325) turns down an empty file and one over the message limit itself.
+/// A message's files never get here refused, as [`check_added`] comes first.
+pub fn check_upload(limits: &Uploads, size: u64) -> Result<(), Refusal> {
+    if size == 0 {
+        return Err(Refusal::Empty);
+    }
+    if size > limits.file_size {
+        return Err(Refusal::TooLarge { max: limits.file_size });
+    }
+    Ok(())
+}
+
+/// Under this, the staging of a command's files calls none too large (`VP`
+/// in 381941); it only picks which of two messages shows.
+const STAGING_FLOOR: u64 = 200 * MIB;
+
+/// Why a command run with files went no further (the staging in `B`,
+/// 545152, location `executeCommand.stageAttachments`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Staging {
+    /// Over the limit: `max` is always the per-file one, even when the
+    /// total is what failed.
+    TooLarge { max: u64 },
+    /// An upload failed; `files` counts all the run's files, not the failed.
+    Failed { files: usize },
+}
+
+impl Staging {
+    pub fn words(&self) -> String {
+        match self {
+            Staging::TooLarge { max } => format!("Max file size is {} please.", filesize(*max)),
+            Staging::Failed { files: 1 } => "1 File Uploading Failed".to_owned(),
+            Staging::Failed { files } => format!("{files} Files Uploading Failed"),
+        }
+    }
+}
+
+/// The check before a run waits on its files: the largest over
+/// `max(file limit, 200 MiB)`, or all of them over the total.
+pub fn check_staging(limits: &Uploads, sizes: &[u64]) -> Result<(), Staging> {
+    let largest = sizes.iter().copied().max().unwrap_or_default();
+    if largest > limits.file_size.max(STAGING_FLOOR) || sizes.iter().sum::<u64>() > limits.total_size {
+        return Err(Staging::TooLarge { max: limits.file_size });
+    }
+    Ok(())
+}
+
+/// What a field of files takes (`M1` in 424170), from its `file_types`:
+/// entries with a dot name an extension, `image`, `video` and `audio` a
+/// list each, and anything else nothing. Empty takes any file.
+pub fn extensions(file_types: &[String]) -> Vec<String> {
+    let mut extensions: Vec<String> =
+        file_types.iter().filter_map(|t| t.strip_prefix('.')).map(str::to_owned).collect();
+    let has = |word: &str| file_types.iter().any(|t| t == word);
+    for (word, list) in [
+        ("image", &["png", "gif", "jpg", "jpeg", "jfif", "webp", "avif"][..]),
+        ("video", &["mp4", "mov", "qt", "webm"]),
+        ("audio", &["mp3", "m4a", "wav", "ogg", "opus", "flac"]),
+    ] {
+        if has(word) {
+            extensions.extend(list.iter().map(|e| (*e).to_owned()));
+        }
+    }
+    extensions
+}
+
+/// Whether a field taking `extensions` takes `filename`: its name in lower
+/// case ends in one, as given (so a `.PDF` entry takes nothing, as in the
+/// client).
+pub fn takes(extensions: &[String], filename: &str) -> bool {
+    let name = filename.to_lowercase();
+    extensions.is_empty() || extensions.iter().any(|e| name.ends_with(&format!(".{e}")))
+}
+
+/// The types a field names (`typesFormattedString`): `image`, `video`,
+/// `audio`, then the extensions sorted, as an English "or" list; `None`
+/// when that is nothing.
+pub fn types_words(file_types: &[String]) -> Option<String> {
+    let mut words: Vec<&str> =
+        ["image", "video", "audio"].into_iter().filter(|w| file_types.iter().any(|t| t == w)).collect();
+    let mut dotted: Vec<&str> = file_types.iter().map(String::as_str).filter(|t| t.starts_with('.')).collect();
+    // JavaScript's default sort: by UTF-16 units, which for these is by bytes
+    // outside the astral planes.
+    dotted.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
+    words.extend(dotted);
+    match words.as_slice() {
+        [] => None,
+        [one] => Some((*one).to_owned()),
+        [a, b] => Some(format!("{a} or {b}")),
+        [rest @ .., last] => Some(format!("{}, or {last}", rest.join(", "))),
+    }
+}
+
+/// The alert for a file a field doesn't take (`showInvalidFileTypeAlert`).
+pub const INVALID_TYPE: &str = "Invalid file type";
+
+pub fn invalid_type_words(types: &str) -> String {
+    format!("File must be {types}.")
 }
 
 /// Whether `added` may join `queued` in a message, by size. The client asks
@@ -527,8 +661,6 @@ impl Rest {
 mod tests {
     use super::*;
 
-    const MIB: u64 = 1024 * 1024;
-
     fn limits() -> Uploads {
         Uploads { file_size: 20 * MIB, files: 10, total_size: 500 * MIB }
     }
@@ -633,8 +765,10 @@ mod tests {
     fn refusals_speak_like_the_client() {
         assert_eq!(Refusal::TooMany { max: 10 }.heading(), "Too many uploads!");
         assert_eq!(Refusal::TooMany { max: 10 }.body(), "You can only upload 10 files at a time!");
-        assert_eq!(Refusal::TooLarge { max: 20 * MIB }.body(), "Max file size is 20 MB please.");
-        assert_eq!(Refusal::TotalTooLarge { max: 1024 * MIB }.body(), "Total message size must be less than 1 GB");
+        // `P` in 518960 and `WQ` in 382287 write the limit with `Hb`.
+        assert_eq!(Refusal::TooLarge { max: 20 * MIB }.body(), "Max file size is 20.00 MB please.");
+        assert_eq!(Refusal::TotalTooLarge { max: 1024 * MIB }.body(), "Total message size must be less than 1.00 GB");
+        assert_eq!(Refusal::TotalTooLarge { max: 500 * MIB }.body(), "Total message size must be less than 500.00 MB");
         assert_eq!(Refusal::Empty.body(), "File cannot be empty");
     }
 
@@ -702,6 +836,62 @@ mod tests {
         assert_eq!(size_words(1536 * 1024), "1.5 MB");
         assert_eq!(size_words(100_000), "97.7 KB");
         assert_eq!(size_words(70), "70 B");
+    }
+
+    #[test]
+    fn staging_writes_sizes_as_humanize_does() {
+        assert_eq!(filesize(20 * MIB), "20.00 MB");
+        assert_eq!(filesize(500 * MIB), "500.00 MB");
+        assert_eq!(filesize(1024 * MIB), "1.00 GB");
+        assert_eq!(filesize(512), "512 bytes");
+        assert_eq!(filesize(0), "0 bytes");
+        assert_eq!(filesize(1_024_000), "1,000.00 KB");
+        assert_eq!(filesize(1536 * 1024), "1.50 MB");
+    }
+
+    #[test]
+    fn a_command_file_is_refused_before_any_request_when_empty_or_too_large() {
+        let l = limits();
+        assert_eq!(check_upload(&l, 0), Err(Refusal::Empty));
+        assert_eq!(check_upload(&l, 20 * MIB), Ok(()));
+        assert_eq!(check_upload(&l, 20 * MIB + 1), Err(Refusal::TooLarge { max: 20 * MIB }));
+    }
+
+    #[test]
+    fn staging_checks_the_largest_against_a_floor_and_all_against_the_total() {
+        let l = limits();
+        let too_large = Err(Staging::TooLarge { max: 20 * MIB });
+        assert_eq!(check_staging(&l, &[100 * MIB]), Ok(()), "its upload has failed already");
+        assert_eq!(check_staging(&l, &[200 * MIB]), Ok(()));
+        assert_eq!(check_staging(&l, &[200 * MIB + 1]), too_large);
+        assert_eq!(check_staging(&l, &[200 * MIB; 3]), too_large, "600 MiB over the 500 MiB total");
+        let rollout = Uploads { total_size: 1024 * MIB, ..l };
+        assert_eq!(check_staging(&rollout, &[200 * MIB; 3]), Ok(()));
+        assert_eq!(check_staging(&l, &[]), Ok(()));
+        assert_eq!(Staging::TooLarge { max: 20 * MIB }.words(), "Max file size is 20.00 MB please.");
+        assert_eq!(Staging::Failed { files: 1 }.words(), "1 File Uploading Failed");
+        assert_eq!(Staging::Failed { files: 3 }.words(), "3 Files Uploading Failed");
+    }
+
+    #[test]
+    fn file_types_read_as_the_client_reads_them() {
+        let types = |list: &[&str]| list.iter().map(|t| (*t).to_owned()).collect::<Vec<_>>();
+        let image = types(&["image"]);
+        assert_eq!(extensions(&image), ["png", "gif", "jpg", "jpeg", "jfif", "webp", "avif"]);
+        assert_eq!(types_words(&image).as_deref(), Some("image"));
+        assert!(takes(&extensions(&image), "Cat.PNG"), "the name is lowercased");
+        assert!(!takes(&extensions(&image), "notes.txt"));
+        let mixed = types(&[".zip", "audio", ".pdf", "image"]);
+        assert_eq!(types_words(&mixed).as_deref(), Some("image, audio, .pdf, or .zip"));
+        assert_eq!(extensions(&mixed)[..3], ["zip", "pdf", "png"]);
+        assert_eq!(types_words(&types(&[".pdf", "video"])).as_deref(), Some("video or .pdf"));
+        let upper = types(&[".PDF"]);
+        assert!(!takes(&extensions(&upper), "a.PDF") && !takes(&extensions(&upper), "a.pdf"), "not lowercased");
+        for anything in [types(&["document"]), Vec::new()] {
+            assert_eq!(types_words(&anything), None);
+            assert!(extensions(&anything).is_empty() && takes(&extensions(&anything), "x.bin"));
+        }
+        assert_eq!(invalid_type_words("image or .pdf"), "File must be image or .pdf.");
     }
 
     #[test]

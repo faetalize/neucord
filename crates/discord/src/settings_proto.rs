@@ -44,6 +44,7 @@ const RENDER_EMBEDS: u32 = 12;
 const RENDER_REACTIONS: u32 = 13;
 const ANIMATE_EMOJI: u32 = 14;
 const ANIMATE_STICKERS: u32 = 15;
+const ENABLE_TTS_COMMAND: u32 = 16;
 const MESSAGE_DISPLAY_COMPACT: u32 = 17;
 const VIEW_NSFW_COMMANDS: u32 = 23;
 
@@ -171,6 +172,7 @@ impl SettingsPatch {
             localization: settings.message(LOCALIZATION).map(|l| l.string_value(LOCALE).map(String::from)),
             skin_tone: text.as_ref().and_then(|t| t.string_value(DIVERSITY_SURROGATE)).map(Tone::from_modifier),
             nsfw_commands_in_dms: flag(VIEW_NSFW_COMMANDS),
+            enable_tts_command: flag(ENABLE_TTS_COMMAND),
         })
     }
 }
@@ -529,6 +531,27 @@ mod tests {
         assert!(!settings.nsfw_commands_in_dms, "absent is off");
         let json = SettingsPatch::from_json(&serde_json::json!({"view_nsfw_commands": true}));
         assert_eq!(json.nsfw_commands_in_dms, None);
+    }
+
+    /// A `BoolValue` that most protos leave out, which means on (253932's
+    /// default); READY's JSON copy isn't read.
+    #[test]
+    fn reads_the_tts_command_setting() {
+        let off = patch(&bytes_field(TEXT_AND_IMAGES, &bool_wrapper(ENABLE_TTS_COMMAND, false)));
+        assert_eq!(off.enable_tts_command, Some(false));
+        let on = patch(&bytes_field(TEXT_AND_IMAGES, &bool_wrapper(ENABLE_TTS_COMMAND, true)));
+        assert_eq!(on.enable_tts_command, Some(true));
+        assert_eq!(patch(&bytes_field(TEXT_AND_IMAGES, &[])).enable_tts_command, None);
+        let mut settings = crate::settings::Settings::default();
+        assert!(settings.tts_command(), "on by default");
+        settings.replace(off);
+        assert!(!settings.tts_command());
+        settings.replace(patch(&bytes_field(TEXT_AND_IMAGES, &[])));
+        assert!(settings.tts_command(), "absent is on");
+        assert_eq!(
+            SettingsPatch::from_json(&serde_json::json!({"enable_tts_command": false})).enable_tts_command,
+            None
+        );
     }
 
     /// Developer Mode is a plain `bool`, not a wrapper: proto3 leaves `false`

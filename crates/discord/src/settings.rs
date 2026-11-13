@@ -770,6 +770,8 @@ pub struct Settings {
     /// `view_nsfw_commands`: age-restricted commands are offered in DMs and
     /// group DMs.
     pub nsfw_commands_in_dms: bool,
+    /// `enable_tts_command`, as the account set it; see [`Self::tts_command`].
+    pub enable_tts_command: Option<bool>,
 }
 
 /// The settings a payload mentions; the rest are `None`.
@@ -788,6 +790,7 @@ pub struct SettingsPatch {
     /// `diversity_surrogate`: the tone, or none for the default.
     pub skin_tone: Option<Option<Tone>>,
     pub nsfw_commands_in_dms: Option<bool>,
+    pub enable_tts_command: Option<bool>,
 }
 
 impl SettingsPatch {
@@ -828,6 +831,9 @@ impl Settings {
             self.skin_tone = tone;
         }
         self.nsfw_commands_in_dms = patch.nsfw_commands_in_dms.unwrap_or(self.nsfw_commands_in_dms);
+        if patch.enable_tts_command.is_some() {
+            self.enable_tts_command = patch.enable_tts_command;
+        }
     }
 
     /// Take `patch` as all of the settings, as a replacing protobuf is: what
@@ -835,6 +841,11 @@ impl Settings {
     pub fn replace(&mut self, patch: SettingsPatch) {
         *self = Settings::default();
         self.apply(patch);
+    }
+
+    /// /tts is offered (253932's `on`): unless the account turned it off.
+    pub fn tts_command(&self) -> bool {
+        self.enable_tts_command.unwrap_or(true)
     }
 
     /// Our status is Do Not Disturb, which silences every notification.

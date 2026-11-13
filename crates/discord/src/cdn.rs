@@ -87,6 +87,86 @@ pub fn group_dm_icon_url(channel_id: u64, hash: &str, size: u16) -> String {
     format!("{CDN}/channel-icons/{channel_id}/{hash}.png?size={size}")
 }
 
+/// An application's own icon, always a still PNG (486020 `k`/`x`:
+/// `canWebP: false`, `canAnimate: false`).
+pub fn app_icon_url(app_id: u64, hash: &str, size: u16) -> String {
+    format!("{CDN}/app-icons/{app_id}/{hash}.png?size={size}")
+}
+
+/// An app's bot user, as far as its picture goes.
+#[derive(Clone, Copy, Debug)]
+pub struct IconBot<'a> {
+    pub id: u64,
+    pub avatar: Option<&'a str>,
+    pub discriminator: &'a str,
+    /// The user's `bot` flag: only a bot gets the bundled pictures.
+    pub bot: bool,
+}
+
+/// The pictures the client bundles for some bots, by avatar "hash"
+/// (`BOT_AVATARS` in 9320).
+const BUNDLED_BOT_AVATARS: [&str; 3] = ["clyde", "nitro", "nitro_wumpus"];
+
+/// What a bot's own avatar resolves to (`C` in 486020, still).
+enum BotPicture {
+    Url(String),
+    /// A picture the client bundles: no request, and the chain stops.
+    Bundled,
+    None,
+}
+
+fn bot_picture(bot: IconBot, size: u16) -> BotPicture {
+    if bot.bot {
+        match bot.avatar {
+            Some(hash) if BUNDLED_BOT_AVATARS.contains(&hash) => return BotPicture::Bundled,
+            None if bot.discriminator == "0000" => return BotPicture::Bundled,
+            _ => {}
+        }
+    }
+    match bot.avatar {
+        Some(hash) => BotPicture::Url(still(&avatar_url(bot.id, hash, size))),
+        None => BotPicture::None,
+    }
+}
+
+/// An app's picture, as `getApplicationIconURL` (486020 `x`) picks it: the
+/// bot's picture in `member`'s server, then (with `bot_icon_first`) the
+/// bot's avatar, then the app icon, then the bot's avatar. `None` is the
+/// client's bundled picture (no request), which Neucord draws as a symbolic
+/// icon. Every image is a still. `member` is the bot's avatar hash in that
+/// server, if it is a member there and has one; the client passes `bot`
+/// only where it knows the bot (969508's `P`: a member of the selected
+/// server), so callers decide that too. `size` is what the caller asks
+/// (`asset_size` of 128 × scale, whatever it draws). An icon that is a
+/// `data:` URL (which the client shows as is) is left to the fallback:
+/// Neucord loads only network images.
+pub fn application_icon(
+    app_id: u64,
+    icon: Option<&str>,
+    bot: Option<IconBot>,
+    member: Option<(u64, &str)>,
+    bot_icon_first: bool,
+    size: u16,
+) -> Option<String> {
+    if let (Some(bot), Some((guild, hash))) = (bot, member) {
+        return Some(still(&member_avatar_url(guild, bot.id, hash, size)));
+    }
+    let from_bot = |bot| match bot_picture(bot, size) {
+        BotPicture::Url(url) => Some(Some(url)),
+        BotPicture::Bundled => Some(None),
+        BotPicture::None => None,
+    };
+    if let Some(bot) = bot.filter(|_| bot_icon_first)
+        && let Some(picture) = from_bot(bot)
+    {
+        return picture;
+    }
+    if let Some(hash) = icon {
+        return (!hash.starts_with("data:")).then(|| app_icon_url(app_id, hash, size));
+    }
+    bot.and_then(from_bot).flatten()
+}
+
 pub fn emoji_url(emoji_id: u64, animated: bool, size: u16) -> String {
     let ext = if animated { "gif" } else { "png" };
     format!("{CDN}/emojis/{emoji_id}.{ext}?size={size}")
@@ -860,6 +940,64 @@ mod tests {
         let thirty_three = format!("{{\"ladder\":{:?}}}", (0..33).map(|n| 16 + n).collect::<Vec<u32>>());
         assert_eq!(Ladder::from_config(&thirty_three), None, "at most 32 rungs");
         assert_eq!(Ladder::from_config(r#"{"ladder":[128.0, 16]}"#).map(|l| l.rungs), Some(vec![16, 128]));
+    }
+
+    #[test]
+    fn an_app_picture_follows_the_clients_chain() {
+        let bot = IconBot { id: 9, avatar: Some("b1"), discriminator: "4242", bot: true };
+        let bare = IconBot { avatar: None, ..bot };
+        let app = |icon, bot, member, first| application_icon(8, icon, bot, member, first, 128);
+        // The bot's picture in the server comes first, a still even when animated.
+        assert_eq!(
+            app(Some("i1"), Some(bot), Some((5, "a_m1")), true).as_deref(),
+            Some("https://cdn.discordapp.com/guilds/5/users/9/avatars/a_m1.png?size=128")
+        );
+        // Then its avatar, before the app icon only when asked.
+        assert_eq!(
+            app(Some("i1"), Some(IconBot { avatar: Some("a_b1"), ..bot }), None, true).as_deref(),
+            Some("https://cdn.discordapp.com/avatars/9/a_b1.png?size=128")
+        );
+        assert_eq!(
+            app(Some("i1"), Some(bot), None, false).as_deref(),
+            Some("https://cdn.discordapp.com/app-icons/8/i1.png?size=128")
+        );
+        // A bot with no avatar gives way to the app icon.
+        let bare_discriminated = IconBot { discriminator: "4242", ..bare };
+        assert_eq!(
+            app(Some("i1"), Some(bare_discriminated), None, true).as_deref(),
+            Some("https://cdn.discordapp.com/app-icons/8/i1.png?size=128")
+        );
+        // No app icon: the bot's avatar after all, else the bundled picture.
+        assert_eq!(
+            app(None, Some(bot), None, false).as_deref(),
+            Some("https://cdn.discordapp.com/avatars/9/b1.png?size=128")
+        );
+        assert_eq!(app(None, Some(bare_discriminated), None, true), None);
+        assert_eq!(app(None, None, None, true), None);
+        // A member without a bot to name is no member (the client needs `bot.id`).
+        assert_eq!(
+            app(Some("i1"), None, Some((5, "m1")), true).as_deref(),
+            Some("https://cdn.discordapp.com/app-icons/8/i1.png?size=128")
+        );
+    }
+
+    #[test]
+    fn a_bundled_bot_picture_stops_the_chain_before_the_app_icon() {
+        let app = |bot| application_icon(8, Some("i1"), Some(bot), None, true, 128);
+        let bot = IconBot { id: 9, avatar: None, discriminator: "0000", bot: true };
+        assert_eq!(app(bot), None);
+        assert_eq!(app(IconBot { avatar: Some("clyde"), discriminator: "1", ..bot }), None);
+        // Only a bot gets them: a user with that hash is fetched as any avatar.
+        assert_eq!(
+            app(IconBot { avatar: Some("clyde"), bot: false, ..bot }).as_deref(),
+            Some("https://cdn.discordapp.com/avatars/9/clyde.png?size=128")
+        );
+        assert_eq!(
+            app(IconBot { bot: false, ..bot }).as_deref(),
+            Some("https://cdn.discordapp.com/app-icons/8/i1.png?size=128")
+        );
+        // An icon that is already a picture is left to the fallback.
+        assert_eq!(application_icon(8, Some("data:image/png;base64,AA"), None, None, true, 128), None);
     }
 
     #[test]

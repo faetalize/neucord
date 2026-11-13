@@ -17,9 +17,9 @@ use gtk::{gdk, gio, glib};
 use super::App;
 use super::chat::{self, MessageTarget};
 use super::{
-    accounts, attachments, composer, create_thread, edits, emoji, forum, gifs, notify_menus, picker, poll_composer,
-    polls, profile, reactions, reactors, scheduling, server_privacy, sidebar, slash, spelling, stickers, threads,
-    uploads, viewer, voice,
+    accounts, attachments, composer, create_thread, edits, emoji, forum, gifs, launcher, notify_menus, picker,
+    poll_composer, polls, profile, reactions, reactors, scheduling, server_privacy, sidebar, slash, spelling, stickers,
+    threads, uploads, viewer, voice,
 };
 
 /// An item that copies or opens a link, shown when the link `$link` finds in
@@ -313,9 +313,15 @@ pub(super) const ATTACH: Table<()> = &[&[
     create_thread::ATTACH_MENU,
     poll_composer::CREATE_POLL,
     slash::USE_APPS,
+    launcher::APP_LAUNCHER,
     scheduling::SCHEDULE_MESSAGE,
     voice::RECORD_VOICE,
 ]];
+
+/// An app in the launcher, right-clicked (`activity-shelf-item-context`,
+/// `eq` in 621377), and its page's More (`app-details-more-menu`). The
+/// client's manage items open server or user settings Neucord lacks.
+pub(super) const LAUNCHER_APP: Table<launcher::AppTarget> = &[&[launcher::COPY_APP_ID]];
 
 /// Added below the message box's own menu (GTK's cut, copy, paste, undo,
 /// select all and emoji, which stand for the browser's menu the web client
@@ -326,6 +332,10 @@ pub(super) const ATTACH: Table<()> = &[&[
 /// make; Remove from Dictionary, which libspelling has no word for; and the
 /// staff-only Fix Grammar, Translate and Transforms.
 pub(super) const COMPOSER: Table<()> = &[&[composer::SEND_BUTTON], &[spelling::SPELLING], &[uploads::PASTE_PLAIN]];
+
+/// The bar above a command in the message box (`dev-context`, 646938):
+/// Copy Command ID, in Developer Mode.
+pub(super) const COMMAND_BAR: Table<slash::BarTarget> = &[&[slash::COPY_COMMAND_ID]];
 
 /// An emoji or sticker of the picker (`expression-picker`, 233503). The
 /// client offers Copy Emoji, Copy Emoji ID and Copy Emoji Image Link, or
@@ -804,6 +814,19 @@ mod tests {
     }
 
     #[test]
+    fn the_app_launcher_stands_where_use_apps_does() {
+        let attach: Vec<_> = ATTACH[0]
+            .iter()
+            .map(|entry| match entry {
+                Entry::Item(item) => item.name,
+                Entry::Choices(choices) => choices.name,
+            })
+            .collect();
+        let at = |name| attach.iter().position(|n| *n == name).unwrap();
+        assert_eq!(at("app-launcher"), at("use-apps") + 1, "one shows where the other doesn't (316576 eR)");
+    }
+
+    #[test]
     fn a_live_submenu_is_made_by_its_feature_and_shows_even_when_empty() {
         const FILLED: Entry<Target, Cx> = Entry::Item(Item {
             name: "filled",
@@ -861,6 +884,7 @@ mod tests {
         // Send Message Button, the spelling groups, then Paste as Plain Text
         // (items 2, 3–4 and 5 of 194400).
         assert_eq!(names(COMPOSER), [["send-button"], ["spelling"], ["paste-plain-text"]]);
+        assert_eq!(names(COMMAND_BAR), [["copy-command-id"]]);
     }
 
     #[test]

@@ -5,7 +5,7 @@ cmd "shot $OUT/dm-list.png"
 cmd "channel 201"
 sleep 1
 cmd "attach"
-cmd "popover $OUT/attach-menu.png"
+cmd "shot-popover composer_box $OUT/attach-menu.png"
 cmd "shot $OUT/dm-open.png"
 cmd "guild 500"
 cmd "channel 600"

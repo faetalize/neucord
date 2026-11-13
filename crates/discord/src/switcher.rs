@@ -233,7 +233,7 @@ fn fuzzy(needle: &str, haystack: &str) -> bool {
 }
 
 /// Lower case, combining marks dropped (`sS` in 23339).
-fn fold(text: &str) -> String {
+pub(crate) fn fold(text: &str) -> String {
     let decomposed = glib::normalize(text.to_lowercase(), glib::NormalizeMode::Default);
     let stripped: String = decomposed.chars().filter(|c| !('\u{300}'..='\u{36f}').contains(c)).collect();
     glib::normalize(stripped, glib::NormalizeMode::DefaultCompose).to_string()

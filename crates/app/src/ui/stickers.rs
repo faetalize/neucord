@@ -223,6 +223,16 @@ impl App {
         Library::new(guilds, state.sticker_packs.all(), &state.limits(), &place)
     }
 
+    /// What `/sticker` searches in `channel`: every server's stickers in
+    /// the order the account has the servers, then the standard packs, each
+    /// saying whether we may send it here (`getStickerMetadataArrays`,
+    /// 898578), not the picker's own-server-first order.
+    pub(super) fn sticker_search_library(&self, channel: Snowflake) -> Library {
+        let place = self.sticker_place(channel);
+        let state = self.account.state.borrow();
+        Library::searchable(state.guilds.iter(), state.sticker_packs.all(), &state.limits(), &place)
+    }
+
     /// Whether `listed` can still be sent in `channel`: what was true when
     /// it was picked may not be, as the box follows our permissions.
     pub(super) fn sticker_sendable(&self, channel: Snowflake, listed: &Listed) -> Result<(), StickerUnavailable> {
@@ -252,13 +262,11 @@ impl App {
         });
     }
 
-    /// Show the sticker button and the waiting sticker as they are now for
-    /// the open channel.
+    /// Show the message box's buttons and the waiting sticker as they are
+    /// now for the open channel.
     pub(super) fn refresh_stickers(self: &Rc<Self>) {
         let channel = self.sticker_channel();
-        self.sticker_button.set_visible(channel.is_some());
-        self.refresh_gif_button();
-        self.refresh_send_button();
+        self.refresh_chat_bar();
         let waiting = channel.and_then(|c| self.waiting.of(c));
         self.waiting.bar.set_visible(waiting.is_some());
         if let Some(listed) = waiting {
@@ -310,6 +318,18 @@ impl App {
             let reload = reload.clone();
             move || reload()
         });
+        let this = Rc::downgrade(self);
+        self.fetch_sticker_packs(move || {
+            if let Some(this) = this.upgrade() {
+                *library.borrow_mut() = Rc::new(this.sticker_library(channel));
+                reload();
+            }
+        });
+    }
+
+    /// Fetch the standard packs (`YB`, 631576) unless a fetch is running or
+    /// one finished within the hour; `fetched` runs once they are in.
+    pub(super) fn fetch_sticker_packs(self: &Rc<Self>, fetched: impl FnOnce() + 'static) {
         let rest = {
             let mut state = self.account.state.borrow_mut();
             let now = (glib::monotonic_time() / 1000) as u64;
@@ -326,8 +346,7 @@ impl App {
                     Ok(packs) => {
                         let now = (glib::monotonic_time() / 1000) as u64;
                         this.account.state.borrow_mut().sticker_packs.fetched(packs, now);
-                        *library.borrow_mut() = Rc::new(this.sticker_library(channel));
-                        reload();
+                        fetched();
                     }
                     Err(e) => eprintln!("stickers: the standard packs weren't fetched: {e}"),
                 }
@@ -337,7 +356,7 @@ impl App {
 
     /// What a pick does: send the sticker at once from an empty box, else
     /// wait above the box for the message.
-    fn pick_sticker(self: &Rc<Self>, channel: Snowflake, entry: &Entry) {
+    pub(super) fn pick_sticker(self: &Rc<Self>, channel: Snowflake, entry: &Entry) {
         let buffer = self.composer.buffer();
         let typed = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
         let alone =
@@ -387,7 +406,7 @@ impl App {
     }
 
     /// How much each sticker was used, for a search to rank by.
-    fn sticker_scores(&self) -> HashMap<String, f64> {
+    pub(super) fn sticker_scores(&self) -> HashMap<String, f64> {
         self.account.state.borrow_mut().frecency.stores.stickers.history.scores(now_ms() as u64)
     }
 }

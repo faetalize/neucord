@@ -18,19 +18,29 @@ edit("crates/discord/src/cdn.rs", 'host == "media.discordapp.net" ||', 'host == 
 edit("crates/discord/src/cdn.rs", 'let host = url.strip_prefix("https://").and_then(|rest| rest.split([\'/\', \'?\']).next()).unwrap_or_default();', 'let host = url.strip_prefix("http://").and_then(|rest| rest.split([\'/\', \'?\']).next()).unwrap_or_default();')
 edit("crates/app/src/ui/uploads.rs", "    attach: gtk::Button,", "    pub(super) attach: gtk::Button,")
 edit("crates/app/src/ui/mod.rs", "mod emoji;", "mod e2e;\nmod emoji;")
+# What a right-click does to the message box's menu before GTK opens it, for `composer-menu`.
+edit("crates/app/src/ui/menus.rs", "    view.add_controller(press);\n    on_keys(view, move |_| {",
+     "    view.add_controller(press);\n    super::e2e::REFILL.with(|r| r.borrow_mut().push({ let refill = refill.clone(); Rc::new(move |at| refill(at)) }));\n    on_keys(view, move |_| {")
 edit("crates/app/src/ui/mod.rs", "glib::spawn_future_local(async move { this.resume_session().await });",
      "let _ = &this; self.e2e_start();")
-open(f"{root}/crates/app/src/ui/e2e.rs", "w").write('''
+open(f"{root}/crates/app/src/ui/e2e.rs", "w").write(r"""
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
+use adw::prelude::*;
 use discord::Snowflake;
-use gtk::glib;
-use gtk::prelude::*;
+use gtk::{gdk, gio, glib};
 
 use super::App;
+use super::composer::Completion;
 
-fn shot(widget: &impl IsA<gtk::Widget>, path: &str) {
+thread_local! {
+    /// Each `menus::extend`'s refill, the message box's first.
+    pub(super) static REFILL: RefCell<Vec<Rc<dyn Fn(Option<(f64, f64)>)>>> = RefCell::default();
+}
+
+pub(super) fn shot(widget: &impl IsA<gtk::Widget>, path: &str) {
     let w = widget.upcast_ref::<gtk::Widget>();
     let paintable = gtk::WidgetPaintable::new(Some(w));
     let snapshot = gtk::Snapshot::new();
@@ -44,9 +54,34 @@ fn shot(widget: &impl IsA<gtk::Widget>, path: &str) {
     eprintln!("e2e: shot {path} {}x{}", w.width(), w.height());
 }
 
+/// The popover showing on `widget`, of those parented to it.
+fn popover_on(widget: &gtk::Widget) -> Option<gtk::Popover> {
+    let mut child = widget.first_child();
+    while let Some(c) = child {
+        if let Ok(p) = c.clone().downcast::<gtk::Popover>()
+            && p.is_mapped()
+        {
+            return Some(p);
+        }
+        child = c.next_sibling();
+    }
+    None
+}
+
+fn buttons(widget: &gtk::Widget, found: &mut Vec<gtk::Button>) {
+    let mut child = widget.first_child();
+    while let Some(c) = child {
+        if let Ok(b) = c.clone().downcast::<gtk::Button>() {
+            found.push(b);
+        }
+        buttons(&c, found);
+        child = c.next_sibling();
+    }
+}
+
 impl App {
     pub(super) fn e2e_start(self: &Rc<Self>) {
-        let token = std::env::var("E2E_TOKEN").unwrap_or_else(|_| "fake-token-1".into());
+        let token = std::env::var("E2E_TOKEN").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| "fake-token-1".into());
         self.window.present();
         // As resuming a stored account does: its id is known before READY.
         self.account.state.borrow_mut().target = Some(Snowflake(100));
@@ -58,7 +93,7 @@ impl App {
             if let Ok(text) = std::fs::read_to_string(&path) {
                 let _ = std::fs::remove_file(&path);
                 for line in text.lines() {
-                    this.e2e_run(line.trim());
+                    this.e2e_run(line);
                 }
             }
             glib::ControlFlow::Continue
@@ -68,6 +103,8 @@ impl App {
     fn e2e_run(self: &Rc<Self>, line: &str) {
         eprintln!("e2e: {line}");
         let mut parts = line.split_whitespace();
+        // What follows the command word, spaces kept, for text.
+        let rest = line.trim_start().split_once(' ').map_or("", |(_, rest)| rest);
         let id = |s: Option<&str>| Snowflake(s.and_then(|s| s.parse().ok()).unwrap_or(0));
         match parts.next() {
             Some("channel") => self.select_channel(id(parts.next())),
@@ -75,17 +112,171 @@ impl App {
             Some("home") => self.select_home(),
             Some("attach") => self.drafts.attach.emit_clicked(),
             Some("shot") => shot(&self.window, parts.next().unwrap_or("shot.png")),
-            Some("popover") => {
-                let path = parts.next().unwrap_or("popover.png");
-                let mut child = self.composer_box.first_child();
-                while let Some(c) = child {
-                    if let Ok(p) = c.clone().downcast::<gtk::Popover>() {
-                        return shot(&p, path);
-                    }
-                    child = c.next_sibling();
+            Some("shot-popover") => {
+                let anchor: Option<gtk::Widget> = match parts.next() {
+                    Some("composer") => Some(self.composer.clone().upcast()),
+                    Some("composer_box") => Some(self.composer_box.clone().upcast()),
+                    Some("gif_button") => Some(self.gif_button.clone().upcast()),
+                    other => return eprintln!("e2e: no widget {other:?}"),
+                };
+                match anchor.and_then(|w| popover_on(&w)) {
+                    Some(popover) => shot(&popover, parts.next().unwrap_or("popover.png")),
+                    None => eprintln!("e2e: no popover"),
                 }
-                eprintln!("e2e: no popover");
             }
+            // As typed (gtk_text_view_commit_text): over the selection, in one user action, where editable.
+            Some("type") => {
+                let buffer = self.composer.buffer();
+                let editable = self.composer.is_editable();
+                buffer.begin_user_action();
+                buffer.delete_selection(true, editable);
+                if !buffer.insert_interactive_at_cursor(rest, editable) {
+                    eprintln!("e2e: not editable");
+                }
+                buffer.end_user_action();
+            }
+            Some("set") => self.set_composer_text(rest),
+            // GTK's own Backspace at the caret, as the key does when the box leaves it alone.
+            Some("backspace") => {
+                let buffer = self.composer.buffer();
+                let mut at = buffer.iter_at_offset(buffer.property::<i32>("cursor-position"));
+                buffer.backspace(&mut at, true, self.composer.is_editable());
+            }
+            Some("suggestions") => {
+                let shown = self.mention_popover.is_visible();
+                let selected = self.mention_list.selected_row().map(|r| r.index());
+                let rows: Vec<String> = self
+                    .mention
+                    .borrow()
+                    .candidates
+                    .iter()
+                    .filter(|_| shown)
+                    .map(|c| match c {
+                        Completion::Command(s) => format!("{} ({})", s.name, s.app),
+                        Completion::Status(text) => format!("[{text}]"),
+                        other => other.label(),
+                    })
+                    .collect();
+                let headers = self.mention.borrow().headers.clone();
+                eprintln!("e2e: suggestions {}", rows.len());
+                for (i, row) in rows.iter().enumerate() {
+                    if let Some((_, header)) = headers.iter().find(|(at, _)| *at == i) {
+                        eprintln!("e2e: header {} {}", header.words, header.query.as_deref().unwrap_or_default());
+                    }
+                    let mark = if selected == Some(i as i32) { " *" } else { "" };
+                    eprintln!("e2e: suggestion {i} {row}{mark}");
+                }
+                if let Some(path) = parts.next().filter(|_| shown) {
+                    shot(&self.mention_popover, path);
+                }
+            }
+            Some("pick") => self.accept_mention(parts.next().and_then(|n| n.parse().ok()).unwrap_or(0)),
+            // A key pressed in the message box, by its GDK name, with modifiers after it.
+            Some("key") => {
+                let Some(key) = parts.next().and_then(gtk::gdk::Key::from_name) else {
+                    return eprintln!("e2e: no such key");
+                };
+                let mut modifiers = gtk::gdk::ModifierType::empty();
+                for word in parts {
+                    modifiers |= match word {
+                        "shift" => gtk::gdk::ModifierType::SHIFT_MASK,
+                        "ctrl" => gtk::gdk::ModifierType::CONTROL_MASK,
+                        "alt" => gtk::gdk::ModifierType::ALT_MASK,
+                        other => return eprintln!("e2e: no modifier {other}"),
+                    };
+                }
+                let handled = self.composer_key(key, modifiers) == glib::Propagation::Stop;
+                eprintln!("e2e: key {}", if handled { "handled" } else { "not handled" });
+            }
+            Some("reply") => {
+                let wanted = parts.next().map(|s| id(Some(s)));
+                let messages = self.messages();
+                let found = (0..messages.n_items())
+                    .rev()
+                    .filter_map(|position| crate::timelines::message_at(&messages, position))
+                    .find(|m| wanted.is_none_or(|w| m.id == w));
+                match found {
+                    Some(message) => self.start_reply(&message, false),
+                    None => eprintln!("e2e: no message to reply to"),
+                }
+            }
+            Some("confirm") => {
+                let Some(dialog) = self.window.visible_dialog().and_downcast::<adw::AlertDialog>() else {
+                    return eprintln!("e2e: no alert");
+                };
+                // The response named, else the last that isn't the close response, as its button.
+                let label = |response: &str| dialog.has_response(response).then(|| dialog.response_label(response));
+                let close = label(&dialog.close_response());
+                let wanted = match parts.next() {
+                    Some(response) if label(response).is_none() => return eprintln!("e2e: no response {response}"),
+                    response => response.and_then(label),
+                };
+                let mut found = Vec::new();
+                buttons(dialog.upcast_ref(), &mut found);
+                let chosen = found.into_iter().filter(|b| b.is_mapped()).rfind(|b| match (&wanted, b.label()) {
+                    (Some(wanted), Some(text)) => &text == wanted,
+                    (None, Some(text)) => close.as_ref() != Some(&text),
+                    (_, None) => false,
+                });
+                match chosen {
+                    Some(button) => button.emit_clicked(),
+                    None => eprintln!("e2e: no such response"),
+                }
+            }
+            Some("press") => {
+                let message = id(parts.next());
+                let custom_id = parts.next().unwrap_or_default().to_owned();
+                match self.account.state.borrow().channel {
+                    Some(channel) => self.interact(channel, message, custom_id, discord::interaction::BUTTON, None),
+                    None => eprintln!("e2e: no channel"),
+                }
+            }
+            Some(command) if command.starts_with("modal-") => self.e2e_modal(command, rest),
+            // The message box's menu, as a right-click at x y opens it (else the Menu key): shoot it with
+            // `shot-popover composer`.
+            Some("composer-menu") => {
+                let at = parts.next().zip(parts.next()).and_then(|(x, y)| Some((x.parse().ok()?, y.parse().ok()?)));
+                if let Some(refill) = REFILL.with(|r| r.borrow().first().cloned()) {
+                    refill(at);
+                }
+                if let Err(e) = self.composer.activate_action("menu.popup", None) {
+                    eprintln!("e2e: {e}");
+                }
+            }
+            // An item of the message box's menu, by its name, as chosen.
+            Some("menu-item") => {
+                let name = parts.next().unwrap_or_default();
+                match self.composer.activate_action(&format!("menu.{name}"), None) {
+                    Ok(()) => eprintln!("e2e: chose {name}"),
+                    Err(e) => eprintln!("e2e: {e}"),
+                }
+            }
+            Some("send") => {
+                let button = &self.send_button;
+                if !button.is_visible() || !button.is_sensitive() {
+                    return eprintln!("e2e: send button visible={} sensitive={}", button.is_visible(), button.is_sensitive());
+                }
+                button.emit_clicked();
+                eprintln!("e2e: sent");
+            }
+            // A copied image (2×2 red pixels), or a copied file with its path as text, as a file manager copies.
+            Some("clip-image") => {
+                let bytes = glib::Bytes::from_owned([255u8, 0, 0, 255].repeat(4));
+                let texture = gdk::MemoryTexture::new(2, 2, gdk::MemoryFormat::R8g8b8a8, &bytes, 8);
+                self.composer.clipboard().set_texture(&texture);
+            }
+            Some("clip-files") => {
+                let path = parts.next().unwrap_or("/tmp/e2e.txt");
+                let files = gdk::FileList::from_array(&[gio::File::for_path(path)]);
+                let provider = gdk::ContentProvider::new_union(&[
+                    gdk::ContentProvider::for_value(&files.to_value()),
+                    gdk::ContentProvider::for_value(&path.to_value()),
+                ]);
+                if let Err(e) = self.composer.clipboard().set_content(Some(&provider)) {
+                    eprintln!("e2e: {e}");
+                }
+            }
+            Some("line") => self.e2e_line(),
             Some("quit") => {
                 if let Some(app) = self.window.application() {
                     app.quit();
@@ -95,4 +286,373 @@ impl App {
         }
     }
 }
-''')
+""")
+
+# `line` prints the command in the box: its text, each pill (option, value, red), the caret, the bar, "+n", the
+# app icon and the buttons beside it.
+open(f"{root}/crates/app/src/ui/e2e.rs", "a").write(r"""
+impl App {
+    fn e2e_line(self: &Rc<Self>) {
+        let buffer = self.composer.buffer();
+        let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+        let caret = buffer.property::<i32>("cursor-position");
+        let selection = buffer.selection_bounds().map(|(a, b)| (a.offset(), b.offset()));
+        eprintln!("e2e: box {text:?} caret {caret} selection {selection:?}");
+        let Some((line, text)) = self.read_line() else { return eprintln!("e2e: no command") };
+        let chars: Vec<char> = text.chars().collect();
+        let slot = self.slash.active.borrow();
+        let active = slot.as_ref().expect("active");
+        for pill in &line.pills {
+            let value: String = chars[pill.value.clone()].iter().collect();
+            let red = if active.states.errored(&pill.option) { " errored" } else { "" };
+            eprintln!("e2e: pill {} {value:?}{red}", pill.option);
+        }
+        eprintln!("e2e: bar {:?} {:?} error={}", self.slash.title.label(), self.slash.description.label(),
+                  self.slash.description.has_css_class("error"));
+        eprintln!("e2e: more {:?} icon={} attach={} gif={} emoji={} length={}",
+                  self.slash.more.is_visible().then(|| self.slash.more.label()), self.slash.icon.is_visible(),
+                  self.drafts.attach.is_visible(), self.gif_button.is_visible(), self.emoji_button.is_visible(),
+                  self.length_visible());
+    }
+}
+""")
+edit("crates/app/src/ui/composer.rs", "    pub(super) fn update_length_indicator(&self) {",
+     "    pub(super) fn length_visible(&self) -> bool {\n        self.length.root.is_visible()\n    }\n\n    pub(super) fn update_length_indicator(&self) {")
+
+# The GIF picker: `gif` opens it, `gif-search <q>` types into its search, `gif-pick <n>`, `gif-shift-pick <n>`
+# and `gif-star <n>` press the nth GIF shown or its star, `gif-tile <n>` the nth front page tile, `gif-back`
+# its back button; `gif-hint [png]` prints whether "Added to Favorites" and the pulse show, and shoots the hint.
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(gif) if gif.starts_with("gif") => self.e2e_gif(gif, parts.next()),
+            Some("quit") => {''')
+edit("crates/app/src/ui/menus.rs", "    pub(super) fn shift_held(&self) -> bool {\n",
+     "    pub(super) fn shift_held(&self) -> bool {\n        if super::e2e::SHIFT.get() {\n            return true;\n        }\n")
+open(f"{root}/crates/app/src/ui/e2e.rs", "a").write(r"""
+thread_local! {
+    pub(super) static SHIFT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn widgets<T: IsA<gtk::Widget>>(widget: &gtk::Widget, found: &mut Vec<T>) {
+    let mut child = widget.first_child();
+    while let Some(c) = child {
+        if let Ok(t) = c.clone().downcast::<T>() {
+            found.push(t);
+        }
+        widgets(&c, found);
+        child = c.next_sibling();
+    }
+}
+
+impl App {
+    fn e2e_gif(self: &Rc<Self>, command: &str, arg: Option<&str>) {
+        if command == "gif" {
+            return self.gif_button.emit_clicked();
+        }
+        if command == "gif-hint" {
+            eprintln!("e2e: hint {} pulse {}", self.gif_hint.is_mapped(), self.gif_button.has_css_class("pulse"));
+            if let Some(path) = arg.filter(|_| self.gif_hint.is_mapped()) {
+                shot(&self.gif_hint, path);
+            }
+            return;
+        }
+        let mut popovers: Vec<gtk::Popover> = Vec::new();
+        widgets(self.gif_button.upcast_ref(), &mut popovers);
+        let picker = popovers.into_iter().find(|p| p.is_mapped() && p != &self.gif_hint);
+        let Some(popover) = picker else { return eprintln!("e2e: no GIF picker") };
+        let n: usize = arg.and_then(|n| n.parse().ok()).unwrap_or(0);
+        let mut all: Vec<gtk::Button> = Vec::new();
+        widgets(popover.upcast_ref(), &mut all);
+        let face = |b: &gtk::Button| b.child().is_some_and(|c| c.is::<gtk::Picture>() || c.is::<gtk::Image>());
+        let gifs: Vec<_> = all.iter().filter(|b| b.has_css_class("flat") && face(b)).collect();
+        let tiles: Vec<_> = all.iter().filter(|b| b.has_css_class("flat") && b.child().is_some_and(|c| c.is::<gtk::Overlay>())).collect();
+        let stars: Vec<_> = all.iter().filter(|b| b.has_css_class("osd") && b.has_css_class("circular")).collect();
+        let press = |list: &[&gtk::Button]| match list.get(n) {
+            Some(b) => b.emit_clicked(),
+            None => eprintln!("e2e: no {command} {n}"),
+        };
+        match command {
+            "gif-search" => {
+                let mut entries: Vec<gtk::SearchEntry> = Vec::new();
+                widgets(popover.upcast_ref(), &mut entries);
+                match entries.first() {
+                    Some(entry) => entry.set_text(arg.unwrap_or_default()),
+                    None => eprintln!("e2e: no search entry"),
+                }
+            }
+            "gif-pick" => press(&gifs),
+            "gif-shift-pick" => {
+                SHIFT.set(true);
+                press(&gifs);
+                SHIFT.set(false);
+            }
+            "gif-star" => press(&stars),
+            "gif-tile" => press(&tiles),
+            "gif-back" => match all.iter().find(|b| b.icon_name().as_deref() == Some("go-previous-symbolic")) {
+                Some(b) => b.emit_clicked(),
+                None => eprintln!("e2e: no back button"),
+            },
+            other => eprintln!("e2e: unknown {other}"),
+        }
+    }
+}
+""")
+
+# The form's own commands, inside the module so they reach its fields: `modal-fields` prints each field's path,
+# kind and title; `modal-set <path> <text>` fills an input; `modal-check <path> <n>` clicks a field's n-th
+# check or radio button; `modal-pick <path> <n>` picks a menu's n-th option and closes it; `modal-clear <path>`
+# clicks Clear selection; `modal-submit`; `modal-cancel` (Escape); `modal-shot <png>` shoots the top form.
+with open(f"{root}/crates/app/src/ui/modal.rs", "a") as f:
+    f.write(r"""
+fn e2e_all<T: IsA<gtk::Widget>>(widget: &gtk::Widget, found: &mut Vec<T>) {
+    let mut child = widget.first_child();
+    while let Some(c) = child {
+        if let Ok(t) = c.clone().downcast::<T>() {
+            found.push(t);
+        }
+        e2e_all(&c, found);
+        child = c.next_sibling();
+    }
+}
+
+impl App {
+    pub(super) fn e2e_modal(self: &Rc<Self>, command: &str, rest: &str) {
+        let Some(form) = self.modal_forms.borrow().last().cloned() else { return eprintln!("e2e: no form") };
+        let mut words = rest.split_whitespace();
+        let path = words.next().unwrap_or_default();
+        let field = form.fields.iter().find(|f| f.node.path == path);
+        let column = || field.and_then(|f| f.focus.parent()).filter(|p| p.is::<gtk::Box>());
+        match command {
+            "modal-fields" => {
+                eprintln!("e2e: form {:?} error {}", form.modal.title, form.error.is_visible());
+                for field in &form.fields {
+                    let kind = format!("{:?}", field.node.kind);
+                    let kind = kind.split(['(', ' ', '{']).next().unwrap_or_default().to_owned();
+                    eprintln!("e2e: field {} {kind} {:?}", field.node.path, field.title.label.label().as_str());
+                }
+                let state = self.account.state.borrow();
+                eprintln!("e2e: submission {:?}", state.modal_submission);
+            }
+            "modal-set" => {
+                let text = rest.split_once(' ').map_or("", |(_, text)| text);
+                match field.map(|f| f.focus.clone()) {
+                    Some(w) if w.is::<gtk::Entry>() => w.downcast::<gtk::Entry>().unwrap().set_text(text),
+                    Some(w) if w.is::<gtk::TextView>() => w.downcast::<gtk::TextView>().unwrap().buffer().set_text(text),
+                    _ => eprintln!("e2e: no input {path}"),
+                }
+            }
+            "modal-check" => {
+                let n: usize = words.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+                let mut checks: Vec<gtk::CheckButton> = Vec::new();
+                match field.map(|f| f.focus.clone()) {
+                    Some(w) if w.is::<gtk::CheckButton>() && column().is_some() => e2e_all(&column().unwrap(), &mut checks),
+                    _ => {}
+                }
+                let radio = matches!(field.map(|f| &f.node.kind), Some(NodeKind::RadioGroup { .. }));
+                match checks.get(n) {
+                    Some(check) => check.set_active(radio || !check.is_active()),
+                    None => eprintln!("e2e: no check {path} {n}"),
+                }
+            }
+            "modal-pick" => {
+                let n: usize = words.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+                let Some(button) = field.and_then(|f| f.focus.clone().downcast::<gtk::MenuButton>().ok()) else {
+                    return eprintln!("e2e: no menu {path}");
+                };
+                button.popup();
+                let Some(popover) = button.popover() else { return eprintln!("e2e: no popover") };
+                let mut choices: Vec<gtk::Button> = Vec::new();
+                e2e_all(popover.upcast_ref(), &mut choices);
+                let mut checks: Vec<gtk::CheckButton> = Vec::new();
+                e2e_all(popover.upcast_ref(), &mut checks);
+                if let Some(choice) = choices.get(n) {
+                    choice.emit_clicked();
+                } else if let Some(check) = checks.get(n) {
+                    check.set_active(!check.is_active());
+                    button.popdown();
+                } else {
+                    eprintln!("e2e: no option {n}");
+                }
+            }
+            "modal-clear" => {
+                let mut buttons: Vec<gtk::Button> = Vec::new();
+                if let Some(column) = column() {
+                    e2e_all(&column, &mut buttons);
+                }
+                match buttons.into_iter().find(|b| b.label().as_deref() == Some("Clear selection")) {
+                    Some(clear) => clear.emit_clicked(),
+                    None => eprintln!("e2e: no clear {path}"),
+                }
+            }
+            "modal-file" | "modal-unfile" | "modal-files" => self.e2e_modal_files(&form, command, rest),
+            "modal-submit" => form.submit.emit_clicked(),
+            "modal-cancel" => _ = form.dialog.close(),
+            "modal-shot" => {
+                let png = if path.is_empty() { "modal.png" } else { path };
+                super::e2e::shot(&form.dialog, png);
+            }
+            other => eprintln!("e2e: unknown {other}"),
+        }
+    }
+}
+""")
+
+# The app launcher: `apps` presses the Apps button and `apps-visible` says whether it shows; with the launcher
+# open, `launcher-shot <png>`, `launcher-search <text>`, `launcher-rows` (the titles of the shown page's rows),
+# `launcher-row <title>` (activate it), `launcher-button <tooltip or label>` and `launcher-close`.
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(l) if l == "apps" || l == "apps-visible" || l.starts_with("launcher") => self.e2e_launcher(l, rest),
+            Some("quit") => {''')
+open(f"{root}/crates/app/src/ui/e2e.rs", "a").write(r"""
+impl App {
+    fn e2e_launcher(self: &Rc<Self>, command: &str, rest: &str) {
+        match command {
+            "apps" => return self.apps_button.emit_clicked(),
+            "apps-visible" => return eprintln!("e2e: apps button visible={}", self.apps_button.is_visible()),
+            _ => {}
+        }
+        let mut popovers: Vec<gtk::Popover> = Vec::new();
+        widgets(self.composer_box.upcast_ref(), &mut popovers);
+        let nav = |p: &gtk::Popover| p.child().and_downcast::<adw::NavigationView>();
+        let Some(popover) = popovers.into_iter().find(|p| p.is_mapped() && nav(p).is_some()) else {
+            return eprintln!("e2e: no launcher");
+        };
+        let Some(page) = nav(&popover).and_then(|n| n.visible_page()) else { return };
+        let page: gtk::Widget = page.upcast();
+        let mut rows: Vec<adw::ActionRow> = Vec::new();
+        widgets(&page, &mut rows);
+        let title = |r: &adw::ActionRow| adw::prelude::PreferencesRowExt::title(r).to_string();
+        match command {
+            "launcher-shot" => shot(&popover, if rest.is_empty() { "launcher.png" } else { rest }),
+            "launcher-close" => popover.popdown(),
+            "launcher-search" => {
+                let mut entries: Vec<gtk::SearchEntry> = Vec::new();
+                widgets(&page, &mut entries);
+                match entries.first() {
+                    Some(entry) => entry.set_text(rest),
+                    None => eprintln!("e2e: no search"),
+                }
+            }
+            "launcher-rows" => eprintln!("e2e: rows {:?}", rows.iter().map(title).collect::<Vec<_>>()),
+            "launcher-row" => match rows.iter().find(|r| title(r) == rest) {
+                Some(row) => adw::prelude::ActionRowExt::activate(row),
+                None => eprintln!("e2e: no row {rest}"),
+            },
+            "launcher-button" => {
+                let mut buttons: Vec<gtk::Button> = Vec::new();
+                widgets(&page, &mut buttons);
+                let named = |b: &gtk::Button| {
+                    b.tooltip_text().as_deref() == Some(rest) || b.label().as_deref() == Some(rest)
+                };
+                match buttons.iter().find(|b| named(b)) {
+                    Some(button) => button.emit_clicked(),
+                    None => eprintln!("e2e: no button {rest}"),
+                }
+            }
+            other => eprintln!("e2e: unknown {other}"),
+        }
+    }
+}
+""")
+
+# A form's file field: `modal-file <path> <file>…` adds files as a pick or a drop does, `modal-unfile <path> <n>`
+# takes back its n-th, as its row's remove button does, `modal-files <path> [png]` prints what the field shows.
+with open(f"{root}/crates/app/src/ui/modal.rs", "a") as f:
+    f.write(r"""
+impl App {
+    fn e2e_modal_files(self: &Rc<Self>, form: &Rc<Form>, command: &str, rest: &str) {
+        let mut words = rest.split_whitespace();
+        let path = words.next().unwrap_or_default();
+        let field = form.fields.iter().find(|f| f.node.path == path);
+        let Some(files) = field.and_then(|f| f._files.clone()) else { return eprintln!("e2e: no file field {path}") };
+        match command {
+            "modal-file" => {
+                let paths: Vec<gio::File> = words.map(gio::File::for_path).collect();
+                let this = self.clone();
+                glib::spawn_future_local(async move { this.add_form_files(&files, paths).await });
+            }
+            "modal-unfile" => {
+                let n: usize = words.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+                match self.file_ids(&files).get(n) {
+                    Some(id) => self.remove_form_file(&files, &id.clone()),
+                    None => eprintln!("e2e: no file {path} {n}"),
+                }
+            }
+            _ => {
+                let mut labels: Vec<gtk::Label> = Vec::new();
+                e2e_all(files.holder.upcast_ref(), &mut labels);
+                let shown: Vec<String> = labels.iter().filter(|l| l.is_visible()).map(|l| l.label().to_string()).collect();
+                eprintln!("e2e: files {path} {:?} ids {:?}", shown, self.file_ids(&files));
+                if let Some(png) = words.next().map(str::to_owned) {
+                    // Scrolled to the bottom, where the fake's file field is, then shot once drawn.
+                    let scroller = files.holder.ancestor(gtk::ScrolledWindow::static_type());
+                    if let Some(scroller) = scroller.and_downcast::<gtk::ScrolledWindow>() {
+                        let adjustment = scroller.vadjustment();
+                        adjustment.set_value(adjustment.upper());
+                    }
+                    let dialog = form.dialog.clone();
+                    glib::timeout_add_local_once(std::time::Duration::from_millis(500), move || {
+                        super::e2e::shot(&dialog, &png);
+                    });
+                }
+            }
+        }
+    }
+}
+""")
+
+# `end` scrolls the chat to its newest message.
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("end") => self.scroll_to_end(),
+            Some("quit") => {''')
+
+# Stickers' images come from the fake (`Sticker::image`, before model.rs's tests).
+edit("crates/discord/src/model.rs", '"https://media.discordapp.net/stickers/{}', '"http://127.0.0.1:8099/attachments/stickers/{}')
+
+# `/gif`'s and `/sticker`'s results: `results [png]` prints the popup's title and each result, `*` on the selected
+# one, and shoots it; `result-click <n>` clicks result n.
+edit("crates/app/src/ui/e2e.rs", '            Some("line") => self.e2e_line(),',
+     '            Some("line") => self.e2e_line(),\n'
+     '            Some("results") => self.e2e_results(parts.next()),\n'
+     '            Some("result-click") => self.e2e_result_click(parts.next().and_then(|n| n.parse().ok()).unwrap_or(0)),')
+with open(f"{root}/crates/app/src/ui/integrations.rs", "a") as f:
+    f.write(r"""
+impl App {
+    pub(super) fn e2e_results(&self, png: Option<&str>) {
+        let view = &self.integration;
+        if !view.popover.is_visible() {
+            return eprintln!("e2e: results hidden");
+        }
+        let selected = self.slash.active.borrow().as_ref().and_then(|a| a.selection.selected());
+        let title = if view.title.is_visible() { view.title.text().to_string() } else { String::new() };
+        eprintln!("e2e: results {title:?} spinner {}", view.spinner.is_visible());
+        let rows: Vec<String> = match &*view.shown.borrow() {
+            Shown::Gifs(gifs) => gifs.iter().map(|g| format!("{} {:?}", g.url, g.command_preview())).collect(),
+            Shown::Stickers(hits) => hits
+                .iter()
+                .map(|h| format!("{} | {:?} | {:?}", h.entry.listed.sticker.name, h.similar_to(), h.source))
+                .collect(),
+            Shown::Nothing => Vec::new(),
+        };
+        for (i, row) in rows.iter().enumerate() {
+            let mark = if selected == Some(i) { " *" } else { "" };
+            eprintln!("e2e: result {i} {row}{mark}");
+        }
+        if let Some(png) = png {
+            super::e2e::shot(&view.popover, png);
+        }
+    }
+
+    pub(super) fn e2e_result_click(&self, n: i32) {
+        let view = &self.integration;
+        // What is shown is read first: the click changes it.
+        let gifs = matches!(&*view.shown.borrow(), Shown::Gifs(_));
+        let stickers = matches!(&*view.shown.borrow(), Shown::Stickers(_));
+        if gifs {
+            view.gifs.child_at_index(n).map(|c| c.activate());
+        } else if stickers {
+            view.stickers.row_at_index(n).map(|r| r.activate());
+        }
+    }
+}
+""")
+
+# `paste` pastes the clipboard into the message box, as Ctrl+V does.
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("paste") => self.composer.emit_paste_clipboard(),
+            Some("quit") => {''')

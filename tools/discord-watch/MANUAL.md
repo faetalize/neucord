@@ -45,7 +45,9 @@ changed for unrelated reasons only needs a note in the issue.
   guests, and takes the moderation permissions (the list in 818348 next to
   the permission bits) where the server requires 2FA and the account lacks
   it. The owner check is in 260509; verification makes its own
-  (`verification::gate`, in the watched `GuildVerificationStore`).
+  (`verification::gate`, in the watched `GuildVerificationStore`). Whom we
+  may kick, ban or time out (`can_manage`, `can_time_out`): `HJ` and `wO` in
+  488926, the role order `AT` in 7864, and `b` in 838111.
 - **A timeout leaves only reading**, and administrators see no notice
   (`Guild::timeout_left`). Client: 316031 (the `communicationDisabledUntil`
   check), 488926 (the cut), `renderMessageBanner` in 699344 (the notice
@@ -132,33 +134,36 @@ changed for unrelated reasons only needs a note in the issue.
   (anchor `end-poll-early`: our own poll, until its expiry).
 - **Pressing buttons and picking from menus** (`interaction.rs`, `Rest::interact`,
   `permissions::components_blocked`, `ui/components.rs`). The endpoint, the
-  gateway events, `InteractionStore` and the component state store are
-  watched. Not watched: the body, which 964363 builds in a variable (`S`,
-  anchor `canQueueInteraction`: `application_id` is the message's or its
-  author's, a DM's `guild_id` is `null`, a menu's data spreads its `type` and
-  `values`), and how a refusal reads (`T` just below); when a click sends,
-  `V` in 232430 (anchor `STOREFRONT_PREMIUM_BUTTON`: a premium button opens
-  the store instead) and a menu, `nt` there (anchor `onSelectInteraction`: one
-  to pick sends when chosen, several when the list closes with a change); and
-  what turns components off, `v` in 911408 (anchor
-  `getInteractionComponentState`) with `O` and the menu limits in 257249.
+  gateway events, `InteractionStore`, the component state store, when a
+  click or a pick sends and what turns components off (232430, 911408,
+  257249) are watched. Not watched: the body, which 964363 builds in a
+  variable (`S`, anchor `canQueueInteraction`: `application_id` is the
+  message's or its author's, a DM's `guild_id` is `null`, a menu's data
+  spreads its `type` and `values`), and how a refusal reads (`T` just below).
 - **Slash commands** (`commands.rs`, `ui/slash.rs`, `Rest::command_index`,
   `run_command`, `autocomplete`). The endpoints, the gateway events, the
   index and autocomplete stores (`ApplicationCommandIndexStore` holds how
-  commands are found and ordered) and `handleCommand`, the run's request, are
-  watched. Not watched: where a command may be used, `zl` in 46477 (anchor
-  `MISSING_BASE_PERMISSIONS`) with the place's permissions, `Bh` in 240591
-  (anchor `hasBaseAccessPermissions`, with `p` there for where age-restricted
-  commands may show), and the rule types, 1 role, 2 user, 3
-  channel (`RA` in 392054); how a command and its sub-commands are
-  listed and what is kept of them, `Lz` in 168186 (anchor `subCommandPath`);
-  what a run sends for each option, `A` in 545152 (anchor
-  `APPLICATION_COMMAND_USED`), and the checks a value passes, `J` in 300541
-  (anchor `allowEmptyValues`); which words the suggestions look up, `Yn` in
-  664929 (anchor `hasSpaceTerminator`); where the menus offer commands: the
-  Apps item, 173500 (anchor `command-search`), shows in `TEXTUAL` channels
-  (478437) but not media threads, with the user commands in 107632 and the
-  message commands in 761304; and Use Apps in the attach menu, 316576 (anchor
+  commands are found and ordered), `handleCommand`, the run's request, how
+  commands are listed and kept (168186) and what a run sends for each option
+  (545152) are watched. Not watched: where a command may be used, `zl` in
+  46477 (anchor `MISSING_BASE_PERMISSIONS`) with the place's permissions,
+  `Bh` in 240591 (anchor `hasBaseAccessPermissions`, with `p` there for
+  where age-restricted commands may show), and the rule types, 1 role, 2
+  user, 3 channel (`RA` in 392054); the checks a value passes, `J` in
+  300541 (anchor `allowEmptyValues`); which answers show who ran the command
+  (267508): 567008 (anchor `childrenExecutedCommand`) and 268719, when
+  `interaction`'s `name_localized ?? name` (432005) isn't empty, with `V` in
+  597929 for a launch command; which words the suggestions look up, `Yn` in
+  664929 (anchor `hasSpaceTerminator`); that a pending reply leaves no app's
+  commands after `/`, typed or bare, only the built-ins that write text,
+  `/gif` and `/sticker` (`canOnlyUseTextCommands` in 989161, anchor
+  `requireCreateTherads`, made `NEW_TEXT_ONLY` by `ta` in 496533, anchor
+  `queryEmojiResults`); that the chat takes no drop while a command is in
+  the box (738876, `getActiveCommand` beside its `onDrop`); where the menus
+  offer commands: the Apps item, 173500
+  (anchor `command-search`), shows in `TEXTUAL` channels (478437) but not
+  media threads, with the user commands in 107632 and the message commands in
+  761304; and Use Apps in the attach menu, 316576 (anchor
   `canUseApplicationCommands`), which a pending reply hides, and which the
   App Launcher replaces while the Apps button is off.
 - **`ansi` code blocks** (`markup::ansi`, `render::ansi_markup`). Which codes
@@ -462,12 +467,13 @@ changed for unrelated reasons only needs a note in the issue.
   - 283047 (anchor `computeWeight`) keeps the last 10 times of a use, sorts
     them when a time is given, drops what scores nothing, and ranks by
     `ceil(total × score ÷ uses)`; 761821 (anchor `recentUses`) keeps the 100
-    used last, with `frecency` and the rounded `score`.
+    used last (500 commands, from 416380), with `frecency` and the rounded
+    `score`.
   - 416380 (anchor `hasPendingUsage`) looks 10 ms to 10 s after connecting,
     every 2 h plus up to 10 min and when the connection closes; it loads the
     proto if a use waits (servers and channels alone not on the first look)
     and saves at once, adding each kind's whole history; usage it counts
-    that Neucord has no surface for (commands, apps, sounds) isn't sent.
+    that Neucord has no surface for (sounds) isn't sent.
   - What is counted: 138399 (anchor `EMOJI_TRACK_USAGE`) once Discord took a
     message that isn't scheduled, the emoji 451909 finds in it (anchor
     `validNonShortcutEmojis`: each written, not in code, not Nitro-locked,
@@ -491,7 +497,8 @@ changed for unrelated reasons only needs a note in the issue.
     (`getEmojiInPriorityOrder`), without Nitro-locked emoji and five faces,
     sent with the location "Message Context Menu".
   - The picker opening loads the settings (920134), and so does the GIF
-    picker (683973), a sticker search and an emoji search (997625).
+    picker (683973), a sticker search, an emoji search (997625) and the command
+    lists (`F` in 56494).
 - **The skin tone** (`Setting::SkinTone`, `UnicodeEmoji::toned`). 554375
   (anchor `diversitySurrogate`) saves it with `FREQUENT_USER_ACTION`, 10 s
   where most settings wait none (`Setting::delay`), and 7584 (anchor
@@ -631,12 +638,11 @@ changed for unrelated reasons only needs a note in the issue.
 
 - **The quick switcher** (`switcher.rs`, `ui/switcher.rs`). The empty
   state (`QuickSwitcherStore`), the channel, server and group DM queries,
-  the single-kind refetch and the unread, mention and speaker lists are
-  watched by name. Not watched: the prefixes and what each result opens (`k`
-  and `H` in 793322, anchor `USER_GLOBAL`), `mod+k` and `mod+t` (161388,
-  anchor `QUICKSWITCHER_SHOW`), the scoring (`eT` and `eC` in 997625, anchor
-  `isFullMatch`, with `ep`'s boosters), and how people rank (the worker,
-  787578, anchor `USER_RESULTS`).
+  the single-kind refetch, the unread, mention and speaker lists and the
+  scoring (997625) are watched. Not watched: the prefixes and what each
+  result opens (`k` and `H` in 793322, anchor `USER_GLOBAL`), `mod+k` and
+  `mod+t` (161388, anchor `QUICKSWITCHER_SHOW`), and how people rank (the
+  worker, 787578, anchor `USER_RESULTS`).
 
 - **Channels we can't view** (`Guild::sidebar`, `permissions::access`).
   Neucord lists, counts unread, opens and posts only where it has a

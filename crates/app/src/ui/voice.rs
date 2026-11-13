@@ -199,12 +199,6 @@ impl App {
         }
     }
 
-    /// Whether a recording takes the open channel's message box.
-    pub(super) fn recording_here(&self) -> bool {
-        let channel = self.account.state.borrow().channel;
-        self.voice.draft.borrow().as_ref().is_some_and(|d| Some(d.channel) == channel)
-    }
-
     fn voice_phase(&self) -> Option<Phase> {
         self.voice.draft.borrow().as_ref().map(|d| d.phase)
     }
@@ -220,18 +214,7 @@ impl App {
         };
         voice.bar.set_visible(shown.is_some());
         self.composer.set_visible(shown.is_none());
-        self.emoji_button.set_visible(shown.is_none());
-        // `refresh_stickers` shows its button again when the draft is gone.
-        if shown.is_some() {
-            self.sticker_button.set_visible(false);
-        }
-        self.refresh_gif_button();
-        self.refresh_send_button();
-        if shown.is_some() {
-            self.length.show(None);
-        } else {
-            self.update_length_indicator();
-        }
+        self.refresh_chat_bar();
         let Some((phase, started, millis)) = shown else { return };
         voice.stop.set_visible(phase == Phase::Recording);
         voice.delete.set_sensitive(matches!(phase, Phase::Requesting | Phase::Recording | Phase::Recorded));

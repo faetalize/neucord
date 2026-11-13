@@ -8,9 +8,7 @@
 
 use serde_json::{Value, json};
 
-use crate::Snowflake;
 use crate::cdn;
-use crate::experiments::Experiments;
 use crate::frecency::{FavoriteGif, GifFormat, MAX_FAVORITE_GIFS_BYTES, favorite_gifs_size};
 use crate::identity::LOCALE;
 
@@ -35,26 +33,6 @@ pub fn favorited_hint(favorites: usize) -> bool {
     favorites <= 2
 }
 
-/// The experiment under which a device may turn the chat bar's buttons off
-/// (951260); everyone else always has them.
-const CHAT_BAR_CUSTOMIZATION: &str = "2026-06-chat-bar-customization";
-
-/// Whether the account may turn the GIF button off: it is in
-/// [`CHAT_BAR_CUSTOMIZATION`]'s variant 1.
-pub fn button_customizable(experiments: &Experiments, me: Snowflake) -> bool {
-    experiments.apex_user(me, CHAT_BAR_CUSTOMIZATION).is_some_and(|a| a.variant == 1)
-}
-
-/// Whether the GIF button shows: wherever the sticker button does (`place`),
-/// but not while a voice recording takes the box's place, which the client
-/// draws instead of the whole chat bar; and where the account is
-/// `customizable`, only if the device's setting is `enabled` (`B` in 4025's
-/// `em`: `!T || isGifButtonEnabled`, a device setting in 775602, on unless
-/// turned off).
-pub fn button_shown(place: bool, recording: bool, customizable: bool, enabled: bool) -> bool {
-    place && !recording && (!customizable || enabled)
-}
-
 /// The results list asks for suggestions once it has scrolled to within this
 /// many pixels of its end, counted from the bottom of what is showing
 /// (`handleScroll` in 884037: `scrollHeight - scrollTop <= 1180`).
@@ -62,7 +40,7 @@ pub const NEAR_END: f64 = 1180.0;
 
 /// `encodeURIComponent`, which is how the client's HTTP layer writes a query
 /// value: everything but letters, digits and ``-_.!~*'()`` is escaped.
-fn component(value: &str) -> String {
+pub(crate) fn component(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&byte) {
@@ -158,6 +136,21 @@ impl Gif {
     /// Where the animated preview comes from.
     pub fn preview(&self) -> String {
         preview_url(&self.src)
+    }
+
+    /// What a `/gif` result shows (`GIFIntegration`'s `src` in 496533): the
+    /// answer's `src`, or its `gif_src` where `src` is a video and `gif_src`
+    /// is something else (`r1`, 273185); none where what is left is a
+    /// video, which Neucord doesn't play. The link loads as the answer gives
+    /// it, `IntegrationQueryStore` keeping the answer raw: not the picker's
+    /// [`Self::preview`], whose rewrites would fetch another image.
+    pub fn command_preview(&self) -> Option<String> {
+        let shown = match self.gif_src.as_deref() {
+            Some(gif) if is_video(&self.src) && !gif.is_empty() && !is_video(gif) => gif,
+            _ => &self.src,
+        };
+        let shown = if shown.starts_with("//") { format!("https:{shown}") } else { shown.to_owned() };
+        (!is_video(&shown)).then_some(shown)
     }
 
     /// Whether the account has it as a favourite.
@@ -335,6 +328,97 @@ fn preview_url(src: &str) -> String {
     let without = src.strip_prefix("https:").or_else(|| src.strip_prefix("http:")).unwrap_or(src);
     let url = if without.starts_with("//") { format!("https:{without}") } else { without.to_owned() };
     cdn::animated(&url)
+}
+
+/// `r1` in 273185: what comes before the first `?` ends as a video's
+/// file does, as the desktop app counts them.
+fn is_video(url: &str) -> bool {
+    let path = url.split('?').next().unwrap_or_default().to_ascii_lowercase();
+    [".mp4", ".webm", ".mov", ".qt"].iter().any(|e| path.ends_with(e))
+}
+
+/// The query of `/gif`'s search (`eb` in 496533), in its field order: a
+/// fixed format and count, not the picker's.
+pub fn command_query(query: &str) -> String {
+    format!("q={}&media_format=webp&locale={LOCALE}&limit=20", component(query))
+}
+
+/// How long `/gif` waits after the last change of its query before it
+/// searches (`eb`: trailing only).
+pub const COMMAND_DEBOUNCE_MS: u32 = 300;
+
+/// What a `/gif` query has come to.
+#[derive(Clone, Debug, PartialEq)]
+enum Searched {
+    Loading,
+    Answered(Vec<Gif>),
+}
+
+/// `/gif`'s searches (`IntegrationQueryStore` and `ej`, `eb` in 496533):
+/// one debounce for the whole session, which nothing cancels and the last
+/// query re-arms; each query's answer kept for the session; a query asked
+/// once at a time; a failed one forgotten, so typing it asks again.
+#[derive(Debug, Default)]
+pub struct CommandSearches {
+    searched: std::collections::HashMap<String, Searched>,
+    in_flight: std::collections::HashSet<String>,
+    /// What the debounce sends when it runs out.
+    armed: Option<String>,
+}
+
+/// What `/gif`'s results show for its query.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CommandShown<'a> {
+    /// No query, no answer yet asked for, or an empty or failed one.
+    Nothing,
+    /// A spinner alone.
+    Loading,
+    Gifs(&'a [Gif]),
+}
+
+impl CommandSearches {
+    /// The query option now holds `text`. Whether to (re)start the
+    /// debounce: for a query, trimmed, that isn't empty and isn't answered.
+    /// When it says no, a debounce already running goes on with its query.
+    pub fn typed(&mut self, text: &str) -> bool {
+        let query = text.trim();
+        if query.is_empty() || matches!(self.searched.get(query), Some(Searched::Answered(_))) {
+            return false;
+        }
+        self.searched.entry(query.to_owned()).or_insert(Searched::Loading);
+        self.armed = Some(query.to_owned());
+        true
+    }
+
+    /// The debounce ran out: the query to search now, unless that one is
+    /// being asked already.
+    pub fn fire(&mut self) -> Option<String> {
+        let query = self.armed.take()?;
+        self.in_flight.insert(query.clone()).then_some(query)
+    }
+
+    /// The answer to `query`; none when the search failed.
+    pub fn answered(&mut self, query: &str, gifs: Option<Vec<Gif>>) {
+        self.in_flight.remove(query);
+        match gifs {
+            Some(gifs) => {
+                self.searched.insert(query.to_owned(), Searched::Answered(gifs));
+            }
+            None => {
+                self.searched.remove(query);
+            }
+        }
+    }
+
+    /// What shows while the query option holds `text`: an empty query is
+    /// never searched, so it shows nothing.
+    pub fn shown(&self, text: &str) -> CommandShown<'_> {
+        match self.searched.get(text.trim()) {
+            Some(Searched::Loading) => CommandShown::Loading,
+            Some(Searched::Answered(gifs)) if !gifs.is_empty() => CommandShown::Gifs(gifs),
+            _ => CommandShown::Nothing,
+        }
+    }
 }
 
 /// What a front page tile opens.
@@ -630,6 +714,98 @@ mod tests {
     }
 
     #[test]
+    fn the_command_search_has_the_clients_query_in_its_order() {
+        assert_eq!(command_query("cats"), "q=cats&media_format=webp&locale=en-US&limit=20");
+        assert_eq!(command_query("a b&c"), "q=a%20b%26c&media_format=webp&locale=en-US&limit=20");
+    }
+
+    #[test]
+    fn a_command_search_waits_and_goes_once_per_query() {
+        let mut searches = CommandSearches::default();
+        assert!(searches.typed("cat"));
+        assert_eq!(searches.shown("cat"), CommandShown::Loading);
+        assert_eq!(searches.fire().as_deref(), Some("cat"));
+        assert_eq!(searches.fire(), None, "nothing armed");
+        // Typed again while it is asked: armed, but not asked twice at once.
+        assert!(searches.typed("cat"));
+        assert_eq!(searches.fire(), None);
+        searches.answered("cat", Some(vec![gif("1")]));
+        assert_eq!(searches.shown(" cat "), CommandShown::Gifs(&[gif("1")]));
+        assert!(!searches.typed("cat"), "answered for the session");
+    }
+
+    #[test]
+    fn a_query_typed_over_stays_waiting_until_typed_again() {
+        let mut searches = CommandSearches::default();
+        for typed in ["c", "ca", "cat"] {
+            assert!(searches.typed(typed));
+        }
+        assert_eq!(searches.fire().as_deref(), Some("cat"), "the last one");
+        assert_eq!(searches.shown("ca"), CommandShown::Loading, "never asked");
+        assert!(searches.typed("ca"));
+        assert_eq!(searches.fire().as_deref(), Some("ca"));
+        // An answered query typed leaves a running debounce alone.
+        searches.answered("cat", Some(vec![gif("1")]));
+        assert!(searches.typed("dog"));
+        assert!(!searches.typed("cat"));
+        assert_eq!(searches.fire().as_deref(), Some("dog"));
+    }
+
+    #[test]
+    fn a_failed_command_search_is_forgotten() {
+        let mut searches = CommandSearches::default();
+        searches.typed("cat");
+        searches.fire();
+        searches.answered("cat", None);
+        assert_eq!(searches.shown("cat"), CommandShown::Nothing);
+        assert!(searches.typed("cat"), "asked again");
+        assert_eq!(searches.fire().as_deref(), Some("cat"));
+    }
+
+    #[test]
+    fn the_command_query_is_trimmed_and_empty_shows_nothing() {
+        let mut searches = CommandSearches::default();
+        assert!(!searches.typed("   "));
+        assert_eq!(searches.fire(), None);
+        assert_eq!(searches.shown(""), CommandShown::Nothing);
+        assert!(searches.typed("  cat "));
+        assert_eq!(searches.fire().as_deref(), Some("cat"));
+        searches.answered("cat", Some(Vec::new()));
+        assert_eq!(searches.shown("cat"), CommandShown::Nothing, "an empty answer");
+    }
+
+    fn command_result(src: &str, gif_src: Option<&str>) -> Gif {
+        let mut answer = json!({"id": "1", "url": "https://example.test/view/1", "src": src});
+        if let Some(gif_src) = gif_src {
+            answer["gif_src"] = json!(gif_src);
+        }
+        Gif::list(&json!([answer])).remove(0)
+    }
+
+    #[test]
+    fn a_video_result_shows_its_gif_instead() {
+        let webp = "https://example.test/a.webp";
+        for video in ["https://example.test/a.mp4", "https://example.test/a.MOV", "https://example.test/a.webm?x=1"] {
+            assert_eq!(command_result(video, Some(webp)).command_preview().as_deref(), Some(webp), "{video}");
+            assert_eq!(command_result(video, Some("https://example.test/b.mp4")).command_preview(), None);
+            assert_eq!(command_result(video, Some("")).command_preview(), None);
+            assert_eq!(command_result(video, None).command_preview(), None);
+        }
+        let named = "https://example.test/x.mp4.webp";
+        assert_eq!(command_result(named, Some(webp)).command_preview().as_deref(), Some(named), "no video");
+    }
+
+    #[test]
+    fn a_command_result_loads_as_the_answer_gives_it() {
+        let proxied = "https://media.discordapp.net/external/abc/a.webp";
+        assert_eq!(command_result(proxied, None).command_preview().as_deref(), Some(proxied), "not made animated");
+        assert_eq!(
+            command_result("//example.test/a.webp", None).command_preview().as_deref(),
+            Some("https://example.test/a.webp")
+        );
+    }
+
+    #[test]
     fn each_request_has_the_clients_query_in_its_order() {
         assert_eq!(Request::Trending.query(), "locale=en-US&media_format=tinywebp");
         assert_eq!(Request::TrendingGifs.query(), "media_format=tinywebp&locale=en-US");
@@ -791,20 +967,6 @@ mod tests {
         picker.open(&tiles[0]);
         picker.answered_trending(Some(vec![gif("3")]));
         assert_eq!(picker.selection(&gif("3")), Some(json!({"id": "3", "q": ""})));
-    }
-
-    #[test]
-    fn a_recording_takes_the_gif_button_with_the_box() {
-        assert!(button_shown(true, false, false, true));
-        assert!(!button_shown(true, true, false, true));
-        assert!(!button_shown(false, false, false, true));
-    }
-
-    #[test]
-    fn the_device_turns_the_gif_button_off_only_under_the_experiment() {
-        assert!(button_shown(true, false, false, false), "outside it the setting counts for nothing");
-        assert!(!button_shown(true, false, true, false));
-        assert!(button_shown(true, false, true, true));
     }
 
     #[test]
