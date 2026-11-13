@@ -227,7 +227,8 @@ impl App {
     pub(super) fn line_values(&self) -> Option<Values> {
         let (line, text) = self.read_line()?;
         let active = self.slash.active.borrow();
-        Some(command_line::values(&active.as_ref()?.command, &line, &text))
+        let active = active.as_ref()?;
+        Some(command_line::values(&active.command, &line, &text, &active.staged()))
     }
 
     /// Make `change`, the box's handlers left out of it.
@@ -320,7 +321,11 @@ impl App {
             asked: None,
             caret: self.cursor(),
             selection: Selection::default(),
+            files: Default::default(),
         }));
+        // The command's boxes take the place of the message's files, which go.
+        self.forget_message_files(channel);
+        self.refresh_command_files();
         if let Some((line, text)) = self.read_line() {
             self.check_options(&line, &text, true, true);
         }
@@ -349,9 +354,8 @@ impl App {
     /// nothing. Its bar, icon and lists go, and the attach button is back.
     /// Clearing the active command closes the app launcher too.
     pub(super) fn end_command(self: &Rc<Self>, keep: Keep) {
-        if self.slash.active.take().is_none() {
-            return;
-        }
+        let Some(mut ended) = self.slash.active.take() else { return };
+        ended.drop_files();
         self.close_launcher();
         let buffer = self.composer.buffer();
         let was = self.slash.syncing.replace(true);
@@ -369,6 +373,7 @@ impl App {
         self.slash.more.set_visible(false);
         self.mention_popover.popdown();
         self.hide_integration();
+        self.refresh_command_files();
         self.refresh_attach();
         // The text may name a command here, or be plain text with its own lists.
         if keep == Keep::Text {
@@ -443,6 +448,7 @@ impl App {
                 None => break,
             }
         }
+        self.refresh_command_files();
         self.refresh_line();
     }
 
@@ -485,7 +491,7 @@ impl App {
         let pill = command_line::active(line, self.cursor()).map(|p| p.option.clone());
         let mut slot = self.slash.active.borrow_mut();
         let Some(active) = slot.as_mut() else { return };
-        let values = command_line::values(&active.command, line, text);
+        let values = command_line::values(&active.command, line, text, &active.staged());
         let state = self.account.state.borrow();
         let names = Resolver { state: &state, channel: active.channel };
         let answers = active.autocomplete.answers();

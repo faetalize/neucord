@@ -8,6 +8,7 @@ mod background;
 mod builtins;
 mod captcha;
 mod chat;
+mod command_files;
 mod components;
 mod composer;
 mod connection;

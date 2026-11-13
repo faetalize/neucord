@@ -135,6 +135,11 @@ impl Upload {
     /// Stop the upload, and take back what it has made: Discord holds a
     /// finished upload until a message names it, and the client says it's
     /// no longer wanted.
+    /// The file's name, as a command's file pill shows it.
+    pub(super) fn name(&self) -> String {
+        self.file.borrow().filename.clone()
+    }
+
     pub(super) fn cancel(&self, rest: Option<Rest>) {
         if let Some(task) = self.task.take() {
             task.abort();
@@ -236,6 +241,9 @@ pub(super) struct Drafts {
     /// Forms' files, kept across closing and reopening until a submit
     /// succeeds, in the order they were added.
     pub(super) forms: RefCell<Vec<FormUpload>>,
+    /// A command's files while its run waits on them, which ending the
+    /// command leaves going.
+    pub(super) commands: RefCell<Vec<Rc<Upload>>>,
     /// Channels with a message waiting on its files.
     sending: RefCell<HashMap<Snowflake, Rc<Sending>>>,
     tray: gtk::Box,
@@ -265,6 +273,7 @@ impl Drafts {
         Drafts {
             files: RefCell::default(),
             forms: RefCell::default(),
+            commands: RefCell::default(),
             sending: RefCell::default(),
             tray: gtk::Box::builder().orientation(gtk::Orientation::Vertical).visible(false).build(),
             attach: attach_button(),
@@ -442,7 +451,8 @@ impl App {
             upload.lock(sending.as_ref().is_some_and(|s| s.has(upload)));
             drafts.tray.append(&upload.row.root);
         }
-        drafts.tray.set_visible(!files.is_empty());
+        // A command in the box takes the tray's place (102077).
+        drafts.tray.set_visible(!files.is_empty() && !self.slash.is_active());
         self.refresh_stickers();
         self.refresh_voice();
         self.refresh_post_files();
@@ -506,8 +516,13 @@ impl App {
             let this = Rc::downgrade(self);
             move |view| {
                 let Some(this) = this.upgrade() else { return };
-                let Some((pasted, _)) = this.composer_paste() else { return };
-                if pasted != Pasted::Text {
+                // With a command in the box, a file goes to its file option (84046),
+                // which takes one without Attach Files (`nS` in 989161).
+                let pasted = match this.slash.is_active() {
+                    true => Some(this.clipboard_pasted().0),
+                    false => this.composer_paste().map(|(pasted, _)| pasted),
+                };
+                if let Some(pasted) = pasted.filter(|p| *p != Pasted::Text) {
                     view.stop_signal_emission_by_name("paste-clipboard");
                     this.paste_files(pasted == Pasted::Files);
                 }
@@ -520,10 +535,15 @@ impl App {
     /// pastes text alone.
     fn composer_paste(&self) -> Option<(Pasted, bool)> {
         self.attach_channel()?;
+        Some(self.clipboard_pasted())
+    }
+
+    /// What a paste of the clipboard holds, and whether it holds text.
+    fn clipboard_pasted(&self) -> (Pasted, bool) {
         let formats = self.composer.clipboard().formats();
         let text = formats.contains_type(glib::Type::STRING);
         let files = formats.contains_type(gdk::FileList::static_type());
-        Some((pasted(files, formats.contains_type(gdk::Texture::static_type()), text), text))
+        (pasted(files, formats.contains_type(gdk::Texture::static_type()), text), text)
     }
 
     /// Let the menu's Paste attach the image or files on the clipboard, as
@@ -562,7 +582,8 @@ impl App {
         let target = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
         target.connect_accept({
             let this = Rc::downgrade(self);
-            move |_, _| this.upgrade().is_some_and(|this| this.attach_channel().is_some())
+            // Not while a command is in the box, whose own boxes take files (738876).
+            move |_, _| this.upgrade().is_some_and(|this| this.attach_channel().is_some() && !this.slash.is_active())
         });
         target.connect_drop({
             let this = Rc::downgrade(self);
@@ -601,7 +622,11 @@ impl App {
     }
 
     fn paste_files(self: &Rc<Self>, files: bool) {
-        let Some(channel) = self.attach_channel() else { return };
+        let command = self.slash.is_active();
+        let channel = self.attach_channel();
+        if !command && channel.is_none() {
+            return;
+        }
         let clipboard = self.composer.clipboard();
         let this = self.clone();
         glib::spawn_future_local(async move {
@@ -611,8 +636,19 @@ impl App {
                 else {
                     return;
                 };
-                if let Ok(list) = value.get::<gdk::FileList>() {
-                    this.add_paths(channel, list.files()).await;
+                let Ok(list) = value.get::<gdk::FileList>() else { return };
+                match (command, channel) {
+                    (true, _) => {
+                        let first = list.files().into_iter().next();
+                        if let Some(file) = match first {
+                            Some(path) => file_at(path).await,
+                            None => None,
+                        } {
+                            this.paste_command_file(file);
+                        }
+                    }
+                    (false, Some(channel)) => this.add_paths(channel, list.files()).await,
+                    (false, None) => {}
                 }
             } else if let Ok(Some(texture)) = clipboard.read_texture_future().await {
                 let bytes = texture.save_to_png_bytes();
@@ -623,9 +659,23 @@ impl App {
                     data: Data::Memory(bytes),
                     original_md5: None,
                 };
-                this.add_files(channel, vec![image]).await;
+                match (command, channel) {
+                    (true, _) => this.paste_command_file(image),
+                    (false, Some(channel)) => this.add_files(channel, vec![image]).await,
+                    (false, None) => {}
+                }
             }
         });
+    }
+
+    /// Forget the message's files in `channel` as a command takes the box
+    /// (102077's `clearAll`): uploads stop, and nothing is asked of Discord.
+    pub(super) fn forget_message_files(self: &Rc<Self>, channel: Snowflake) {
+        let files = self.drafts.files.borrow_mut().remove(&channel).unwrap_or_default();
+        for upload in files {
+            upload.cancel(None);
+        }
+        self.refresh_attach();
     }
 
     /// Add what `paths` hold.
@@ -746,13 +796,36 @@ impl App {
         remove: &str,
         removed: impl Fn() + 'static,
     ) -> Rc<Upload> {
+        self.lone_upload(channel, file, remove, removed, false)
+    }
+
+    /// [`plain_upload`](Self::plain_upload) for a file pasted into a command,
+    /// which may be converted as a message's is (565150's default).
+    pub(super) fn pasted_upload(
+        self: &Rc<Self>,
+        channel: Snowflake,
+        file: File,
+        remove: &str,
+        removed: impl Fn() + 'static,
+    ) -> Rc<Upload> {
+        self.lone_upload(channel, file, remove, removed, true)
+    }
+
+    fn lone_upload(
+        self: &Rc<Self>,
+        channel: Snowflake,
+        file: File,
+        remove: &str,
+        removed: impl Fn() + 'static,
+        convert: bool,
+    ) -> Rc<Upload> {
         let limits = {
             let state = self.account.state.borrow();
             state.limits().uploads(state.find_channel(channel).and_then(|(guild, _)| guild))
         };
         let checked = uploads::check_upload(&limits, file.size);
         let upload = upload_of(channel, file, None, None, remove);
-        upload.optimized.set(true);
+        upload.optimized.set(!convert);
         upload.row.remove.connect_clicked(move |_| removed());
         match checked {
             Ok(()) => self.start_upload(&upload),

@@ -647,16 +647,79 @@ pub fn active(line: &Line, caret: usize) -> Option<&Pill> {
 
 /// What each pill holds, as written, by option (`SQ` in 317681); options
 /// without a pill are left out. `validate` and `run_options` trim where the
-/// client does. A file option's value is its staged file, never text: a
-/// typed `file:` pill holds none until the box can hold a file, so a run
-/// never names a file it doesn't carry.
-pub fn values(command: &Command, line: &Line, text: &str) -> Values {
+/// client does. A file pill holds the name of the file `staged` has for its
+/// option, or nothing (`g` in 317681), never the text in it, so a run never
+/// names a file it doesn't carry.
+pub fn values(command: &Command, line: &Line, text: &str, staged: &Values) -> Values {
     let chars: Vec<char> = text.chars().collect();
     line.pills
         .iter()
-        .filter(|p| command.options.iter().any(|o| o.name == p.option && listed(o)))
-        .map(|p| (p.option.clone(), slice(&chars, p.value.clone())))
+        .map(|p| match option(command, &p.option) {
+            Some(o) if o.kind == option_type::ATTACHMENT => {
+                (p.option.clone(), staged.get(&p.option).cloned().unwrap_or_default())
+            }
+            _ => (p.option.clone(), slice(&chars, p.value.clone())),
+        })
         .collect()
+}
+
+/// Each file pill's text set to what it shows (84046 `em`): the name of
+/// the file `staged` has for its option, or nothing. A file pill is a void
+/// node (870748's `isVoid`): whatever was typed or pasted into it goes.
+/// `caret` stays where it was in what is kept.
+pub fn file_texts(command: &Command, marked: &Marked<'_>, staged: &Values, caret: usize) -> Change {
+    let parsed = parse(command, marked);
+    let nodes: Vec<Node> = parsed
+        .nodes
+        .iter()
+        .map(|node| match node {
+            Node::Pill { option: name, .. }
+                if option(command, name).is_some_and(|o| o.kind == option_type::ATTACHMENT) =>
+            {
+                Node::Pill { option: name.clone(), value: staged.get(name).cloned().unwrap_or_default() }
+            }
+            node => node.clone(),
+        })
+        .collect();
+    let new = render(command, &nodes);
+    let (edits, changed, new_end) = edits(&parsed, &new);
+    if edits.is_empty() {
+        return Change::default();
+    }
+    Change { edits, caret: Some(Caret::At(moved(caret, &changed, new_end))) }
+}
+
+/// Backspace or Delete at the caret ([`backspace`], [`delete`]), where a
+/// file pill holding a file goes whole rather than a char of its name, as
+/// the editor deletes a void node.
+pub fn erase(command: &Command, line: &Line, text: &str, caret: usize, back: bool) -> Option<Change> {
+    let filled = |at: usize| {
+        line.pills.iter().find(|p| {
+            !p.value.is_empty()
+                && p.value.contains(&at)
+                && option(command, &p.option).is_some_and(|o| o.kind == option_type::ATTACHMENT)
+        })
+    };
+    let change = if back { backspace(line, text, caret) } else { delete(line, text, caret) };
+    let touched = match change.as_ref().map(|c| &c.edits[..]) {
+        Some([Edit::Delete(range)]) if range.len() == 1 => range.start,
+        Some(_) => return change,
+        // Inside a value, where the box deletes as usual.
+        None if back => caret.checked_sub(1)?,
+        None => caret,
+    };
+    filled(touched).map(remove).or(change)
+}
+
+/// The file option a pasted file goes to (84046's paste handler): the one
+/// whose pill holds the caret, else the command's first with nothing in
+/// `staged`, with a pill or not.
+pub fn paste_option<'c>(command: &'c Command, holding: Option<&str>, staged: &Values) -> Option<&'c CommandOption> {
+    let file = |o: &&CommandOption| o.kind == option_type::ATTACHMENT;
+    holding
+        .and_then(|name| option(command, name))
+        .filter(file)
+        .or_else(|| command.options.iter().filter(file).find(|o| !staged.contains_key(&o.name)))
 }
 
 /// Tab (`selectNextCommandOption` in 35277): the next pill's whole value,
@@ -722,19 +785,13 @@ pub fn add(command: &Command, marked: &Marked<'_>, option: &str, word: Range<usi
     change_to(&parsed, &new, caret)
 }
 
-/// Whether an option has a pill in the box; file options have none until
-/// the box can hold a file.
-fn listed(option: &CommandOption) -> bool {
-    option.kind != option_type::ATTACHMENT
-}
-
 /// Sending with required options left out (`insertCommandOption` in
 /// 35277): an empty pill for each at the end, in the command's order.
 pub fn add_missing(command: &Command, marked: &Marked<'_>) -> Change {
     let parsed = parse(command, marked);
     let mut nodes = parsed.nodes.clone();
     for option in &command.options {
-        if option.required && listed(option) && !parsed.line.pills.iter().any(|p| p.option == option.name) {
+        if option.required && !parsed.line.pills.iter().any(|p| p.option == option.name) {
             nodes.push(Node::Pill { option: option.name.clone(), value: String::new() });
         }
     }
@@ -864,7 +921,7 @@ pub fn delete(line: &Line, text: &str, caret: usize) -> Option<Change> {
 /// The hint after the line (`e6` in 84046): how many options aren't in the
 /// box yet.
 pub fn placeholder(command: &Command, line: &Line) -> Option<String> {
-    let left = command.options.iter().filter(|o| listed(o) && !line.pills.iter().any(|p| p.option == o.name)).count();
+    let left = command.options.iter().filter(|o| !line.pills.iter().any(|p| p.option == o.name)).count();
     match (left, line.pills.len()) {
         (0, _) => None,
         (n, d) if d > 0 => Some(format!("+{n} more")),
@@ -884,7 +941,7 @@ pub fn remaining<'c>(
     command
         .options
         .iter()
-        .filter(|o| listed(o) && !line.pills.iter().any(|p| p.option == o.name))
+        .filter(|o| !line.pills.iter().any(|p| p.option == o.name))
         .filter(|o| o.display_name.starts_with(&word))
         .partition(|o| o.required)
 }
@@ -1247,7 +1304,7 @@ mod tests {
         assert_eq!(b.caret, b.text().chars().count() - 1, "in the last new pill");
         let line = b.line(&roll);
         assert_eq!(
-            values(&roll, &line, &b.text()).into_iter().collect::<Vec<_>>(),
+            values(&roll, &line, &b.text(), &Values::new()).into_iter().collect::<Vec<_>>(),
             [
                 ("count".to_owned(), "3".to_owned()),
                 ("size".to_owned(), "D6".to_owned()),
@@ -1274,7 +1331,7 @@ mod tests {
         let (b, _) = activated(&names, "/names नाम:1 ชื่อ:2 x_y-z: 3 ");
         let line = b.line(&names);
         assert_eq!(line.pills.iter().map(|p| p.option.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
-        assert_eq!(values(&names, &line, &b.text())["c"], "3", "trimmed");
+        assert_eq!(values(&names, &line, &b.text(), &Values::new())["c"], "3", "trimmed");
     }
 
     #[test]
@@ -1315,7 +1372,11 @@ mod tests {
         let (mut b, _) = activated(&roll, "/roll ");
         b.type_text("3 ");
         let line = b.line(&roll);
-        assert_eq!(values(&roll, &line, &b.text())["count"], "3 ", "an INTEGER's spaces stay for its query");
+        assert_eq!(
+            values(&roll, &line, &b.text(), &Values::new())["count"],
+            "3 ",
+            "an INTEGER's spaces stay for its query"
+        );
     }
 
     #[test]
@@ -1580,7 +1641,7 @@ mod tests {
         let roll = roll();
         let (b, _) = activated(&roll, "/roll who:x size:D7");
         let line = b.line(&roll);
-        let values = values(&roll, &line, &b.text());
+        let values = values(&roll, &line, &b.text(), &Values::new());
         let mut states = OptionStates::new(&roll);
         let failed = states.submit(&roll, &line, &values, &check).unwrap_err();
         // Pills in the box's order (who, size, count), count empty as required.
@@ -1605,7 +1666,7 @@ mod tests {
         let (b, _) = activated(&upload, "/upload file:cat.png note:hi");
         let line = b.line(&upload);
         assert_eq!(line.pills.len(), 2, "the key is still a pill");
-        let values = values(&upload, &line, &b.text());
+        let values = values(&upload, &line, &b.text(), &Values::new());
         let mut states = OptionStates::new(&upload);
         assert_eq!(states.submit(&upload, &line, &values, &check).unwrap_err(), ["file"], "required, no file");
         let note = values_of(&[("note", "hi")]);
@@ -1616,5 +1677,96 @@ mod tests {
             crate::commands::run_options(&upload, &note, &NoNames, &Default::default(), None).unwrap(),
             "no type 11 pointing at a file the run doesn't carry"
         );
+    }
+
+    fn upload() -> Command {
+        command(
+            "upload",
+            json!([{"type": 11, "name": "file", "description": "", "required": true},
+                   {"type": 11, "name": "picture", "description": ""},
+                   {"type": 3, "name": "note", "description": ""}]),
+        )
+    }
+
+    #[test]
+    fn a_file_pill_holds_its_staged_file_and_nothing_typed() {
+        let upload = upload();
+        let (mut b, _) = activated(&upload, "/upload file:typed.png note:hi");
+        let staged = values_of(&[("file", "cat.png"), ("picture", "dog.png")]);
+        let (text, keys, ends) = b.marked();
+        let change = file_texts(&upload, &Marked { text: &text, keys, ends }, &staged, 0);
+        b.apply(&change);
+        assert_eq!(b.text(), "/upload file:cat.png note:hi ", "the typed text goes, the file's name shows");
+        let line = b.line(&upload);
+        let given = values(&upload, &line, &b.text(), &staged);
+        assert_eq!(given.get("file").map(String::as_str), Some("cat.png"));
+        assert!(!given.contains_key("picture"), "a file without a pill isn't sent");
+        // Taken back: the pill stays, empty.
+        let (text, keys, ends) = b.marked();
+        b.apply(&file_texts(&upload, &Marked { text: &text, keys, ends }, &Values::new(), 0));
+        assert_eq!(b.text(), "/upload file: note:hi ");
+        assert_eq!(values(&upload, &b.line(&upload), &b.text(), &Values::new())["file"], "");
+        let (text, keys, ends) = b.marked();
+        assert!(file_texts(&upload, &Marked { text: &text, keys, ends }, &Values::new(), 0).is_empty());
+    }
+
+    #[test]
+    fn file_options_are_offered_as_any_other() {
+        let upload = upload();
+        let (b, _) = activated(&upload, "/upload ");
+        let line = b.line(&upload);
+        assert_eq!(placeholder(&upload, &line), Some("+2 more".into()));
+        let (required, others) = remaining(&upload, &line, "");
+        assert!(required.is_empty());
+        assert_eq!(others.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(), ["picture", "note"]);
+        // A required file option left out gets its pill on Enter.
+        let mut b = Box::typed("/upload note:hi ");
+        b.parts[..8].fill(Part::Name);
+        b.parts[8..13].fill(Part::Key);
+        b.parts[15] = Part::End;
+        let (text, keys, ends) = b.marked();
+        b.apply(&add_missing(&upload, &Marked { text: &text, keys, ends }));
+        assert_eq!(b.text(), "/upload note:hi file: ");
+    }
+
+    #[test]
+    fn a_file_pill_holding_a_file_goes_whole() {
+        let upload = upload();
+        let (mut b, _) = activated(&upload, "/upload note:hi");
+        let staged = values_of(&[("file", "cat.png")]);
+        let (text, keys, ends) = b.marked();
+        b.apply(&file_texts(&upload, &Marked { text: &text, keys, ends }, &staged, 0));
+        let text = b.text();
+        assert_eq!(text, "/upload note:hi file:cat.png ");
+        let line = b.line(&upload);
+        let run = |change: Option<Change>| {
+            let mut b = b.clone();
+            b.apply(&change.expect("handled"));
+            (b.text(), b.caret)
+        };
+        let gone = ("/upload note:hi ".to_owned(), 16);
+        // Right after the pill, inside its name, and Delete before its key or inside it.
+        for (caret, back) in [(29, true), (28, true), (24, true), (16, false), (22, false)] {
+            assert_eq!(run(erase(&upload, &line, &text, caret, back)), gone, "{caret} {back}");
+        }
+        // At the name's start, Backspace takes what is before the pill, as for any pill.
+        assert_eq!(run(erase(&upload, &line, &text, 21, true)).0, "/upload note:h file:cat.png ");
+        // Elsewhere, as ever.
+        assert!(erase(&upload, &line, &text, 15, true).is_none(), "inside another value, the box deletes");
+    }
+
+    #[test]
+    fn a_pasted_file_goes_to_the_file_option_in_hand_or_the_first_empty() {
+        let upload = upload();
+        let name = |o: Option<&CommandOption>| o.map(|o| o.name.clone());
+        let none = Values::new();
+        assert_eq!(name(paste_option(&upload, Some("picture"), &none)), Some("picture".into()));
+        assert_eq!(name(paste_option(&upload, None, &none)), Some("file".into()));
+        assert_eq!(name(paste_option(&upload, Some("note"), &none)), Some("file".into()), "not a file option");
+        let filled = values_of(&[("file", "cat.png")]);
+        assert_eq!(name(paste_option(&upload, None, &filled)), Some("picture".into()), "with a pill or not");
+        assert_eq!(name(paste_option(&upload, Some("file"), &filled)), Some("file".into()), "replaces in hand");
+        let full = values_of(&[("file", "cat.png"), ("picture", "dog.png")]);
+        assert_eq!(name(paste_option(&upload, None, &full)), None);
     }
 }

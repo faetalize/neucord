@@ -5,6 +5,7 @@
 //! and when comes from the client's command code; see `discord::commands`.
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -17,10 +18,12 @@ use gtk::{gio, glib};
 
 use super::App;
 use super::chat::MessageTarget;
+use super::command_files::{FileBoxes, FileRun};
 use super::composer::{Completion, MentionCtx};
 use super::menus::{Entry, Item, Kind, Live};
 use super::profile::UserTarget;
 use super::state::now_unix;
+use super::uploads::Upload;
 
 /// The icons over the command browser's sections: the clock over Frequently
 /// Used and a slash in a box over Built-In (`ClockIcon`, `SlashBoxIcon` in
@@ -86,6 +89,8 @@ pub(super) struct Slash {
     pub(super) in_action: Cell<bool>,
     /// A change outside a user action waits for the line to be read again.
     pub(super) queued: Cell<bool>,
+    /// The command's file boxes, in the place of the message's files.
+    pub(super) file_boxes: FileBoxes,
 }
 
 /// The command in the box (`ApplicationCommandStore`, 861382).
@@ -109,6 +114,8 @@ pub(super) struct Active {
     pub(super) caret: usize,
     /// Which row of the popup is selected.
     pub(super) selection: Selection,
+    /// Each file option's file, by option name, pill or not.
+    pub(super) files: BTreeMap<String, Rc<Upload>>,
 }
 
 impl Slash {
@@ -130,6 +137,7 @@ impl Slash {
             thread_busy: Cell::default(),
             in_action: Cell::default(),
             queued: Cell::default(),
+            file_boxes: FileBoxes::new(),
         }
     }
 
@@ -467,6 +475,7 @@ impl App {
             }
         });
         area.append(&slash.bar);
+        self.build_command_files(area);
     }
 
     /// Show the suggestions for the command being typed after a `/` at the
@@ -759,6 +768,7 @@ impl App {
                 body: serde_json::Value,
                 nonce: Snowflake,
             },
+            Files(Box<Command>, Box<CommandApp>, FileRun),
         }
         let Some((line, _)) = self.read_line() else { return };
         let Some(values) = self.line_values() else { return };
@@ -789,22 +799,39 @@ impl App {
                     Ok(options) => {
                         let guild = state.find_channel(active.channel).and_then(|(guild, _)| guild.map(|g| g.id));
                         let nonce = Snowflake::now();
-                        let run = Run {
-                            application: active.command.application,
-                            guild,
-                            channel: active.channel,
-                            session: &state.session_id,
-                            data: active.command.data(options, None),
-                            nonce,
-                            from: active.from,
-                        };
-                        Prepared::Go {
-                            channel: active.channel,
-                            command: Box::new(active.command.clone()),
-                            app: Box::new(active.app.clone()),
-                            // The command's files go here once a file option has them (#290).
-                            body: run.body(&[]),
-                            nonce,
+                        // Taken from the command, so that ending it doesn't stop them.
+                        let files: Vec<Rc<Upload>> = commands::file_options(&options)
+                            .iter()
+                            .filter_map(|name| active.files.remove(*name))
+                            .collect();
+                        if !files.is_empty() {
+                            let run = FileRun {
+                                application: active.command.application,
+                                guild,
+                                channel: active.channel,
+                                data: active.command.data(options, None),
+                                nonce,
+                                from: active.from,
+                                files,
+                            };
+                            Prepared::Files(Box::new(active.command.clone()), Box::new(active.app.clone()), run)
+                        } else {
+                            let run = Run {
+                                application: active.command.application,
+                                guild,
+                                channel: active.channel,
+                                session: &state.session_id,
+                                data: active.command.data(options, None),
+                                nonce,
+                                from: active.from,
+                            };
+                            Prepared::Go {
+                                channel: active.channel,
+                                command: Box::new(active.command.clone()),
+                                app: Box::new(active.app.clone()),
+                                body: run.body(&[]),
+                                nonce,
+                            }
                         }
                     }
                 }
@@ -828,6 +855,7 @@ impl App {
             Prepared::Go { channel, command, app, body, nonce } => {
                 self.send_command(channel, *command, &app, body, nonce)
             }
+            Prepared::Files(command, app, run) => self.send_command_files(*command, &app, run),
         };
         if ran {
             self.end_command(Keep::Nothing);
@@ -933,7 +961,7 @@ impl App {
     }
 
     /// Discord turned the request down.
-    fn command_refused(self: &Rc<Self>, nonce: Snowflake, command: &Command, failure: &Failure) {
+    pub(super) fn command_refused(self: &Rc<Self>, nonce: Snowflake, command: &Command, failure: &Failure) {
         let Some(running) = self.account.state.borrow_mut().running.remove(&nonce) else { return };
         if failure.stale_command {
             self.account.state.borrow_mut().commands_out_of_date(command.application, running.channel);

@@ -652,3 +652,7 @@ impl App {
     }
 }
 """)
+
+# `paste` pastes the clipboard into the message box, as Ctrl+V does.
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("paste") => self.composer.emit_paste_clipboard(),
+            Some("quit") => {''')
