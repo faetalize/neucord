@@ -681,7 +681,7 @@ impl Offer {
     pub const ALL: Offer = Offer { apps: true, builtins: BuiltIns::All };
 }
 
-/// Which built-ins are listed (`y.n` in 210978).
+/// Which built-ins are listed (`n` in 210978).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuiltIns {
     All,

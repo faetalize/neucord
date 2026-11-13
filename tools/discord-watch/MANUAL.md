@@ -159,13 +159,13 @@ changed for unrelated reasons only needs a note in the issue.
   `APPLICATION_COMMAND_USED`), and the checks a value passes, `J` in 300541
   (anchor `allowEmptyValues`); which words the suggestions look up, `Yn` in
   664929 (anchor `hasSpaceTerminator`); that a pending reply leaves no app's
-  commands after `/`, typed or bare, only the built-ins that write text
-  (`canOnlyUseTextCommands` in 989161, anchor `requireCreateTherads`, made
-  `NEW_TEXT_ONLY` by `ta` in 496533, anchor `queryEmojiResults`); where the
-  menus offer commands: the
-  Apps item, 173500 (anchor `command-search`), shows in `TEXTUAL` channels
-  (478437) but not media threads, with the user commands in 107632 and the
-  message commands in 761304; and Use Apps in the attach menu, 316576 (anchor
+  commands after `/`, typed or bare, only the built-ins that write text,
+  `/gif` and `/sticker` (`canOnlyUseTextCommands` in 989161, anchor
+  `requireCreateTherads`, made `NEW_TEXT_ONLY` by `ta` in 496533, anchor
+  `queryEmojiResults`); where the menus offer commands: the Apps item, 173500
+  (anchor `command-search`), shows in `TEXTUAL` channels (478437) but not
+  media threads, with the user commands in 107632 and the message commands in
+  761304; and Use Apps in the attach menu, 316576 (anchor
   `canUseApplicationCommands`), which a pending reply hides, and which the
   App Launcher replaces while the Apps button is off.
 - **`ansi` code blocks** (`markup::ansi`, `render::ansi_markup`). Which codes
