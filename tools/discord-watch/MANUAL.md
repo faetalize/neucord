@@ -158,7 +158,9 @@ changed for unrelated reasons only needs a note in the issue.
   commands after `/`, typed or bare, only the built-ins that write text,
   `/gif` and `/sticker` (`canOnlyUseTextCommands` in 989161, anchor
   `requireCreateTherads`, made `NEW_TEXT_ONLY` by `ta` in 496533, anchor
-  `queryEmojiResults`); where the menus offer commands: the Apps item, 173500
+  `queryEmojiResults`); that the chat takes no drop while a command is in
+  the box (738876, `getActiveCommand` beside its `onDrop`); where the menus
+  offer commands: the Apps item, 173500
   (anchor `command-search`), shows in `TEXTUAL` channels (478437) but not
   media threads, with the user commands in 107632 and the message commands in
   761304; and Use Apps in the attach menu, 316576 (anchor
