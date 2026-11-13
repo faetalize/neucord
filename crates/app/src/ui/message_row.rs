@@ -54,6 +54,11 @@ pub(super) struct Parts {
     pub(super) row: gtk::Box,
     /// The line above a reply.
     pub(super) reply: RefCell<Option<gtk::Widget>>,
+    /// The line above an app's answer: who ran which command.
+    pub(super) executed: RefCell<Option<gtk::Widget>>,
+    /// The avatars and names on that line, with whose they are, for their
+    /// menus.
+    pub(super) executed_users: RefCell<Vec<(gtk::Widget, discord::User)>>,
     pub(super) gutter: gtk::Box,
     /// The id of the first message of the group the row's message is in, for
     /// the avatar to move when any message of it is under the pointer.
@@ -149,6 +154,8 @@ impl MessageRow {
             run: Cell::new(None),
             row,
             reply: RefCell::new(None),
+            executed: RefCell::new(None),
+            executed_users: RefCell::default(),
             gutter,
             group: Rc::default(),
             avatar: RefCell::new(None),

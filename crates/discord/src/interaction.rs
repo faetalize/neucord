@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use crate::Snowflake;
 use crate::component::Component;
+use crate::model::{Message, User};
 
 /// `MESSAGE_COMPONENT` in 127258's interaction types.
 const MESSAGE_COMPONENT: u8 = 3;
@@ -244,10 +245,90 @@ fn first_error(errors: &Value) -> Option<&Value> {
         .find_map(|(_, v)| first_error(v))
 }
 
+/// `APPLICATION_COMMAND` in 127258's interaction types.
+const APPLICATION_COMMAND: u8 = 2;
+/// `PRIMARY_ENTRY_POINT` in 155718's command types: an app's launch command.
+const PRIMARY_ENTRY_POINT: u8 = 4;
+/// `INTERACTION_PREMIUM_UPSELL` in 448761's message types.
+const PREMIUM_UPSELL: u8 = 26;
+
+/// The line above an app's answer: who ran which command, on what
+/// (`ExecutedCommand`, 267508).
+#[derive(Debug, PartialEq)]
+pub struct Executed<'a> {
+    /// Who ran it (`interaction.user`).
+    pub user: &'a User,
+    pub what: Ran,
+    pub target: Option<Target<'a>>,
+}
+
+/// What the line says was run.
+#[derive(Debug, PartialEq)]
+pub enum Ran {
+    /// "used" a slash command, after the apps icon. The client opens the
+    /// run's options from it.
+    Slash(String),
+    /// "used" an app's launch command, after the apps icon, its name as
+    /// `kF` (735991) writes it. The client opens the launcher from it.
+    EntryPoint(String),
+    /// "used" a user or message command, plainly.
+    Plain(String),
+    /// "started an activity".
+    Activity,
+}
+
+/// What a user or message command was run on, after a chevron.
+#[derive(Debug, PartialEq)]
+pub enum Target<'a> {
+    /// A message command's message, which the message references.
+    Message(Snowflake),
+    User(&'a User),
+}
+
+/// The line above `message`, if it answers a command with a name. The
+/// target comes from a modal submit's triggering interaction when there
+/// is one (`Am` in 168186); a message command's message wins over a user.
+pub fn executed(message: &Message) -> Option<Executed<'_>> {
+    let interaction = message.interaction.as_ref()?;
+    let name = interaction.display_name();
+    if name.is_empty() {
+        return None;
+    }
+    let outer = message.interaction_metadata.as_ref();
+    // `V` in 597929 reads the message's own metadata, not the triggering one.
+    let entry = outer.is_some_and(|m| m.kind == APPLICATION_COMMAND && m.command_type == Some(PRIMARY_ENTRY_POINT));
+    if message.activity_instance.is_some() && !entry {
+        return Some(Executed { user: &interaction.user, what: Ran::Activity, target: None });
+    }
+    let what = if matches!(message.kind, Message::CHAT_INPUT_COMMAND | PREMIUM_UPSELL) {
+        Ran::Slash(name.to_owned())
+    } else if entry {
+        Ran::EntryPoint(launch_name(name))
+    } else {
+        Ran::Plain(name.to_owned())
+    };
+    let meta = outer.and_then(|m| m.triggering_interaction_metadata.as_deref().or(Some(m)));
+    let target = meta.filter(|m| m.kind == APPLICATION_COMMAND).and_then(|m| {
+        match message.message_reference.as_ref().and_then(|r| r.message_id) {
+            Some(id) => Some(Target::Message(id)),
+            None => m.target_user.as_ref().map(Target::User),
+        }
+    });
+    Some(Executed { user: &interaction.user, what, target })
+}
+
+/// `kF` in 735991: the first letter upper-cased, underscores as spaces.
+fn launch_name(name: &str) -> String {
+    let mut chars = name.chars();
+    let first = chars.next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default();
+    (first + chars.as_str()).replace('_', " ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::component::{Button, ButtonStyle};
+    use serde_json::json;
 
     fn button(id: &str, style: ButtonStyle) -> Component {
         Component::Button(Button {
@@ -394,5 +475,95 @@ mod tests {
         assert!(!failure(400, &invalid("SOMETHING_ELSE")).stale_command);
         assert!(failure(404, r#"{"code": 10005, "message": "Unknown Integration"}"#).stale_command);
         assert!(!failure(403, r#"{"code": 50013, "message": "Missing Permissions"}"#).stale_command);
+    }
+
+    fn answer(kind: u8, extra: Value) -> Message {
+        let mut message = json!({"id": "3", "channel_id": "9", "type": kind, "timestamp": "",
+            "author": {"id": "7", "username": "app", "bot": true},
+            "interaction": {"id": "8", "type": 2, "name": "settings set", "user": {"id": "5", "username": "me"}},
+            "interaction_metadata": {"id": "8", "type": 2, "user": {"id": "5", "username": "me"}}});
+        merge(&mut message, extra);
+        serde_json::from_value(message).unwrap()
+    }
+
+    fn merge(into: &mut Value, from: Value) {
+        match (into, from) {
+            (Value::Object(into), Value::Object(from)) => {
+                for (key, value) in from {
+                    merge(into.entry(key).or_insert(Value::Null), value);
+                }
+            }
+            (into, from) => *into = from,
+        }
+    }
+
+    fn line(message: &Message) -> Option<(Snowflake, Ran, Option<Snowflake>)> {
+        let line = executed(message)?;
+        let target = line.target.map(|t| match t {
+            Target::Message(id) => id,
+            Target::User(user) => user.id,
+        });
+        Some((line.user.id, line.what, target))
+    }
+
+    #[test]
+    fn a_slash_commands_answer_says_who_used_it() {
+        let slash = |name: &str| Ran::Slash(name.into());
+        assert_eq!(line(&answer(20, json!({}))), Some((Snowflake(5), slash("settings set"), None)));
+        assert_eq!(line(&answer(26, json!({}))), Some((Snowflake(5), slash("settings set"), None)), "an upsell");
+        assert_eq!(line(&answer(20, json!({"flags": 64}))).map(|l| l.1), Some(slash("settings set")), "ephemeral");
+        let localized = json!({"interaction": {"name_localized": "réglages"}});
+        assert_eq!(line(&answer(20, localized)).map(|l| l.1), Some(slash("réglages")));
+    }
+
+    #[test]
+    fn no_line_without_a_named_interaction() {
+        assert_eq!(line(&answer(20, json!({"interaction": null}))), None);
+        assert_eq!(line(&answer(20, json!({"interaction": {"name": ""}}))), None, "a component's answer");
+        assert_eq!(line(&answer(20, json!({"interaction": {"name_localized": ""}}))), None, "?? keeps it empty");
+    }
+
+    #[test]
+    fn a_user_or_message_command_names_what_it_ran_on() {
+        let them = json!({"id": "6", "username": "them"});
+        let on_user = answer(
+            23,
+            json!({"interaction": {"name": "Report User"},
+                                        "interaction_metadata": {"command_type": 2, "target_user": them}}),
+        );
+        assert_eq!(line(&on_user), Some((Snowflake(5), Ran::Plain("Report User".into()), Some(Snowflake(6)))));
+        let reference = json!({"message_id": "40", "channel_id": "9"});
+        let on_message = answer(
+            23,
+            json!({"interaction": {"name": "Quote Message"}, "message_reference": reference,
+                                           "interaction_metadata": {"command_type": 3, "target_user": them}}),
+        );
+        assert_eq!(line(&on_message).and_then(|l| l.2), Some(Snowflake(40)), "the message wins");
+        let component = answer(23, json!({"interaction_metadata": {"type": 3, "target_user": them}}));
+        assert_eq!(line(&component).and_then(|l| l.2), None, "only a command has a target");
+    }
+
+    #[test]
+    fn a_modal_submits_answer_takes_the_target_of_what_opened_it() {
+        let them = json!({"id": "6", "username": "them"});
+        let submit = answer(
+            23,
+            json!({"interaction_metadata": {"type": 5, "triggering_interaction_metadata":
+            {"id": "9", "type": 2, "user": {"id": "5", "username": "me"}, "target_user": them}}}),
+        );
+        assert_eq!(line(&submit).and_then(|l| l.2), Some(Snowflake(6)));
+        let plain = answer(23, json!({"interaction_metadata": {"type": 5, "target_user": them}}));
+        assert_eq!(line(&plain).and_then(|l| l.2), None, "a submit has no target of its own");
+    }
+
+    #[test]
+    fn a_launch_command_and_an_activity_read_as_the_client_writes_them() {
+        let entry = json!({"interaction": {"name": "launch_game"}, "interaction_metadata": {"command_type": 4}});
+        assert_eq!(line(&answer(23, entry.clone())).map(|l| l.1), Some(Ran::EntryPoint("Launch game".into())));
+        let mut launched = entry;
+        merge(&mut launched, json!({"activity_instance": {"id": "a1"}}));
+        assert_eq!(line(&answer(23, launched)).map(|l| l.1), Some(Ran::EntryPoint("Launch game".into())));
+        let activity = answer(20, json!({"activity_instance": {"id": "a1"}}));
+        assert_eq!(line(&activity), Some((Snowflake(5), Ran::Activity, None)));
     }
 }

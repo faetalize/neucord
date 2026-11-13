@@ -4,7 +4,8 @@
 Everything it is sent goes to $FAKE_LOG as JSON lines. $FAKE_VARIANTS names
 which Apex experiments the account is assigned, e.g. "hiding=1,lazy=1".
 $FAKE_INTERACTION is how apps answer: ok (the default), fail, silent, 429,
-modal or iframe.
+modal or iframe. $FAKE_ANSWERS=1 ends #general's history with apps' answers
+to commands others ran.
 """
 import base64, json, os, re, socket, struct, sys, threading, time, zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -271,7 +272,40 @@ def messages(channel):
             if n == 39:
                 text, files = "the newest picture, and see <#603> for the plan", (attachment(39),)
             out.append(message(n, who, text, files))
+        if os.environ.get("FAKE_ANSWERS"):
+            out += answers(out)
     return list(reversed(out + POSTED.get(channel, [])))
+
+
+def answers(lines):
+    """Dicey's answers to what Alice and Bob ran in #general, after its 40 lines: a slash command, another a
+    minute later (its own group), a user command, a message command on line 30, a button's answer (no name, so
+    no line), an activity, and Alice's reply to an answer with only an embed."""
+    def answer(n, who, name, kind=20, content=None, metadata=(), **fields):
+        msg = message(n, DICEY, "A made-up answer to %s." % name if content is None else content)
+        meta = {"id": snowflake(1000 + n * 100, 99), "type": 2, "user": who,
+                "authorizing_integration_owners": {"0": "500"}, "command_type": 1 if kind == 20 else 2,
+                **dict(metadata)}
+        msg.update(type=kind, application_id="900", webhook_id="900", interaction_metadata=meta,
+                   interaction={"id": meta["id"], "type": meta["type"], "name": name, "user": who}, **fields)
+        return msg
+    quoted = lines[30]
+    reference = {"type": 0, "message_id": quoted["id"], "channel_id": "600", "guild_id": "500"}
+    embed_only = answer(46, BOB, "stats show", content="", embeds=[{"title": "Made-up scores", "type": "rich"}])
+    reply = message(47, ALICE, "what did that say?")
+    reply.update(type=19, message_reference={"type": 0, "message_id": embed_only["id"], "channel_id": "600"},
+                 referenced_message=embed_only)
+    return [
+        answer(40, ALICE, "settings set"),
+        answer(41, BOB, "roll"),
+        answer(42, ALICE, "Report User", kind=23, metadata={"command_type": 2, "target_user": BOB}),
+        answer(43, BOB, "Quote Message", kind=23, metadata={"command_type": 3, "target_message_id": quoted["id"]},
+               message_reference=reference, referenced_message=quoted),
+        answer(44, ALICE, "", content="A made-up answer to a button.", metadata={"type": 3}),
+        answer(45, BOB, "launch", content="", metadata={"command_type": None}, activity_instance={"id": "a1"}),
+        embed_only,
+        reply,
+    ]
 
 
 def find(channel, id):
