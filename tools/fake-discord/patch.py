@@ -653,6 +653,33 @@ impl App {
 }
 """)
 
+# `link <url>` clicks the link to `url` in a message shown, as its label is told to follow it, and says whether
+# Neucord followed it (else the browser would open it).
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("link") => {
+                fn labels(widget: &gtk::Widget, found: &mut Vec<gtk::Label>) {
+                    let mut child = widget.first_child();
+                    while let Some(c) = child {
+                        if let Ok(label) = c.clone().downcast::<gtk::Label>() {
+                            found.push(label);
+                        }
+                        labels(&c, found);
+                        child = c.next_sibling();
+                    }
+                }
+                let url = parts.next().unwrap_or_default();
+                let mut found = Vec::new();
+                labels(self.window.upcast_ref(), &mut found);
+                let href = format!("href=\\"{url}\\"");
+                match found.into_iter().find(|l| l.uses_markup() && l.label().contains(&href)) {
+                    Some(label) => {
+                        let followed = label.emit_by_name::<bool>("activate-link", &[&url]);
+                        eprintln!("e2e: link {}", if followed { "followed" } else { "left to the browser" });
+                    }
+                    None => eprintln!("e2e: no link to {url}"),
+                }
+            }
+            Some("quit") => {''')
+
 # `paste` pastes the clipboard into the message box, as Ctrl+V does.
 edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("paste") => self.composer.emit_paste_clipboard(),
             Some("quit") => {''')
