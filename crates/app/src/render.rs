@@ -41,13 +41,17 @@ pub struct Context<'a> {
     pub jumbo: bool,
     /// Opens a mentioned user's profile, from the text they are in.
     pub on_mention: Option<MentionHandler>,
+    /// Follows a clicked link in the app, saying whether it did; one it
+    /// didn't opens in the browser.
+    pub on_link: Option<LinkHandler>,
 }
 
 pub type MentionHandler = Rc<dyn Fn(u64, &rich_text::RichText)>;
+pub type LinkHandler = Rc<dyn Fn(&str) -> bool>;
 
 impl<'a> Context<'a> {
     pub fn new(names: &'a Names, images: Option<&'a Images>) -> Self {
-        Context { names, images, spoilers: None, jumbo: false, on_mention: None }
+        Context { names, images, spoilers: None, jumbo: false, on_mention: None, on_link: None }
     }
 }
 
@@ -473,6 +477,12 @@ impl<'a> Inline<'a> {
         let text = RichText::new(&self.markup, images, spoilers, self.links);
         if let Some(on_mention) = cx.on_mention.clone() {
             text.connect_mention(move |user, text| on_mention(user, text));
+        }
+        if let Some(on_link) = cx.on_link.clone() {
+            text.label().connect_activate_link(move |_, uri| match on_link(uri) {
+                true => gtk::glib::Propagation::Stop,
+                false => gtk::glib::Propagation::Proceed,
+            });
         }
         if let Some(memory) = &cx.spoilers {
             let on_reveal = memory.on_reveal.clone();

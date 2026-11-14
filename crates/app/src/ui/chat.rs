@@ -844,6 +844,7 @@ impl App {
         // The box's text is the next channel's too: its line, as text, names the command again there if it can
         // (`CHANNEL_SELECT` resets the client's command).
         if left.is_some() {
+            self.dice_channel_selected(id);
             self.end_command(super::slash::Keep::Text);
             self.update_mention_popup();
         }
@@ -2153,6 +2154,13 @@ impl App {
         })
     }
 
+    /// What a click on a link in a message does that the browser doesn't:
+    /// roll the dice a roll's link names.
+    fn link_follower(self: &Rc<Self>) -> render::LinkHandler {
+        let this = Rc::downgrade(self);
+        Rc::new(move |url| this.upgrade().is_some_and(|this| this.follow_dice_link(url)))
+    }
+
     /// What a message says, and shows: its text, attachments and embeds. Its
     /// buttons and menus work if `live`: not in a forward.
     fn message_content(self: &Rc<Self>, body: &gtk::Box, message: &Message, names: &Names, live: bool) {
@@ -2164,6 +2172,7 @@ impl App {
             spoilers: Some(self.spoilers(message.id)),
             jumbo: discord::markup::is_jumbo(&spans),
             on_mention: live.then(|| self.mention_opener(message)),
+            on_link: live.then(|| self.link_follower()),
             ..Context::new(names, Some(&self.images))
         };
         if discord::embed::hides_content(&message.content, &embeds, media.inline_embed_media) {

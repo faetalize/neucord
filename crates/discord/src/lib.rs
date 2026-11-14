@@ -21,6 +21,7 @@ pub mod command_line;
 pub mod commands;
 pub mod component;
 pub mod cooldowns;
+pub mod dice;
 pub mod edits;
 pub mod embed;
 pub mod emoji;

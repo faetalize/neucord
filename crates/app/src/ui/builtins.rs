@@ -84,6 +84,7 @@ impl App {
                     }
                 });
             }
+            Outcome::RollDice(dice) => self.roll_dice(channel, dice),
             Outcome::Thread { name, message } => {
                 self.start_thread(channel, rest, name, message);
                 return false;

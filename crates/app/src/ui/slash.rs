@@ -578,7 +578,10 @@ impl App {
         let (Some((guild, at)), Some(me)) = (state.find_channel(channel), state.account.as_ref()) else {
             return Vec::new();
         };
-        let facts = builtins::Facts::of(guild, at, me, state.settings.tts_command(), now_unix());
+        let facts = builtins::Facts {
+            dice: discord::dice::enabled(&state.experiments, me.id),
+            ..builtins::Facts::of(guild, at, me, state.settings.tts_command(), now_unix())
+        };
         builtins::commands(&facts, offer, state.limits().max_message_length() as u64)
     }
 

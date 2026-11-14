@@ -233,6 +233,7 @@ impl App {
         self.reply_bar.append(&cancel);
         area.append(&self.reply_bar);
         self.build_schedule_bar(area);
+        self.build_dice_bar(area);
         self.build_edit_bar(area);
         self.build_slash(area);
         self.build_attach(area);

@@ -9,14 +9,14 @@
 use serde_json::{Value, json};
 
 use crate::commands::{BuiltIns, Choice, Command, CommandOption, option_type};
+use crate::dice::{self, Dice};
 use crate::model::{Channel, ChannelKind, Guild, Message, User};
 use crate::permissions::{self, Permissions};
 use crate::thread_creation;
 use crate::verification::Account;
 use crate::{Error, Snowflake};
 
-/// A built-in command, in the client's order (`x`). `/roll-dice` (-18,
-/// behind `2026-05-dice-roll-slash-command`) is left out.
+/// A built-in command, in the client's order (`x`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BuiltIn {
     Gif,
@@ -35,6 +35,7 @@ pub enum BuiltIn {
     Ban,
     Timeout,
     Msg,
+    RollDice,
 }
 
 /// How a built-in takes what is typed (`y$` in 392054).
@@ -55,7 +56,7 @@ pub enum Integration {
 }
 
 impl BuiltIn {
-    pub const ALL: [BuiltIn; 16] = [
+    pub const ALL: [BuiltIn; 17] = [
         BuiltIn::Gif,
         BuiltIn::Leave,
         BuiltIn::Schedule,
@@ -72,6 +73,7 @@ impl BuiltIn {
         BuiltIn::Ban,
         BuiltIn::Timeout,
         BuiltIn::Msg,
+        BuiltIn::RollDice,
     ];
 
     /// The client's id for it, negative so that no app's can be it; the gaps
@@ -94,6 +96,7 @@ impl BuiltIn {
             BuiltIn::Ban => "-12",
             BuiltIn::Timeout => "-13",
             BuiltIn::Msg => "-14",
+            BuiltIn::RollDice => "-18",
         }
     }
 
@@ -120,6 +123,7 @@ impl BuiltIn {
             BuiltIn::Ban => "ban",
             BuiltIn::Timeout => "timeout",
             BuiltIn::Msg => "msg",
+            BuiltIn::RollDice => "roll-dice",
         }
     }
 
@@ -137,7 +141,8 @@ impl BuiltIn {
             | BuiltIn::Kick
             | BuiltIn::Ban
             | BuiltIn::Timeout
-            | BuiltIn::Msg => Input::Action,
+            | BuiltIn::Msg
+            | BuiltIn::RollDice => Input::Action,
         }
     }
 
@@ -161,6 +166,7 @@ impl BuiltIn {
             BuiltIn::Ban => "Ban user",
             BuiltIn::Timeout => "Timeout user",
             BuiltIn::Msg => "Message user",
+            BuiltIn::RollDice => "Roll dice (PRE-ALPHA TESTING)",
         }
     }
 
@@ -216,6 +222,16 @@ impl BuiltIn {
                 option("user", USER, true, "The user to message"),
                 longest(option("message", STRING, true, "Message to send")),
             ],
+            BuiltIn::RollDice => {
+                let mut count =
+                    option("count", INTEGER, false, &format!("Number of dice to roll (1-{})", dice::MAX_COUNT));
+                count.min_value = Some(1.0);
+                count.max_value = Some(f64::from(dice::MAX_COUNT));
+                let mut size = option("size", INTEGER, false, "Number of sides on the die");
+                size.choices =
+                    Some(dice::SIDES.iter().map(|s| Choice { name: format!("D{s}"), value: json!(s) }).collect());
+                vec![count, size]
+            }
         }
     }
 
@@ -242,6 +258,7 @@ impl BuiltIn {
             BuiltIn::Ban => guild_wide(Permissions::BAN_MEMBERS),
             BuiltIn::Timeout => guild_wide(Permissions::MODERATE_MEMBERS),
             BuiltIn::Leave => facts.group_dm,
+            BuiltIn::RollDice => facts.dice,
             // `kJ` in 566908.
             BuiltIn::Schedule => facts.private || facts.channel.contains(Permissions::SEND_MESSAGES),
             BuiltIn::Gif
@@ -314,6 +331,9 @@ pub struct Facts {
     pub starts_threads: bool,
     /// `enable_tts_command` (see [`crate::settings::Settings::tts_command`]).
     pub tts_command: bool,
+    /// /roll-dice's experiment ([`dice::enabled`]), which [`Facts::of`]
+    /// leaves off.
+    pub dice: bool,
 }
 
 impl Facts {
@@ -336,6 +356,7 @@ impl Facts {
             guild: Some(permissions::in_guild(guild, me, now)),
             starts_threads: thread_creation::can_start(guild, context, None, me, now),
             tts_command,
+            dice: false,
         }
     }
 }
@@ -397,6 +418,8 @@ pub enum Outcome {
     },
     /// Pick a time, then schedule the message.
     Schedule(String),
+    /// Roll, show it above the box, then send it.
+    RollDice(Dice),
 }
 
 /// What running `builtin` with `options` does; none for /gif and /sticker,
@@ -432,6 +455,9 @@ pub fn outcome(builtin: BuiltIn, options: &[Value]) -> Option<Outcome> {
         BuiltIn::Msg => Some(Outcome::Msg { user: user()?, message: text("message") }),
         BuiltIn::Leave => Some(Outcome::Leave { silent: value("silent").and_then(Value::as_bool).unwrap_or(false) }),
         BuiltIn::Schedule => Some(text("message")).filter(|m| !m.is_empty()).map(Outcome::Schedule),
+        BuiltIn::RollDice => {
+            Some(Outcome::RollDice(Dice::new(number("count").unwrap_or(1), number("size").unwrap_or(6))))
+        }
     }
 }
 
@@ -660,7 +686,10 @@ mod tests {
         let ids: Vec<&str> = BuiltIn::ALL.iter().map(|b| b.id()).collect();
         assert_eq!(
             ids,
-            ["-16", "-15", "-19", "-17", "-1", "-2", "-3", "-4", "-5", "-6", "-7", "-10", "-11", "-12", "-13", "-14"]
+            [
+                "-16", "-15", "-19", "-17", "-1", "-2", "-3", "-4", "-5", "-6", "-7", "-10", "-11", "-12", "-13",
+                "-14", "-18"
+            ]
         );
         let shrug = BuiltIn::Shrug.command(2000);
         assert_eq!((shrug.id.as_str(), shrug.name.as_str(), shrug.display_name.as_str()), ("-1", "shrug", "shrug"));
@@ -692,6 +721,8 @@ mod tests {
         let kinds: Vec<(&str, u8, bool)> = kick.options.iter().map(|o| (o.name.as_str(), o.kind, o.required)).collect();
         assert_eq!(kinds, [("user", option_type::USER, true), ("reason", option_type::STRING, false)]);
         assert_eq!(BuiltIn::Timeout.command(2000).description, "Timeout user");
+        let dice = BuiltIn::RollDice.command(2000);
+        assert_eq!((dice.name.as_str(), dice.description.as_str()), ("roll-dice", "Roll dice (PRE-ALPHA TESTING)"));
     }
 
     #[test]
@@ -714,6 +745,20 @@ mod tests {
         let timeout = BuiltIn::Timeout.command(2000);
         let labels: Vec<String> = timeout.options[1].choices.clone().unwrap().into_iter().map(|c| c.name).collect();
         assert_eq!(labels, ["60 secs", "5 mins", "10 mins", "1 hour", "1 day", "1 week"]);
+        let dice = BuiltIn::RollDice.command(2000);
+        let count = &dice.options[0];
+        assert_eq!(
+            (count.name.as_str(), count.description.as_str(), count.min_value, count.max_value, count.required),
+            ("count", "Number of dice to roll (1-10)", Some(1.0), Some(10.0), false)
+        );
+        let sides: Vec<(String, Value)> =
+            dice.options[1].choices.clone().unwrap().into_iter().map(|c| (c.name, c.value)).collect();
+        assert_eq!(sides.first(), Some(&("D4".into(), json!(4))));
+        assert_eq!(sides.last(), Some(&("D20".into(), json!(20))));
+        assert_eq!(
+            (dice.options[1].description.as_str(), dice.options[1].required),
+            ("Number of sides on the die", false)
+        );
     }
 
     #[test]
@@ -724,7 +769,17 @@ mod tests {
             names(&offered(&facts, BuiltIns::TextOnly)),
             ["gif", "sticker", "shrug", "tableflip", "unflip", "tts", "me", "spoiler"]
         );
-        assert_eq!(offered(&facts, BuiltIns::All).len(), 15, "everything but /leave in a server");
+        assert_eq!(offered(&facts, BuiltIns::All).len(), 15, "everything but /leave and /roll-dice in a server");
+    }
+
+    #[test]
+    fn roll_dice_follows_its_experiment_only() {
+        let dice = |facts: Facts| offered(&facts, BuiltIns::All).contains(&BuiltIn::RollDice);
+        let server = guild(SEE, Permissions::NONE);
+        assert!(!dice(facts_in(&server, TEXT, true)), "off unless in it");
+        assert!(dice(Facts { dice: true, ..facts_in(&server, TEXT, true) }));
+        assert!(dice(Facts { dice: true, ..private(1) }));
+        assert!(!offered(&Facts { dice: true, ..private(1) }, BuiltIns::TextOnly).contains(&BuiltIn::RollDice));
     }
 
     #[test]
@@ -856,6 +911,14 @@ mod tests {
         );
         assert_eq!(run(BuiltIn::Schedule, json!([text("message", "later")])), Some(Outcome::Schedule("later".into())));
         assert_eq!(run(BuiltIn::Schedule, json!([text("message", "")])), None, "nothing to schedule");
+        assert_eq!(run(BuiltIn::RollDice, json!([])), Some(Outcome::RollDice(Dice { count: 1, sides: 6 })));
+        assert_eq!(
+            run(
+                BuiltIn::RollDice,
+                json!([{"type": 4, "name": "count", "value": 3}, {"type": 4, "name": "size", "value": 20}])
+            ),
+            Some(Outcome::RollDice(Dice { count: 3, sides: 20 }))
+        );
     }
 
     #[test]
