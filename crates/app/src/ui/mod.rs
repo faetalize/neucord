@@ -13,6 +13,7 @@ mod components;
 mod composer;
 mod connection;
 mod create_thread;
+mod dice;
 mod edits;
 mod embeds;
 mod emoji;
@@ -206,6 +207,8 @@ pub struct App {
     drafts: uploads::Drafts,
     /// When the messages being written go out, if they are scheduled.
     scheduling: scheduling::Scheduling,
+    /// A roll of the dice above the message box, while there is one.
+    dice: dice::DiceBar,
     /// Says how a request went, for the ones with nothing else to show it.
     toasts: adw::ToastOverlay,
     /// Shows the pictures and videos of messages over the window.
@@ -457,6 +460,7 @@ impl App {
             reply: RefCell::default(),
             drafts: uploads::Drafts::new(),
             scheduling: scheduling::Scheduling::new(),
+            dice: dice::DiceBar::new(),
             toasts: adw::ToastOverlay::new(),
             viewer: viewer::Viewer::new(),
             voice: voice::Voice::new(),

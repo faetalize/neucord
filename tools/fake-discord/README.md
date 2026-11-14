@@ -28,7 +28,8 @@ what arrived, IDENTIFY's key order and properties first.
   `FAKE_UPLOAD_FAIL=too-large` turns the URL down with Discord's 40005.
   Both settings protos are kept, and a save merges into them field by field
   as Discord's does. The GIF endpoints answer made-up results, one with a
-  numeric id, and take a pick's `POST /gifs/select`. `FAKE_VARIANTS="hiding=1,voice=1,ladder=1,lazy=1,upload=1,nsfwlevel=1,chatbar=1"`
+  numeric id, and take a pick's `POST /gifs/select`. A thread made from a
+  channel joins the server and comes back as `THREAD_CREATE`. `FAKE_VARIANTS="hiding=1,voice=1,ladder=1,lazy=1,upload=1,nsfwlevel=1,chatbar=1,dice=1"`
   assigns Apex experiments by name, `FAKE_REIDENTIFY=<s>` sends op 9 after
   that many seconds to force a second IDENTIFY, `FAKE_NEW_TOKEN` puts an
   `auth_token` in READY. `FAKE_NSFW="allowed=1,dms=0,status=3,gated=0,level=0,owner=0"`
@@ -64,7 +65,9 @@ what arrived, IDENTIFY's key order and properties first.
   <path>`, `modal-submit`, `modal-cancel`, `modal-shot <png>`, a file
   field's `modal-file <path> <file>…` (adds them, as a pick or a drop
   does), `modal-unfile <path> <n>` (its row's remove button) and
-  `modal-files <path> [png]` (prints what it shows, and shoots it), `quit`. It edits the copy by exact strings
+  `modal-files <path> [png]` (prints what it shows, and shoots it), `link
+  <url>` (clicks that link in a message shown, and says whether Neucord
+  followed it or left it to the browser), `quit`. It edits the copy by exact strings
   and stops on the first that no longer matches: when the code it patches
   moves, update the string. The module it adds is only built here, so a
   change to what it calls needs a run to show it still builds.
@@ -78,6 +81,8 @@ what arrived, IDENTIFY's key order and properties first.
   `pills` fills a command's options in the box, searches members (the fake
   answers op 8 with a `query` with its people whose username or name starts
   with it), and ends commands by Backspace, a reply and a channel switch;
+  `thread` (with `FAKE_OWNER=1`) runs /thread; `dice` (with
+  `FAKE_VARIANTS=dice=1`) rolls by /roll-dice and by its message's link;
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).
 

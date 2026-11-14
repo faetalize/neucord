@@ -64,6 +64,7 @@ NAMES = {
     "upload": "2026-09-nitro-file-upload-rollout",
     "nsfwlevel": "2025-09-server-nsfw-level",
     "chatbar": "2026-06-chat-bar-customization",
+    "dice": "2026-05-dice-roll-slash-command",
 }
 LADDER = json.dumps({"ladder": [64, 128, 256], "maxUpscale": 1.1, "minSnapDownDpr": 2})
 # Under FAKE_OWNER the account owns the server, so its moderation commands show.
@@ -689,6 +690,21 @@ def edit_member(guild, user, body):
 @route("DELETE", r"/channels/(\d+)")
 def close_channel(channel, body):
     return 200, {"id": channel}
+
+
+# /thread's thread: a channel of the server from then on, pushed as THREAD_CREATE.
+@route("POST", r"/channels/(\d+)/threads")
+def create_thread(channel, body):
+    now = time.strftime("%Y-%m-%dT%H:%M:%S.000000+00:00", time.gmtime())
+    thread = {"id": snowflake_now(), "type": body.get("type", 11), "guild_id": "500", "parent_id": channel,
+              "name": body.get("name", ""), "owner_id": ME["id"], "last_message_id": None, "message_count": 0,
+              "member_count": 1, "rate_limit_per_user": 0, "flags": 0,
+              "thread_metadata": {"archived": False, "locked": False, "archive_timestamp": now,
+                                  "auto_archive_duration": body.get("auto_archive_duration", 4320),
+                                  "create_timestamp": now},
+              "member": {"id": None, "user_id": ME["id"], "join_timestamp": now, "flags": 1}}
+    GUILD_CHANNELS.add(thread["id"])
+    return 201, thread, lambda: dispatch("THREAD_CREATE", {**thread, "newly_created": True})
 
 
 def modal_form():

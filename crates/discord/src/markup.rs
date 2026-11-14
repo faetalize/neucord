@@ -598,13 +598,17 @@ fn apply(state: &mut Ansi, params: &[&str]) {
 
 /// Inline markup within a block of text.
 fn parse_inline(input: &str) -> Vec<Span> {
-    Parser { bytes: input.as_bytes(), input, pos: 0 }.run(None)
+    Parser { bytes: input.as_bytes(), input, pos: 0, escapes: true }.run(None)
 }
 
 struct Parser<'a> {
     input: &'a str,
     bytes: &'a [u8],
     pos: usize,
+    /// `\` before any character but a letter, digit or space makes it text
+    /// (simple-markdown's `escape`), except in a link's label, which 694403
+    /// parses with `allowEscape: false`.
+    escapes: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -631,6 +635,15 @@ impl<'a> Parser<'a> {
                 flush(&mut text, &mut spans);
                 spans.push(Span::Break);
                 self.pos += 1;
+                continue;
+            }
+            if self.escapes
+                && let Some(escaped) = rest.strip_prefix('\\').and_then(|r| r.chars().next())
+                && !escaped.is_ascii_alphanumeric()
+                && !escaped.is_whitespace()
+            {
+                text.push(escaped);
+                self.pos += 1 + escaped.len_utf8();
                 continue;
             }
             // Inline code: run of backticks, closed by the same run.
@@ -739,7 +752,8 @@ impl<'a> Parser<'a> {
             return None;
         }
         let total = close + 2 + paren + 1;
-        Some((Span::Link { url: url.to_string(), children: parse_inline(label) }, total))
+        let children = Parser { bytes: label.as_bytes(), input: label, pos: 0, escapes: false }.run(None);
+        Some((Span::Link { url: url.to_string(), children }, total))
     }
 }
 
@@ -817,6 +831,32 @@ mod tests {
     #[test]
     fn unterminated_delimiter_is_literal() {
         assert_eq!(parse("a ** b"), vec![text("a "), text("**"), text(" b")]);
+    }
+
+    /// The text of `spans` if that's all they are.
+    fn text_of(spans: &[Span]) -> Option<String> {
+        spans.iter().map(|s| if let Span::Text(t) = s { Some(t.as_str()) } else { None }).collect()
+    }
+
+    #[test]
+    fn backslash_escapes() {
+        assert_eq!(
+            text_of(&parse("¯\\_(ツ)_/¯")).as_deref(),
+            Some("¯_(ツ)_/¯"),
+            "/shrug's face, as the client draws it"
+        );
+        assert_eq!(text_of(&parse("\\*not italic\\*")).as_deref(), Some("*not italic*"));
+        assert_eq!(text_of(&parse("\\\\")).as_deref(), Some("\\"));
+        assert_eq!(text_of(&parse("\\`x\\`")).as_deref(), Some("`x`"));
+        assert_eq!(text_of(&parse("\\<@1>")).as_deref(), Some("<@1>"));
+        assert_eq!(
+            text_of(&parse("\\a \\1 \\ \\")).as_deref(),
+            Some("\\a \\1 \\ \\"),
+            "letters, digits and spaces aren't escaped"
+        );
+        let [Span::Link { children, .. }] = &parse("[a\\*b](https://x.com)")[..] else { panic!("a link") };
+        assert_eq!(text_of(children).as_deref(), Some("a\\*b"), "nor anything in a link's label");
+        assert_eq!(parse("`a\\*b`"), vec![Span::Code("a\\*b".into())]);
     }
 
     #[test]
