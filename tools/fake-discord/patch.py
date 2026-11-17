@@ -111,6 +111,12 @@ impl App {
             Some("guild") => self.select_guild(id(parts.next())),
             Some("home") => self.select_home(),
             Some("attach") => self.drafts.attach.emit_clicked(),
+            // Create Thread for the open channel, as the attach menu's entry opens it.
+            Some("thread-form") => {
+                if let Some(channel) = self.thread_channel() {
+                    self.open_thread_form(channel, None);
+                }
+            }
             Some("shot") => shot(&self.window, parts.next().unwrap_or("shot.png")),
             Some("shot-popover") => {
                 let anchor: Option<gtk::Widget> = match parts.next() {

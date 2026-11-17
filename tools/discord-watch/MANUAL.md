@@ -61,7 +61,11 @@ changed for unrelated reasons only needs a note in the issue.
   Bypass Slowmode in the channel (`cooldowns::bypasses_slowmode`). What
   feeds it isn't watched either: 138399
   resets the cooldown only after a send succeeds and reads `retry_after` on
-  `SLOWMODE_RATE_LIMITED`.
+  `SLOWMODE_RATE_LIMITED`. Threads have a cooldown of their own
+  (`CreateThread`, `Slowmode::thread_made`), which `Y` in 971389 resets
+  when Discord makes one, from either form, /thread or a forum post, and
+  sets from `retry_after` on a refusal; the thread sidebar (134357, with
+  `isThreadCreation`) and the forum's forms (371115, 745431) read it.
 - **When we say we're typing, and who is listed** (`typing.rs`).
   `handleTextareaChange` in 699344 sends for any change to a box that isn't
   empty, unless the text starts with `/` or is the `+:name:` reaction

@@ -377,7 +377,7 @@ impl App {
     fn refresh_post_form(&self, form: &PostForm) {
         let (name, text) = (form.name.text().to_string(), form.text());
         let problems = self.post_draft(form, &name, &text);
-        let wait = self.slowmode_left(form.forum);
+        let wait = self.thread_slowmode_left(form.forum);
         let postable = problems.none() && !name.trim().is_empty() && wait == 0;
         form.post.set_sensitive(postable && !form.submitting.get());
         form.tag_error.set_visible(problems.tag);
@@ -498,7 +498,7 @@ impl App {
             problems.message.then_some("A message is required"),
         );
         // A tag that is missing is said all along; slowmode shows in the form.
-        if !problems.none() || self.slowmode_left(form.forum) > 0 {
+        if !problems.none() || self.thread_slowmode_left(form.forum) > 0 {
             return;
         }
         // `:name:`s go out as emoji, and the length is of what goes out.
@@ -540,7 +540,7 @@ impl App {
                 }
             };
             // Discord's wait starts when the post is made.
-            this.record_slowmode(form.forum, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
+            this.record_slowmode(form.forum, |slowmode, c, bypass| slowmode.thread_made(c, bypass, now_ms()));
             form.posted.set(true);
             // The client waits for the gateway to bring the post, which is
             // what opens it. Past the wait we give it, the post is Discord's
@@ -582,10 +582,7 @@ impl App {
                 "This server has reached the maximum number of active announcement threads. Free up space by archiving a thread.",
             ),
             // The client records the wait and says nothing.
-            Refused::Slowmode(_) => {
-                let wait = error.slowmode_wait().unwrap_or_default();
-                self.record_slowmode(form.forum, |slowmode, c, _| slowmode.refused(c, wait, now_ms()));
-            }
+            Refused::Slowmode(_) => self.thread_slowmode_refused(form.forum, error),
             Refused::RateLimited => alert(CANNOT, "You are being rate limited."),
             Refused::AutoMod { title, reason } => {
                 let reason = reason.unwrap_or_else(|| AUTOMOD_REASON.to_owned());

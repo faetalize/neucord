@@ -34,13 +34,16 @@ what arrived, IDENTIFY's key order and properties first.
   that many seconds to force a second IDENTIFY, `FAKE_NEW_TOKEN` puts an
   `auth_token` in READY, `FAKE_LEFT=<user ids>` has those people leave the
   server: op 8 with a `nonce` answers them `not_found`, and a search finds
-  them no more. `FAKE_NSFW="allowed=1,dms=0,status=3,gated=0,level=0,owner=0"`
+  them no more. `FAKE_SLOWMODE=<s>` gives `#general` that slowmode and
+  refuses a thread there with 20016, as inside its cooldown.
+  `FAKE_NSFW="allowed=1,dms=0,status=3,gated=0,level=0,owner=0"`
   (the defaults) sets the account's `nsfw_allowed` and age status, the
   age-restricted commands in DMs setting, the region's age-gated features
   and the server's content levels; channel 604 is `nsfw`.
 - **`patch.py`**: points the copy's API, gateway and CDN at the fake, and adds
   a command file the scenario writes to: `home`, `guild <id>`,
-  `channel <id>`, `attach`, `shot <png>`, `shot-popover <widget> <png>` (the
+  `channel <id>`, `attach`, `thread-form` (Create Thread for the open
+  channel), `shot <png>`, `shot-popover <widget> <png>` (the
   popover showing on `composer`, `composer_box` or `gif_button`),
   `type <text>` (as typed), `set <text>` (as the app sets it),
   `backspace` (GTK's own Backspace at the caret), `suggestions [png]`
@@ -83,7 +86,9 @@ what arrived, IDENTIFY's key order and properties first.
   `pills` fills a command's options in the box, searches members (the fake
   answers op 8 with a `query` with its people whose username or name starts
   with it), and ends commands by Backspace, a reply and a channel switch;
-  `thread` (with `FAKE_OWNER=1`) runs /thread; `dice` (with
+  `thread` (with `FAKE_OWNER=1`) runs /thread, and `thread-slowmode` (with
+  `FAKE_OWNER=1 FAKE_SLOWMODE=30`) has it refused, which shows in Create
+  Thread and not in the message box; `dice` (with
   `FAKE_VARIANTS=dice=1`) rolls by /roll-dice and by its message's link;
   `bot-commands` (with `FAKE_NSFW=dms=1`, which puts settings proto 1 in
   READY) lists a bot's commands after its mention, and turns them off and

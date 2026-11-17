@@ -200,6 +200,9 @@ impl App {
                 Ok(thread) => thread,
                 Err(e) => {
                     let refused = Refused::from(&e);
+                    if let Refused::Slowmode(_) = refused {
+                        this.thread_slowmode_refused(channel, &e);
+                    }
                     if refused.alerts_after_slash_command()
                         && let Some((heading, body)) = refusal_alert(&refused, &e)
                     {
@@ -210,6 +213,7 @@ impl App {
                     return;
                 }
             };
+            this.record_slowmode(channel, |slowmode, c, bypass| slowmode.thread_made(c, bypass, now_ms()));
             this.thread_arrived(thread.id).await;
             if this.slash.active.borrow().as_ref().is_some_and(|a| a.channel == channel) {
                 this.end_command(Keep::Nothing);

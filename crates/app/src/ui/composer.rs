@@ -979,9 +979,22 @@ impl App {
         state.find_channel(channel).map_or(0, |(_, c)| state.slowmode.remaining_ms(c, now_ms()))
     }
 
-    /// Tell the slowmode tracker about a message to `channel`, then show the
-    /// wait if that channel is still open. `record` is told whether we
-    /// bypass slowmode there.
+    /// Milliseconds before we may make another thread in `channel`.
+    pub(super) fn thread_slowmode_left(&self, channel: Snowflake) -> i64 {
+        let state = self.account.state.borrow();
+        state.find_channel(channel).map_or(0, |(_, c)| state.slowmode.thread_remaining_ms(c, now_ms()))
+    }
+
+    /// Discord refused a thread in `channel` for slowmode: the client records
+    /// the wait it names and says nothing.
+    pub(super) fn thread_slowmode_refused(self: &Rc<Self>, channel: Snowflake, error: &discord::Error) {
+        let wait = error.slowmode_wait().unwrap_or_default();
+        self.record_slowmode(channel, |slowmode, c, _| slowmode.thread_refused(c, wait, now_ms()));
+    }
+
+    /// Tell the slowmode tracker about a message or thread in `channel`, then
+    /// show the message wait if that channel is still open. `record` is told
+    /// whether we bypass slowmode there.
     pub(super) fn record_slowmode(
         self: &Rc<Self>,
         channel: Snowflake,

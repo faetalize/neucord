@@ -9,6 +9,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use adw::prelude::*;
+use discord::cooldowns::wait_words;
 use discord::thread_creation::{
     self, FROM_ATTACH_MENU, FROM_MESSAGE_MENU, Missing, NAME_MAX, NAME_PLACEHOLDER, Privacy, Refused,
 };
@@ -18,6 +19,7 @@ use gtk::glib;
 use super::App;
 use super::chat::MessageTarget;
 use super::menus::{Entry, Item, Kind};
+use super::state::now_ms;
 use super::uploads::Stopped;
 use crate::render;
 
@@ -55,6 +57,9 @@ struct Form {
     private: adw::SwitchRow,
     message: gtk::TextView,
     message_error: gtk::Label,
+    /// The wait slowmode asks before another thread, which the client shows
+    /// and doesn't hold Create for (420018).
+    slowmode: gtk::Label,
     create: gtk::Button,
     /// The request is out: nothing changes until it answers.
     submitting: Cell<bool>,
@@ -143,8 +148,31 @@ impl App {
             }
         });
         form.message.add_controller(keys);
+        self.refresh_thread_slowmode(&form, parent);
+        glib::timeout_add_local(Duration::from_secs(1), {
+            let (this, form) = (Rc::downgrade(self), Rc::downgrade(&form));
+            move || match (this.upgrade(), form.upgrade()) {
+                (Some(this), Some(form)) => {
+                    this.refresh_thread_slowmode(&form, parent);
+                    glib::ControlFlow::Continue
+                }
+                _ => glib::ControlFlow::Break,
+            }
+        });
         form.dialog.present(Some(&self.window));
         form.name.grab_focus();
+    }
+
+    /// Show how long before another thread in `parent`, while it lasts.
+    fn refresh_thread_slowmode(&self, form: &Form, parent: Snowflake) {
+        let wait = self.thread_slowmode_left(parent);
+        form.slowmode.set_visible(wait > 0);
+        if wait > 0 {
+            form.slowmode.set_label(&format!(
+                "Slowmode is enabled. You can create another thread in this channel in {}.",
+                wait_words((wait + 999) / 1000)
+            ));
+        }
     }
 
     /// What a thread on `message` is called when its name is left empty.
@@ -228,6 +256,7 @@ impl App {
         switch.append(&private);
         let error = || gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["error"]).visible(false).build();
         let (name_error, message_error) = (error(), error());
+        let slowmode = gtk::Label::builder().xalign(0.0).wrap(true).css_classes(["dim-label"]).visible(false).build();
         let label = |text: &str| gtk::Label::builder().label(text).xalign(0.0).css_classes(["heading"]).build();
         let body = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).build();
         body.set_margin_top(12);
@@ -244,6 +273,7 @@ impl App {
         body.append(&label("Message"));
         body.append(&scroller);
         body.append(&message_error);
+        body.append(&slowmode);
 
         let create = gtk::Button::builder().label("Create").css_classes(["suggested-action"]).build();
         let header = adw::HeaderBar::new();
@@ -252,8 +282,17 @@ impl App {
         toolbar.add_top_bar(&header);
         toolbar.set_content(Some(&body));
         let dialog = adw::Dialog::builder().title("Create Thread").content_width(480).child(&toolbar).build();
-        let form =
-            Form { dialog, name, name_error, private, message, message_error, create, submitting: Cell::new(false) };
+        let form = Form {
+            dialog,
+            name,
+            name_error,
+            private,
+            message,
+            message_error,
+            slowmode,
+            create,
+            submitting: Cell::new(false),
+        };
         self.guard_thread_form(&form);
         // A refusal is said until its field is changed, which answers it.
         form.name.connect_changed({
@@ -368,9 +407,10 @@ impl App {
                 Ok(thread) => thread,
                 Err(error) => {
                     form.set_busy(false);
-                    return this.thread_refused(&form, &discord::thread_creation::Refused::from(&error), &error);
+                    return this.thread_refused(&form, parent, &Refused::from(&error), &error);
                 }
             };
+            this.record_slowmode(parent, |slowmode, c, bypass| slowmode.thread_made(c, bypass, now_ms()));
             // The client waits for the gateway to bring the thread, and sends
             // the first message into it once it's there.
             if !this.thread_arrived(thread.id).await {
@@ -403,9 +443,11 @@ impl App {
     }
 
     /// Say why Discord turned a thread down, as the client does: an alert for
-    /// most, next to the name for the name's own refusals.
-    fn thread_refused(self: &Rc<Self>, form: &Form, refused: &Refused, error: &discord::Error) {
+    /// most, next to the name for the name's own refusals, and slowmode
+    /// recorded without a word.
+    fn thread_refused(self: &Rc<Self>, form: &Form, parent: Snowflake, refused: &Refused, error: &discord::Error) {
         match refused {
+            Refused::Slowmode(_) => self.thread_slowmode_refused(parent, error),
             Refused::AutoMod { reason: Some(reason), .. } => form.show_errors(Some(reason), None),
             Refused::Name => form.show_errors(Some("Thread Name is required"), None),
             _ => {
@@ -444,8 +486,8 @@ impl App {
 }
 
 /// The alert the client shows for a thread Discord refused, its heading and
-/// body (`Y` in 971389); none for the name's own refusals, which show by the
-/// name.
+/// body (`Y` in 971389); none for slowmode, whose wait is only recorded, nor
+/// for the name's own refusals, which show by the name.
 pub(super) fn refusal_alert(refused: &Refused, error: &discord::Error) -> Option<(&'static str, String)> {
     const CANNOT: &str = "Cannot create thread";
     let text = match refused {
@@ -456,10 +498,7 @@ pub(super) fn refusal_alert(refused: &Refused, error: &discord::Error) -> Option
             "This server has reached the maximum number of active announcement threads. Free up space by archiving a thread."
         }
         Refused::RateLimited => "You are being rate limited.",
-        Refused::Slowmode(seconds) => {
-            return Some((CANNOT, format!("Slowmode is on in this channel. Try again in {seconds} seconds.")));
-        }
-        Refused::AutoMod { reason: Some(_), .. } | Refused::Name => return None,
+        Refused::Slowmode(_) | Refused::AutoMod { reason: Some(_), .. } | Refused::Name => return None,
         Refused::AutoMod { reason: None, .. } | Refused::Other => {
             return Some(match error {
                 discord::Error::Http { .. } => ("Error", "An error occurred, please try again.".to_owned()),

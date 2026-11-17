@@ -21,11 +21,52 @@ pub fn bypasses_slowmode(guild: &Guild, channel: &Channel, me: &Account, now_uni
     permissions::in_channel(guild, channel, me, now_unix).contains(Permissions::BYPASS_SLOWMODE)
 }
 
+/// When each channel's cooldown ends (ms since 1970), and the channel's
+/// slowmode when it started.
+#[derive(Debug, Default)]
+struct Waits(HashMap<Snowflake, (i64, u32)>);
+
+impl Waits {
+    fn start(&mut self, channel: &Channel, bypass: bool, now_ms: i64) {
+        let rate = channel.rate_limit_per_user;
+        if rate > 0 && !bypass {
+            self.0.insert(channel.id, (now_ms + i64::from(rate) * 1000 + MARGIN_MS, rate));
+        }
+    }
+
+    fn refused(&mut self, channel: &Channel, retry_after: f64, now_ms: i64) {
+        if retry_after > 0.0 {
+            let end = now_ms + (retry_after * 1000.0).ceil() as i64 + MARGIN_MS;
+            self.0.insert(channel.id, (end, channel.rate_limit_per_user));
+        }
+    }
+
+    fn update(&mut self, channel: &Channel, now_ms: i64) {
+        let rate = channel.rate_limit_per_user;
+        if let Some((end, was)) = self.0.get_mut(&channel.id)
+            && *was != rate
+        {
+            *end = (*end).min(now_ms + i64::from(rate) * 1000 + MARGIN_MS);
+            *was = rate;
+        }
+    }
+
+    fn remaining_ms(&self, channel: &Channel, now_ms: i64) -> i64 {
+        if channel.rate_limit_per_user == 0 {
+            return 0;
+        }
+        self.0.get(&channel.id).map_or(0, |(end, _)| (end - now_ms).max(0))
+    }
+}
+
+/// A channel's cooldowns for posting a message and for making a thread, which
+/// the client keeps apart (`SendMessage` and `CreateThread` in
+/// `SlowmodeStore`): making a thread doesn't hold the next message, nor a
+/// message the next thread.
 #[derive(Debug, Default)]
 pub struct Slowmode {
-    /// When each channel's cooldown ends (ms since 1970), and the channel's
-    /// slowmode when it started.
-    ends: HashMap<Snowflake, (i64, u32)>,
+    messages: Waits,
+    threads: Waits,
 }
 
 impl Slowmode {
@@ -34,26 +75,20 @@ impl Slowmode {
     /// starts when the message arrives, and so does the official client's.
     /// `bypass` is [`bypasses_slowmode`] for the channel's server.
     pub fn sent(&mut self, channel: &Channel, bypass: bool, now_ms: i64) {
-        let rate = channel.rate_limit_per_user;
-        if rate > 0 && !bypass {
-            self.ends.insert(channel.id, (now_ms + i64::from(rate) * 1000 + MARGIN_MS, rate));
-        }
+        self.messages.start(channel, bypass, now_ms);
     }
 
     /// Our message to `channel` failed for some other reason than slowmode,
     /// so the wait it started is void. None ran before it: we don't send then.
     pub fn failed(&mut self, channel: &Channel) {
-        self.ends.remove(&channel.id);
+        self.messages.0.remove(&channel.id);
     }
 
     /// Discord refused a message in `channel` for slowmode, with `retry_after`
     /// seconds left. Only a wait we didn't know of, as after a message from
     /// another device, gets here.
     pub fn refused(&mut self, channel: &Channel, retry_after: f64, now_ms: i64) {
-        if retry_after > 0.0 {
-            let end = now_ms + (retry_after * 1000.0).ceil() as i64 + MARGIN_MS;
-            self.ends.insert(channel.id, (end, channel.rate_limit_per_user));
-        }
+        self.messages.refused(channel, retry_after, now_ms);
     }
 
     /// Discord answered our typing notice in `channel` with how long we must
@@ -64,31 +99,40 @@ impl Slowmode {
         if cooldown_ms <= 0 {
             return;
         }
-        self.ends.remove(&channel.id);
+        self.messages.0.remove(&channel.id);
         if !bypass {
-            self.ends.insert(channel.id, (now_ms + cooldown_ms + MARGIN_MS, channel.rate_limit_per_user));
+            self.messages.0.insert(channel.id, (now_ms + cooldown_ms + MARGIN_MS, channel.rate_limit_per_user));
         }
+    }
+
+    /// We made a thread in `channel`: the next waits from now (the client's
+    /// `SLOWMODE_RESET_COOLDOWN` for `CreateThread`, `Y` in 971389).
+    pub fn thread_made(&mut self, channel: &Channel, bypass: bool, now_ms: i64) {
+        self.threads.start(channel, bypass, now_ms);
+    }
+
+    /// Discord refused a thread in `channel` for slowmode, with `retry_after`
+    /// seconds left.
+    pub fn thread_refused(&mut self, channel: &Channel, retry_after: f64, now_ms: i64) {
+        self.threads.refused(channel, retry_after, now_ms);
     }
 
     /// `channel` changed. A new slowmode can only shorten a running cooldown,
     /// as in the official client.
     pub fn update(&mut self, channel: &Channel, now_ms: i64) {
-        let rate = channel.rate_limit_per_user;
-        if let Some((end, was)) = self.ends.get_mut(&channel.id)
-            && *was != rate
-        {
-            *end = (*end).min(now_ms + i64::from(rate) * 1000 + MARGIN_MS);
-            *was = rate;
-        }
+        self.messages.update(channel, now_ms);
+        self.threads.update(channel, now_ms);
     }
 
     /// Milliseconds before we may post in `channel` again; 0 if we may now.
     /// Turning slowmode off ends the wait (the client's `isChannelOnCooldown`).
     pub fn remaining_ms(&self, channel: &Channel, now_ms: i64) -> i64 {
-        if channel.rate_limit_per_user == 0 {
-            return 0;
-        }
-        self.ends.get(&channel.id).map_or(0, |(end, _)| (end - now_ms).max(0))
+        self.messages.remaining_ms(channel, now_ms)
+    }
+
+    /// Milliseconds before we may make another thread in `channel`.
+    pub fn thread_remaining_ms(&self, channel: &Channel, now_ms: i64) -> i64 {
+        self.threads.remaining_ms(channel, now_ms)
     }
 }
 
@@ -141,6 +185,29 @@ mod tests {
 
         slowmode.refused(&general, 4.2, 30_000);
         assert_eq!(slowmode.remaining_ms(&general, 30_000), 4_300, "Discord knew of a wait we didn't");
+    }
+
+    #[test]
+    fn threads_wait_apart_from_messages() {
+        let mut slowmode = Slowmode::default();
+        let general = channel(1, 10);
+        slowmode.thread_made(&general, false, 0);
+        assert_eq!(slowmode.thread_remaining_ms(&general, 0), 10_100, "the next thread waits");
+        assert_eq!(slowmode.remaining_ms(&general, 0), 0, "a message doesn't");
+
+        slowmode.sent(&general, false, 1_000);
+        assert_eq!(slowmode.thread_remaining_ms(&general, 1_000), 9_100, "nor does a message restart the thread's");
+        assert_eq!(slowmode.remaining_ms(&general, 1_000), 10_100);
+
+        slowmode.thread_refused(&channel(2, 10), 4.2, 0);
+        assert_eq!(slowmode.thread_remaining_ms(&channel(2, 10), 0), 4_300);
+        assert_eq!(slowmode.remaining_ms(&channel(2, 10), 0), 0);
+        slowmode.thread_made(&channel(3, 10), true, 0);
+        assert_eq!(slowmode.thread_remaining_ms(&channel(3, 10), 0), 0, "bypassed");
+
+        slowmode.update(&channel(1, 5), 2_000);
+        assert_eq!(slowmode.thread_remaining_ms(&channel(1, 5), 2_000), 5_100, "a new slowmode shortens both");
+        assert_eq!(slowmode.remaining_ms(&channel(1, 5), 2_000), 5_100);
     }
 
     #[test]

@@ -75,6 +75,8 @@ if INTERACTION not in ("ok", "fail", "silent", "429", "modal", "iframe"):
 MODAL_SUBMIT = os.environ.get("FAKE_MODAL_SUBMIT") or "ok"
 if MODAL_SUBMIT not in ("ok", "fail", "silent", "429"):
     sys.exit("unknown FAKE_MODAL_SUBMIT " + MODAL_SUBMIT)
+# Under FAKE_SLOWMODE=<s> #general has that slowmode, and a thread there is refused as inside its cooldown.
+SLOWMODE = int(os.environ.get("FAKE_SLOWMODE") or 0)
 UPLOAD_FAIL = os.environ.get("FAKE_UPLOAD_FAIL") or ""
 if UPLOAD_FAIL not in ("", "too-large"):
     sys.exit("unknown FAKE_UPLOAD_FAIL " + UPLOAD_FAIL)
@@ -209,7 +211,7 @@ def guild_stickers():
 def guild():
     channels = [
         {"id": "600", "type": 0, "name": "general", "position": 0, "parent_id": None, "permission_overwrites": [],
-         "last_message_id": snowflake(5000, 40), "flags": 0},
+         "last_message_id": snowflake(5000, 40), "flags": 0, "rate_limit_per_user": SLOWMODE},
         {"id": "601", "type": 0, "name": "hidden-plans", "position": 1, "parent_id": None, "flags": 1 << 17,
          "permission_overwrites": [{"id": "500", "type": 0, "allow": "0", "deny": str(VIEW)}]},
         {"id": "603", "type": 0, "name": "leaked-name", "position": 2, "parent_id": None, "flags": 1 << 17,
@@ -695,6 +697,9 @@ def close_channel(channel, body):
 # /thread's thread: a channel of the server from then on, pushed as THREAD_CREATE.
 @route("POST", r"/channels/(\d+)/threads")
 def create_thread(channel, body):
+    if SLOWMODE and channel == "600":
+        return 429, {"message": "You are being rate limited.", "code": 20016, "retry_after": SLOWMODE,
+                     "global": False}
     now = time.strftime("%Y-%m-%dT%H:%M:%S.000000+00:00", time.gmtime())
     thread = {"id": snowflake_now(), "type": body.get("type", 11), "guild_id": "500", "parent_id": channel,
               "name": body.get("name", ""), "owner_id": ME["id"], "last_message_id": None, "message_count": 0,
