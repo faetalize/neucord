@@ -113,7 +113,8 @@ struct ChannelOverride {
     mute_config: Option<MuteConfig>,
     #[serde(default = "inherit")]
     message_notifications: u8,
-    /// `NEW_FORUM_THREADS_ON`/`_OFF` (355097), which a forum's New Posts switch sets.
+    /// `NEW_FORUM_THREADS_ON`/`_OFF` and `OPT_IN_ENABLED` (355097), which a
+    /// forum's New Posts switch and a channel's opt-in set.
     #[serde(default)]
     flags: u64,
 }
@@ -140,6 +141,9 @@ pub struct GuildSettings {
     notify_highlights: u8,
     #[serde(default)]
     hide_muted_channels: bool,
+    /// `OPT_IN_CHANNELS_ON`/`_OFF` (355097).
+    #[serde(default)]
+    flags: u64,
     #[serde(default)]
     mute_scheduled_events: bool,
     #[serde(default)]
@@ -159,6 +163,7 @@ impl GuildSettings {
             mobile_push: true,
             notify_highlights: 0,
             hide_muted_channels: false,
+            flags: 0,
             mute_scheduled_events: false,
             channel_overrides: Vec::new(),
         }
@@ -364,7 +369,8 @@ impl NotificationSettings {
             return false;
         }
         let as_channel = Place { parent: None, ..*parent };
-        if self.muted(&as_channel, now_unix) || self.level(&as_channel) == Level::Nothing {
+        let opted_out = self.opted_out(&as_channel) && !self.opted_in(&Place { channel: thread.id, ..as_channel });
+        if self.muted(&as_channel, now_unix) || opted_out || self.level(&as_channel) == Level::Nothing {
             return false;
         }
         match self.thread_level(thread, parent, now_unix) {
@@ -372,6 +378,50 @@ impl NotificationSettings {
             Level::Mentions => mentions(message, me, my_roles, false, false),
             Level::All => true,
         }
+    }
+
+    /// The server has opt-in channels on (`isOptInEnabled`, 543465).
+    pub fn opt_in_enabled(&self, guild: Snowflake) -> bool {
+        self.by_guild.get(&Some(guild)).is_some_and(|s| s.flags & guild_flags::OPT_IN_CHANNELS_ON != 0)
+    }
+
+    fn channel_opted_in(&self, guild: Snowflake, channel: Snowflake) -> bool {
+        self.channel_flags(guild, channel) & forum_flags::OPT_IN_ENABLED != 0
+    }
+
+    /// The channel or its parent (its category, or a thread's channel) is
+    /// opted in (`isChannelRecordOrParentOptedIn`, 543465).
+    pub fn opted_in(&self, place: &Place) -> bool {
+        place.guild.is_some_and(|g| {
+            [Some(place.channel), place.parent].into_iter().flatten().any(|c| self.channel_opted_in(g, c))
+        })
+    }
+
+    /// `allowNoMessages`' opt-in clause: the server has opt-in channels on
+    /// and this isn't one, which silences it whatever else is set.
+    fn opted_out(&self, place: &Place) -> bool {
+        place.guild.is_some_and(|g| self.opt_in_enabled(g)) && !self.opted_in(place)
+    }
+
+    /// What a channel adds to its server's badge when the server has opt-in
+    /// channels on, as `getGuildChannelUnreadState` (218461) and the
+    /// server's tally (458294) decide: nothing when its last message is
+    /// over a week old, mentions included, and without a mention only a
+    /// channel opted in. (The client also lets a channel we recently read
+    /// through here, but that tally leaves it out again.)
+    pub fn opt_in_badge(
+        &self,
+        place: &Place,
+        last_message: Option<Snowflake>,
+        unread: bool,
+        mentions: u32,
+        now_ms: i64,
+    ) -> (bool, u32) {
+        let fresh = last_message.is_some_and(|m| m.unix_ms() >= now_ms - STALE_MS);
+        if !fresh || (mentions == 0 && !self.opted_in(place)) {
+            return (false, 0);
+        }
+        (unread, mentions)
     }
 
     /// Whether `message` pings us: directly, via @everyone/@here, or via one
@@ -401,8 +451,7 @@ impl NotificationSettings {
     }
 
     /// Should a message here raise a desktop notification? `allowNoMessages`
-    /// (543465) comes first, without its opt-in channels, which aren't
-    /// modelled: a mute on the server (for DMs, their settings
+    /// (543465) comes first: opt-in channels on and this one not opted in, a mute on the server (for DMs, their settings
     /// entry), category or channel, or a level of "nothing", silences
     /// everything, mentions included. Then `mentioned` (`mentions_me`, so
     /// what the server suppresses is already out) decides under "mentions";
@@ -421,7 +470,7 @@ impl NotificationSettings {
     }
 
     fn notify(&self, place: &Place, mentioned: bool, vocal: bool, now_unix: i64) -> bool {
-        if self.muted(place, now_unix) {
+        if self.muted(place, now_unix) || self.opted_out(place) {
             return false;
         }
         match self.level(place) {
@@ -459,7 +508,18 @@ pub mod thread_flags {
 pub mod forum_flags {
     pub const NEW_POSTS_ON: u64 = 1 << 14;
     pub const NEW_POSTS_OFF: u64 = 1 << 13;
+    /// `OPT_IN_ENABLED`: the channel is opted in.
+    pub const OPT_IN_ENABLED: u64 = 1 << 12;
 }
+
+/// A server entry's flags (355097's `OPT_IN_CHANNELS_ON`).
+pub mod guild_flags {
+    pub const OPT_IN_CHANNELS_ON: u64 = 1 << 14;
+}
+
+/// A channel with no message in this long drops out of an opt-in server's
+/// badge (`eC`, 218461).
+const STALE_MS: i64 = 7 * 86_400_000;
 
 #[cfg(test)]
 mod tests {
@@ -727,6 +787,73 @@ mod tests {
         assert!(!notify(1 << 1, &place(Some(1), 11, None)), "muted parent channel");
         assert!(notify(1 << 1, &place(Some(1), 12, Some(11))), "muted category: not looked at");
         assert!(!notify(0, &place(Some(1), 12, Some(11))), "muted category, nothing chosen");
+    }
+
+    fn opt_in_settings() -> NotificationSettings {
+        NotificationSettings::from_ready(&json!([
+            {"guild_id": "1", "flags": 16384, "message_notifications": 0,
+             "channel_overrides": [{"channel_id": "10", "flags": 4096},
+                                   {"channel_id": "11", "flags": 0},
+                                   {"channel_id": "50", "flags": 4096}]},
+            {"guild_id": "2", "flags": 8192, "message_notifications": 0},
+            {"guild_id": "3", "message_notifications": 0}
+        ]))
+    }
+
+    #[test]
+    fn with_opt_in_on_only_opted_in_channels_notify() {
+        let s = opt_in_settings();
+        let notify = |p: Place, mentioned| s.should_notify(&p, mentioned, NOW);
+        assert!(notify(place(Some(1), 10, None), false), "opted in");
+        assert!(!notify(place(Some(1), 11, None), false), "not opted in");
+        assert!(!notify(place(Some(1), 11, None), true), "a mention doesn't change that");
+        assert!(!notify(place(Some(1), 12, None), true), "no override at all");
+        assert!(notify(place(Some(1), 12, Some(50)), false), "its category is opted in");
+        assert!(!s.should_notify_in_vocal(&place(Some(1), 11, None), true, NOW));
+        assert!(s.should_notify_in_vocal(&place(Some(1), 10, None), true, NOW));
+        assert!(notify(place(Some(2), 12, None), false), "opt-in turned off");
+        assert!(notify(place(Some(3), 12, None), true), "never turned on");
+        assert!(notify(place(None, 12, None), true), "DMs have no opt-in");
+        assert!(s.opt_in_enabled(Snowflake(1)) && !s.opt_in_enabled(Snowflake(2)) && !s.opt_in_enabled(Snowflake(4)));
+    }
+
+    #[test]
+    fn a_thread_notifies_only_where_its_parent_is_opted_in() {
+        let s = opt_in_settings();
+        let thread = |parent: u64| -> Channel {
+            serde_json::from_value(json!({"id": "30", "type": 11, "parent_id": parent.to_string(),
+                "member": {"flags": 1 << 1, "muted": false, "join_timestamp": "2026-10-28T00:00:00Z"}}))
+            .unwrap()
+        };
+        let message: Message = serde_json::from_value(json!({
+            "id": "1", "channel_id": "30", "guild_id": "1", "author": {"id": "7", "username": "x"},
+            "content": "", "timestamp": "2026-10-26T00:00:00+00:00"}))
+        .unwrap();
+        let me = Snowflake(5);
+        let notify = |parent: u64, above: Option<u64>| {
+            let parent_place = place(Some(1), parent, above);
+            s.should_notify_in_thread(&thread(parent), &parent_place, &message, me, &[], NOW)
+        };
+        assert!(notify(10, None), "its parent is opted in");
+        assert!(!notify(11, None), "its parent isn't");
+        assert!(!notify(12, Some(50)), "a category above the parent doesn't count for a thread");
+    }
+
+    #[test]
+    fn opt_in_keeps_a_servers_badge_to_fresh_and_opted_in_channels() {
+        let s = opt_in_settings();
+        let now_ms = Snowflake::from_unix_ms(1_800_000_000_000).unix_ms();
+        let day = 86_400_000;
+        let at = |days_ago: i64| Some(Snowflake::from_unix_ms(now_ms - days_ago * day));
+        let badge = |channel: u64, last: Option<Snowflake>, unread, mentions| {
+            s.opt_in_badge(&place(Some(1), channel, None), last, unread, mentions, now_ms)
+        };
+        assert_eq!(badge(10, at(1), true, 2), (true, 2), "opted in and fresh");
+        assert_eq!(badge(10, at(8), true, 2), (false, 0), "older than a week: nothing, mentions too");
+        assert_eq!(badge(10, None, true, 2), (false, 0), "no message at all");
+        assert_eq!(badge(11, at(1), true, 0), (false, 0), "not opted in, no mention");
+        assert_eq!(badge(11, at(1), true, 3), (true, 3), "not opted in but mentioned");
+        assert_eq!(badge(11, at(9), true, 3), (false, 0), "mentioned, but stale");
     }
 
     #[test]
