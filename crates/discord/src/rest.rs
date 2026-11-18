@@ -670,6 +670,15 @@ impl Rest {
         Ok(crate::emoji::top_emoji_ids(&answer))
     }
 
+    /// The emoji packs (`Fp` in 934499), or none when Discord answers 404:
+    /// they aren't enabled for the account.
+    pub async fn emoji_packs(&self) -> Result<Value, Error> {
+        match self.request(call!(EMOJI_PACKS), None).await {
+            Err(Error::Http { status: 404, .. }) => Ok(Value::Null),
+            other => other,
+        }
+    }
+
     /// A thread we don't know, by id (`loadThread` in 353202), with the
     /// server it is in. The client asks only for what it has no record of.
     pub async fn thread(&self, id: Snowflake) -> Result<(Snowflake, Channel), Error> {

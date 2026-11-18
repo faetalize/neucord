@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 
 use serde_json::Value;
 
+use crate::emoji_packs::{self, EmojiPacks, Pack, PackEmoji};
 use crate::emoticons;
 use crate::limits::{Limits, Unavailable};
 use crate::model::{Guild, Snowflake};
@@ -543,6 +544,22 @@ pub struct Library {
     /// Typed emoticons like `:)` become their emoji on [`translate`](Self::translate)
     /// (the account's "convert emoticons" setting).
     pub emoticons: bool,
+    /// The emoji of packs that `:name:` and search offer, named after the
+    /// servers' (see [`Self::with_packs`]).
+    indexed: Vec<Named>,
+    /// The packs the account pinned and what of theirs the picker lists.
+    pub packs: Vec<PackSection>,
+    /// How many times each name is taken by the Unicode emoji and the
+    /// servers', which a pack's emoji continue.
+    taken: HashMap<String, usize>,
+}
+
+/// A pinned pack's section of the picker.
+#[derive(Clone, Debug)]
+pub struct PackSection {
+    pub id: Snowflake,
+    pub name: String,
+    pub emoji: Vec<Named>,
 }
 
 impl Library {
@@ -574,7 +591,61 @@ impl Library {
                 Server { id: guild.id, name: guild.name.clone(), emoji }
             })
             .collect();
-        Library { servers, place: *place, emoticons: false }
+        Library { servers, place: *place, emoticons: false, indexed: Vec::new(), packs: Vec::new(), taken }
+    }
+
+    /// Adds the emoji packs (`getIndexablePackEmojis`, 121681): the emoji of
+    /// every available pack are offered by `:name:` and search, named after
+    /// the servers' emoji (a repeated name takes `~1`, …), and the packs the
+    /// account pinned, in the order it pinned them, get a section of the
+    /// picker, with those of their emoji that are indexed. Nothing is added
+    /// while packs are off for the account.
+    pub fn with_packs(mut self, packs: &EmojiPacks, pinned: &[u64], limits: &Limits) -> Library {
+        self.set_packs(packs, pinned, limits);
+        self
+    }
+
+    /// [`Self::with_packs`] on a library in use, which replaces what packs it had
+    /// (the picker opens before the packs are fetched).
+    pub fn set_packs(&mut self, packs: &EmojiPacks, pinned: &[u64], limits: &Limits) {
+        let mut taken = self.taken.clone();
+        self.indexed.clear();
+        self.packs.clear();
+        let enabled = emoji_packs::enabled(limits.experiments, limits.me);
+        let status = limits.pack_emoji();
+        let mut by_pack: HashMap<Snowflake, Vec<Named>> = HashMap::new();
+        for (pack, emoji) in packs.indexable(enabled) {
+            let seen = taken.entry(emoji.name.clone()).or_insert(0);
+            let name = if *seen == 0 { emoji.name.clone() } else { format!("{}~{}", emoji.name, seen) };
+            *seen += 1;
+            let named = Named { emoji: emoji.guild_emoji(), name, status };
+            by_pack.entry(pack.id).or_default().push(named.clone());
+            self.indexed.push(named);
+        }
+        if enabled {
+            self.packs = packs
+                .pinned(pinned)
+                .into_iter()
+                .map(|pack| PackSection {
+                    id: pack.id,
+                    name: pack.name.clone(),
+                    emoji: by_pack.remove(&pack.id).unwrap_or_default(),
+                })
+                .collect();
+        }
+    }
+
+    /// A pack's emoji as the library offers one, for the page that lists
+    /// whole packs, whether pinned or not: the name it would have here, and
+    /// whether we may send it.
+    pub fn pack_item(&self, pack: &Pack, emoji: &PackEmoji, limits: &Limits) -> Item {
+        let status = match (pack.available && emoji.available, limits.pack_emoji()) {
+            (false, _) => Err(Unavailable::ServerBoost),
+            (true, status) => status,
+        };
+        let name =
+            self.indexed.iter().find(|n| n.emoji.id == emoji.id).map_or_else(|| emoji.name.clone(), |n| n.name.clone());
+        Item::Custom(Named { emoji: emoji.guild_emoji(), name, status })
     }
 
     /// The key the client files an emoji under in the favourites and the
@@ -625,7 +696,7 @@ impl Library {
     }
 
     fn custom(&self) -> impl Iterator<Item = &Named> {
-        self.servers.iter().flat_map(|s| &s.emoji)
+        self.servers.iter().flat_map(|s| &s.emoji).chain(&self.indexed)
     }
 
     /// The custom sections of the picker: each server's emoji, those we may
@@ -919,6 +990,102 @@ mod tests {
         item.iter().map(Item::name).collect()
     }
 
+    /// The parts of a library the tests of emoticons don't use.
+    fn bare() -> Library {
+        Library {
+            servers: vec![],
+            place: Place { guild: None, external: true },
+            emoticons: false,
+            indexed: Vec::new(),
+            packs: Vec::new(),
+            taken: HashMap::new(),
+        }
+    }
+
+    fn packs_answer() -> EmojiPacks {
+        let emoji = |id: &str, name: &str| json!({"id": id, "name": name, "animated": false, "available": true});
+        let mut packs = EmojiPacks::default();
+        packs.start_fetch();
+        packs.fetched(&json!([
+            {"id": "10", "name": "Cats", "available": true, "emojis": [emoji("100", "tabby"), emoji("101", "plain")]},
+            {"id": "20", "name": "Dogs", "available": true, "emojis": [emoji("200", "husky")]},
+            {"id": "30", "name": "Gone", "available": false, "emojis": [emoji("300", "ghost")]},
+        ]));
+        packs
+    }
+
+    fn pack_limits(nitro: &Value, on: bool) -> Limits<'static> {
+        let experiments =
+            Experiments::from_ready(&json!({"apex_experiments": {"assignments": {"1": {"7": {"assignments": [
+                [crate::experiments::murmur3(emoji_packs::EXPERIMENT), i64::from(on), 0, 1]
+            ]}}}}}));
+        limits(&Nitro::from_user(nitro), &experiments)
+    }
+
+    fn with_packs(nitro: Value, on: bool, pinned: &[u64]) -> Library {
+        let guild: Guild = serde_json::from_value(json!({
+            "id": "1", "name": "Server 1", "owner_id": "99", "emojis": [custom("5", "plain", json!({}))],
+        }))
+        .unwrap();
+        let limits = pack_limits(&nitro, on);
+        Library::new(&[guild], &limits, &here(true)).with_packs(&packs_answer(), pinned, &limits)
+    }
+
+    #[test]
+    fn packs_add_their_emoji_to_the_names_and_a_section_for_each_pinned_one() {
+        let nitro = json!({"premium_type": 2});
+        let library = with_packs(nitro.clone(), true, &[20, 10, 30, 99]);
+        let sections: Vec<(&str, Vec<&str>)> = library
+            .packs
+            .iter()
+            .map(|p| (p.name.as_str(), p.emoji.iter().map(|n| n.name.as_str()).collect()))
+            .collect();
+        // The pinned order, and the pack that is gone listed with nothing.
+        assert_eq!(sections, [("Dogs", vec!["husky"]), ("Cats", vec!["tabby", "plain~1"]), ("Gone", vec![])]);
+        // Named after the server's `plain`, found by name, by id and by search.
+        assert_eq!(library.find("plain~1").map(|i| i.text()), Some("<:plain:101>".to_owned()));
+        assert!(library.item("200").is_some());
+        let found = library.search("husky", 10, &Scores::default());
+        assert_eq!(names(&found.unlocked), ["husky"]);
+        // Setting them again on a library in use replaces them, with the same names.
+        let mut again = with_packs(nitro.clone(), true, &[20]);
+        again.set_packs(&packs_answer(), &[10, 20], &pack_limits(&nitro, true));
+        again.set_packs(&packs_answer(), &[10, 20], &pack_limits(&nitro, true));
+        assert_eq!(again.packs.len(), 2);
+        assert_eq!(names(&[again.find("plain~1").unwrap()]), ["plain~1"]);
+        assert!(again.find("plain~2").is_none(), "not named again");
+        // Not pinned still offers its emoji by name, but not in the picker.
+        let unpinned = with_packs(nitro.clone(), true, &[]);
+        assert!(unpinned.packs.is_empty());
+        assert!(unpinned.find("husky").is_some());
+        // Typing one writes its markup, where it is open.
+        assert_eq!(library.translate(":husky:").text, "<:husky:200>");
+        assert!(library.translate(":husky:").locked.is_empty());
+    }
+
+    #[test]
+    fn pack_emoji_need_nitro_and_nothing_else() {
+        let library = with_packs(json!({"premium_type": 3}), true, &[10]);
+        let dog = library.find("husky").unwrap();
+        assert_eq!(dog.unavailable(), Some(Unavailable::Nitro), "Nitro Basic doesn't unlock them");
+        assert_eq!(library.translate(":husky:").locked.len(), 1, "told as locked on sending");
+        assert_eq!(library.search("husky", 10, &Scores::default()).locked.len(), 1, "a search offers them as Nitro's");
+        // In a channel that keeps other servers' emoji out they are open to Nitro all the same.
+        let nitro = Nitro::from_user(&json!({"premium_type": 2}));
+        let experiments = Experiments::default();
+        assert_eq!(limits(&nitro, &experiments).pack_emoji(), Ok(()));
+        assert_eq!(limits(&Nitro::default(), &experiments).pack_emoji(), Err(Unavailable::Nitro));
+    }
+
+    #[test]
+    fn packs_off_add_nothing() {
+        let library = with_packs(json!({"premium_type": 2}), false, &[10]);
+        assert!(library.packs.is_empty());
+        assert!(library.find("husky").is_none(), "not offered by name");
+        assert!(library.item("200").is_none());
+        assert!(library.translate(":husky:").text == ":husky:");
+    }
+
     #[test]
     fn the_picker_lists_a_subscription_roles_emoji_locked_unless_we_hold_it() {
         let build = |mine: &[&str]| {
@@ -1164,7 +1331,8 @@ mod tests {
         let toned = thumbs.toned(Some(Tone::Dark));
         assert_eq!(Library::key(&Item::Unicode(toned)), "thumbsup");
         assert_eq!(Library::key(&Item::Unicode(thumbs)), "thumbsup");
-        let library = Library { servers: vec![], place: Place { guild: None, external: true }, emoticons: false };
+        let library =
+            Library { servers: vec![], place: Place { guild: None, external: true }, emoticons: false, ..bare() };
         assert!(matches!(library.item("thumbsup"), Some(Item::Unicode(e)) if e.glyph == "👍"));
         assert!(library.item("no_such_emoji_at_all").is_none());
         assert!(library.item("12345").is_none(), "an id nobody has");
@@ -1174,8 +1342,8 @@ mod tests {
 
     #[test]
     fn emoticons_become_emoji_only_where_the_client_converts_them() {
-        let off = Library { servers: vec![], place: Place { guild: None, external: true }, emoticons: false };
-        let on = Library { servers: vec![], place: off.place, emoticons: true };
+        let off = Library { servers: vec![], place: Place { guild: None, external: true }, emoticons: false, ..bare() };
+        let on = Library { servers: vec![], place: off.place, emoticons: true, ..bare() };
         let said = |library: &Library, text: &str| library.translate(text).text;
         assert_eq!(said(&off, ":) hi"), ":) hi", "the setting is off");
         assert_eq!(said(&on, ":) hi <3\nx ;-)"), "🙂 hi ❤️\nx 😉");

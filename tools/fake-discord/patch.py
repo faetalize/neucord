@@ -54,6 +54,21 @@ pub(super) fn shot(widget: &impl IsA<gtk::Widget>, path: &str) {
     eprintln!("e2e: shot {path} {}x{}", w.width(), w.height());
 }
 
+/// The buttons below `widget`, in order, that `wanted` picks: the packs page's Pin and Unpin buttons, one for
+/// each pack, or the picker's button to the page.
+fn buttons_below(widget: &gtk::Widget, wanted: impl Fn(&gtk::Button) -> bool + Copy) -> Vec<gtk::Button> {
+    let mut found = Vec::new();
+    let mut child = widget.first_child();
+    while let Some(c) = child {
+        if let Some(button) = c.downcast_ref::<gtk::Button>().filter(|b| wanted(b)) {
+            found.push(button.clone());
+        }
+        found.extend(buttons_below(&c, wanted));
+        child = c.next_sibling();
+    }
+    found
+}
+
 /// The popover showing on `widget`, of those parented to it.
 fn popover_on(widget: &gtk::Widget) -> Option<gtk::Popover> {
     let mut child = widget.first_child();
@@ -137,6 +152,34 @@ impl App {
             }
             // The emoji picker, from the message box's button.
             Some("emoji-picker") => self.emoji_button.emit_clicked(),
+            // The emoji packs page, as the open picker's button opens it (the packs must be fetched),
+            // `packs-pin <n>` clicks the Pin or Unpin button of its nth pack, `packs-shot <png>` shoots it and
+            // `packs-close` closes it.
+            Some("emoji-packs") => {
+                let popover = popover_on(self.emoji_button.upcast_ref());
+                let button = popover.and_then(|p| buttons_below(p.upcast_ref(), |b| b.tooltip_text().as_deref() == Some("Emoji Packs")).pop());
+                match button {
+                    Some(button) => button.emit_clicked(),
+                    None => eprintln!("e2e: no packs button"),
+                }
+            }
+            Some("packs-pin") => {
+                let n: usize = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+                let dialog = self.window.visible_dialog();
+                match dialog.and_then(|d| buttons_below(d.upcast_ref(), |b| matches!(b.label().as_deref(), Some("Pin" | "Unpin"))).into_iter().nth(n)) {
+                    Some(button) => button.emit_clicked(),
+                    None => eprintln!("e2e: no pin button {n}"),
+                }
+            }
+            Some("packs-shot") => match self.window.visible_dialog() {
+                Some(dialog) => shot(&dialog, parts.next().unwrap_or("packs.png")),
+                None => eprintln!("e2e: no dialog"),
+            },
+            Some("packs-close") => {
+                if let Some(dialog) = self.window.visible_dialog() {
+                    dialog.close();
+                }
+            }
             // Click the nth quick reaction on the bar of the first row that has them.
             Some("hover-react") => {
                 let n: i32 = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
@@ -1037,6 +1080,11 @@ edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''           
 # With E2E_NO_PLAYER=1 a draft gets no player: a media stream keeps a window shot from finishing in this session.
 edit("crates/app/src/ui/voice.rs", "    fn start_playback(self: &Rc<Self>, id: u64, recording: &Recording) {\n",
      "    fn start_playback(self: &Rc<Self>, id: u64, recording: &Recording) {\n        if std::env::var_os(\"E2E_NO_PLAYER\").is_some() {\n            return;\n        }\n")
+# `FAKE_EMOJI_IMAGES=1` serves custom emoji from the fake (`/attachments/emojis/<id>.png`, a stand-in picture), which
+# the CDN would, so the picker and the packs page draw them.
+if os.environ.get("FAKE_EMOJI_IMAGES"):
+    edit("crates/discord/src/cdn.rs", 'format!("{CDN}/emojis/{emoji_id}.{ext}?size={size}")',
+         'format!("http://127.0.0.1:8099/attachments/emojis/{emoji_id}.{ext}?width={}&height={}", u32::from(size) * 4, u32::from(size) * 4)')
 # `FAKE_HOVER=1` shows every row's hover bar, which a pointer would only show on the row it is over.
 if os.environ.get("FAKE_HOVER"):
     edit("crates/app/src/style.css", ".message .message-action { opacity: 0;", ".message .message-action { opacity: 1;")

@@ -134,6 +134,13 @@ what arrived, IDENTIFY's key order and properties first.
   `top-emoji` (with `FAKE_TOP_EMOJI=1`, two custom emoji and the top-emojis
   route) opens the emoji picker (`emoji-picker`; `shot-popover emoji_button`)
   and shows "Top Emoji in Test Server" first;
+  `emoji-packs` (with `FAKE_NITRO=1 FAKE_EMOJI_PACKS=1 FAKE_EMOJI_IMAGES=1
+  FAKE_VARIANTS=packs=1`: Nitro, two packs on `GET /emoji-packs` (without
+  `FAKE_EMOJI_PACKS` the route is Discord's 404), the experiment on, and
+  custom emoji served as stand-in pictures) opens the picker, then its packs
+  page (`emoji-packs`, `packs-shot <png>`), pins the first pack with its
+  button (`packs-pin <n>`, `PinnedEmojiPacks` in settings-proto 2), closes
+  the page (`packs-close`) and shows the picker's "Blobs" section;
   `heartbeat` waits for five op 40s, the interval's among them;
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).

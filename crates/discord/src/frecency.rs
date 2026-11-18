@@ -25,10 +25,13 @@ const APPLICATION_COMMAND_FRECENCY: u32 = 7;
 const APPLICATION_FRECENCY: u32 = 9;
 const GUILD_AND_CHANNEL_FRECENCY: u32 = 12;
 const EMOJI_REACTION_FRECENCY: u32 = 13;
+const PINNED_EMOJI_PACKS: u32 = 14;
 
 // FavoriteEmojis, FavoriteStickers.
 const EMOJIS: u32 = 1;
 const STICKER_IDS: u32 = 1;
+// PinnedEmojiPacks.
+const PACK_IDS: u32 = 1;
 
 // FavoriteGIFs and FavoriteGIF.
 const GIFS: u32 = 1;
@@ -123,6 +126,8 @@ pub struct FrecencyPatch {
     /// `application_frecency.applications`, by app id (as a string, like
     /// the commands' keys).
     pub application_usage: Option<Vec<(String, Usage)>>,
+    /// `pinned_emoji_packs.pack_ids`, in the order they were pinned.
+    pub pinned_emoji_packs: Option<Vec<u64>>,
 }
 
 /// The entries of a frecency message: a map of `FrecencyItem`s whose keys
@@ -177,6 +182,7 @@ impl FrecencyPatch {
             channel_usage: settings.message(GUILD_AND_CHANNEL_FRECENCY).map(|m| usage_of(m, true)),
             command_usage: settings.message(APPLICATION_COMMAND_FRECENCY).map(|m| usage_of(m, false)),
             application_usage: settings.message(APPLICATION_FRECENCY).map(|m| usage_of(m, false)),
+            pinned_emoji_packs: settings.message(PINNED_EMOJI_PACKS).map(|packs| packs.fixed64s(PACK_IDS)),
         })
     }
 }
@@ -188,6 +194,8 @@ pub struct Frecency {
     pub favorite_stickers: Vec<u64>,
     pub favorite_gifs: Vec<FavoriteGif>,
     pub hide_gif_tooltip: bool,
+    /// The emoji packs the picker lists, in the order they were pinned.
+    pub pinned_emoji_packs: Vec<u64>,
     /// What is used, and what of it is not saved yet.
     pub stores: Stores,
 }
@@ -201,6 +209,7 @@ impl Frecency {
         self.favorite_stickers.clear();
         self.favorite_gifs.clear();
         self.hide_gif_tooltip = false;
+        self.pinned_emoji_packs.clear();
         let patch = FrecencyPatch {
             emoji_usage: Some(patch.emoji_usage.clone().unwrap_or_default()),
             reaction_usage: Some(patch.reaction_usage.clone().unwrap_or_default()),
@@ -224,6 +233,9 @@ impl Frecency {
         if let Some((gifs, hide_tooltip)) = patch.favorite_gifs {
             self.favorite_gifs = gifs;
             self.hide_gif_tooltip = hide_tooltip;
+        }
+        if let Some(packs) = patch.pinned_emoji_packs {
+            self.pinned_emoji_packs = packs;
         }
         if let Some(usage) = patch.emoji_usage {
             self.stores.emoji.reload(&usage, &SEEDED_EMOJI, now_ms);
@@ -254,6 +266,8 @@ pub enum Setting {
     FavoriteStickers(Vec<u64>),
     /// The whole message: the GIFs and whether the hint is hidden.
     FavoriteGifs(Vec<FavoriteGif>, bool),
+    /// The pinned emoji packs' ids, written whole.
+    PinnedEmojiPacks(Vec<u64>),
 }
 
 /// Why an emoji could not be favourited.
@@ -311,6 +325,15 @@ fn stickers_message(ids: &[u64]) -> Vec<u8> {
     ids.iter().flat_map(|id| build(&[(STICKER_IDS, Value::Fixed64(*id))])).collect()
 }
 
+/// `PinnedEmojiPacks`: the ids packed as `fixed64`s, as the client writes them.
+fn pinned_packs_message(ids: &[u64]) -> Vec<u8> {
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    let packed: Vec<u8> = ids.iter().flat_map(|id| id.to_le_bytes()).collect();
+    build(&[(PACK_IDS, Value::Bytes(packed))])
+}
+
 /// `FavoriteGIFs`, as the client's `toBinary` writes it: a map entry for each
 /// GIF, then the hint's flag when it is set.
 fn gifs_message(gifs: &[FavoriteGif], hide_tooltip: bool) -> Vec<u8> {
@@ -366,6 +389,7 @@ impl Kind for Frecent {
             Setting::FavoriteEmojis(emojis) => Some((FAVORITE_EMOJIS, favorites_message(&emojis))),
             Setting::FavoriteStickers(ids) => Some((FAVORITE_STICKERS, stickers_message(&ids))),
             Setting::FavoriteGifs(gifs, hide_tooltip) => Some((FAVORITE_GIFS, gifs_message(&gifs, hide_tooltip))),
+            Setting::PinnedEmojiPacks(ids) => Some((PINNED_EMOJI_PACKS, pinned_packs_message(&ids))),
         }
     }
 
@@ -411,6 +435,31 @@ mod tests {
         frecency.apply(patch, 0);
         frecency.apply(FrecencyPatch::default(), 0);
         assert_eq!(frecency.favorite_emojis.len(), 2, "an update that says nothing leaves them");
+    }
+
+    #[test]
+    fn pinned_emoji_packs_are_read_packed_or_not_and_written_packed() {
+        let packed =
+            bytes_field(PINNED_EMOJI_PACKS, &bytes_field(PACK_IDS, &[7u64.to_le_bytes(), 9u64.to_le_bytes()].concat()));
+        let loose = bytes_field(PINNED_EMOJI_PACKS, &fixed64_field(PACK_IDS, 5));
+        assert_eq!(FrecencyPatch::from_proto_bytes(&packed).unwrap().pinned_emoji_packs, Some(vec![7, 9]));
+        assert_eq!(FrecencyPatch::from_proto_bytes(&loose).unwrap().pinned_emoji_packs, Some(vec![5]));
+        assert_eq!(FrecencyPatch::from_proto_bytes(&[]).unwrap().pinned_emoji_packs, None, "not said, not changed");
+        // Written as the client's `toBinary` does: one packed field; none for an empty list.
+        assert_eq!(
+            pinned_packs_message(&[7, 9]),
+            bytes_field(PACK_IDS, &[7u64.to_le_bytes(), 9u64.to_le_bytes()].concat())
+        );
+        assert_eq!(pinned_packs_message(&[]), Vec::<u8>::new());
+        let written = Frecent::written(Setting::PinnedEmojiPacks(vec![7]), &[]).unwrap();
+        assert_eq!(written.0, PINNED_EMOJI_PACKS);
+        // An empty message says none, which clears them.
+        let mut frecency = Frecency::default();
+        frecency.apply(FrecencyPatch { pinned_emoji_packs: Some(vec![1, 2]), ..Default::default() }, 0);
+        frecency.apply(FrecencyPatch::default(), 0);
+        assert_eq!(frecency.pinned_emoji_packs, vec![1, 2]);
+        frecency.apply(FrecencyPatch { pinned_emoji_packs: Some(vec![]), ..Default::default() }, 0);
+        assert!(frecency.pinned_emoji_packs.is_empty());
     }
 
     #[test]

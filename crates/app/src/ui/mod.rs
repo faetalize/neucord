@@ -17,6 +17,7 @@ mod dice;
 mod edits;
 mod embeds;
 mod emoji;
+mod emoji_packs;
 mod favorites;
 mod forum;
 mod forum_post;
