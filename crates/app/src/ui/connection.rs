@@ -366,6 +366,16 @@ impl App {
                     }
                     self.refresh_attach();
                 }
+                Event::ExperimentOverride { name, variant } => {
+                    {
+                        let mut state = self.account.state.borrow_mut();
+                        match variant {
+                            Some(variant) => state.experiments.override_variant(&name, variant),
+                            None => state.experiments.remove_override(&name),
+                        }
+                    }
+                    self.refresh_attach();
+                }
                 Event::RequiredActionUpdate(action) => {
                     self.account.state.borrow_mut().required_action = action;
                     self.apply_required_action();

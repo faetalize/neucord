@@ -409,6 +409,13 @@ pub enum Event {
     /// Assignments Discord sent after READY (`STATE_UPDATE`), in an
     /// [`Experiments`] holding only them.
     ExperimentsUpdate(Experiments),
+    /// Discord forced a variant of an experiment for this session
+    /// (`EXPERIMENT_SESSION_OVERRIDE_CREATE`), or took it back (`_DELETE`,
+    /// with no `variant`).
+    ExperimentOverride {
+        name: String,
+        variant: Option<i64>,
+    },
     /// Discord started or stopped requiring a step (see [`crate::account`]).
     RequiredActionUpdate(Option<String>),
     /// A resume succeeded; everything missed has been replayed before this.
@@ -1214,6 +1221,16 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
                 return;
             }
             Event::ExperimentsUpdate(Experiments::from_ready(&data))
+        }
+        "EXPERIMENT_SESSION_OVERRIDE_CREATE" => {
+            let (Some(name), Some(variant)) = (data["experiment_name"].as_str(), data["variant_id"].as_i64()) else {
+                return;
+            };
+            Event::ExperimentOverride { name: name.to_owned(), variant: Some(variant) }
+        }
+        "EXPERIMENT_SESSION_OVERRIDE_DELETE" => {
+            let Some(name) = data["experiment_name"].as_str() else { return };
+            Event::ExperimentOverride { name: name.to_owned(), variant: None }
         }
         "USER_REQUIRED_ACTION_UPDATE" => {
             Event::RequiredActionUpdate(data["required_action"].as_str().map(str::to_owned))
@@ -2293,6 +2310,23 @@ mod tests {
 
         dispatch(&state, "STATE_UPDATE", json!({}));
         assert!(state.try_recv().is_err(), "nothing to apply, as in the client");
+    }
+
+    #[test]
+    fn session_overrides_are_made_and_taken_back() {
+        let state = Parser::default();
+        dispatch(
+            &state,
+            "EXPERIMENT_SESSION_OVERRIDE_CREATE",
+            json!({"experiment_name": "2099-01-x", "variant_id": 2}),
+        );
+        let Ok(Event::ExperimentOverride { name, variant }) = state.try_recv() else { panic!("create was dropped") };
+        assert_eq!((name.as_str(), variant), ("2099-01-x", Some(2)));
+        dispatch(&state, "EXPERIMENT_SESSION_OVERRIDE_DELETE", json!({"experiment_name": "2099-01-x"}));
+        let Ok(Event::ExperimentOverride { name, variant }) = state.try_recv() else { panic!("delete was dropped") };
+        assert_eq!((name.as_str(), variant), ("2099-01-x", None));
+        dispatch(&state, "EXPERIMENT_SESSION_OVERRIDE_CREATE", json!({"experiment_name": "2099-01-x"}));
+        assert!(state.try_recv().is_err(), "a create without a variant says nothing");
     }
 
     #[test]
