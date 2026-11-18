@@ -1025,6 +1025,10 @@ impl State {
             Some(guild) => {
                 let mut rows = Vec::new();
                 sig.push(self.notifications.hide_muted_channels(guild.id) as u64);
+                // The header's name.
+                let mut name = std::collections::hash_map::DefaultHasher::new();
+                guild.name.hash(&mut name);
+                sig.push(name.finish());
                 for section in self.sidebar(guild) {
                     sig.extend([section.category.map_or(0, |c| c.id.0), section.folded as u64]);
                     for c in section.channels {
@@ -1578,6 +1582,15 @@ mod tests {
         assert_eq!(state.rail_signature(true).1, 0, "no dot in the title or on the icon");
         state.read = ReadStates::from_ready(&json!([{"id": "9", "last_message_id": "100", "mention_count": 2}]));
         assert_eq!(state.rail_signature(true).1, 2);
+    }
+
+    #[test]
+    fn the_sidebar_is_drawn_again_when_the_server_is_renamed() {
+        // The header over the channels shows the name.
+        let mut state = open_server(None, json!({}));
+        let before = state.sidebar_signature();
+        state.guilds[0].name = "Renamed".into();
+        assert_ne!(state.sidebar_signature(), before);
     }
 
     #[test]
