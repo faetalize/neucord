@@ -808,7 +808,8 @@ edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''           
 
 # Voice messages need a microphone, which the scratch session has none of: `voice-draft <seconds>` puts a made-up
 # recording in the open channel as the recorder would have left it, `voice-play` clicks the player's button,
-# `voice-scrub <0..1>` presses the waveform there and lets go, `voice-state` prints the player.
+# `voice-scrub <0..1>` presses the waveform there and lets go, `voice-state` prints the player, `voice-finishing`
+# makes the draft one whose last packets are still coming.
 edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(v) if v.starts_with("voice") => self.e2e_voice(v, parts.next()),
             Some("quit") => {''')
 open(f"{root}/crates/app/src/ui/voice.rs", "a").write(r"""
@@ -842,6 +843,13 @@ impl App {
                 }
                 self.voice_event(id, Event::Ended);
                 self.voice_ended(id);
+            }
+            // As if it had just been stopped and its last packets were on their way.
+            "voice-finishing" => {
+                if let Some(draft) = self.voice.draft.borrow_mut().as_mut() {
+                    draft.phase = Phase::Finishing;
+                }
+
             }
             "voice-play" => self.voice.play.emit_clicked(),
             "voice-scrub" => {
@@ -976,6 +984,9 @@ edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''           
             }
             Some("quit") => {''')
 
+# With E2E_NO_PLAYER=1 a draft gets no player: a media stream keeps a window shot from finishing in this session.
+edit("crates/app/src/ui/voice.rs", "    fn start_playback(self: &Rc<Self>, id: u64, recording: &Recording) {\n",
+     "    fn start_playback(self: &Rc<Self>, id: u64, recording: &Recording) {\n        if std::env::var_os(\"E2E_NO_PLAYER\").is_some() {\n            return;\n        }\n")
 # `FAKE_HOVER=1` shows every row's hover bar, which a pointer would only show on the row it is over.
 if os.environ.get("FAKE_HOVER"):
     edit("crates/app/src/style.css", ".message .message-action { opacity: 0;", ".message .message-action { opacity: 1;")
