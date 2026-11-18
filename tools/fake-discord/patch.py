@@ -258,6 +258,20 @@ impl App {
                     Err(e) => eprintln!("e2e: {e}"),
                 }
             }
+            // The form for a password the account has to change, over the app: shoot the window.
+            Some("ask-password") => self.ask_new_password(),
+            // What the form sends, as a login's answer would have it send: `password-send <current> <new>`.
+            Some("password-send") => {
+                let (old, new) = (parts.next().unwrap_or_default().to_owned(), parts.next().unwrap_or_default().to_owned());
+                if let Some(rest) = self.account.state.borrow().rest.clone() {
+                    glib::spawn_future_local(async move {
+                        match rest.update_password(&old, &new).await {
+                            Ok(token) => eprintln!("e2e: password changed, new token {token}"),
+                            Err(e) => eprintln!("e2e: password refused: {e}"),
+                        }
+                    });
+                }
+            }
             // The pinned messages popover, as its header button opens it: shoot it with `shot-popover pins_button`.
             Some("pins-open") => self.pins_button.popup(),
             // The next page, as the button under the list or a scroll near its end asks.

@@ -36,6 +36,7 @@ mod notify;
 mod notify_menus;
 mod own_status;
 mod panes;
+mod password_update;
 mod picker;
 mod pills;
 mod pin_list;
@@ -131,6 +132,9 @@ pub struct App {
     roster: RefCell<Roster>,
     /// Where the login page was opened from, which says what Back does.
     login_origin: Cell<accounts::Origin>,
+    /// The login that is connecting needs a new password, asked for once it is
+    /// through.
+    password_due: Cell<bool>,
     /// Why the list of accounts is shown instead of a login, if it is.
     accounts_error: gtk::Label,
     /// The lists of accounts that exist, to redraw as they change.
@@ -368,6 +372,7 @@ impl App {
             }),
             roster: RefCell::default(),
             login_origin: Cell::default(),
+            password_due: Cell::default(),
             accounts_error: gtk::Label::builder().wrap(true).xalign(0.0).visible(false).css_classes(["error"]).build(),
             account_lists: RefCell::default(),
             switch_items: gio::Menu::new(),

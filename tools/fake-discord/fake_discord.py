@@ -568,6 +568,15 @@ def settings(kind, body):
     return 200, {"settings": settings_answer(kind)}
 
 
+@route("PATCH", r"/users/@me")
+def edit_me(body):
+    """The change of a password: the current one is "old-password", and Discord answers a new token."""
+    if body.get("password") != "old-password":
+        return 400, {"code": 50035, "message": "Invalid Form Body", "errors": {
+            "password": {"_errors": [{"code": "PASSWORD_DOES_NOT_MATCH", "message": "Password does not match."}]}}}
+    return 200, {**ME, "token": "fake-token-2"}
+
+
 @route("PATCH", r"/users/@me/settings-proto/([12])")
 def save_settings(kind, body):
     """Each top-level field sent replaces Discord's, unless the edit was made against an older data_version."""

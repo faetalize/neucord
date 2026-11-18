@@ -15,9 +15,17 @@ const PHONE_VERIFICATION_REQUIRED: u64 = 70007;
 
 pub enum Login {
     Token(String),
+    /// A token, with a new password required before the account is used
+    /// (`update_password` in `required_actions`): the client connects, then
+    /// shows its change form over the app, and logs out if it is closed
+    /// (165685).
+    UpdatePassword(String),
     /// The password was right; now a second factor.
     Mfa(Mfa),
 }
+
+/// The step in `required_actions` that asks for a new password.
+const UPDATE_PASSWORD: &str = "update_password";
 
 /// A pending two-factor login.
 #[derive(Clone, Debug, Deserialize)]
@@ -31,6 +39,9 @@ pub struct Mfa {
     pub sms: bool,
     #[serde(default)]
     pub backup: bool,
+    /// What the login also needs once it is through, from the same answer.
+    #[serde(default)]
+    required_actions: Vec<String>,
 }
 
 impl Mfa {
@@ -85,9 +96,8 @@ impl Rest {
         let response = self.auth_with(call!(LOGIN), login_body(login, password, undelete), true).await?;
         // Sent here even when a second factor follows; that answer has none.
         let required: Vec<String> = serde_json::from_value(response["required_actions"].clone()).unwrap_or_default();
-        check_required(&required)?;
         if let Some(token) = response["token"].as_str() {
-            return Ok(Login::Token(token.to_owned()));
+            return Ok(token_login(token, &required));
         }
         if response["mfa"].as_bool() == Some(true) {
             return Ok(Login::Mfa(Mfa::deserialize(&response)?));
@@ -111,8 +121,17 @@ impl Rest {
         Ok(response["phone"].as_str().unwrap_or_default().to_owned())
     }
 
-    pub async fn verify_mfa(&self, mfa: &Mfa, method: MfaMethod, code: &str) -> Result<String, Error> {
+    pub async fn verify_mfa(&self, mfa: &Mfa, method: MfaMethod, code: &str) -> Result<Login, Error> {
         let response = self.auth(call!(VERIFY_MFA, method = method.path()), mfa_body(mfa, code)).await?;
+        Ok(token_login(&token(&response)?, &mfa.required_actions))
+    }
+
+    /// Change the password of the account this is signed in to (`E` in
+    /// 631670, the form's `{password, new_password}` and nothing else).
+    /// Discord answers with the account's new token, the one to use from
+    /// here: the old one stops working.
+    pub async fn update_password(&self, current: &str, new: &str) -> Result<String, Error> {
+        let response = self.auth(call!(EDIT_ME), password_body(current, new)).await?;
         token(&response)
     }
 
@@ -163,18 +182,17 @@ fn mfa_body(mfa: &Mfa, code: &str) -> Value {
     body
 }
 
-/// Turn down a login that came with steps Neucord can't take. Discord sends
-/// the token all the same, but the official client won't let the account in
-/// until they're done: closing its forced password change logs out.
-fn check_required(actions: &[String]) -> Result<(), Error> {
-    if actions.iter().any(|a| a == "update_password") {
-        return Err(Error::Rejected(
-            "Discord requires a new password for this account. Change it in the official app \
-             or at discord.com, then log in here with the new one."
-                .into(),
-        ));
+/// The token of a login, and whether it has to be followed by a new password.
+fn token_login(token: &str, required: &[String]) -> Login {
+    if required.iter().any(|a| a == UPDATE_PASSWORD) {
+        Login::UpdatePassword(token.to_owned())
+    } else {
+        Login::Token(token.to_owned())
     }
-    Ok(())
+}
+
+fn password_body(current: &str, new: &str) -> Value {
+    json!({ "password": current, "new_password": new })
 }
 
 fn token(response: &Value) -> Result<String, Error> {
@@ -228,6 +246,14 @@ mod tests {
     }
 
     #[test]
+    fn a_login_that_requires_a_new_password_says_so() {
+        let required = ["update_password".to_owned()];
+        assert!(matches!(token_login("t", &required), Login::UpdatePassword(t) if t == "t"));
+        assert!(matches!(token_login("t", &[]), Login::Token(_)));
+        assert_eq!(password_body("old", "new").to_string(), r#"{"new_password":"new","password":"old"}"#);
+    }
+
+    #[test]
     fn accounts_the_client_stops_at() {
         let suspended = serde_json::json!({"code": 40002, "message": "x", "suspended_user_token": "tok"});
         assert!(matches!(refusal(&suspended), Some(Error::Suspended(t)) if t == "tok"));
@@ -264,12 +290,6 @@ mod tests {
         );
         let without_instance: Mfa = serde_json::from_str(r#"{"ticket":"t","mfa":true,"totp":true}"#).unwrap();
         assert!(mfa_body(&without_instance, "1").get("login_instance_id").is_none());
-    }
-
-    #[test]
-    fn forced_password_change() {
-        assert!(check_required(&["update_password".into()]).is_err());
-        assert!(check_required(&[]).is_ok());
     }
 
     #[test]

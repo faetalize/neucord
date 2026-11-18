@@ -304,13 +304,20 @@ impl App {
         self.stack.visible_child_name().as_deref() == Some("login")
     }
 
-    fn logged_in(self: &Rc<Self>, token: String) {
+    pub(super) fn logged_in(self: &Rc<Self>, token: String) {
         self.login.clear();
         self.login_origin.set(Origin::Start);
         // An account added beside another takes the window from it, as a
         // switch does: no request goes out for the one left.
         drop(self.leave_account());
         self.connect(token, false);
+    }
+
+    /// A login that has to change its password: it connects, and the form
+    /// comes over the app once it is through.
+    fn logged_in_to_update_password(self: &Rc<Self>, token: String) {
+        self.logged_in(token);
+        self.password_due.set(true);
     }
 
     fn login_failed(self: &Rc<Self>, error: &Error) {
@@ -358,6 +365,7 @@ impl App {
             }
             match result {
                 Ok(Login::Token(token)) => this.logged_in(token),
+                Ok(Login::UpdatePassword(token)) => this.logged_in_to_update_password(token),
                 Ok(Login::Mfa(mfa)) => match mfa.preferred() {
                     Some(method) => this.choose_mfa(mfa, method),
                     None => this.login_failed(&Error::Rejected(
@@ -507,7 +515,9 @@ impl App {
                 return;
             }
             match result {
-                Ok(token) => this.logged_in(token),
+                Ok(Login::UpdatePassword(token)) => this.logged_in_to_update_password(token),
+                Ok(Login::Token(token)) => this.logged_in(token),
+                Ok(Login::Mfa(_)) => {}
                 Err(e) => this.login_failed(&e),
             }
         });

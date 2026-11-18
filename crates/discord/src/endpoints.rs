@@ -61,6 +61,7 @@ pub(crate) const JOIN_THREAD: Endpoint = Endpoint::post("/channels/{channel}/thr
 pub(crate) const LEAVE_THREAD: Endpoint = Endpoint::delete("/channels/{channel}/thread-members/@me");
 pub(crate) const POST_DATA: Endpoint = Endpoint::post("/channels/{channel}/post-data");
 pub(crate) const ME: Endpoint = Endpoint::get("/users/@me");
+pub(crate) const EDIT_ME: Endpoint = Endpoint::patch("/users/@me");
 pub(crate) const USER: Endpoint = Endpoint::get("/users/{user}");
 pub(crate) const USER_PROFILE: Endpoint = Endpoint::get("/users/{user}/profile");
 pub(crate) const MUTUAL_FRIENDS: Endpoint = Endpoint::get("/users/{user}/relationships");
