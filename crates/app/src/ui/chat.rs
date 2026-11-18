@@ -469,8 +469,26 @@ impl App {
         adjustment.value() + adjustment.page_size() >= adjustment.upper() - 80.0
     }
 
+    /// The thread started from `message` shows a copy of it as its first
+    /// message: change that copy too, wherever the thread is held.
+    pub(super) fn change_thread_starter(self: &Rc<Self>, message: Snowflake, change: impl Fn(&mut Message)) {
+        // A thread has the id of the message it was started from.
+        let Some(store) = self.account.timelines.borrow().get(Snowflake(message.0)).map(|t| t.store.clone()) else {
+            return;
+        };
+        let starters = timelines::update_starter(&store, message, |copy| {
+            if let Referenced::Message(copy) = copy {
+                change(copy);
+            }
+        });
+        for position in starters {
+            self.rebind(&store, position, 1);
+        }
+    }
+
     pub(super) fn on_message_update(self: &Rc<Self>, edit: MessageEdit) {
         self.forum_message_edited(&edit);
+        self.change_thread_starter(edit.id, |copy| edit.clone().apply(copy));
         let Some(store) = self.account.timelines.borrow().get(edit.channel_id).map(|t| t.store.clone()) else { return };
         let (id, content) = (edit.id, edit.content.clone());
         // In place: a new object would get a new row, rather than this one
@@ -493,6 +511,11 @@ impl App {
 
     pub(super) fn on_message_delete(self: &Rc<Self>, id: Snowflake, channel_id: Snowflake) {
         self.forum_message_deleted(id, channel_id);
+        if let Some(store) = self.account.timelines.borrow().get(Snowflake(id.0)).map(|t| t.store.clone()) {
+            for position in timelines::update_starter(&store, id, |copy| *copy = Referenced::Deleted) {
+                self.rebind(&store, position, 1);
+            }
+        }
         let Some(store) = self.account.timelines.borrow().get(channel_id).map(|t| t.store.clone()) else { return };
         if let Some((position, _)) = timelines::find(&store, id) {
             self.hand_off_focus(&store, position);
@@ -533,20 +556,23 @@ impl App {
         added: bool,
         many: bool,
     ) {
-        let Some(store) = self.account.timelines.borrow().get(channel).map(|t| t.store.clone()) else { return };
         let (me, dm) = {
             let state = self.account.state.borrow();
             (state.me(), state.find_channel(channel).is_some_and(|(_, c)| c.kind == ChannelKind::Dm))
         };
+        let tally = |m: &mut Message, answer, user: Snowflake| {
+            let mine = me == Some(user);
+            if let Some(poll) = &mut m.poll {
+                if added { poll.vote(answer, mine, dm && !many) } else { poll.unvote(answer, mine) }
+            }
+        };
+        for &(answer, user) in &votes {
+            self.change_thread_starter(message, |m| tally(m, answer, user));
+        }
+        let Some(store) = self.account.timelines.borrow().get(channel).map(|t| t.store.clone()) else { return };
         let mut changed = None;
         for (answer, user) in votes {
-            let mine = me == Some(user);
-            let at = timelines::edit(&store, message, |m| {
-                if let Some(poll) = &mut m.poll {
-                    if added { poll.vote(answer, mine, dm && !many) } else { poll.unvote(answer, mine) }
-                }
-            });
-            changed = at.or(changed);
+            changed = timelines::edit(&store, message, |m| tally(m, answer, user)).or(changed);
         }
         if let Some(position) = changed {
             self.rebind(&store, position, 1);
