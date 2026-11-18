@@ -387,7 +387,7 @@ mod tests {
         timelines.landed(Snowflake(1), started);
         timelines.clear();
         assert!(timelines.get(Snowflake(1)).is_none());
-        let opening = discord::held::Opening { private: true, ..Default::default() };
+        let opening = discord::held::Opening::default();
         assert!(timelines.held.fetch_on_open(Snowflake(1), opening));
     }
 
@@ -400,7 +400,7 @@ mod tests {
         timelines.landed(Snowflake(1), started);
         timelines.remove(Snowflake(1));
         assert!(timelines.get(Snowflake(1)).is_none());
-        let opening = discord::held::Opening { private: true, ..Default::default() };
+        let opening = discord::held::Opening::default();
         assert!(timelines.held.fetch_on_open(Snowflake(1), opening));
     }
 
@@ -709,7 +709,7 @@ mod tests {
         }
         assert!(timelines.get(Snowflake(1)).is_none());
         timelines.landed(Snowflake(1), started);
-        let opening = discord::held::Opening { private: true, ..Default::default() };
+        let opening = discord::held::Opening::default();
         assert!(timelines.held.fetch_on_open(Snowflake(1), opening), "its page went nowhere");
     }
 

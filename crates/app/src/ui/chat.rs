@@ -944,21 +944,17 @@ impl App {
         self.sync_members();
 
         // Show what we have at once (instant for a recently viewed channel),
-        // and ask for the newest page, to merge in, unless it's a DM we hold,
-        // which the gateway keeps current as the client trusts it to.
-        let (system_dm_unread, private) = {
+        // and ask for the newest page, to merge in, unless we hold the
+        // channel, which the gateway keeps current as the client trusts it to.
+        let system_dm_unread = {
             let state = self.account.state.borrow();
-            let found = state.find_channel(id);
-            (
-                found.is_some_and(|(_, c)| c.is_system_dm() && state.is_unread(c)),
-                found.is_some_and(|(g, _)| g.is_none()),
-            )
+            state.find_channel(id).is_some_and(|(_, c)| c.is_system_dm() && state.is_unread(c))
         };
         let (store, loading, detached, fetch) = {
             let mut timelines = self.account.timelines.borrow_mut();
             let timeline = timelines.reopen(id, u64::try_from(now_ms()).unwrap_or_default());
             let (store, loading, detached) = (timeline.store.clone(), timeline.loading, timeline.detached);
-            let fetch = timelines.held.fetch_on_open(id, Opening { loading, system_dm_unread, private });
+            let fetch = timelines.held.fetch_on_open(id, Opening { loading, system_dm_unread });
             (store, loading, detached, fetch)
         };
         self.scroll_loader.borrow_mut().reset();

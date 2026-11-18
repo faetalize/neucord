@@ -10,12 +10,11 @@
 //! channel by READY (`CONNECTION_OPEN`). A resume clears nothing: Discord
 //! replays what was missed.
 //!
-//! Only DMs and group DMs are held. The client is subscribed to every server
-//! it has held channels of (`threads` stays on even when it goes idle,
-//! 661670), and Neucord subscribes the same way ([`crate::subscriptions`]),
-//! so the client's rule could cover servers too, with the channels we lose
-//! View Channel on marked stale (`Y` in 596344). A DM has no subscription on
-//! either side.
+//! Every channel is held, a server's too: the client is subscribed to every
+//! server it has held channels of (`threads` stays on even when it goes idle,
+//! 661670), and Neucord subscribes the same way ([`crate::subscriptions`]). A
+//! server's channel we lose View Channel on is marked stale (`Y` in 596344),
+//! which [`Held::forget`] does for it.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -49,8 +48,6 @@ pub struct Opening {
     /// The channel is the DM with Discord's own account, and has unread
     /// messages.
     pub system_dm_unread: bool,
-    /// A DM or group DM, the only channels held.
-    pub private: bool,
 }
 
 /// How soon after a page a stale one is asked for again (`b` in 123363).
@@ -150,7 +147,7 @@ impl Held {
     /// A load in flight is never doubled, which the client's system DM case
     /// would.
     pub fn fetch_on_open(&self, channel: Snowflake, opening: Opening) -> bool {
-        !opening.loading && (opening.system_dm_unread || !opening.private || !self.fresh.contains(&channel))
+        !opening.loading && (opening.system_dm_unread || !self.fresh.contains(&channel))
     }
 }
 
@@ -160,7 +157,7 @@ mod tests {
 
     const A: Snowflake = Snowflake(1);
     const B: Snowflake = Snowflake(2);
-    const OPEN: Opening = Opening { loading: false, system_dm_unread: false, private: true };
+    const OPEN: Opening = Opening { loading: false, system_dm_unread: false };
 
     /// A session whose READY arrived, with `channels` loaded in it.
     fn session(channels: &[Snowflake]) -> Held {
@@ -318,11 +315,18 @@ mod tests {
     }
 
     #[test]
-    fn only_the_gateways_own_channels_are_held() {
-        // A server's channels sit under subscriptions we don't make.
+    fn a_servers_channel_is_held_like_a_dm() {
         let held = session(&[A]);
         assert!(!held.fetch_on_open(A, OPEN));
-        assert!(held.fetch_on_open(A, Opening { private: false, ..OPEN }));
+    }
+
+    #[test]
+    fn a_channel_we_lost_sight_of_is_fetched_again() {
+        // `forget` is what marks a channel stale when View Channel goes.
+        let mut held = session(&[A, B]);
+        held.forget(A);
+        assert!(held.fetch_on_open(A, OPEN));
+        assert!(!held.fetch_on_open(B, OPEN));
     }
 
     #[test]
