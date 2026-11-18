@@ -18,6 +18,9 @@ struct Entry {
     /// `None` before we have acked anything here.
     acked: Option<Snowflake>,
     mentions: u32,
+    /// Discord knows of it: READY listed it, or we acked it. An entry made
+    /// by a message arriving isn't (`_persisted` in 218461).
+    persisted: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -57,7 +60,7 @@ impl ReadStates {
                     .and_then(|s| s.parse().ok())
                     .filter(|&n: &u64| n != 0)
                     .map(Snowflake);
-                (raw.id, Entry { acked, mentions: raw.mention_count })
+                (raw.id, Entry { acked, mentions: raw.mention_count, persisted: true })
             })
             .collect();
         ReadStates { channels }
@@ -69,6 +72,12 @@ impl ReadStates {
             (Some(entry), Some(last)) => entry.acked.is_none_or(|acked| last > acked),
             _ => false,
         }
+    }
+
+    /// Discord has a read state for `channel` (`hasOpenedThread` in 218461:
+    /// the thread was opened before, on any client).
+    pub fn persisted(&self, channel: Snowflake) -> bool {
+        self.channels.get(&channel).is_some_and(|e| e.persisted)
     }
 
     /// The last message we read in `channel`, if we read any.
@@ -96,6 +105,7 @@ impl ReadStates {
         let entry = self.channels.entry(channel).or_default();
         entry.acked = Some(message);
         entry.mentions = mentions;
+        entry.persisted = true;
     }
 
     /// The channel is gone: so is what we kept of its reading (`clear` on
@@ -111,6 +121,7 @@ impl ReadStates {
         if entry.acked.is_none_or(|acked| message >= acked) {
             entry.acked = Some(message);
             entry.mentions = 0;
+            entry.persisted = true;
         }
     }
 }
@@ -157,6 +168,17 @@ mod tests {
         s.remove(Snowflake(1));
         assert_eq!((s.acked(Snowflake(1)), s.mentions(Snowflake(1))), (None, 0));
         assert!(s.acked(Snowflake(2)).is_none() && s.is_unread(Snowflake(2), Some(Snowflake(5))), "the other stays");
+    }
+
+    #[test]
+    fn only_what_discord_has_a_read_state_for_is_persisted() {
+        let mut s = states();
+        assert!(s.persisted(Snowflake(1)) && s.persisted(Snowflake(2)), "READY lists them");
+        s.on_message(Snowflake(3), false);
+        assert!(!s.persisted(Snowflake(3)), "a message arriving makes only a local entry");
+        s.ack(Snowflake(3), Snowflake(9));
+        assert!(s.persisted(Snowflake(3)), "an ack is sent");
+        assert!(!s.persisted(Snowflake(4)));
     }
 
     #[test]

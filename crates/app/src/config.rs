@@ -136,6 +136,33 @@ impl Store {
         self.save()
     }
 
+    /// The numbers under `group`, by key: what a map keeps, as ids and times.
+    pub fn numbers(&self, group: &str) -> Vec<(String, u64)> {
+        let Ok(keys) = self.file.keys(group) else { return Vec::new() };
+        keys.iter()
+            .filter_map(|key| {
+                let value = self.file.int64(group, key).ok()?;
+                Some((key.to_string(), u64::try_from(value).ok()?))
+            })
+            .collect()
+    }
+
+    /// Make `group` exactly `entries`, and write the file if that changed it.
+    pub fn set_numbers(&self, group: &str, entries: &[(String, u64)]) -> Result<(), glib::Error> {
+        let mut before = self.numbers(group);
+        before.sort();
+        let mut after = entries.to_vec();
+        after.sort();
+        if before == after {
+            return Ok(());
+        }
+        let _ = self.file.remove_group(group);
+        for (key, value) in entries {
+            self.file.set_int64(group, key, i64::try_from(*value).unwrap_or(i64::MAX));
+        }
+        self.save()
+    }
+
     fn save(&self) -> Result<(), glib::Error> {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| glib::Error::new(glib::FileError::Failed, &e.to_string()))?;
@@ -185,6 +212,18 @@ mod tests {
             assert!(store.get(key), "{}: as the client has it", key.name);
         }
         assert!(!dir.file().exists(), "reading creates nothing");
+    }
+
+    #[test]
+    fn numbers_under_a_group_are_replaced_as_a_whole() {
+        let dir = Dir::new("numbers");
+        let store = Store::open(dir.file());
+        assert!(store.numbers("Viewed").is_empty());
+        store.set_numbers("Viewed", &[("1".into(), 10), ("2".into(), 20)]).unwrap();
+        store.set_numbers("Viewed", &[("2".into(), 20), ("3".into(), 30)]).unwrap();
+        let mut stored = Store::open(dir.file()).numbers("Viewed");
+        stored.sort();
+        assert_eq!(stored, [("2".to_owned(), 20), ("3".to_owned(), 30)]);
     }
 
     #[test]
