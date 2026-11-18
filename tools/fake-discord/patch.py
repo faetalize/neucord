@@ -689,3 +689,29 @@ edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''           
 # `paste` pastes the clipboard into the message box, as Ctrl+V does.
 edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("paste") => self.composer.emit_paste_clipboard(),
             Some("quit") => {''')
+# `clip-text <n>` puts n letters on the clipboard as text, `clip-page-image <src>` an image with the HTML a browser
+# copies with it (an `<img>` of that address), and `box-length` prints how long the message box's text is (#260).
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("clip-text") => {
+                let n: usize = parts.next().and_then(|n| n.parse().ok()).unwrap_or(10);
+                self.composer.clipboard().set_text(&"a".repeat(n));
+            }
+            Some("clip-page-image") => {
+                let src = parts.next().unwrap_or("https://example.com/pic.jpg");
+                let bytes = glib::Bytes::from_owned([255u8, 0, 0, 255].repeat(4));
+                let texture = gdk::MemoryTexture::new(2, 2, gdk::MemoryFormat::R8g8b8a8, &bytes, 8);
+                let texture: gdk::Texture = texture.upcast();
+                let html = format!("<meta charset='utf-8'><img src=\\"{src}\\" alt=\\"\\">");
+                let provider = gdk::ContentProvider::new_union(&[
+                    gdk::ContentProvider::for_value(&texture.to_value()),
+                    gdk::ContentProvider::for_bytes("text/html", &glib::Bytes::from_owned(html.into_bytes())),
+                ]);
+                if let Err(e) = self.composer.clipboard().set_content(Some(&provider)) {
+                    eprintln!("e2e: {e}");
+                }
+            }
+            Some("box-length") => {
+                let buffer = self.composer.buffer();
+                let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+                eprintln!("e2e: box {}", text.chars().count());
+            }
+            Some("quit") => {''')

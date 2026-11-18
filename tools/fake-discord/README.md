@@ -59,7 +59,9 @@ what arrived, IDENTIFY's key order and properties first.
   composer`), `menu-item <name>` (chooses
   an item of it), `send` (clicks the send button, or says why it can't),
   `clip-image`, `clip-files [path]` (puts an image, or a file with its path
-  as text, on the clipboard), `reply [message id]` (the newest
+  as text, on the clipboard), `clip-text <n>` (n letters of text),
+  `clip-page-image <src>` (an image with the HTML a browser copies with it),
+  `paste` and `box-length` (the message box's length), `reply [message id]` (the newest
   message without one), `confirm [response]` (the open alert's, else its
   last that doesn't close it), `gif` (opens the GIF picker),
   `gif-search <q>`, `gif-pick <n>`, `gif-shift-pick <n>`, `gif-star <n>`
@@ -97,6 +99,8 @@ what arrived, IDENTIFY's key order and properties first.
   on from the message box's menu; `member-check` (with `FAKE_LEFT=302`)
   lists Bob in a pill, whose check then drops him; `mentions` (and with
   `FAKE_OWNER=1`, `@everyone` and `@here`) lists the message box's `@`;
+  `paste` pastes a short text, a text over the message length (which
+  becomes message.txt) and images, one from a page named after its `<img>`;
   `heartbeat` waits for five op 40s, the interval's among them;
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).
