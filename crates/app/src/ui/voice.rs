@@ -713,7 +713,10 @@ impl App {
     /// The open channel was left. A recording that is still going stops and
     /// stays a draft; one that hadn't started is dropped (`yx` and `eT`).
     pub(super) fn voice_left(self: &Rc<Self>, left: Snowflake) {
-        match self.voice.draft.borrow().as_ref().filter(|d| d.channel == left).map(|d| d.phase) {
+        // Read first: the match would keep the draft borrowed through the arms,
+        // which change it.
+        let phase = self.voice.draft.borrow().as_ref().filter(|d| d.channel == left).map(|d| d.phase);
+        match phase {
             Some(Phase::Requesting) => self.discard_voice(),
             Some(Phase::Recording) => self.stop_voice(),
             _ => {}
