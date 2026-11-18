@@ -510,7 +510,10 @@ impl View {
         };
         let status = self.target.presence.clone().or_else(|| {
             let friend = state.relationships.get(user.id).is_some_and(|r| r.kind == Relation::Friend);
-            friend.then(|| state.relationships.presence(user.id))
+            // A friend can be offline; for anyone else, only what we heard.
+            friend
+                .then(|| state.relationships.presence(user.id))
+                .or_else(|| state.relationships.known_presence(user.id).cloned())
         });
 
         let header = gtk::Box::builder().spacing(12).margin_top(12).margin_start(12).margin_end(12).build();

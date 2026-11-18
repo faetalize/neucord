@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::presences::Presences;
 use crate::settings::UserStatus;
 use crate::{Snowflake, User};
 
@@ -185,8 +186,8 @@ pub enum List {
 #[derive(Clone, Debug, Default)]
 pub struct Relationships {
     by_user: HashMap<Snowflake, Relationship>,
-    /// Only for users we have a relationship with; absent means offline.
-    presences: HashMap<Snowflake, Presence>,
+    /// Everyone's, not only friends'.
+    presences: Presences,
     /// Whom we ignored. Kept apart from `by_user`: unfriending an ignored
     /// user removes the relationship but not the ignore.
     ignored: HashSet<Snowflake>,
@@ -207,7 +208,7 @@ impl Relationships {
         }
         for raw in ready["presences"].as_array().into_iter().flatten() {
             if let Some(id) = raw["user"]["id"].as_str().and_then(|id| id.parse().ok()) {
-                this.set_presence(Snowflake(id), Presence::from_value(raw));
+                this.set_presence(None, Snowflake(id), Presence::from_value(raw));
             }
         }
         this
@@ -232,7 +233,9 @@ impl Relationships {
     /// relationship.
     pub fn remove(&mut self, id: Snowflake, ignored: bool) {
         self.by_user.remove(&id);
-        self.presences.remove(&id);
+        // The account's own scope was for friends: no more is sent of them.
+        // Whatever a server says of them stays.
+        self.presences.set(None, id, Presence::default());
         if !ignored {
             self.ignored.remove(&id);
         }
@@ -250,20 +253,30 @@ impl Relationships {
         self.by_user.get(&id)
     }
 
-    /// Record a presence, if it is someone we have a relationship with.
-    /// Returns whether anything changed.
-    pub fn set_presence(&mut self, id: Snowflake, presence: Presence) -> bool {
-        if !self.by_user.contains_key(&id) {
-            return false;
-        }
-        if presence.status == Status::Offline {
-            return self.presences.remove(&id).is_some();
-        }
-        self.presences.insert(id, presence.clone()) != Some(presence)
+    /// Record what `guild` (`None`: the account) says of `id`'s presence.
+    /// Returns whether what shows of them changed.
+    pub fn set_presence(&mut self, guild: Option<Snowflake>, id: Snowflake, presence: Presence) -> bool {
+        self.presences.set(guild, id, presence)
     }
 
+    /// A server was left: what it said of people goes.
+    pub fn forget_guild(&mut self, guild: Snowflake) {
+        self.presences.forget_guild(guild);
+    }
+
+    /// A member left a server. Whether what shows of them changed.
+    pub fn forget_member(&mut self, guild: Snowflake, id: Snowflake) -> bool {
+        self.presences.forget_member(guild, id)
+    }
+
+    /// Anyone's presence as far as we have heard it; offline if not.
     pub fn presence(&self, id: Snowflake) -> Presence {
-        self.presences.get(&id).cloned().unwrap_or_default()
+        self.presences.get(id).cloned().unwrap_or_default()
+    }
+
+    /// `id`'s presence, if they are online somewhere we hear of.
+    pub fn known_presence(&self, id: Snowflake) -> Option<&Presence> {
+        self.presences.get(id)
     }
 
     pub fn is_blocked(&self, id: Snowflake) -> bool {
@@ -297,7 +310,7 @@ impl Relationships {
             .by_user
             .values()
             .filter(|r| match list {
-                List::Online => r.kind == Kind::Friend && self.presences.contains_key(&r.user.id),
+                List::Online => r.kind == Kind::Friend && self.presences.get(r.user.id).is_some(),
                 List::All => r.kind == Kind::Friend,
                 List::Pending => matches!(r.kind, Kind::Incoming | Kind::Outgoing),
                 List::Blocked => r.kind == Kind::Blocked,
@@ -347,7 +360,12 @@ mod tests {
         assert_eq!(r.incoming(), 1, "spam requests don't count");
         assert!(r.is_blocked(Snowflake(3)) && !r.is_blocked(Snowflake(1)));
         assert!(r.get(Snowflake(4)).unwrap().stranger && !r.get(Snowflake(5)).unwrap().stranger);
-        assert_eq!(r.presence(Snowflake(99)), Presence::default(), "strangers' presences aren't kept");
+        assert_eq!(
+            r.presence(Snowflake(99)).status,
+            Status::Online,
+            "a stranger's is kept too, as the client keeps it"
+        );
+        assert!(!r.list(List::Online).iter().any(|r| r.user.id == Snowflake(99)), "though they are no friend");
     }
 
     #[test]
@@ -362,13 +380,13 @@ mod tests {
         r.update(Snowflake(4), Some("Newt".into()), false);
         assert_eq!(r.get(Snowflake(4)).unwrap().name(), "Newt");
 
-        assert!(r.set_presence(Snowflake(4), Presence { status: Status::Online, text: None, mobile: false }));
+        assert!(r.set_presence(None, Snowflake(4), Presence { status: Status::Online, text: None, mobile: false }));
         assert!(
-            !r.set_presence(Snowflake(4), Presence { status: Status::Online, text: None, mobile: false }),
+            !r.set_presence(None, Snowflake(4), Presence { status: Status::Online, text: None, mobile: false }),
             "unchanged"
         );
         assert_eq!(names(r.list(List::Online)), ["bea", "Newt"]);
-        assert!(r.set_presence(Snowflake(4), Presence::default()), "went offline");
+        assert!(r.set_presence(None, Snowflake(4), Presence::default()), "went offline");
         assert_eq!(names(r.list(List::Online)), ["bea"]);
 
         r.remove(Snowflake(1), false);

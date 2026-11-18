@@ -65,6 +65,7 @@ pub mod poll;
 pub mod poll_draft;
 pub mod post_creation;
 pub mod presence;
+pub mod presences;
 pub mod profile;
 mod protobuf;
 pub mod qos;

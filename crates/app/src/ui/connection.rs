@@ -425,11 +425,12 @@ impl App {
                 Event::UserNoteUpdate { user_id, note } => self.on_note(user_id, note),
                 Event::PresenceUpdate { user_id, guild_id, presence } => {
                     self.on_list_presence(guild_id, user_id, &presence);
-                    if self.account.state.borrow_mut().relationships.set_presence(user_id, presence) {
-                        self.queue_friends_refresh();
-                        // A group DM's friends.
-                        self.refresh_member_rows();
-                        self.refresh_profile_views();
+                    self.on_presence(guild_id, user_id, presence);
+                }
+                Event::GuildMemberRemove { guild_id, user_id } => {
+                    let changed = self.account.state.borrow_mut().relationships.forget_member(guild_id, user_id);
+                    if changed {
+                        self.presence_changed();
                     }
                 }
                 Event::NotificationSettingsUpdate(settings) => {
@@ -898,10 +899,38 @@ impl App {
 
     /// A server is gone from the rail, with its messages. If it was open, Home
     /// opens instead. One that is only unavailable stays.
+    /// Keep what `guild` (`None`: the account) says of `user`'s presence,
+    /// anyone's but our own, which we know better (`v` in 290863).
+    fn on_presence(
+        self: &Rc<Self>,
+        guild: Option<Snowflake>,
+        user: Snowflake,
+        presence: discord::relationships::Presence,
+    ) {
+        let mut state = self.account.state.borrow_mut();
+        if state.me.as_ref().is_some_and(|me| me.id == user) {
+            return;
+        }
+        let changed = state.relationships.set_presence(guild, user, presence);
+        drop(state);
+        if changed {
+            self.presence_changed();
+        }
+    }
+
+    /// Whom we show a status for may have changed.
+    fn presence_changed(self: &Rc<Self>) {
+        self.queue_friends_refresh();
+        // A group DM's people.
+        self.refresh_member_rows();
+        self.refresh_profile_views();
+    }
+
     fn on_guild_delete(self: &Rc<Self>, id: Snowflake, unavailable: bool) {
         let Some((channels, was_open)) = self.account.state.borrow_mut().guild_deleted(id, unavailable) else {
             return;
         };
+        self.account.state.borrow_mut().relationships.forget_guild(id);
         {
             let mut timelines = self.account.timelines.borrow_mut();
             for channel in channels {
