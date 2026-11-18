@@ -266,7 +266,6 @@ pub enum Display {
 
 impl Embed {
     fn shaped(&self) -> Shaped {
-        let proxied = |m: &Option<EmbedMedia>| m.as_ref().and_then(EmbedMedia::proxied);
         let mut shaped = Shaped::default();
         // Image and article links carry their picture as a thumbnail, but
         // show it large.
@@ -276,7 +275,8 @@ impl Embed {
         });
         shaped.image = large.and_then(EmbedMedia::proxied);
         if !matches!(self.kind, EmbedKind::Article | EmbedKind::Image) {
-            shaped.thumbnail = proxied(&self.thumbnail);
+            // As any image of the embed that animates, it has a star.
+            shaped.thumbnail = self.thumbnail.as_ref().and_then(EmbedMedia::gallery_item);
         }
         if let Some(video) = &self.video
             && let Some((width, height)) = video.sized()
@@ -799,6 +799,19 @@ mod tests {
                 Some(("https://example.test/b.gif", "https://images-ext-1.discordapp.net/b")),
             ]
         );
+    }
+
+    #[test]
+    fn a_cards_thumbnail_is_starred_as_itself_where_it_animates() {
+        let card = |thumbnail: &str| {
+            embed(json!({"type": "rich", "title": "t",
+                "thumbnail": {"url": format!("https://example.test/{thumbnail}"),
+                              "proxy_url": format!("https://images-ext-1.discordapp.net/{thumbnail}"), "width": 8, "height": 8}}))
+        };
+        let Display::Card { thumbnail: Some(moving), .. } = card("small.gif").display(true) else { panic!() };
+        assert_eq!(moving.star.as_ref().map(|s| s.url.as_str()), Some("https://example.test/small.gif"));
+        let Display::Card { thumbnail: Some(still), .. } = card("small.png").display(true) else { panic!() };
+        assert!(still.star.is_none());
     }
 
     #[test]

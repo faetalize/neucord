@@ -33,7 +33,7 @@ use discord::Snowflake;
 use gtk::{gdk, gio, glib};
 
 use super::App;
-use super::chat::{Clicked, emoji_at};
+use super::chat::{Clicked, emoji_at, media_at};
 use super::composer::Completion;
 use super::menus::At;
 use super::message_row::MessageRow;
@@ -423,6 +423,42 @@ impl App {
                     return;
                 }
                 eprintln!("e2e: no row with emoji-probe");
+            }
+            // The message menu on the picture in the row with `embed-probe`, found as a click would be: `embed-menu <png>`.
+            Some("embed-menu") => {
+                let rows: Vec<MessageRow> = self.rows.borrow().iter().filter_map(|r| r.upgrade()).collect();
+                for row in rows {
+                    let parts = row.parts();
+                    let (Some(item), width, height) = (parts.item.upgrade(), parts.row.width(), parts.row.height())
+                    else {
+                        continue;
+                    };
+                    let Some(message) = item.item().and_downcast::<glib::BoxedAnyObject>() else { continue };
+                    let message = message.borrow::<discord::Message>().clone();
+                    if !message.content.contains("embed-probe") {
+                        continue;
+                    }
+                    let mut hit = None;
+                    'scan: for y in (0..height).step_by(4) {
+                        for x in (0..width).step_by(4) {
+                            if let Some(media) = media_at(parts.row.upcast_ref(), f64::from(x), f64::from(y)) {
+                                hit = Some((f64::from(x), f64::from(y), media));
+                                break 'scan;
+                            }
+                        }
+                    }
+                    let Some((x, y, media)) = hit else { return eprintln!("e2e: no media in the row") };
+                    eprintln!("e2e: media {media} at {x},{y}");
+                    let clicked = Clicked { media: Some(media), ..Clicked::default() };
+                    self.message_menu(&parts.row, message, At::Point(x, y), clicked);
+                    let (anchor, path) = (parts.row.clone().upcast::<gtk::Widget>(), rest.trim().to_owned());
+                    glib::timeout_add_local_once(Duration::from_millis(600), move || match popover_above(&anchor) {
+                        Some(popover) if !path.is_empty() => shot(&popover, &path),
+                        _ => eprintln!("e2e: no popover on the row"),
+                    });
+                    return;
+                }
+                eprintln!("e2e: no row with embed-probe");
             }
             Some("send") => {
                 let button = &self.send_button;

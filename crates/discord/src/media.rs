@@ -23,14 +23,18 @@ pub enum Source {
     Attachment(Snowflake),
     /// The embed at this place among the message's visible ones.
     Embed(usize),
+    /// The thumbnail of the card of that embed, which opens alone.
+    Thumbnail(usize),
 }
 
 impl Source {
-    /// What a source opens with: all the attachments, or one embed's images.
-    fn group(self) -> Option<usize> {
+    /// What a source opens with: all the attachments, or one embed's images,
+    /// or the thumbnail by itself.
+    fn group(self) -> Option<(bool, usize)> {
         match self {
             Source::Attachment(_) => None,
-            Source::Embed(embed) => Some(embed),
+            Source::Embed(embed) => Some((false, embed)),
+            Source::Thumbnail(embed) => Some((true, embed)),
         }
     }
 }
@@ -90,9 +94,13 @@ impl Item {
     }
 
     fn embedded(media: &Media, embed: usize, kind: Kind) -> Item {
+        Item::from_embed(media, Source::Embed(embed), kind)
+    }
+
+    fn from_embed(media: &Media, source: Source, kind: Kind) -> Item {
         Item {
             kind,
-            source: Source::Embed(embed),
+            source,
             url: media.original.clone(),
             proxy_url: Some(media.url.clone()),
             size: Some((media.width, media.height)),
@@ -168,7 +176,13 @@ pub fn items(message: &Message, settings: &MediaSettings, profile_links: bool) -
         items.extend(message.attachments.iter().filter(|a| !a.is_hidden()).filter_map(Item::attachment));
     }
     for (n, embed) in embed::visible(message, settings, profile_links).iter().enumerate() {
-        match embed.display(settings.inline_embed_media) {
+        let display = embed.display(settings.inline_embed_media);
+        // The card's thumbnail is an image of its own, which the client draws
+        // through the same image component (`renderThumbnail`, 265705).
+        if let Display::Card { thumbnail: Some(thumbnail), .. } = &display {
+            items.push(Item::from_embed(thumbnail, Source::Thumbnail(n), Kind::Image));
+        }
+        match display {
             Display::Bare(large) | Display::Card { media: Some(large), .. } => match large {
                 Large::Image(media) => items.push(Item::embedded(&media, n, Kind::Image)),
                 Large::Gallery(media) => items.extend(media.iter().map(|media| Item::embedded(media, n, Kind::Image))),
@@ -407,6 +421,22 @@ mod tests {
         ]}));
         let ids: Vec<_> = items(&message, &MediaSettings::default(), false).into_iter().map(|i| i.source).collect();
         assert_eq!(ids, [Source::Attachment(Snowflake(12))]);
+    }
+
+    #[test]
+    fn a_cards_thumbnail_is_an_image_of_its_own_that_opens_alone() {
+        let message = message(serde_json::json!({
+            "embeds": [{"type": "rich", "title": "t",
+                "image": {"url": "https://e.test/big.png", "proxy_url": "https://images-ext-1.discordapp.net/external/a/https/e.test/big.png", "width": 80, "height": 60},
+                "thumbnail": {"url": "https://e.test/small.gif", "proxy_url": "https://images-ext-1.discordapp.net/external/b/https/e.test/small.gif", "width": 8, "height": 8}}],
+        }));
+        let items = items(&message, &MediaSettings::default(), false);
+        let sources: Vec<_> = items.iter().map(|i| i.source).collect();
+        assert_eq!(sources, [Source::Thumbnail(0), Source::Embed(0)]);
+        // Opening one doesn't bring the other.
+        let (opened, place) = gallery(&items, 1);
+        assert_eq!((opened.len(), place), (1, 0));
+        assert_eq!(gallery(&items, 0).0.len(), 1);
     }
 
     #[test]
