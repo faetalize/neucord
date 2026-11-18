@@ -170,8 +170,8 @@ impl App {
 
     /// The reactions under `message`, and the button that adds another:
     /// nothing without a reaction, or where the account hides them. A
-    /// thread's first message stands for one in the parent, whose reactions
-    /// this copy doesn't keep current. The add button's picker opens over
+    /// thread's first message stands for one in the parent and shows none
+    /// (`renderReactions: false` in 812266). The add button's picker opens over
     /// `content`, which stays while the row is built again: the button
     /// itself goes with the next change, and a picker left on it would
     /// outlive it.
@@ -478,6 +478,7 @@ impl App {
         let dm = self.account.state.borrow().find_channel(channel).is_some_and(|(_, c)| c.kind == ChannelKind::Dm);
         // A post's card shows the top reaction of its first message.
         self.forum_change_first(channel, message, |m| change(m, dm));
+        self.change_thread_starter(message, |m| change(m, dm));
         let changed = self.account.timelines.borrow().change(channel, message, |m| change(m, dm));
         if let Some((store, position)) = changed {
             self.rebind(&store, position, 1);
