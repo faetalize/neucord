@@ -332,6 +332,14 @@ impl App {
                     self.mention_done(id);
                 }
             }
+            // Files dropped on the chat, as a drop does: `drop <path>` joins the draft, `drop-shift <path>` is sent
+            // at once (Shift held); `drop-overlay` shows what a drag says.
+            Some(command @ ("drop" | "drop-shift")) => {
+                let (Some(channel), Some(path)) = (self.attach_channel(), parts.next()) else { return };
+                let (this, file, instant) = (self.clone(), gio::File::for_path(path), command == "drop-shift");
+                glib::spawn_future_local(async move { this.dropped(channel, vec![file], instant).await });
+            }
+            Some("drop-overlay") => self.show_drop_overlay(true),
             Some("send") => {
                 let button = &self.send_button;
                 if !button.is_visible() || !button.is_sensitive() {
