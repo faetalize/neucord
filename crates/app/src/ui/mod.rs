@@ -227,6 +227,8 @@ pub struct App {
     /// How many messages are new since the channel was last read, with a
     /// way to jump to the first.
     unread_bar: adw::Banner,
+    /// That the open channel's newest page didn't load, with a way to ask again.
+    failed_bar: adw::Banner,
     /// That Discord refused too many requests and none are being sent.
     paused_bar: adw::Banner,
     /// Hides the paused bar when the pause is over.
@@ -474,6 +476,7 @@ impl App {
                 .button_label("Jump to Present")
                 .build(),
             unread_bar: adw::Banner::builder().button_label("Jump").build(),
+            failed_bar: adw::Banner::builder().title("Could not load messages").button_label("Try Again").build(),
             paused_bar: adw::Banner::new(""),
             paused_end: RefCell::default(),
             unread_divider: glib::WeakRef::new(),
