@@ -601,19 +601,29 @@ impl App {
         });
     }
 
+    /// Whether `message` started a thread we know and may view, which is
+    /// the message's own id as a channel's (`castMessageIdAsChannelId`):
+    /// where the box under it, View Thread and the `t` key have a thread to open.
+    pub(super) fn has_viewable_thread(&self, message: &Message) -> bool {
+        if !message.has_thread() || message.thread_starter().is_some() {
+            return false;
+        }
+        let state = self.account.state.borrow();
+        state
+            .find_channel(message.id)
+            .is_some_and(|(_, t)| t.kind.is_thread() && t.parent_id == Some(message.channel_id) && state.can_view(t.id))
+    }
+
     /// The box under a message that started a thread (`r8` in 190854): the
     /// thread's name and how many messages it holds, opening it. Only for a
     /// thread we know, as there.
     pub(super) fn thread_accessory(self: &Rc<Self>, message: &Message) -> Option<gtk::Widget> {
-        if !message.has_thread() || message.thread_starter().is_some() {
+        if !self.has_viewable_thread(message) {
             return None;
         }
         let (name, detail) = {
             let state = self.account.state.borrow();
-            let (_, thread) = state
-                .find_channel(message.id)
-                .filter(|(_, t)| t.kind.is_thread() && t.parent_id == Some(message.channel_id))
-                .filter(|(_, t)| state.can_view(t.id))?;
+            let (_, thread) = state.find_channel(message.id)?;
             let count = match thread.message_count {
                 Some(0) => Some("No messages yet".to_owned()),
                 Some(1) => Some("1 message".to_owned()),

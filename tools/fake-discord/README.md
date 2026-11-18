@@ -141,6 +141,14 @@ what arrived, IDENTIFY's key order and properties first.
   page (`emoji-packs`, `packs-shot <png>`), pins the first pack with its
   button (`packs-pin <n>`, `PinnedEmojiPacks` in settings-proto 2), closes
   the page (`packs-close`) and shows the picker's "Blobs" section;
+  `thread-shortcuts` (with `FAKE_CHAIN=1 FAKE_OWNER=1`: lines 70-73 of
+  #general reply to one another and line 10 started a thread) replies to
+  them (`reply <id>`, `reply-nudge`), clicks the nudge under the reply bar
+  (`nudge-click`) and creates the thread from the form (`thread-message`,
+  `thread-create`: its request's `location` is "Reply Chain Nudge"), opens
+  a message's menu (`message-more <id>`, `shot-popover row:<id> <png>
+  [close]`) to see View Thread or Create Thread, and presses the `t`
+  shortcut's action (`thread-key <id>`, location "Message Shortcut");
   `heartbeat` waits for five op 40s, the interval's among them;
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).

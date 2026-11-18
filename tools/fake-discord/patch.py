@@ -219,7 +219,7 @@ impl App {
             }
             Some("thread-form") => {
                 if let Some(channel) = self.thread_channel() {
-                    self.open_thread_form(channel, None);
+                    self.open_thread_form(channel, None, "Plus Button");
                 }
             }
             Some("shot") => shot(&self.window, parts.next().unwrap_or("shot.png")),
@@ -229,13 +229,26 @@ impl App {
                     Some("composer_box") => Some(self.composer_box.clone().upcast()),
                     Some("gif_button") => Some(self.gif_button.clone().upcast()),
                     Some("emoji_button") => Some(self.emoji_button.clone().upcast()),
+                    Some(row) if row.starts_with("row:") => {
+                        let wanted = id(row.strip_prefix("row:"));
+                        self.rows.borrow().iter().filter_map(|r| r.upgrade()).find(|r| {
+                            r.parts().item.upgrade().and_then(|i| i.item().and_downcast::<glib::BoxedAnyObject>())
+                                .is_some_and(|o| o.borrow::<discord::Message>().id == wanted)
+                        }).map(|r| r.parts().row.clone().upcast())
+                    }
                     Some("attach_button") => Some(self.drafts.attach.clone().upcast()),
                     Some("pins_button") => Some(self.pins_button.clone().upcast()),
                     Some("inbox_button") => Some(self.inbox_button.clone().upcast()),
                     other => return eprintln!("e2e: no widget {other:?}"),
                 };
                 match anchor.and_then(|w| popover_above(&w)) {
-                    Some(popover) => shot(&popover, parts.next().unwrap_or("popover.png")),
+                    Some(popover) => {
+                        shot(&popover, parts.next().unwrap_or("popover.png"));
+                        // A third word, `close`, closes it after.
+                        if parts.next() == Some("close") {
+                            popover.popdown();
+                        }
+                    }
                     None => eprintln!("e2e: no popover"),
                 }
             }
@@ -314,6 +327,70 @@ impl App {
                     Some(message) => self.start_reply(&message, false),
                     None => eprintln!("e2e: no message to reply to"),
                 }
+            }
+            // `t` on a message (the shortcut's own action: what the key handler runs for a focused row):
+            // `thread-key <id>` says whether it did something. `message-more <id>` presses the row's More
+            // button, and `shot-popover row:<id> <png>` shoots the menu it opens.
+            Some("thread-key") => {
+                let wanted = id(parts.next());
+                let messages = self.messages();
+                let found = (0..messages.n_items())
+                    .filter_map(|position| crate::timelines::message_at(&messages, position))
+                    .find(|m| m.id == wanted);
+                match found {
+                    Some(message) => eprintln!("e2e: thread-key {}", self.thread_shortcut(&message)),
+                    None => eprintln!("e2e: no such message"),
+                }
+            }
+            Some("message-more") => {
+                let wanted = id(parts.next());
+                let row = self.rows.borrow().iter().filter_map(|r| r.upgrade()).find(|row| {
+                    row.parts().item.upgrade().and_then(|i| i.item().and_downcast::<glib::BoxedAnyObject>())
+                        .is_some_and(|o| o.borrow::<discord::Message>().id == wanted)
+                });
+                match row {
+                    Some(row) => row.parts().more.emit_clicked(),
+                    None => eprintln!("e2e: no row"),
+                }
+            }
+            // The nudge's Create Thread, and the open thread form's Create.
+            Some("nudge-click") => {
+                match buttons_below(self.reply_nudge.upcast_ref(), |b| b.label().as_deref() == Some("Create Thread")).pop() {
+                    Some(button) => button.emit_clicked(),
+                    None => eprintln!("e2e: no nudge button"),
+                }
+            }
+            // The open thread form's starter message, as typed.
+            Some("thread-message") => {
+                fn text_view(widget: &gtk::Widget) -> Option<gtk::TextView> {
+                    let mut child = widget.first_child();
+                    while let Some(c) = child {
+                        if let Some(view) = c.downcast_ref::<gtk::TextView>() {
+                            return Some(view.clone());
+                        }
+                        if let Some(view) = text_view(&c) {
+                            return Some(view);
+                        }
+                        child = c.next_sibling();
+                    }
+                    None
+                }
+                match self.window.visible_dialog().and_then(|d| text_view(d.upcast_ref())) {
+                    Some(view) => view.buffer().set_text(rest),
+                    None => eprintln!("e2e: no message field"),
+                }
+            }
+            Some("thread-create") => {
+                let found = self.window.visible_dialog().and_then(|d| {
+                    buttons_below(d.upcast_ref(), |b| b.label().as_deref() == Some("Create")).pop()
+                });
+                match found {
+                    Some(button) => button.emit_clicked(),
+                    None => eprintln!("e2e: no Create button"),
+                }
+            }
+            Some("reply-nudge") => {
+                eprintln!("e2e: reply-nudge shown={} text={:?}", self.reply_nudge.is_visible(), self.reply_nudge_label.label());
             }
             Some("confirm") => {
                 let Some(dialog) = self.window.visible_dialog().and_downcast::<adw::AlertDialog>() else {
