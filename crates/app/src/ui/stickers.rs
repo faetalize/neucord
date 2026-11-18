@@ -91,13 +91,21 @@ pub(super) const COPY_STICKER_LINK: MenuEntry<Target> = MenuEntry::Item(MenuItem
 
 /// "Message Details" where a sticker was right-clicked, in Developer Mode: the
 /// client (761304) shows it in place of Copy Message ID, with that, the
-/// sticker's id and its image link, and a way to open the link. It's the same
-/// for an emoji, which Neucord's message menu has nothing for yet.
+/// sticker's id and its image link, and a way to open the link; for a custom
+/// emoji in the text it has the emoji's.
 pub(super) const MESSAGE_DETAILS: MenuEntry<MessageTarget> = MenuEntry::Item(MenuItem {
     name: "message-details",
     label: "Message _Details",
-    shows: |app, target| developer(app) && target.sticker().is_some(),
-    kind: Kind::Submenu(&[&[DETAILS_MESSAGE_ID, DETAILS_STICKER_ID, DETAILS_STICKER_LINK, DETAILS_OPEN_LINK]]),
+    shows: |app, target| developer(app) && (target.sticker().is_some() || target.emoji.is_some()),
+    kind: Kind::Submenu(&[&[
+        DETAILS_MESSAGE_ID,
+        DETAILS_STICKER_ID,
+        DETAILS_STICKER_LINK,
+        DETAILS_OPEN_LINK,
+        DETAILS_EMOJI_ID,
+        DETAILS_EMOJI_LINK,
+        DETAILS_OPEN_EMOJI_LINK,
+    ]]),
 });
 
 const DETAILS_MESSAGE_ID: MenuEntry<MessageTarget> = MenuEntry::Item(MenuItem {
@@ -125,6 +133,39 @@ const DETAILS_STICKER_LINK: MenuEntry<MessageTarget> = MenuEntry::Item(MenuItem 
     kind: Kind::Action(|app, target| {
         if let Some(link) = target.sticker().and_then(|s| s.link()) {
             app.copy(&link);
+        }
+    }),
+});
+
+const DETAILS_EMOJI_ID: MenuEntry<MessageTarget> = MenuEntry::Item(MenuItem {
+    name: "details-copy-emoji-id",
+    label: "Copy Emoji _ID",
+    shows: |_, target| target.emoji.is_some(),
+    kind: Kind::Action(|app, target| {
+        if let Some(emoji) = &target.emoji {
+            app.copy(&emoji.id.to_string());
+        }
+    }),
+});
+
+const DETAILS_EMOJI_LINK: MenuEntry<MessageTarget> = MenuEntry::Item(MenuItem {
+    name: "details-copy-emoji-link",
+    label: "Copy Emoji Image _Link",
+    shows: |_, target| target.emoji.is_some(),
+    kind: Kind::Action(|app, target| {
+        if let Some(emoji) = &target.emoji {
+            app.copy(&emoji.link);
+        }
+    }),
+});
+
+const DETAILS_OPEN_EMOJI_LINK: MenuEntry<MessageTarget> = MenuEntry::Item(MenuItem {
+    name: "details-open-emoji-link",
+    label: "_Open Emoji Image Link",
+    shows: |_, target| target.emoji.is_some(),
+    kind: Kind::Action(|app, target| {
+        if let Some(emoji) = &target.emoji {
+            super::viewer::open_link(app, &emoji.link);
         }
     }),
 });

@@ -33,7 +33,10 @@ use discord::Snowflake;
 use gtk::{gdk, gio, glib};
 
 use super::App;
+use super::chat::{Clicked, emoji_at};
 use super::composer::Completion;
+use super::menus::At;
+use super::message_row::MessageRow;
 
 thread_local! {
     /// Each `menus::extend`'s refill, the message box's first.
@@ -375,6 +378,51 @@ impl App {
                 if let Some(id) = first {
                     self.mention_done(id);
                 }
+            }
+            // The message menu on the custom emoji in the newest row that has one, found as a click would:
+            // `emoji-menu` turns Developer Mode on, scans the row for the emoji and opens the menu there.
+            Some("emoji-menu") => {
+                self.account.state.borrow_mut().settings.developer_mode = true;
+                let rows: Vec<MessageRow> = self.rows.borrow().iter().filter_map(|r| r.upgrade()).collect();
+                for row in rows {
+                    let parts = row.parts();
+                    let (Some(item), width, height) = (parts.item.upgrade(), parts.row.width(), parts.row.height())
+                    else {
+                        continue;
+                    };
+                    let Some(message) = item.item().and_downcast::<glib::BoxedAnyObject>() else { continue };
+                    let message = message.borrow::<discord::Message>().clone();
+                    if !message.content.contains("emoji-probe") {
+                        continue;
+                    }
+                    let mut hit = None;
+                    'scan: for y in (0..height).step_by(4) {
+                        for x in (0..width).step_by(2) {
+                            if let Some(emoji) = emoji_at(parts.row.upcast_ref(), f64::from(x), f64::from(y)) {
+                                hit = Some((f64::from(x), f64::from(y), emoji));
+                                break 'scan;
+                            }
+                        }
+                    }
+                    match hit {
+                        Some((x, y, emoji)) => {
+                            eprintln!("e2e: emoji {} at {x},{y}: {}", emoji.id, emoji.link);
+                            let clicked = Clicked { emoji: Some(emoji), ..Clicked::default() };
+                            self.message_menu(&parts.row, message, At::Point(x, y), clicked);
+                            // The popover is its own surface: shoot it once it is up, as `emoji-menu <png>`.
+                            let (anchor, path) = (parts.row.clone().upcast::<gtk::Widget>(), rest.trim().to_owned());
+                            glib::timeout_add_local_once(Duration::from_millis(600), move || {
+                                match popover_above(&anchor) {
+                                    Some(popover) if !path.is_empty() => shot(&popover, &path),
+                                    _ => eprintln!("e2e: no popover on the row"),
+                                }
+                            });
+                        }
+                        None => eprintln!("e2e: no emoji in the row"),
+                    }
+                    return;
+                }
+                eprintln!("e2e: no row with emoji-probe");
             }
             Some("send") => {
                 let button = &self.send_button;

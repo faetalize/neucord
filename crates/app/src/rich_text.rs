@@ -26,6 +26,9 @@ pub struct Image {
     /// What copying the text gives for it, and its tooltip.
     pub alt: String,
     pub paintable: Option<gdk::Paintable>,
+    /// A custom emoji's id and whether it is animated, which a menu on it
+    /// names it by.
+    pub emoji: Option<(u64, bool)>,
 }
 
 type RevealHandler = Box<dyn Fn(usize)>;
@@ -307,6 +310,15 @@ impl RichText {
         }
         let index = self.index_at(x, y)?;
         spoilers.iter().position(|(range, revealed)| !revealed && range.contains(&index))
+    }
+
+    /// The custom emoji under a point: its id, whether it is animated, and
+    /// its size in logical pixels.
+    pub fn emoji_at(&self, x: f64, y: f64) -> Option<(u64, bool, i32)> {
+        let n = self.image_at(x, y)?;
+        let images = self.imp().images.borrow();
+        let image = &images[n];
+        image.emoji.map(|(id, animated)| (id, animated, image.size))
     }
 
     fn image_at(&self, x: f64, y: f64) -> Option<usize> {
