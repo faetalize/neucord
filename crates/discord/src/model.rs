@@ -1063,6 +1063,9 @@ pub struct Message {
     /// installed.
     #[serde(default)]
     pub interaction_metadata: Option<InteractionMetadata>,
+    /// For a server space's system message (a leaderboard's): whom it is about.
+    #[serde(default)]
+    pub guild_space_data: Option<GuildSpaceData>,
     /// For an app's answer: the command it answers, as the line above it
     /// names it. Discord calls it deprecated but sends it.
     #[serde(default)]
@@ -1119,6 +1122,24 @@ pub struct InteractionMetadata {
     /// For a modal's submit: the interaction that opened the modal.
     #[serde(default)]
     pub triggering_interaction_metadata: Option<Box<InteractionMetadata>>,
+}
+
+/// What a server space's system message carries; only the leaderboard's
+/// people matter here.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct GuildSpaceData {
+    #[serde(default)]
+    pub leaderboard: Option<LeaderboardEvent>,
+}
+
+/// A leaderboard message's subject and, when the lead changed hands, the
+/// previous leader (`e7` in 518782).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct LeaderboardEvent {
+    #[serde(default)]
+    pub user_id: Option<Snowflake>,
+    #[serde(default)]
+    pub secondary_user_id: Option<Snowflake>,
 }
 
 /// The command an app's answer answers (`interaction`, read by 432005).
@@ -1396,9 +1417,13 @@ impl Message {
 
     /// Whether the client counts this message as blocked
     /// (`isBlockedForMessage`, 994500), `blocked` saying whom we blocked:
-    /// its author, or for an app's answer who ran the command.
+    /// its author, for an app's answer who ran the command, and for a
+    /// server space's leaderboard message either person it names.
     pub fn is_blocked_by(&self, blocked: impl Fn(Snowflake) -> bool) -> bool {
-        blocked(self.author.id) || self.interaction_metadata.as_ref().is_some_and(|i| blocked(i.user.id))
+        let leaderboard = self.guild_space_data.as_ref().and_then(|d| d.leaderboard.as_ref());
+        blocked(self.author.id)
+            || self.interaction_metadata.as_ref().is_some_and(|i| blocked(i.user.id))
+            || leaderboard.is_some_and(|l| l.user_id.into_iter().chain(l.secondary_user_id).any(&blocked))
     }
 
     /// What a reply line shows for this message when it has no text to
@@ -1785,6 +1810,21 @@ mod tests {
         assert!(!answer("5").is_blocked_by(blocked));
         assert!(ours(json!({"author": {"id": "6", "username": "them"}})).is_blocked_by(blocked));
         assert!(!ours(json!({})).is_blocked_by(blocked));
+    }
+
+    #[test]
+    fn a_leaderboard_message_about_a_blocked_user_counts_as_blocked() {
+        let blocked = |id: Snowflake| id == Snowflake(6);
+        let leaderboard = |data: serde_json::Value| {
+            ours(json!({"author": {"id": "7", "username": "app"}, "guild_space_data": {"leaderboard": data}}))
+        };
+        assert!(leaderboard(json!({"user_id": "6"})).is_blocked_by(blocked), "the subject");
+        assert!(
+            leaderboard(json!({"user_id": "5", "secondary_user_id": "6"})).is_blocked_by(blocked),
+            "the previous leader"
+        );
+        assert!(!leaderboard(json!({"user_id": "5", "secondary_user_id": "4"})).is_blocked_by(blocked));
+        assert!(!ours(json!({"guild_space_data": {"music": {}}})).is_blocked_by(blocked), "no leaderboard");
     }
 
     #[test]
