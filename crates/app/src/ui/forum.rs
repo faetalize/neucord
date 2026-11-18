@@ -71,6 +71,9 @@ pub(super) struct Data {
     /// When the rows were last made: the list moves by itself after, and
     /// only scrolling asks for more.
     rebuilt: Option<Instant>,
+    /// The guidelines' card is open (closed until opened, as in the client's
+    /// form store, 218152).
+    guidelines_open: bool,
 }
 
 pub(super) struct Page {
@@ -81,6 +84,11 @@ pub(super) struct Page {
     new_posts: gtk::Button,
     /// Opens the form that starts a post, where we may.
     post_button: gtk::Button,
+    /// Shows or hides the forum's guidelines (its topic), where it has any.
+    guidelines_button: gtk::ToggleButton,
+    /// The guidelines' card above the posts, and its text.
+    guidelines: gtk::Box,
+    guidelines_text: gtk::Box,
     stack: gtk::Stack,
     model: gio::ListStore,
     list: gtk::ListView,
@@ -112,6 +120,27 @@ impl Page {
                 .visible(false)
                 .valign(gtk::Align::Start)
                 .css_classes(["suggested-action"])
+                .build(),
+            guidelines_button: gtk::ToggleButton::builder()
+                .icon_name("emblem-documents-symbolic")
+                .tooltip_text("Post Guidelines")
+                .visible(false)
+                .valign(gtk::Align::Start)
+                .build(),
+            guidelines: gtk::Box::builder()
+                .orientation(gtk::Orientation::Vertical)
+                .spacing(6)
+                .margin_start(12)
+                .margin_end(12)
+                .margin_bottom(6)
+                .css_classes(["card"])
+                .visible(false)
+                .build(),
+            guidelines_text: gtk::Box::builder()
+                .orientation(gtk::Orientation::Vertical)
+                .margin_start(12)
+                .margin_end(12)
+                .margin_bottom(12)
                 .build(),
             stack: gtk::Stack::new(),
             list: gtk::ListView::builder().model(&selection).single_click_activate(true).build(),
@@ -259,13 +288,44 @@ impl App {
             }
         });
 
+        let heading = gtk::Box::builder().spacing(6).margin_top(8).margin_start(12).margin_end(6).build();
+        heading.append(
+            &gtk::Label::builder().label("Post Guidelines").xalign(0.0).hexpand(true).css_classes(["heading"]).build(),
+        );
+        let close = gtk::Button::builder()
+            .icon_name("window-close-symbolic")
+            .tooltip_text("Close")
+            .css_classes(["flat", "circular"])
+            .build();
+        heading.append(&close);
+        page.guidelines.append(&heading);
+        page.guidelines.append(&page.guidelines_text);
+        close.connect_clicked({
+            let toggle = page.guidelines_button.downgrade();
+            move |_| {
+                if let Some(toggle) = toggle.upgrade() {
+                    toggle.set_active(false);
+                }
+            }
+        });
+        page.guidelines_button.connect_toggled({
+            let this = Rc::downgrade(self);
+            move |button| {
+                if let Some(this) = this.upgrade() {
+                    this.forum.data.borrow_mut().guidelines_open = button.is_active();
+                    this.forum_guidelines();
+                }
+            }
+        });
         let bar = gtk::Box::builder().spacing(6).margin_top(6).margin_bottom(6).margin_start(12).margin_end(12).build();
         bar.append(&page.chips);
         bar.append(&page.new_posts);
         bar.append(&page.post_button);
+        bar.append(&page.guidelines_button);
         bar.append(&page.sort_button);
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
         column.append(&bar);
+        column.append(&page.guidelines);
         column.append(&page.stack);
         page.root.set_content(Some(&column));
         page.root.clone().upcast()
@@ -455,6 +515,30 @@ impl App {
         }
         drop((state, data));
         self.forum_new_posts();
+        self.forum_guidelines();
+    }
+
+    /// The guidelines (the forum's topic): their button where it has one, and
+    /// their card while that is open (`nX` and `iv` in 745431).
+    fn forum_guidelines(self: &Rc<Self>) {
+        let page = &self.forum;
+        let topic = {
+            let state = self.account.state.borrow();
+            state.channel.and_then(|id| state.find_channel(id)).and_then(|(_, c)| c.topic.clone())
+        }
+        .filter(|topic| !topic.is_empty());
+        let open = page.data.borrow().guidelines_open && topic.is_some();
+        page.guidelines_button.set_visible(topic.is_some());
+        page.guidelines_button.set_active(open);
+        page.guidelines.set_visible(open);
+        while let Some(child) = page.guidelines_text.first_child() {
+            page.guidelines_text.remove(&child);
+        }
+        if let (true, Some(topic)) = (open, topic) {
+            let names = self.names();
+            let cx = render::Context::new(&names, Some(&self.images));
+            page.guidelines_text.append(&render::render(&discord::markup::parse(&topic), &cx, false));
+        }
     }
 
     /// The button that offers the posts others made.
