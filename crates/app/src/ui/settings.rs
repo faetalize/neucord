@@ -20,6 +20,7 @@ use gtk::glib;
 
 use super::App;
 use crate::config::{self, Key};
+use crate::theme::Theme;
 
 /// Sets a row to the settings.
 pub(super) type Show = Box<dyn Fn(&Settings)>;
@@ -271,11 +272,37 @@ impl App {
         let appearance = group(
             "Appearance",
             &format!(
-                "Colours follow your system's light or dark preference and accent colour. \
+                "Colours follow the colour scheme below and your system's accent colour. \
                  Put your own stylesheet in {}.",
                 glib::markup_escape_text(&config::stylesheet_path().display().to_string())
             ),
         );
+        let scheme =
+            adw::ComboRow::builder()
+                .title("Colour scheme")
+                .subtitle("System follows your desktop's light or dark preference.")
+                .model(&gtk::StringList::new(&config::ColorScheme::ALL.map(config::ColorScheme::label)))
+                .selected(
+                    config::ColorScheme::ALL.iter().position(|s| *s == self.config.color_scheme()).unwrap_or(0) as u32
+                )
+                .build();
+        scheme.connect_selected_notify({
+            let app = Rc::downgrade(self);
+            move |row| {
+                let (Some(app), Some(scheme)) = (app.upgrade(), config::ColorScheme::ALL.get(row.selected() as usize))
+                else {
+                    return;
+                };
+                match app.config.set_color_scheme(*scheme) {
+                    Ok(()) => Theme::set_color_scheme(*scheme),
+                    Err(e) => {
+                        eprintln!("config: {e}");
+                        app.settings_toast("Could not save that option");
+                    }
+                }
+            }
+        });
+        appearance.add(&scheme);
         option_switch(
             self,
             &appearance,
