@@ -454,6 +454,67 @@ struct Payload {
     t: Option<String>,
 }
 
+/// READY, whose `guilds` are kept as text and made into servers one at a
+/// time, so the whole list is never a tree of values at once (it is most of
+/// the payload, and the tree is several times its text).
+#[derive(Deserialize)]
+struct ReadyPayload {
+    #[serde(default)]
+    s: Option<u64>,
+    d: ReadyData,
+}
+
+/// READY's `d`: everything but `guilds`, which are in `guilds`, unparsed.
+struct ReadyData {
+    rest: Value,
+    guilds: Vec<Box<serde_json::value::RawValue>>,
+}
+
+impl<'de> Deserialize<'de> for ReadyData {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visit;
+        impl<'de> serde::de::Visitor<'de> for Visit {
+            type Value = ReadyData;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("READY's data")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<ReadyData, A::Error> {
+                let (mut rest, mut guilds) = (serde_json::Map::new(), Vec::new());
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "guilds" {
+                        guilds = map.next_value()?;
+                    } else {
+                        rest.insert(key, map.next_value()?);
+                    }
+                }
+                Ok(ReadyData { rest: Value::Object(rest), guilds })
+            }
+        }
+        deserializer.deserialize_map(Visit)
+    }
+}
+
+/// Whether the frame is READY, by `"t":"READY"`, which Discord writes at the
+/// start. A READY this misses is parsed whole, as any event is. The debug
+/// dumps want the whole payload too.
+fn looks_like_ready(frame: &[u8]) -> bool {
+    const NEEDLE: &[u8] = br#""t":"READY""#;
+    frame.len() > 4096
+        && frame[..frame.len().min(128)].windows(NEEDLE.len()).any(|w| w == NEEDLE)
+        && !crate::shape::enabled()
+        && std::env::var_os("NEUCORD_DEBUG_EXPERIMENTS").is_none()
+}
+
+fn parse_frame(parser: &Parser, frame: &[u8]) -> Result<Parsed, serde_json::Error> {
+    if looks_like_ready(frame) {
+        let ReadyPayload { s, d } = serde_json::from_slice(frame)?;
+        return Ok(Parsed { seq: s, what: What::Dispatch(parser.dispatched_ready(d.rest, d.guilds)) });
+    }
+    Ok(parser.parse(serde_json::from_slice::<Payload>(frame)?))
+}
+
 struct State {
     /// The account's token now, which IDENTIFY sends.
     token: String,
@@ -564,6 +625,18 @@ impl Parser {
         Dispatched { events, established }
     }
 
+    /// READY from [`ReadyPayload`]: its servers come as text.
+    fn dispatched_ready(&self, data: Value, guilds: Vec<Box<serde_json::value::RawValue>>) -> Dispatched {
+        let session = Some((data["session_id"].as_str(), data["resume_gateway_url"].as_str()))
+            .and_then(|(id, url)| Some((id?.to_owned(), url?.to_owned())));
+        let servers = guilds.iter().map(|raw| serde_json::from_str::<Value>(raw.get()).unwrap_or(Value::Null));
+        ready(self, data, servers);
+        let events: Vec<Event> = self.events.borrow_mut().drain(..).collect();
+        let established =
+            events.iter().any(|event| matches!(event, Event::Ready(_))).then_some(Established::Ready(session));
+        Dispatched { events, established }
+    }
+
     fn push(&self, event: Event) {
         self.events.borrow_mut().push_back(event);
     }
@@ -583,8 +656,8 @@ fn work(input: std::sync::mpsc::Receiver<Input>, output: async_channel::Sender<O
             Input::Frame(_) if unreadable => continue,
             Input::Frame(bytes) => match inflater.push(&bytes) {
                 Ok(None) => continue,
-                Ok(Some(text)) => match serde_json::from_slice::<Payload>(&text) {
-                    Ok(payload) => Output::Parsed(parser.parse(payload)),
+                Ok(Some(text)) => match parse_frame(&parser, &text) {
+                    Ok(parsed) => Output::Parsed(parsed),
                     Err(e) => {
                         eprintln!("gateway: unparseable payload: {e}");
                         continue;
@@ -1111,74 +1184,80 @@ fn private_channels(ready: &Value) -> Vec<Channel> {
         .collect()
 }
 
+/// READY: the account's session, `servers` being its `guilds` (taken out of
+/// `data`) as values.
+fn ready(parser: &Parser, data: Value, servers: impl Iterator<Item = Value>) {
+    let user: User = match serde_json::from_value(data["user"].clone()) {
+        Ok(user) => user,
+        Err(e) => return eprintln!("gateway: READY without a usable user: {e}"),
+    };
+    let Some(account) = Account::from_user(&data["user"]) else { return };
+    parser.me.set(Some(user.id));
+    // One server at a time, so only one is ever a tree of values.
+    let (mut guilds, mut voice_states, mut members, mut unavailable_guilds) =
+        (Vec::new(), VoiceStates::default(), Members::default(), 0);
+    for (i, g) in servers.enumerate() {
+        let merged = &data["merged_members"][i];
+        guilds.extend(guild_with_member(&g, merged, user.id));
+        if let Some(id) = parse_id(&g["id"]) {
+            voice_states.replace_guild(id, VoiceState::parse_list(&g["voice_states"]));
+            members.add(id, members_of(&g, merged), &[]);
+        }
+        unavailable_guilds += usize::from(g["unavailable"] == true);
+    }
+    let experiments = Experiments::from_ready(&data);
+    crate::experiments::debug_dump(&data, &experiments, user.id, &guilds);
+    parser.push(Event::Ready(Box::new(Ready {
+        private_channels: private_channels(&data),
+        relationships: Relationships::from_ready(&data),
+        read_states: ReadStates::from_ready(&data["read_state"]),
+        notification_settings: {
+            let mut settings = NotificationSettings::from_ready(&data["user_guild_settings"]);
+            settings.set_flags(data["notification_settings"]["flags"].as_u64().unwrap_or(0));
+            settings
+        },
+        collapsed: Collapsed::from_ready(&data["user_guild_settings"]),
+        settings: {
+            // The protobuf is what the official client reads, so it
+            // wins where both say something.
+            let mut settings = Settings::default();
+            settings.apply(SettingsPatch::from_json(&data["user_settings"]));
+            if let Some(proto) = data["user_settings_proto"].as_str().and_then(SettingsPatch::from_proto) {
+                settings.apply(proto);
+            }
+            settings
+        },
+        settings_proto: data["user_settings_proto"].as_str().map(settings_proto::decode),
+        media_takedown_regulated: crate::regional::media_takedown_regulated(&data["regional_feature_config"]),
+        required_action: data["required_action"].as_str().map(str::to_owned),
+        experiments,
+        session_id: data["session_id"].as_str().unwrap_or_default().to_owned(),
+        gates: Gates::from_ready(&data),
+        unavailable_guilds,
+        voice_states,
+        auth_token: data["auth_token"].as_str().filter(|t| !t.is_empty()).map(str::to_owned),
+        qos_token: data["qos_token"].as_str().map(str::to_owned),
+        account,
+        nitro: Nitro::from_user(&data["user"]),
+        user,
+        guilds,
+        members,
+    })));
+}
+
 fn dispatch(parser: &Parser, name: &str, data: Value) {
     if crate::shape::enabled() {
         eprintln!("gateway {name}: {}", crate::shape::describe(&data));
     }
     let event = match name {
         "READY" => {
-            let user: User = match serde_json::from_value(data["user"].clone()) {
-                Ok(user) => user,
-                Err(e) => return eprintln!("gateway: READY without a usable user: {e}"),
+            let mut data = data;
+            let servers = match data.get_mut("guilds").map(Value::take) {
+                Some(Value::Array(servers)) => servers,
+                _ => Vec::new(),
             };
-            let Some(account) = Account::from_user(&data["user"]) else { return };
-            parser.me.set(Some(user.id));
-            let raw_guilds = data["guilds"].as_array().map(Vec::as_slice).unwrap_or_default();
-            let guilds: Vec<Guild> = raw_guilds
-                .iter()
-                .enumerate()
-                .filter_map(|(i, g)| guild_with_member(g, &data["merged_members"][i], user.id))
-                .collect();
-            let mut voice_states = VoiceStates::default();
-            for g in raw_guilds {
-                if let Some(id) = parse_id(&g["id"]) {
-                    voice_states.replace_guild(id, VoiceState::parse_list(&g["voice_states"]));
-                }
-            }
-            let experiments = Experiments::from_ready(&data);
-            crate::experiments::debug_dump(&data, &experiments, user.id, &guilds);
-            let mut members = Members::default();
-            for (i, g) in raw_guilds.iter().enumerate() {
-                if let Some(id) = parse_id(&g["id"]) {
-                    members.add(id, members_of(g, &data["merged_members"][i]), &[]);
-                }
-            }
-            Event::Ready(Box::new(Ready {
-                private_channels: private_channels(&data),
-                relationships: Relationships::from_ready(&data),
-                read_states: ReadStates::from_ready(&data["read_state"]),
-                notification_settings: {
-                    let mut settings = NotificationSettings::from_ready(&data["user_guild_settings"]);
-                    settings.set_flags(data["notification_settings"]["flags"].as_u64().unwrap_or(0));
-                    settings
-                },
-                collapsed: Collapsed::from_ready(&data["user_guild_settings"]),
-                settings: {
-                    // The protobuf is what the official client reads, so it
-                    // wins where both say something.
-                    let mut settings = Settings::default();
-                    settings.apply(SettingsPatch::from_json(&data["user_settings"]));
-                    if let Some(proto) = data["user_settings_proto"].as_str().and_then(SettingsPatch::from_proto) {
-                        settings.apply(proto);
-                    }
-                    settings
-                },
-                settings_proto: data["user_settings_proto"].as_str().map(settings_proto::decode),
-                media_takedown_regulated: crate::regional::media_takedown_regulated(&data["regional_feature_config"]),
-                required_action: data["required_action"].as_str().map(str::to_owned),
-                experiments,
-                session_id: data["session_id"].as_str().unwrap_or_default().to_owned(),
-                gates: Gates::from_ready(&data),
-                unavailable_guilds: raw_guilds.iter().filter(|g| g["unavailable"] == true).count(),
-                voice_states,
-                auth_token: data["auth_token"].as_str().filter(|t| !t.is_empty()).map(str::to_owned),
-                qos_token: data["qos_token"].as_str().map(str::to_owned),
-                account,
-                nitro: Nitro::from_user(&data["user"]),
-                user,
-                guilds,
-                members,
-            }))
+            ready(parser, data, servers.into_iter());
+            return;
         }
         // What the capabilities IDENTIFY sends leave out of READY, which comes
         // right after it: other people's members and presences, who is in
@@ -2180,6 +2259,49 @@ mod tests {
         assert_eq!((guild_id, id), (Snowflake(1), Snowflake(9)));
         dispatch(&state, "CHANNEL_DELETE", json!({"id": "9", "type": 1}));
         assert!(matches!(state.try_recv(), Ok(Event::PrivateChannelDelete(Snowflake(9)))), "a DM stays as it was");
+    }
+
+    #[test]
+    fn a_big_ready_is_read_server_by_server_and_comes_out_the_same() {
+        let ready = json!({
+            "user": {"id": "5", "username": "me"},
+            "session_id": "abc", "resume_gateway_url": "wss://resume.example",
+            "guilds": [
+                {"id": "1", "properties": {"name": "A"}, "voice_states": [{"user_id": "6", "channel_id": "9", "session_id": "s"}],
+                 "channels": [{"id": "9", "type": 2}]},
+                {"id": "2", "unavailable": true},
+                {"id": "3", "properties": {"name": "C"}, "voice_states": []},
+            ],
+            "merged_members": [[{"user_id": "5", "roles": ["40"]}, {"user_id": "6", "roles": []}], [], [{"user_id": "5", "roles": []}]],
+            // Past what the shortcut reads as a frame worth splitting.
+            "padding": "x".repeat(5000),
+        });
+        // As Discord writes it, `t` first.
+        let frame = format!(r#"{{"t":"READY","s":1,"op":0,"d":{ready}}}"#).into_bytes();
+        assert!(looks_like_ready(&frame));
+        let events = |parsed: Parsed| match parsed.what {
+            What::Dispatch(dispatched) => dispatched,
+            _ => panic!("not a dispatch"),
+        };
+        let split = events(parse_frame(&Parser::default(), &frame).unwrap());
+        let whole = Parser::default().parse(serde_json::from_slice(&frame).unwrap());
+        let whole = events(whole);
+        let summary = |d: &Dispatched| {
+            let Some(Event::Ready(ready)) = d.events.first() else { panic!("no READY") };
+            (
+                ready.guilds.iter().map(|g| g.id.0).collect::<Vec<_>>(),
+                ready.unavailable_guilds,
+                ready.voice_states.in_channel(Snowflake(1), Snowflake(9), |s| s.user_id.0.to_string()).len(),
+                ready.members.roles(Snowflake(1), Snowflake(6)).map(<[Snowflake]>::len),
+                ready.guilds[0].my_roles.clone(),
+                ready.session_id.clone(),
+                matches!(&d.established, Some(Established::Ready(Some((id, url)))) if id == "abc" && url == "wss://resume.example"),
+            )
+        };
+        assert_eq!(summary(&split), summary(&whole));
+        assert_eq!(summary(&split).0, [1, 3]);
+        assert_eq!(summary(&split).1, 1);
+        assert!(summary(&split).6);
     }
 
     #[test]
