@@ -76,6 +76,10 @@ pub(super) struct Parts {
     /// what it holds.
     pub(super) thread_slot: gtk::Box,
     pub(super) thread: RefCell<Option<gtk::Widget>>,
+    /// The quick reactions at the start of the bar and the button that adds
+    /// one (`nA` and `nc` in 812266), filled in as the row is.
+    pub(super) quick: gtk::Box,
+    pub(super) react_button: gtk::Button,
     pub(super) edit_button: gtk::Button,
     pub(super) reply_button: gtk::Button,
     pub(super) more: gtk::Button,
@@ -138,8 +142,18 @@ impl MessageRow {
             .focus_on_click(false)
             .css_classes(["flat", "message-action"])
             .build();
-        actions.append(&edit_button);
+        let quick = gtk::Box::builder().spacing(0).visible(false).build();
+        let react_button = gtk::Button::builder()
+            .icon_name("face-smile-symbolic")
+            .tooltip_text("Add Reaction")
+            .css_classes(["flat", "message-action"])
+            .visible(false)
+            .build();
+        // The client's order: reactions, reply, edit, then more.
+        actions.append(&quick);
+        actions.append(&react_button);
         actions.append(&reply_button);
+        actions.append(&edit_button);
         actions.append(&more);
         let overlay = gtk::Overlay::builder().child(&main).build();
         overlay.add_overlay(&actions);
@@ -166,6 +180,8 @@ impl MessageRow {
             content,
             thread_slot,
             thread: RefCell::new(None),
+            quick,
+            react_button,
             edit_button,
             reply_button,
             more,

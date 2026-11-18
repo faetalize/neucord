@@ -119,6 +119,9 @@ what arrived, IDENTIFY's key order and properties first.
   `poll-votes` (with `FAKE_POLL=1`, a finished poll in #general whose first
   answer has 130 voters) opens the list of who voted (`poll-votes <message>
   <answer>`) and asks for the first page of voters (`limit=100&type=2`);
+  `hover-bar` (with `FAKE_HOVER=1`, which shows every row's hover bar) shows
+  the bar over a message and clicks its first quick reaction (`hover-react
+  <n>`), which sends `location=Message Hover Bar`;
   `heartbeat` waits for five op 40s, the interval's among them;
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).

@@ -1925,6 +1925,13 @@ fn attach_message_actions(this: &std::rc::Weak<App>, cell: &MessageRow) {
             this.start_reply(&message, this.shift_held());
         }
     });
+    parts.react_button.connect_clicked({
+        let (this, cell) = (this.clone(), cell.downgrade());
+        move |button| {
+            let (Some(this), Some((_, message))) = (this.upgrade(), shown(&cell)) else { return };
+            this.pick_reaction(&message, button.upcast_ref());
+        }
+    });
     parts.more.connect_clicked({
         let (this, cell) = (this.clone(), cell.downgrade());
         move |button| {
@@ -2132,6 +2139,7 @@ impl App {
         }
         parts.edit_button.set_visible(editable);
         parts.reply_button.set_visible(self.offers_reply(message));
+        self.hover_reactions(parts, shown);
 
         let epoch = self.row_epoch.get();
         let changed = parts.shown.borrow().as_ref().is_none_or(|(was, at)| *at != epoch || was != message);

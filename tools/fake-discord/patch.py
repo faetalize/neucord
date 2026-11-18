@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Point a scratch copy of Neucord at the loopback fake and give it a command file."""
-import re, sys
+import os, re, sys
 root = sys.argv[1]
 
 def edit(path, old, new, count=1):
@@ -121,6 +121,19 @@ impl App {
                 let channel = self.account.state.borrow().channel;
                 if let Some(message) = channel.and_then(|c| self.message_in(c, message)) {
                     self.view_poll_votes(&message, answer);
+                }
+            }
+            // Click the nth quick reaction on the bar of the first row that has them.
+            Some("hover-react") => {
+                let n: i32 = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+                let rows: Vec<_> = self.rows.borrow().iter().filter_map(|r| r.upgrade()).collect();
+                let button = rows.iter().find_map(|row| {
+                    let quick = &row.parts().quick;
+                    quick.is_visible().then(|| quick.observe_children().item(n as u32).and_downcast::<gtk::Button>()).flatten()
+                });
+                match button {
+                    Some(button) => button.emit_clicked(),
+                    None => eprintln!("e2e: no quick reaction {n}"),
                 }
             }
             // The thread browser, its name search (as typed, then Enter) and the threads it lists.
@@ -886,3 +899,7 @@ edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''           
                 });
             }
             Some("quit") => {''')
+
+# `FAKE_HOVER=1` shows every row's hover bar, which a pointer would only show on the row it is over.
+if os.environ.get("FAKE_HOVER"):
+    edit("crates/app/src/style.css", ".message .message-action { opacity: 0;", ".message .message-action { opacity: 1;")
