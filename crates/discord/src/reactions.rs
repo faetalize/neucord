@@ -450,6 +450,8 @@ pub enum Location {
     ReactionPicker,
     /// One of the quick reactions at the top of the message menu.
     ContextMenu,
+    /// A quick reaction on the bar over a message.
+    HoverBar,
 }
 
 impl Location {
@@ -459,8 +461,23 @@ impl Location {
             Location::InlineButton => "Message Inline Button",
             Location::ReactionPicker => "Message Reaction Picker",
             Location::ContextMenu => "Message Context Menu",
+            Location::HoverBar => "Message Hover Bar",
         }
     }
+}
+
+/// The reactions on the bar over a message, three (`nA` in 812266): the ones
+/// used most, then `defaults` for what is missing.
+pub fn hover_bar<T: Clone + PartialEq>(frequent: &[T], defaults: &[T]) -> Vec<T> {
+    let mut all: Vec<T> = Vec::new();
+    let defaults = if frequent.len() >= 3 { &[] } else { defaults };
+    for item in frequent.iter().chain(defaults) {
+        if !all.contains(item) {
+            all.push(item.clone());
+        }
+    }
+    all.truncate(3);
+    all
 }
 
 /// `TOO_MANY_REACTIONS`: a message holds at most 20 different reactions.
@@ -579,6 +596,14 @@ mod tests {
     /// `(count, me, burst_count, me_burst)` of each reaction.
     fn counts(m: &Message) -> Vec<(u32, bool, u32, bool)> {
         m.reactions.iter().map(|r| (r.count, r.me, r.burst_count, r.me_burst)).collect()
+    }
+
+    #[test]
+    fn the_hover_bar_fills_up_to_three_with_the_defaults() {
+        assert_eq!(hover_bar(&[1, 2, 3, 4], &[7, 8, 9]), [1, 2, 3]);
+        assert_eq!(hover_bar(&[1], &[7, 1, 9]), [1, 7, 9], "the defaults follow, none twice");
+        assert_eq!(hover_bar::<u8>(&[], &[7, 8, 9, 10]), [7, 8, 9]);
+        assert_eq!(hover_bar(&[1, 2], &[2, 3]), [1, 2, 3]);
     }
 
     #[test]
