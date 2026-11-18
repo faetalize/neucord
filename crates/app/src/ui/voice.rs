@@ -26,18 +26,25 @@ use super::state::now_ms;
 use super::video::media_bytes;
 use crate::recorder::{self, Event, Recorder};
 
-/// Record Voice Message, in the attach menu.
+/// Record Voice Message, in the attach menu: greyed while a recording is
+/// being finished, as in the client (`disabled` in 316576, from `wX`).
 pub(super) const RECORD_VOICE: Entry<()> = Entry::Item(Item {
     name: "record-voice-message",
     label: "_Record Voice Message",
     shows: |app, _| app.voice_channel().is_some(),
-    kind: Kind::Action(|app, _| app.record_voice_message()),
+    kind: Kind::Gated { enabled: |app, _| !finishing(app.voice_phase()), run: |app, _| app.record_voice_message() },
 });
 
 /// How long the recorder has to start, and to finish, before it is given up
 /// on (198620's `d`).
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Whether a recording is being finished, while which the client starts
+/// nothing: it is stopping, or being sent (`wX` in 709372).
+fn finishing(phase: Option<Phase>) -> bool {
+    matches!(phase, Some(Phase::Finishing | Phase::Sending))
+}
 
 /// How a press on the waveform goes: pressed, dragged, let go.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -442,11 +449,12 @@ impl App {
     pub(super) fn record_voice_message(self: &Rc<Self>) {
         let Some(channel) = self.voice_channel() else { return };
         // The client starts nothing while another recording is being finished.
-        let draft = self.voice.draft.borrow().as_ref().map(|d| (d.channel, d.phase));
-        match draft {
-            Some((_, Phase::Finishing | Phase::Sending)) => return,
-            Some((other, _)) => return self.ask_to_discard_voice(other),
-            None => {}
+        if finishing(self.voice_phase()) {
+            return;
+        }
+        let other = self.voice.draft.borrow().as_ref().map(|d| d.channel);
+        if let Some(other) = other {
+            return self.ask_to_discard_voice(other);
         }
         let recorder = match Recorder::start() {
             Ok(recorder) => recorder,
@@ -834,6 +842,16 @@ fn bars_of(levels: &[u8], count: usize, recording: bool) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::bars_of;
+
+    #[test]
+    fn nothing_starts_while_a_recording_is_being_finished() {
+        use super::{Phase, finishing};
+        assert!(finishing(Some(Phase::Finishing)) && finishing(Some(Phase::Sending)));
+        assert!(!finishing(None));
+        for phase in [Phase::Requesting, Phase::Recording, Phase::Recorded] {
+            assert!(!finishing(Some(phase)), "a draft that can be returned to or discarded asks first");
+        }
+    }
 
     #[test]
     fn recording_scrolls_and_a_finished_one_fits() {
