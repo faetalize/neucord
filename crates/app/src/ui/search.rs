@@ -41,9 +41,11 @@ pub(super) struct Saved {
 pub(super) struct View {
     dialog: adw::Dialog,
     context: Context,
-    entry: gtk::Entry,
+    pub(super) entry: gtk::Entry,
     suggestions: gtk::ListBox,
     offered: RefCell<Vec<Suggestion>>,
+    /// The text whose names were last asked of the server's members.
+    asked_members: RefCell<String>,
     selected: Cell<Option<usize>>,
     summary: gtk::Label,
     sort: gtk::DropDown,
@@ -126,9 +128,10 @@ impl App {
         self.pins_button.set_visible(pins);
     }
 
-    /// People we hold the details of: friends, the people in our DMs, and
-    /// the authors and mentions of the messages the open channel has.
-    fn known_users(&self, state: &State) -> Vec<User> {
+    /// People we hold the details of: friends, the people in our DMs, the
+    /// authors and mentions of the messages the open channel has, and the
+    /// members of `guild` we know, which a member search brings.
+    fn known_users(&self, state: &State, guild: Option<Snowflake>) -> Vec<User> {
         let mut users: Vec<User> =
             state.relationships.list(discord::relationships::List::All).iter().map(|r| r.user.clone()).collect();
         users.extend(state.private_channels.iter().flat_map(|c| c.recipients.iter().cloned()));
@@ -138,6 +141,9 @@ impl App {
                 users.push(message.author);
                 users.extend(message.mentions);
             }
+        }
+        if let Some(guild) = guild {
+            users.extend(state.members.of_guild(guild).filter_map(|(id, _)| state.whole_users.get(&id.0).cloned()));
         }
         let mut seen = std::collections::HashSet::new();
         users.retain(|u| seen.insert(u.id));
@@ -180,7 +186,11 @@ impl App {
                     .filter_map(|c| Some((c.name.clone()?, c.id))),
             );
         }
-        Known { users: self.known_users(&state), channels, me: state.me().unwrap_or_default() }
+        let guild = match context {
+            Context::Guild(id) => Some(id),
+            Context::Channel(id) => state.find_channel(id).and_then(|(guild, _)| guild.map(|g| g.id)),
+        };
+        Known { users: self.known_users(&state, guild), channels, me: state.me().unwrap_or_default() }
     }
 
     /// Open the search box, or close it.
@@ -368,6 +378,7 @@ impl View {
             entry,
             suggestions,
             offered: RefCell::default(),
+            asked_members: RefCell::default(),
             selected: Cell::new(None),
             summary,
             sort,
@@ -542,12 +553,27 @@ impl View {
     }
 
     /// What the box offers for what is typed.
-    fn suggest(self: &Rc<Self>, app: &Rc<App>) {
+    pub(super) fn suggest(self: &Rc<Self>, app: &Rc<App>) {
         let text = self.entry.text().to_string();
         let cursor = usize::try_from(self.entry.position()).unwrap_or(0);
         let known = app.search_known(self.context);
         let tokens = known.tokens(self.context, &text);
         let names: Vec<String> = known.channels.iter().map(|(n, _)| n.clone()).collect();
+        // A name after `from:` or `mentions:` is asked of the server's members, as the client does when
+        // what is typed has changed (692986).
+        if let Some(query) = search::member_query(&text, cursor, &tokens)
+            && *self.asked_members.borrow() != text
+        {
+            *self.asked_members.borrow_mut() = text.clone();
+            let state = app.account.state.borrow();
+            let guild = match self.context {
+                Context::Guild(guild) => Some(guild),
+                Context::Channel(channel) => state.find_channel(channel).and_then(|(guild, _)| guild.map(|g| g.id)),
+            };
+            if let (Some(guild), Some(gateway)) = (guild, &state.gateway) {
+                gateway.search_members(guild, &query, 10);
+            }
+        }
         let offered = search::suggest(
             &text,
             cursor,

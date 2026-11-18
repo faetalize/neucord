@@ -110,6 +110,8 @@ pub(super) struct Pane {
     shown: RefCell<Option<Target>>,
     /// The ranges are sent when the list has rested.
     settle: RefCell<Option<glib::SourceId>>,
+    /// The wait before typing `@here` asks for the list, and when it began.
+    here: RefCell<Option<(glib::SourceId, std::time::Instant)>>,
 }
 
 impl Pane {
@@ -138,6 +140,7 @@ impl Pane {
             toggles: RefCell::default(),
             shown: RefCell::default(),
             settle: RefCell::default(),
+            here: RefCell::default(),
         }
     }
 }
@@ -311,6 +314,52 @@ impl App {
         if let Some(gateway) = &state.gateway {
             gateway.send_subscriptions(&messages);
         }
+    }
+
+    /// The message box changed: if `@here` is in it, the channel's member
+    /// list is asked for, which counts who `@here` reaches (`R` in 486319).
+    /// It waits for the typing to rest, 200 ms, but not past 500 ms from the
+    /// first change (lodash's `debounce` with `maxWait`).
+    pub(super) fn here_typed(self: &Rc<Self>) {
+        const REST: Duration = Duration::from_millis(200);
+        const LONGEST: Duration = Duration::from_millis(500);
+        let began = match self.members.here.take() {
+            Some((old, began)) => {
+                old.remove();
+                began
+            }
+            None => std::time::Instant::now(),
+        };
+        let wait = REST.min(LONGEST.saturating_sub(began.elapsed()));
+        let this = Rc::downgrade(self);
+        let id = glib::timeout_add_local_once(wait, move || {
+            let Some(this) = this.upgrade() else { return };
+            this.members.here.take();
+            this.ask_first_range();
+        });
+        *self.members.here.borrow_mut() = Some((id, began));
+    }
+
+    /// Ask for the first range of the open channel's member list, unless it
+    /// is known, when the box holds `@here` (and is not longer than a message
+    /// may be).
+    fn ask_first_range(&self) {
+        let buffer = self.composer.buffer();
+        let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+        let state = &mut *self.account.state.borrow_mut();
+        let length = text.chars().count();
+        if length < "@here".len() || length > state.limits().max_message_length() || !text.contains("@here") {
+            return;
+        }
+        let Some(channel) = state.channel else { return };
+        let Some((Some(guild), open)) = state.find_channel(channel) else { return };
+        let list = member_list::list_id(guild, open);
+        if state.member_lists.get(guild.id, &list).is_some_and(|l| !l.is_unknown()) {
+            return;
+        }
+        let guild = guild.id;
+        state.subscriptions.ranges(guild, channel, discord::subscriptions::first_page());
+        self.send_subscriptions(state);
     }
 
     /// Once the list has rested, ask for the rows it shows (`NJ`, 361610).

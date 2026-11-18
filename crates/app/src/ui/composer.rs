@@ -372,6 +372,7 @@ impl App {
                         this.queue_command_sync();
                     }
                 } else {
+                    this.here_typed();
                     this.update_mention_popup();
                     this.refresh_chat_bar();
                 }
