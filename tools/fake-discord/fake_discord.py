@@ -223,6 +223,20 @@ def guild():
         {"id": "604", "type": 0, "name": "after-dark", "position": 4, "parent_id": None, "nsfw": True,
          "permission_overwrites": [], "flags": 0},
     ]
+    threads = []
+    if os.environ.get("FAKE_THREADS"):
+        # Two active threads of #general (#323): one with its newest message, one without.
+        now = time.strftime("%Y-%m-%dT%H:%M:%S.000000+00:00", time.gmtime())
+        recent = {"id": snowflake_now(), "channel_id": "7201", "author": ALICE, "content": "see you there at **noon**",
+                  "timestamp": now, "edited_timestamp": None, "tts": False, "mention_everyone": False, "mentions": [],
+                  "mention_roles": [], "attachments": [], "embeds": [], "pinned": False, "type": 0, "flags": 0}
+        for tid, name, last in [("7201", "lunch plans", recent), ("7202", "quiet corner", None)]:
+            threads.append({"id": tid, "type": 11, "guild_id": "500", "parent_id": "600", "name": name,
+                            "owner_id": "301", "last_message_id": last["id"] if last else None, "message_count": 1,
+                            "member_count": 1, "rate_limit_per_user": 0, "flags": 0,
+                            "thread_metadata": {"archived": False, "locked": False, "archive_timestamp": now,
+                                                "auto_archive_duration": 4320, "create_timestamp": now},
+                            **({"most_recent_message": last} if last else {})})
     return {"id": "500", "properties": {"name": "Test Server", "owner_id": "100" if OWNER else "999", "icon": None, "features": [],
             "premium_tier": 0, "default_message_notifications": 0, "nsfw_level": NSFW["level"],
             "owner_configured_content_level": NSFW["owner"]}, "roles": [
@@ -230,7 +244,7 @@ def guild():
          "permissions": str(VIEW | SEND | HISTORY | ATTACH | REACT | CONNECT | USE_APPLICATION_COMMANDS)},
         {"id": "510", "name": "Mods", "permissions": "0", "position": 1, "color": 0, "hoist": False,
          "mentionable": True, "managed": False, "flags": 0}],
-        "channels": channels, "emojis": [], "stickers": guild_stickers(), "threads": [], "member_count": 3,
+        "channels": channels, "emojis": [], "stickers": guild_stickers(), "threads": threads, "member_count": 3,
         "data_mode": "full", "joined_at": "2026-01-01T00:00:00.000000+00:00", "large": False, "lazy": True}
 
 
@@ -1019,6 +1033,12 @@ class Handler(BaseHTTPRequestHandler):
                     log(kind="identify", raw=text, at=time.time())
                     send(0, ready(), "READY")
                     send(0, supplemental(), "READY_SUPPLEMENTAL")
+                    threads = guild()["threads"]
+                    if threads:
+                        # The active threads, with the newest message of those that have one, as Discord syncs them.
+                        recent = [t.pop("most_recent_message") for t in threads if "most_recent_message" in t]
+                        send(0, {"guild_id": "500", "threads": threads, "members": [], "most_recent_messages": recent},
+                             "THREAD_LIST_SYNC")
                     SESSION[0] = send
                     if IDENTIFIES[0] == 1 and os.environ.get("FAKE_REIDENTIFY"):
                         threading.Timer(float(os.environ["FAKE_REIDENTIFY"]), lambda: send(9, False)).start()

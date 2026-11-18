@@ -282,7 +282,7 @@ impl View {
                 .map(|t| Line::Thread {
                     id: t.id,
                     name: t.name.clone().unwrap_or_else(|| "unnamed".into()),
-                    detail: detail(t, &state.users),
+                    detail: detail(t, &state.users, &state.relationships),
                 })
                 .collect();
             return if lines.is_empty() { vec![Line::Empty] } else { lines };
@@ -300,7 +300,7 @@ impl View {
             lines.extend(threads.iter().map(|t| Line::Thread {
                 id: t.id,
                 name: t.name.clone().unwrap_or_else(|| "unnamed".into()),
-                detail: detail(t, &state.users),
+                detail: detail(t, &state.users, &state.relationships),
             }));
         };
         let plural = |n: usize| if n == 1 { "" } else { "s" };
@@ -419,13 +419,39 @@ fn thread_line(app: &Rc<App>, thread: Snowflake, name: &str, detail: &str) -> gt
 
 /// "Started by A · Last active 3 hours ago" for an archived thread, whose
 /// starter the client names; for an active one, only when it was last active.
-fn detail(thread: &Channel, users: &std::collections::HashMap<u64, String>) -> String {
+/// A thread row's second line (`ThreadBrowserRowSubtext`, 28579): for an
+/// active thread its newest message with who wrote it, or that there are none,
+/// and when; for an archived one who started it and when it was last active.
+fn detail(
+    thread: &Channel,
+    users: &std::collections::HashMap<u64, String>,
+    relationships: &discord::relationships::Relationships,
+) -> String {
     let last = thread
         .last_message_id
         .map(|id| id.unix_ms())
         .or_else(|| thread.thread_metadata.as_ref().and_then(|m| m.archive_timestamp))
         .unwrap_or_else(|| thread.id.unix_ms());
-    let active = format!("Last active {} ago", system::humanize(((now_ms() - last) / 1000).max(0)));
+    let ago = system::humanize(((now_ms() - last) / 1000).max(0));
+    if thread.is_active_thread() {
+        let written = |m: &discord::Message| {
+            let (blocked, ignored) = (m.is_blocked_by(|id| relationships.is_blocked(id)), false);
+            let text = m.thread_preview(blocked, ignored);
+            let text = discord::markup::parse(&text);
+            let plain = crate::render::plain_text(&text, &crate::render::Names::default());
+            let name = m.author.display_name();
+            format!("{name}: {}", plain.lines().next().unwrap_or_default())
+        };
+        return match &thread.recent_message {
+            Some(message) => {
+                let when = message.id.unix_ms();
+                let ago = system::humanize(((now_ms() - when) / 1000).max(0));
+                format!("{} · {ago} ago", written(message))
+            }
+            None => format!("No recent messages · {ago} ago"),
+        };
+    }
+    let active = format!("Last active {ago} ago");
     match thread.owner_id.and_then(|owner| users.get(&owner.0)).filter(|_| thread.is_archived()) {
         Some(owner) => format!("Started by {owner} · {active}"),
         None => active,
