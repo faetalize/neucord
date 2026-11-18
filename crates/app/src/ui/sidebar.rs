@@ -32,6 +32,21 @@ pub(super) const COPY_CHANNEL_LINK: Entry<ChannelTarget> = Entry::Item(Item {
     }),
 });
 
+/// Close DM, on a one-to-one DM's row (486524, in the group of its Mark As
+/// Read). A group DM's own item is Leave Group.
+pub(super) const CLOSE_DM: Entry<ChannelTarget> = Entry::Item(Item {
+    name: "close-dm",
+    label: "Close _DM",
+    shows: |app, target| {
+        app.account
+            .state
+            .borrow()
+            .find_channel(target.0)
+            .is_some_and(|(guild, c)| guild.is_none() && c.kind == discord::ChannelKind::Dm)
+    },
+    kind: Kind::Action(|app, target| app.close_dm(target.0)),
+});
+
 /// Open Chat, on a voice or stage channel (428631): the client's other way
 /// into the chat, which it shows with Connect. Without View Channel too the
 /// row isn't listed, so `can_view` stands for both.

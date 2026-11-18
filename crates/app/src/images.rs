@@ -46,6 +46,11 @@ const BYTES_BUDGET: u64 = 32 * MIB;
 const TEXTURE_BUDGET: u64 = 96 * MIB;
 /// Video files on disk.
 const VIDEO_BUDGET: u64 = 256 * MIB;
+/// Image files on disk (encoded, so about what the network sent).
+const IMAGE_DISK_BUDGET: u64 = 256 * MIB;
+/// Files written to the image cache between walks of its directory, which
+/// is what keeps it within its budget.
+const WRITES_PER_PRUNE: u32 = 200;
 
 /// Shared image cache and fetcher. Clone-cheap (`Rc` inside).
 #[derive(Clone)]
@@ -68,8 +73,15 @@ struct Inner {
     /// Decoded animations by URL, while some widget still holds one.
     moving: RefCell<HashMap<String, glib::WeakRef<gdk::Paintable>>>,
     motion: Motion,
+    /// Image files written since the cache directory was last pruned.
+    written: Cell<u32>,
     /// URLs currently being fetched → wakers waiting for the bytes.
     pending: RefCell<HashMap<String, Vec<async_channel::Sender<Option<glib::Bytes>>>>>,
+}
+
+/// `url` without its query, for a log: a CDN link's query is its signature.
+fn unsigned(url: &str) -> &str {
+    url.split('?').next().unwrap_or(url)
 }
 
 impl Images {
@@ -80,7 +92,7 @@ impl Images {
         let (cache_dir, video_dir) = (cache.join("images"), cache.join("videos"));
         let _ = std::fs::create_dir_all(&cache_dir);
         let _ = std::fs::create_dir_all(&video_dir);
-        Images(Rc::new(Inner {
+        let images = Images(Rc::new(Inner {
             session,
             cache_dir,
             video_dir,
@@ -91,8 +103,13 @@ impl Images {
             lazy: Cell::new(false),
             moving: RefCell::default(),
             motion: Motion::new(),
+            written: Cell::new(0),
             pending: RefCell::new(HashMap::new()),
-        }))
+        }));
+        // What an earlier run left may already be over budget.
+        let dir = images.0.cache_dir.clone();
+        drop(gio::spawn_blocking(move || prune(&dir, IMAGE_DISK_BUDGET)));
+        images
     }
 
     pub fn set_scale(&self, scale: i32) {
@@ -131,18 +148,30 @@ impl Images {
     /// Fetch an image and hand it to `done` as a still: at once if it is
     /// decoded already, else once it has loaded, and never if it fails to.
     pub fn load(&self, url: &str, done: impl FnOnce(gdk::Paintable) + 'static) {
+        self.load_or(url, done, || {});
+    }
+
+    /// [`load`](Self::load), telling `failed` when the image can't be
+    /// fetched or decoded, for what shows a spinner until it has the picture.
+    pub fn load_or(&self, url: &str, done: impl FnOnce(gdk::Paintable) + 'static, failed: impl FnOnce() + 'static) {
         if let Some(texture) = self.0.textures.borrow_mut().get(url) {
             return done(texture.upcast());
         }
         let url = url.to_owned();
         let this = self.clone();
         glib::spawn_future_local(async move {
-            let Some(bytes) = this.load_bytes(&url).await else { return };
+            let Some(bytes) = this.load_bytes(&url).await else {
+                eprintln!("images: could not fetch {}", unsigned(&url));
+                return failed();
+            };
             // Another picture may have decoded it while we waited.
             let cached = this.0.textures.borrow_mut().get(&url);
             let texture = match cached.map_or_else(|| gdk::Texture::from_bytes(&bytes), Ok) {
                 Ok(texture) => texture,
-                Err(_) => return eprintln!("images: could not decode {url}"),
+                Err(_) => {
+                    eprintln!("images: could not decode {}", unsigned(&url));
+                    return failed();
+                }
             };
             let size = texture.width() as u64 * texture.height() as u64 * 4;
             this.0.textures.borrow_mut().insert(&url, texture.clone(), size);
@@ -155,8 +184,20 @@ impl Images {
     /// keeps its frames advancing for as long as it is held, and one that
     /// doesn't decode arrives as its still.
     pub fn load_playing(&self, url: &str, animated: bool, done: impl FnOnce(gdk::Paintable, Option<Lease>) + 'static) {
+        self.load_playing_or(url, animated, done, || {});
+    }
+
+    /// [`load_playing`](Self::load_playing), telling `failed` when not even
+    /// the still can be had.
+    pub fn load_playing_or(
+        &self,
+        url: &str,
+        animated: bool,
+        done: impl FnOnce(gdk::Paintable, Option<Lease>) + 'static,
+        failed: impl FnOnce() + 'static,
+    ) {
         if !animated {
-            return self.load(url, |paintable| done(paintable, None));
+            return self.load_or(url, |paintable| done(paintable, None), failed);
         }
         let (this, url) = (self.clone(), url.to_owned());
         glib::spawn_future_local(async move {
@@ -165,7 +206,7 @@ impl Images {
                     let lease = animated::play(&paintable);
                     done(paintable, lease);
                 }
-                None => this.load(&url, |paintable| done(paintable, None)),
+                None => this.load_or(&url, |paintable| done(paintable, None), failed),
             }
         });
     }
@@ -421,14 +462,20 @@ impl Images {
     async fn fetch_uncached(&self, url: &str) -> Option<glib::Bytes> {
         let path = self.disk_path(url);
         let read = path.clone();
-        if let Ok(Ok(data)) = gio::spawn_blocking(move || std::fs::read(read)).await {
+        if let Ok(Ok(data)) = gio::spawn_blocking(move || touched_read(&read)).await {
             return Some(glib::Bytes::from_owned(data));
         }
         let bytes = self.download(url).await?;
         // Nothing waits for the file: the bytes are in the memory cache by now.
         let copy = bytes.clone();
+        let written = self.0.written.get() + 1;
+        self.0.written.set(written % WRITES_PER_PRUNE);
+        let (dir, prune_now) = (self.0.cache_dir.clone(), written >= WRITES_PER_PRUNE);
         drop(gio::spawn_blocking(move || {
             let _ = write_atomic(&path, &copy);
+            if prune_now {
+                prune(&dir, IMAGE_DISK_BUDGET);
+            }
         }));
         Some(bytes)
     }
@@ -448,7 +495,7 @@ impl Images {
         // walk after it, stay off the main loop.
         gio::spawn_blocking(move || {
             write_atomic(&path, &bytes).ok()?;
-            prune_videos(&dir);
+            prune(&dir, VIDEO_BUDGET);
             Some(path)
         })
         .await
@@ -479,9 +526,19 @@ fn cache_key(url: &str) -> String {
         .unwrap_or_else(|| url.bytes().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Videos' files on disk are kept within [`VIDEO_BUDGET`], least recently
-/// played going first.
-fn prune_videos(dir: &Path) {
+/// `path`'s bytes, its modification time set to now: what stands for last
+/// use, so [`prune`] lets go of the files nobody asks for.
+fn touched_read(path: &Path) -> std::io::Result<Vec<u8>> {
+    let data = std::fs::read(path)?;
+    if let Ok(file) = std::fs::File::options().write(true).open(path) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
+    Ok(data)
+}
+
+/// The files of `dir` are kept within `budget`, least recently used going
+/// first.
+fn prune(dir: &Path, budget: u64) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let files = entries
         .flatten()
@@ -490,7 +547,7 @@ fn prune_videos(dir: &Path) {
             Some((e.path(), meta.len(), meta.modified().ok()?))
         })
         .collect();
-    for path in lru::over_budget(files, VIDEO_BUDGET) {
+    for path in lru::over_budget(files, budget) {
         let _ = std::fs::remove_file(path);
     }
 }
@@ -554,7 +611,7 @@ fn animated_paintable(bytes: &glib::Bytes) -> Option<gdk::Paintable> {
 
 #[cfg(test)]
 mod tests {
-    use super::{request_size, write_atomic};
+    use super::{prune, request_size, touched_read, write_atomic};
 
     #[test]
     fn a_written_file_is_whole_and_leaves_nothing_behind() {
@@ -565,6 +622,27 @@ mod tests {
         write_atomic(&path, b"second, and longer").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"second, and longer");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no .part file stays");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_directory_is_pruned_by_last_use_and_a_read_is_a_use() {
+        let dir = std::env::temp_dir().join(format!("neucord-prune-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let at = |seconds| std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+        for (name, used) in [("old", 1), ("mid", 2), ("new", 3)] {
+            let path = dir.join(name);
+            std::fs::write(&path, [0u8; 10]).unwrap();
+            std::fs::File::options().write(true).open(&path).unwrap().set_modified(at(used)).unwrap();
+        }
+        // Reading the oldest makes it the newest.
+        assert_eq!(touched_read(&dir.join("old")).unwrap().len(), 10);
+        prune(&dir, 20);
+        let mut left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        left.sort();
+        assert_eq!(left, ["new", "old"], "the least recently used went");
+        prune(&dir, 100);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "within budget, nothing goes");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

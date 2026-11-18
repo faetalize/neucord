@@ -347,6 +347,10 @@ pub struct Experiments {
     apex: HashMap<(u64, String), HashMap<u32, Assignment>>,
     user: HashMap<u32, i64>,
     guild: HashMap<u32, Rollout>,
+    /// Variants Discord forced for this session by experiment hash
+    /// (`EXPERIMENT_SESSION_OVERRIDE_CREATE`), which beat any assignment, of
+    /// any unit.
+    session_overrides: HashMap<u32, Assignment>,
 }
 
 impl Experiments {
@@ -371,7 +375,7 @@ impl Experiments {
             .collect();
         let guild =
             ready["guild_experiments"].as_array().into_iter().flatten().filter_map(Rollout::from_value).collect();
-        Experiments { apex, user, guild }
+        Experiments { apex, user, guild, session_overrides: HashMap::new() }
     }
 
     /// Our own Apex assignments, as the client keeps them between launches
@@ -395,7 +399,22 @@ impl Experiments {
     /// replaced whole and the rest stays, as the client's
     /// `setExperimentAssignments` does (340344).
     pub fn apply_update(&mut self, update: Experiments) {
+        // Fresh assignments end the session's overrides (`clearSessionOverrides`).
+        self.session_overrides.clear();
         self.apex.extend(update.apex);
+    }
+
+    /// Discord forces `variant` of the experiment `name` for this session
+    /// (`createSessionOverride` in 340344): it answers for the user and for
+    /// every server, and nothing about it is tracked.
+    pub fn override_variant(&mut self, name: &str, variant: i64) {
+        let flags = Assignment::IS_OVERRIDE;
+        self.session_overrides.insert(murmur3(name), Assignment { variant, revision: 0, flags, config: None });
+    }
+
+    /// Discord took the override of `name` back (`deleteSessionOverride`).
+    pub fn remove_override(&mut self, name: &str) {
+        self.session_overrides.remove(&murmur3(name));
     }
 
     /// Our Apex assignment for a user experiment, or `None` for its default
@@ -427,7 +446,8 @@ impl Experiments {
     }
 
     fn apex_assignment(&self, unit: u64, id: &str, name: &str) -> Option<&Assignment> {
-        self.apex.get(&(unit, id.to_string()))?.get(&murmur3(name))
+        let hash = murmur3(name);
+        self.session_overrides.get(&hash).or_else(|| self.apex.get(&(unit, id.to_string()))?.get(&hash))
     }
 
     /// Our bucket in an older user experiment.
@@ -585,6 +605,31 @@ mod tests {
         assert_eq!(experiments.apex_user(ME, "2099-01-eligible-only"), None);
         // Someone else's assignments aren't ours.
         assert_eq!(experiments.apex_user(Snowflake(11), "2099-01-on"), None);
+    }
+
+    #[test]
+    fn a_session_override_beats_every_assignment_until_fresh_ones_come() {
+        let mut experiments = Experiments::from_ready(&ready(json!({
+            "1": { "10": { "assignments": [[murmur3("2099-01-on"), 1, 0, 1], [murmur3("2099-01-eligible"), 0, 8, 1]] } },
+            "3": { "20": { "assignments": [[murmur3("2099-01-eligible"), 2, 0, 1]] } },
+        })));
+        let user = |e: &Experiments, name| e.apex_user(ME, name).map(|a| a.variant);
+        experiments.override_variant("2099-01-on", 2);
+        assert_eq!(user(&experiments, "2099-01-on"), Some(2), "over the assignment");
+        experiments.override_variant("2099-01-new", 1);
+        assert_eq!(user(&experiments, "2099-01-new"), Some(1), "and where there was none");
+        // Forced, so a server answers whatever the user's eligibility.
+        experiments.override_variant("2099-01-eligible", 3);
+        assert_eq!(experiments.apex_guild(ME, Snowflake(20), "2099-01-eligible").map(|a| a.variant), Some(3));
+
+        experiments.remove_override("2099-01-on");
+        assert_eq!(user(&experiments, "2099-01-on"), Some(1), "deleted, the assignment answers again");
+        experiments.remove_override("2099-01-never-made");
+
+        experiments.apply_update(Experiments::default());
+        assert_eq!(user(&experiments, "2099-01-new"), None, "fresh assignments clear the rest");
+        let guild = experiments.apex_guild(ME, Snowflake(20), "2099-01-eligible");
+        assert_eq!(guild.map(|a| a.variant), Some(2), "the server's own assignment is back");
     }
 
     #[test]

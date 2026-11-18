@@ -11,8 +11,8 @@ use discord::frecency::{
 };
 use discord::gifs::{Starred, TooBig, favorited, is_favorite, unfavorited};
 use discord::settings_sync::Schedule;
-use gtk::glib;
 use gtk::prelude::*;
+use gtk::{gio, glib};
 
 use super::App;
 use super::state::now_ms;
@@ -38,7 +38,13 @@ impl App {
         let this = self.clone();
         let epoch = self.account.epoch.get();
         glib::spawn_future_local(async move {
-            let proto = rest.settings_proto(2).await;
+            let proto = match rest.settings_proto(2).await {
+                // Decoded off the main loop, as CONTRIBUTING asks for anything that parses a payload.
+                Ok(proto) => gio::spawn_blocking(move || (FrecencyPatch::from_proto_bytes(&proto), proto))
+                    .await
+                    .map_err(|_| "decoding panicked".to_owned()),
+                Err(e) => Err(e.to_string()),
+            };
             // Of an account that was left meanwhile: its state, which waited, is gone.
             if this.account.epoch.get() != epoch {
                 return;
@@ -47,8 +53,7 @@ impl App {
             state.frecency_loading = false;
             let waiting = std::mem::take(&mut state.frecency_waiting);
             match proto {
-                Ok(proto) => {
-                    let patch = FrecencyPatch::from_proto_bytes(&proto);
+                Ok((patch, proto)) => {
                     let offline = state.frecency_sync.connected(proto);
                     state.frecency.load(patch.unwrap_or_default(), now_ms() as u64);
                     drop(state);

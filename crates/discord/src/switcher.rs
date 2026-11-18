@@ -758,6 +758,27 @@ pub fn visited(history: &mut Vec<Snowflake>, channel: Snowflake) {
     history.truncate(HISTORY);
 }
 
+/// The history as the client saves it (`getState` of `QuickSwitcherStore`,
+/// 174768): `{"channelHistory": [ids]}`, newest first.
+pub fn history_json(history: &[Snowflake]) -> String {
+    serde_json::json!({ "channelHistory": history.iter().map(|c| c.0.to_string()).collect::<Vec<_>>() }).to_string()
+}
+
+/// What [`history_json`] saved. A file that doesn't read leaves no history,
+/// and one with more than the client keeps (or a channel twice) is cut to
+/// what [`visited`] would have left.
+pub fn restored_history(json: &str) -> Vec<Snowflake> {
+    let saved: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
+    let mut history = Vec::new();
+    for id in saved["channelHistory"].as_array().into_iter().flatten().filter_map(|id| id.as_str()?.parse().ok()) {
+        let id = Snowflake(id);
+        if !history.contains(&id) && history.len() < HISTORY {
+            history.push(id);
+        }
+    }
+    history
+}
+
 /// Where the selection starts: the first result, never a heading
 /// (`Vv` in 662090 from -1 going down).
 pub fn first_selectable(rows: &[Row]) -> Option<usize> {
@@ -878,6 +899,18 @@ mod tests {
             ],
             relationships: friends(&[(300, "alice", None), (303, "dave", Some("Dad"))]),
         }
+    }
+
+    #[test]
+    fn the_history_is_saved_and_read_back() {
+        let history = [Snowflake(5), Snowflake(3), Snowflake(9)];
+        assert_eq!(history_json(&history), r#"{"channelHistory":["5","3","9"]}"#);
+        assert_eq!(restored_history(&history_json(&history)), history);
+        assert!(restored_history("").is_empty() && restored_history("not json").is_empty());
+        assert!(restored_history(r#"{"channelHistory": "x"}"#).is_empty());
+        let long = (1..=12).map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(",");
+        assert_eq!(restored_history(&format!(r#"{{"channelHistory": [{long}, "1", 7, "x"]}}"#)).len(), HISTORY);
+        assert_eq!(restored_history(r#"{"channelHistory": ["2", "1", "2"]}"#), [Snowflake(2), Snowflake(1)]);
     }
 
     #[test]

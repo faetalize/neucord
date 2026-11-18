@@ -577,19 +577,32 @@ impl Viewer {
             }
         }
         let viewer = self.clone();
+        let (fail_viewer, fail_spinner) = (self.clone(), spinner.clone());
         // The viewer is dark, as the client's modal is.
-        app.images.load_playing(&url, item.animated, move |paintable, lease| {
-            let current = viewer.0.state.borrow().open.as_ref().is_some_and(|open| open.generation == generation);
-            if current {
-                picture.set_paintable(Some(&paintable));
-                if let Some(open) = viewer.0.state.borrow_mut().open.as_mut() {
-                    open.lease = lease;
+        app.images.load_playing_or(
+            &url,
+            item.animated,
+            move |paintable, lease| {
+                let current = viewer.0.state.borrow().open.as_ref().is_some_and(|open| open.generation == generation);
+                if current {
+                    picture.set_paintable(Some(&paintable));
+                    if let Some(open) = viewer.0.state.borrow_mut().open.as_mut() {
+                        open.lease = lease;
+                    }
+                    if let Some(spinner) = spinner {
+                        spinner.set_visible(false);
+                    }
                 }
-                if let Some(spinner) = spinner {
+            },
+            move || {
+                let current =
+                    fail_viewer.0.state.borrow().open.as_ref().is_some_and(|open| open.generation == generation);
+                if let Some(spinner) = fail_spinner.filter(|_| current) {
                     spinner.set_visible(false);
+                    fail_viewer.0.holder.append(&load_failed());
                 }
-            }
-        });
+            },
+        );
     }
 
     /// The URL to load `item` from, in `fitted`: the proxy's, sized.
@@ -858,6 +871,14 @@ impl Viewer {
         let target = Target { item, src };
         menus::popup(&app, menus::VIEWER_MEDIA, target, &self.0.root, At::Point(x, y));
     }
+}
+
+/// What the viewer shows in place of a picture it couldn't load.
+fn load_failed() -> gtk::Widget {
+    let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).build();
+    page.append(&gtk::Image::builder().icon_name("image-missing-symbolic").pixel_size(48).build());
+    page.append(&gtk::Label::new(Some("This image could not be loaded")));
+    page.upcast()
 }
 
 /// Mark `widget` as one a click doesn't close the viewer through.

@@ -74,6 +74,7 @@ impl App {
             self.roster.borrow_mut().remove(id);
             self.refresh_account_views();
             super::usage::forget_usage(id);
+            super::switcher::forget_history(id);
             super::identity::forget(id);
             if let Err(e) = session::clear_token(id).await {
                 eprintln!("logout: {e}");
@@ -366,6 +367,16 @@ impl App {
                     }
                     self.refresh_attach();
                 }
+                Event::ExperimentOverride { name, variant } => {
+                    {
+                        let mut state = self.account.state.borrow_mut();
+                        match variant {
+                            Some(variant) => state.experiments.override_variant(&name, variant),
+                            None => state.experiments.remove_override(&name),
+                        }
+                    }
+                    self.refresh_attach();
+                }
                 Event::RequiredActionUpdate(action) => {
                     self.account.state.borrow_mut().required_action = action;
                     self.apply_required_action();
@@ -606,6 +617,7 @@ impl App {
         }
         // What was used and not saved: a closed app's, and a lost connection's edit.
         self.restore_usage();
+        self.restore_history();
         let offline_frecency = self.account.state.borrow_mut().frecency_sync.reconnected();
         if let Some(schedule) = offline_frecency {
             self.save_frecency_after(schedule);
@@ -740,6 +752,25 @@ impl App {
         if open {
             self.refresh_member_rows();
         }
+    }
+
+    /// Close the DM `channel` (`closePrivateChannel` in 308528, from the row's
+    /// menu, 486524). It goes from here at once, and the one we had open
+    /// leaves for Friends, before Discord answers; its request is the one
+    /// that leaves a group, which asks for no confirmation here either.
+    pub(super) fn close_dm(self: &Rc<Self>, channel: Snowflake) {
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
+        if self.account.state.borrow().channel == Some(channel) {
+            self.account.state.borrow_mut().private_channels.retain(|c| c.id != channel);
+            self.show_friends();
+        } else {
+            self.on_private_channel_delete(channel);
+        }
+        glib::spawn_future_local(async move {
+            if let Err(e) = rest.leave_group(channel, false).await {
+                eprintln!("close DM: {e}");
+            }
+        });
     }
 
     pub(super) fn on_private_channel_delete(self: &Rc<Self>, id: Snowflake) {
@@ -939,6 +970,18 @@ impl App {
     /// the message box and Reply follow what we may still do.
     pub(super) fn permissions_changed(self: &Rc<Self>, guild: Option<Snowflake>) {
         self.refresh_badges();
+        // What we held of a channel we can't view any more is asked for again.
+        {
+            let state = self.account.state.borrow();
+            let gone: Vec<Snowflake> = match guild {
+                Some(guild) => state.unviewable(guild),
+                None => state.guilds.iter().flat_map(|g| state.unviewable(g.id)).collect(),
+            };
+            let mut timelines = self.account.timelines.borrow_mut();
+            for channel in gone {
+                timelines.held.forget(channel);
+            }
+        }
         let (open, viewable, replyable, editable) = {
             let state = self.account.state.borrow();
             let open = state.guild.filter(|&open| guild.is_none_or(|id| id == open));
