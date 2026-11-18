@@ -56,13 +56,15 @@ impl App {
         self.config.get(&config::MINIMIZE_TO_TRAY) && self.tray.shown() && !self.background_refused.get()
     }
 
+    /// The client's "disable unread badge": no dot for unread without a
+    /// mention in the tray, on the app icon or in the title.
+    pub(super) fn unread_badge_off(&self) -> bool {
+        !self.config.get(&config::UNREAD_BADGE)
+    }
+
     /// The icon says what the rail does, unless the option is off.
     pub(super) fn refresh_tray(&self) {
-        let alert = if self.config.get(&config::UNREAD_BADGE) {
-            self.account.state.borrow().tray_alert()
-        } else {
-            Alert::Quiet
-        };
+        let alert = if !self.unread_badge_off() { self.account.state.borrow().tray_alert() } else { Alert::Quiet };
         self.tray.set_alert(alert);
     }
 

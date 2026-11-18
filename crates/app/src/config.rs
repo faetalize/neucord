@@ -68,8 +68,8 @@ pub const MINIMIZE_TO_TRAY: Key = Key { group: "Background", name: "minimize-to-
 /// binary happened to be, such as a `cargo run` build.
 pub const OPEN_ON_STARTUP: Key = Key { group: "Background", name: "open-on-startup", default: false };
 
-/// The tray icon shows unread messages (the client's "Enable Unread Message
-/// Badge", on by default).
+/// Unread messages show on the tray icon, and as a dot on the app icon and
+/// in the title (the client's "Enable Unread Message Badge", on by default).
 pub const UNREAD_BADGE: Key = Key { group: "Background", name: "unread-badge", default: true };
 
 /// The member pane, docked beside the chat, was closed by the user.

@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::settings::UserStatus;
 use crate::{Snowflake, User};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +96,17 @@ impl Status {
             "idle" => Status::Idle,
             "dnd" => Status::DoNotDisturb,
             _ => Status::Offline,
+        }
+    }
+
+    /// How the status we set shows in a list: Invisible looks offline, as
+    /// it does to everyone else.
+    pub fn own(set: UserStatus) -> Self {
+        match set {
+            UserStatus::Online => Status::Online,
+            UserStatus::Idle => Status::Idle,
+            UserStatus::DoNotDisturb => Status::DoNotDisturb,
+            UserStatus::Invisible => Status::Offline,
         }
     }
 
@@ -390,6 +402,14 @@ mod tests {
             .unwrap(),
         );
         assert!(r.is_blocked_or_ignored(id(3)) && !r.is_ignored(id(3)), "blocked beats ignored");
+    }
+
+    #[test]
+    fn our_own_status_shows_as_we_set_it() {
+        assert_eq!(Status::own(UserStatus::Online), Status::Online);
+        assert_eq!(Status::own(UserStatus::Idle), Status::Idle);
+        assert_eq!(Status::own(UserStatus::DoNotDisturb), Status::DoNotDisturb);
+        assert_eq!(Status::own(UserStatus::Invisible), Status::Offline, "invisible looks offline in a list");
     }
 
     #[test]

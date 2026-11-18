@@ -491,6 +491,9 @@ impl App {
         self.change_thread_starter(edit.id, |copy| edit.clone().apply(copy));
         let Some(store) = self.account.timelines.borrow().get(edit.channel_id).map(|t| t.store.clone()) else { return };
         let (id, content) = (edit.id, edit.content.clone());
+        if let Some(timeline) = self.account.timelines.borrow_mut().get_mut(edit.channel_id) {
+            timeline.older.update(id, |message| edit.clone().apply(message));
+        }
         // In place: a new object would get a new row, rather than this one
         // changed.
         if let Some(position) = timelines::edit(&store, id, |message| edit.apply(message)) {
@@ -517,6 +520,9 @@ impl App {
             }
         }
         let Some(store) = self.account.timelines.borrow().get(channel_id).map(|t| t.store.clone()) else { return };
+        if let Some(timeline) = self.account.timelines.borrow_mut().get_mut(channel_id) {
+            timeline.older.remove(id);
+        }
         if let Some((position, _)) = timelines::find(&store, id) {
             self.hand_off_focus(&store, position);
             store.remove(position);
@@ -572,6 +578,9 @@ impl App {
         let Some(store) = self.account.timelines.borrow().get(channel).map(|t| t.store.clone()) else { return };
         let mut changed = None;
         for (answer, user) in votes {
+            if let Some(timeline) = self.account.timelines.borrow_mut().get_mut(channel) {
+                timeline.older.update(message, |m| tally(m, answer, user));
+            }
             changed = timelines::edit(&store, message, |m| tally(m, answer, user)).or(changed);
         }
         if let Some(position) = changed {
@@ -848,9 +857,9 @@ impl App {
         };
         let subtitle = self.channel_subtitle(id);
         self.refresh_typing();
-        // The channel we left keeps only its newest messages, which live
-        // events keep current. The client keeps the rest to page back in from
-        // memory; we ask for it.
+        // The channel we left shows only its newest messages, which live
+        // events keep current; the rest is kept aside to page back in from
+        // memory.
         // Names come from the open server, and a change in another one isn't
         // counted, so what was kept there can't be trusted on return.
         if left.is_some() {
@@ -974,6 +983,7 @@ impl App {
                             timeline.complete = true;
                         } else if replaced {
                             timeline.complete = false;
+                            timeline.older.clear();
                         }
                     }
                     this.update_present_bar();
@@ -1175,6 +1185,22 @@ impl App {
         };
         self.scroll_loader.borrow_mut().load_started(self.content_height());
         let limit = self.viewport().scroll_page();
+        // What we cut off when we left is still here: no request, as in the
+        // client.
+        let kept = {
+            let mut timelines = self.account.timelines.borrow_mut();
+            timelines.get_mut(channel).and_then(|t| {
+                let count = timelines::page_back(t, usize::from(limit))?;
+                t.loading = false;
+                Some(count)
+            })
+        };
+        if let Some(count) = kept {
+            self.rebind(&store, count, 1);
+            self.update_unread_bar();
+            self.page_landed(channel);
+            return;
+        }
         let started = self.account.timelines.borrow().held.started();
         let this = self.clone();
         glib::spawn_future_local(async move {

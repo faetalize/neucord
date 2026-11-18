@@ -127,7 +127,7 @@ impl App {
     pub(super) fn save_edit(self: &Rc<Self>) {
         let Some(message) = self.editing.borrow().as_ref().map(|e| e.message.clone()) else { return };
         let buffer = self.composer.buffer();
-        let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+        let text = discord::message_text::preprocess(&buffer.text(&buffer.start_iter(), &buffer.end_iter(), false));
         let bare = message.attachments.is_empty() && message.components.is_empty() && message.sticker_items.is_empty();
         let decision = edits::decide(&self.account.state.borrow().limits(), &text, &message.content, bare);
         // A refused edit stays open.

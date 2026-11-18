@@ -1021,7 +1021,8 @@ impl App {
             return self.save_edit();
         }
         let buffer = self.composer.buffer();
-        let typed = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).trim().to_owned();
+        let typed =
+            discord::message_text::trim(&buffer.text(&buffer.start_iter(), &buffer.end_iter(), false)).to_owned();
         let Some(channel) = self.account.state.borrow().channel else { return };
         self.send_text(channel, typed, false);
     }
@@ -1055,7 +1056,7 @@ impl App {
         // `:name:`s go out as emoji. The length is checked on what goes out,
         // which is longer than what was typed.
         let library = self.emoji_library(channel);
-        let translated = library.translate(&typed);
+        let translated = library.translate(&discord::message_text::preprocess(&typed));
         let (text, used) = (translated.text, translated.used);
         // The client checks length before slowmode. The text stays in the box to be shortened.
         let too_long = self.account.state.borrow().limits().check_length(&text);

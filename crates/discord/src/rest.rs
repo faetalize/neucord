@@ -1211,7 +1211,7 @@ fn vote_body(answers: &[u32]) -> Value {
 /// sticker (`j` in 290153, which greys the send button; Enter sends nothing
 /// then either).
 pub fn nothing_to_send(text: &str, files: usize, sticker: bool) -> bool {
-    scheduled::split_silent(text.trim(), 0).0.is_empty() && files == 0 && !sticker
+    scheduled::split_silent(crate::message_text::trim(text), 0).0.is_empty() && files == 0 && !sticker
 }
 
 /// What sending a message sends, as `_sendMessage` in 138399 builds it. A
@@ -1578,6 +1578,8 @@ mod tests {
     fn spaces_alone_are_nothing_to_send() {
         assert!(nothing_to_send("", 0, false));
         assert!(nothing_to_send(" \n\t ", 0, false));
+        assert!(nothing_to_send("\u{FEFF}", 0, false), "JavaScript's trim takes the byte order mark");
+        assert!(!nothing_to_send("\u{85}", 0, false), "and leaves U+0085");
         assert!(!nothing_to_send(" hi ", 0, false));
         assert!(!nothing_to_send("", 1, false), "a file alone goes");
         assert!(!nothing_to_send("  ", 0, true), "a waiting sticker alone goes");

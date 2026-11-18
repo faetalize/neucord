@@ -456,6 +456,13 @@ impl App {
         self.show_loading_or_list();
     }
 
+    /// A group DM's list shows our own status, so it follows ours.
+    pub(super) fn refresh_group_member_rows(&self) {
+        if matches!(&*self.members.shown.borrow(), Some(Target::Group(_))) {
+            self.refresh_member_rows();
+        }
+    }
+
     /// What the row at `position` shows.
     fn member_row(self: &Rc<Self>, position: usize) -> gtk::Widget {
         let state = self.account.state.borrow();
@@ -480,10 +487,10 @@ impl App {
                     return header("Members", people.len() as u32);
                 }
                 let Some(user) = people.get(position - 1) else { return placeholder() };
-                // We know how our friends are, and ours is that we are here.
+                // We know how our friends are, and ours is what we set.
                 let mut presence = state.relationships.presence(user.id);
                 if user.id == me.id {
-                    presence.status = Status::Online;
+                    presence.status = Status::own(state.settings.status.status);
                 }
                 let owner = channel.owner_id == Some(user.id);
                 self.person(user, None, &state.name_in(*id, user), None, &presence, owner)
