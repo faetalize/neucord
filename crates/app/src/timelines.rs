@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use discord::cdn;
 use discord::held::Held;
 use discord::history::Around;
+use discord::scrollback::Scrollback;
 use discord::{Message, Referenced, Snowflake};
 use gtk::gio;
 use gtk::prelude::*;
@@ -25,8 +26,8 @@ use gtk::prelude::*;
 /// memory: a channel past it is asked for again, which the client wouldn't.
 const CAPACITY: usize = 200;
 /// A channel we left keeps everything up to `MAX_RETAINED` messages, past that the
-/// newest `RETAINED`: the official client's `truncate` (755364), so going
-/// back asks for no more than it would.
+/// newest `RETAINED`: the official client's `truncate` (755364), which keeps
+/// the rest aside ([`Scrollback`]) to page back from.
 const MAX_RETAINED: u32 = 120;
 const RETAINED: u32 = 60;
 
@@ -38,6 +39,8 @@ pub struct Timeline {
     pub loading: bool,
     /// The store does not reach the newest message (after a jump).
     pub detached: bool,
+    /// What leaving the channel cut off its top, for paging back.
+    pub older: Scrollback,
     last_used: u64,
 }
 
@@ -67,6 +70,7 @@ impl Timelines {
             complete: false,
             loading: false,
             detached: false,
+            older: Scrollback::default(),
             last_used: 0,
         });
         timeline.last_used = clock;
@@ -78,15 +82,21 @@ impl Timelines {
     }
 
     /// Change the message `id` of `channel` wherever it is kept, shown or
-    /// held, and say where: its store and place. Events reach every channel
-    /// we hold, since the client keeps them current and trusts that.
+    /// held, and say where in a store it is, if it is in one. Events reach
+    /// every channel we hold, since the client keeps them current and trusts
+    /// that.
     pub fn change(
-        &self,
+        &mut self,
         channel: Snowflake,
         id: Snowflake,
         change: impl FnOnce(&mut Message),
     ) -> Option<(gio::ListStore, u32)> {
-        let store = self.get(channel)?.store.clone();
+        let timeline = self.channels.get_mut(&channel)?;
+        let store = timeline.store.clone();
+        if position_of(&store, id).is_none() {
+            timeline.older.update(id, change);
+            return None;
+        }
         let position = edit(&store, id, change)?;
         Some((store, position))
     }
@@ -115,11 +125,16 @@ impl Timelines {
     /// channel with a link that has expired (or soon will) is emptied, not
     /// shown: its images would be dead, so it is asked for again.
     pub fn reopen(&mut self, channel: Snowflake, now_ms: u64) -> &mut Timeline {
-        let expired = self.channels.get(&channel).is_some_and(|t| holds_expired_link(&t.store, now_ms));
+        let (expired, kept_expired) = self.channels.get(&channel).map_or((false, false), |t| {
+            (holds_expired_link(&t.store, now_ms), t.older.any(|m| cdn::links_expired(m, now_ms)))
+        });
         if expired {
             self.held.forget(channel);
         }
         let timeline = self.open(channel);
+        if expired || kept_expired {
+            timeline.older.clear();
+        }
         if expired {
             timeline.store.remove_all();
             timeline.complete = false;
@@ -155,10 +170,14 @@ pub fn ids(store: &gio::ListStore) -> Vec<Snowflake> {
     (0..store.n_items()).filter_map(|position| id_at(store, position)).collect()
 }
 
+fn position_of(store: &gio::ListStore, id: Snowflake) -> Option<u32> {
+    (0..store.n_items()).rev().find(|&position| id_at(store, position) == Some(id))
+}
+
 /// Change the message `id` where it is, and say where that is. The list
 /// doesn't see this: the caller fills its row in again.
 pub fn edit(store: &gio::ListStore, id: Snowflake, change: impl FnOnce(&mut Message)) -> Option<u32> {
-    let position = (0..store.n_items()).rev().find(|&position| id_at(store, position) == Some(id))?;
+    let position = position_of(store, id)?;
     let object = store.item(position).and_downcast::<glib::BoxedAnyObject>()?;
     change(&mut object.borrow_mut::<Message>());
     Some(position)
@@ -239,21 +258,39 @@ pub fn merge_newest(store: &gio::ListStore, page: Vec<Message>) -> bool {
     }
 }
 
-/// Drop all but the newest messages of a channel we left. The timeline can
-/// page back again, and an older page still in flight will no longer line up,
-/// so it is dropped.
+/// Cut a channel we left down to its newest messages. What goes is kept
+/// aside for paging back (see [`Scrollback`]), and an older page still in
+/// flight will no longer line up, so it is dropped.
 pub fn keep_newest(timeline: &mut Timeline) {
     let n = timeline.store.n_items();
     if n > MAX_RETAINED {
-        timeline.store.splice(0, n - RETAINED, &[] as &[glib::BoxedAnyObject]);
+        let cut = n - RETAINED;
+        let messages = (0..cut).filter_map(|position| message_at(&timeline.store, position)).collect();
+        timeline.older.keep(messages, timeline.complete);
+        timeline.store.splice(0, cut, &[] as &[glib::BoxedAnyObject]);
         timeline.complete = false;
     }
+}
+
+/// Page back from what [`keep_newest`] kept aside: up to `limit` messages go
+/// before the shown ones, without a request. Gives how many, or `None` when
+/// nothing is kept and the page has to be asked for.
+pub fn page_back(timeline: &mut Timeline, limit: usize) -> Option<u32> {
+    if timeline.older.is_empty() {
+        return None;
+    }
+    let page = timeline.older.take(limit);
+    let count = page.len() as u32;
+    prepend(&timeline.store, page);
+    timeline.complete = timeline.older.exhausted();
+    Some(count)
 }
 
 /// Replace everything with a page around a message we jumped to.
 pub fn replace(timeline: &mut Timeline, page: Vec<Message>, around: Around) {
     let objects: Vec<glib::BoxedAnyObject> = page.into_iter().map(boxed).collect();
     timeline.store.splice(0, timeline.store.n_items(), &objects);
+    timeline.older.clear();
     timeline.complete = !around.more_before;
     timeline.detached = around.more_after;
 }
@@ -521,6 +558,56 @@ mod tests {
         keep_newest(timeline);
         assert_eq!(ids(&timeline.store), (62..=121).collect::<Vec<_>>());
         assert!(!timeline.complete, "trimmed history can be paged again");
+    }
+
+    fn left_with(count: u64, complete: bool) -> Timelines {
+        let mut timelines = Timelines::default();
+        let timeline = timelines.open(Snowflake(1));
+        for id in 1..=count {
+            timeline.store.append(&boxed(msg(id, "")));
+        }
+        timeline.complete = complete;
+        keep_newest(timeline);
+        timelines
+    }
+
+    #[test]
+    fn going_back_in_a_channel_we_left_asks_for_nothing() {
+        let mut timelines = left_with(300, false);
+        let timeline = timelines.get_mut(Snowflake(1)).unwrap();
+        assert_eq!(page_back(timeline, 50), Some(50));
+        assert_eq!(oldest_id(&timeline.store), Some(Snowflake(191)));
+        assert_eq!(page_back(timeline, 500), Some(100), "what is kept, not more");
+        assert_eq!(oldest_id(&timeline.store), Some(Snowflake(91)), "the 150 newest of the 240 cut");
+        assert!(!timeline.complete, "the channel went further back, which is asked for");
+        assert_eq!(page_back(timeline, 50), None);
+    }
+
+    #[test]
+    fn a_channel_whose_start_was_kept_is_complete_again_once_paged_back() {
+        let mut timelines = left_with(130, true);
+        let timeline = timelines.get_mut(Snowflake(1)).unwrap();
+        assert!(!timeline.complete);
+        page_back(timeline, 500);
+        assert!(timeline.complete);
+        assert_eq!(timeline.store.n_items(), 130);
+    }
+
+    #[test]
+    fn a_message_changed_while_kept_aside_is_changed_when_it_comes_back() {
+        let mut timelines = left_with(130, false);
+        assert!(timelines.change(Snowflake(1), Snowflake(5), |m| m.content = "edited".into()).is_none());
+        let timeline = timelines.get_mut(Snowflake(1)).unwrap();
+        page_back(timeline, 500);
+        assert_eq!(find(&timeline.store, Snowflake(5)).unwrap().1.content, "edited");
+    }
+
+    #[test]
+    fn a_jump_drops_what_was_kept_aside() {
+        let mut timelines = left_with(130, false);
+        let timeline = timelines.get_mut(Snowflake(1)).unwrap();
+        replace(timeline, vec![msg(500, "")], Around { more_before: true, more_after: false });
+        assert_eq!(page_back(timeline, 50), None);
     }
 
     #[test]
