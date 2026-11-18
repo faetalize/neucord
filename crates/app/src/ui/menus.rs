@@ -603,6 +603,27 @@ pub(super) fn on_secondary(widget: &impl IsA<gtk::Widget>, open: impl Fn(f64, f6
     widget.add_controller(press);
 }
 
+/// Call `open` with `widget` and where its menu goes: where it is right-clicked
+/// or long-pressed, or from the keyboard (Menu, Shift+F10) with the focus in
+/// it, near its start, as GTK opens a focused widget's.
+pub(super) fn on_menu(widget: &impl IsA<gtk::Widget>, open: impl Fn(&gtk::Widget, At) + 'static) {
+    let open = Rc::new(open);
+    let weak = widget.upcast_ref::<gtk::Widget>().downgrade();
+    on_secondary(widget, {
+        let open = open.clone();
+        move |x, y| {
+            if let Some(widget) = weak.upgrade() {
+                open(&widget, At::Point(x, y));
+            }
+        }
+    });
+    on_keys(widget, move |widget| {
+        let (x, y) = (f64::from(widget.width()).min(48.0) / 2.0, f64::from(widget.height()) / 2.0);
+        open(widget, At::Point(x, y));
+        true
+    });
+}
+
 /// Call `open` when the keys for a menu (Menu or Shift+F10, as in GTK) are
 /// pressed in `widget`, ahead of the widgets inside. It says whether it
 /// opened one; if not, the keys go on.

@@ -10,7 +10,7 @@ use discord::{Guild, Snowflake};
 use gtk::prelude::*;
 
 use super::App;
-use super::menus::{self, At};
+use super::menus;
 use super::notify_menus::{FolderTarget, GuildTarget};
 use super::widgets::{initials, set_badge};
 use crate::images::{Images, Row};
@@ -103,12 +103,14 @@ impl App {
                             }
                         }
                     });
-                    // The folder's menu opens where its button is right-clicked, open or not.
+                    // The folder's menu opens where its button is right-clicked, open or not,
+                    // or from the keyboard.
                     let servers: Vec<Snowflake> = members.iter().map(|g| g.id).collect();
-                    let (app, weak) = (Rc::downgrade(self), button.downgrade());
-                    menus::on_secondary(&button, move |x, y| {
-                        let (Some(app), Some(button)) = (app.upgrade(), weak.upgrade()) else { return };
-                        menus::popup(&app, menus::FOLDER, FolderTarget(servers.clone()), &button, At::Point(x, y));
+                    let app = Rc::downgrade(self);
+                    menus::on_menu(&button, move |button, at| {
+                        if let Some(app) = app.upgrade() {
+                            menus::popup(&app, menus::FOLDER, FolderTarget(servers.clone()), button, at);
+                        }
                     });
                     if expanded {
                         button.add_css_class("expanded");
@@ -206,11 +208,12 @@ impl App {
                 this.select_guild(id);
             }
         });
-        // The server's menu opens where its icon is right-clicked.
-        let (app, weak) = (Rc::downgrade(self), button.downgrade());
-        menus::on_secondary(&button, move |x, y| {
-            let (Some(app), Some(button)) = (app.upgrade(), weak.upgrade()) else { return };
-            menus::popup(&app, menus::GUILD, GuildTarget(id), &button, At::Point(x, y));
+        // The server's menu opens where its icon is right-clicked, or from the keyboard.
+        let app = Rc::downgrade(self);
+        menus::on_menu(&button, move |button, at| {
+            if let Some(app) = app.upgrade() {
+                menus::popup(&app, menus::GUILD, GuildTarget(id), button, at);
+            }
         });
         rail_item(&button, Mark::Guild(id), items)
     }

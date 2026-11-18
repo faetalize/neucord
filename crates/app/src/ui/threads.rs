@@ -14,7 +14,7 @@ use gtk::glib;
 
 use super::App;
 use super::friends::confirm;
-use super::menus::{self, At, Entry, Item, Kind};
+use super::menus::{self, Entry, Item, Kind};
 use super::state::{now_ms, now_unix};
 
 /// How close to the end of the list scrolling asks for the next page (the
@@ -564,12 +564,14 @@ impl App {
         self.sync_search_button();
     }
 
-    /// Open `thread`'s menu where `widget` is right-clicked.
+    /// Open `thread`'s menu where `widget` is right-clicked, or from the
+    /// keyboard while the focus is in it.
     pub(super) fn thread_menu_on(self: &Rc<Self>, widget: &(impl IsA<gtk::Widget> + Clone), thread: Snowflake) {
-        let (app, widget_weak) = (Rc::downgrade(self), widget.downgrade());
-        menus::on_secondary(widget, move |x, y| {
-            let (Some(app), Some(widget)) = (app.upgrade(), widget_weak.upgrade()) else { return };
-            menus::popup(&app, menus::THREAD, ThreadTarget(thread), &widget, At::Point(x, y));
+        let app = Rc::downgrade(self);
+        menus::on_menu(widget, move |widget, at| {
+            if let Some(app) = app.upgrade() {
+                menus::popup(&app, menus::THREAD, ThreadTarget(thread), widget, at);
+            }
         });
     }
 

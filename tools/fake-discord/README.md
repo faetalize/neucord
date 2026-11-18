@@ -79,7 +79,9 @@ what arrived, IDENTIFY's key order and properties first.
   followed it or left it to the browser), `voice-draft <seconds>` (a made-up
   recording as the open channel's draft, there being no microphone),
   `voice-play`, `voice-scrub <0..1>` and `voice-state` (the draft player and
-  its clock), `quit`. It edits the copy by exact strings
+  its clock), `menu-key row|rail <n> [png]` (gives the nth sidebar row or rail
+  button the focus, runs its Menu / Shift+F10 shortcut, says whether a menu
+  opened and shoots it), `quit`. It edits the copy by exact strings
   and stops on the first that no longer matches: when the code it patches
   moves, update the string. The module it adds is only built here, so a
   change to what it calls needs a run to show it still builds.
