@@ -38,6 +38,7 @@ use lru::Lru;
 pub use play::{Motion, Row, Update};
 
 use crate::rich_text::RichText;
+use crate::ui::media_frame::MediaFrame;
 
 const MIB: u64 = 1024 * 1024;
 /// Encoded bytes kept in memory, which saves rereading files.
@@ -139,14 +140,25 @@ impl Images {
 
     /// Fetch and set an image onto `picture`, as a still: the first frame of
     /// an animation. If the picture is dropped before the bytes arrive,
-    /// nothing happens.
+    /// nothing happens. A picture in a media frame that can't be had shows
+    /// the frame's missing-image mark, as the client's placeholder does
+    /// (251843).
     pub fn set(&self, picture: &gtk::Picture, url: &str) {
-        let weak = picture.downgrade();
-        self.load(url, move |paintable| {
-            if let Some(picture) = weak.upgrade() {
-                picture.set_paintable(Some(&paintable));
-            }
-        });
+        let (weak, failed) = (picture.downgrade(), picture.downgrade());
+        self.load_or(
+            url,
+            move |paintable| {
+                if let Some(picture) = weak.upgrade() {
+                    picture.set_paintable(Some(&paintable));
+                }
+            },
+            move || {
+                if let Some(frame) = failed.upgrade().and_then(|picture| picture.parent()).and_downcast::<MediaFrame>()
+                {
+                    frame.show_missing();
+                }
+            },
+        );
     }
 
     /// Fetch an image and hand it to `done` as a still: at once if it is

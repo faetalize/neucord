@@ -26,6 +26,7 @@ what arrived, IDENTIFY's key order and properties first.
   `FAKE_MODAL_SUBMIT=fail|silent|429` says. Files get an upload URL at the
   fake, which takes the `PUT` and a `DELETE`, unless
   `FAKE_UPLOAD_FAIL=too-large` turns the URL down with Discord's 40005.
+  `FAKE_IMAGE_FAIL=1` has every image on the CDN answer 404.
   Heartbeats (op 40) are logged and acknowledged, and READY carries a made-up
   `qos_token`. Both settings protos are kept, and a save merges into them field by field
   as Discord's does. The GIF endpoints answer made-up results, one with a

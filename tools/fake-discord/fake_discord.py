@@ -78,6 +78,8 @@ if MODAL_SUBMIT not in ("ok", "fail", "silent", "429"):
 # Under FAKE_SLOWMODE=<s> #general has that slowmode, and a thread there is refused as inside its cooldown.
 SLOWMODE = int(os.environ.get("FAKE_SLOWMODE") or 0)
 UPLOAD_FAIL = os.environ.get("FAKE_UPLOAD_FAIL") or ""
+# FAKE_IMAGE_FAIL=1: every image on the CDN answers 404.
+IMAGE_FAIL = bool(os.environ.get("FAKE_IMAGE_FAIL"))
 if UPLOAD_FAIL not in ("", "too-large"):
     sys.exit("unknown FAKE_UPLOAD_FAIL " + UPLOAD_FAIL)
 
@@ -825,6 +827,8 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/attachments/"):
             query = dict(p.split("=", 1) for p in path.split("?", 1)[-1].split("&") if "=" in p)
             log(kind="image", path=path, width=query.get("width"), height=query.get("height"), at=time.time())
+            if IMAGE_FAIL:
+                return self.send(404, b"")
             body = png(int(query.get("width", 1200)) // 4, int(query.get("height", 800)) // 4)
             return self.send(200, body, "image/png")
         self.answer()
