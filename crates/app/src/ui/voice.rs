@@ -24,6 +24,7 @@ use super::composer::ReplyCtx;
 use super::menus::{Entry, Item, Kind};
 use super::state::now_ms;
 use super::video::media_bytes;
+use crate::config;
 use crate::recorder::{self, Event, Recorder};
 
 /// Record Voice Message, in the attach menu: greyed while a recording is
@@ -39,6 +40,8 @@ pub(super) const RECORD_VOICE: Entry<()> = Entry::Item(Item {
 /// on (198620's `d`).
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: Duration = Duration::from_secs(120);
+/// How loud the stop sound plays (`Ak(z, 0.4)` in 841817).
+const STOP_VOLUME: f64 = 0.4;
 
 /// Whether a recording is being finished, while which the client starts
 /// nothing: it is stopping, or being sent (`wX` in 709372).
@@ -475,6 +478,12 @@ impl App {
                 match phase {
                     Phase::Recording => self.stop_voice(),
                     _ => self.discard_voice(),
+                }
+                // With the sound the client plays there (`voice_message_recording_stopped`, at
+                // 0.4): `complete` is the theme's event for a finished operation. Only "all
+                // sounds" can turn it off, as in the client's `isSoundDisabled`.
+                if self.config.get(&config::ALL_SOUNDS) {
+                    crate::sound::play("complete", STOP_VOLUME);
                 }
                 return self.toast("Voice message recording stopped.");
             }
