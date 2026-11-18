@@ -281,6 +281,8 @@
     "handlePollActionTapped",
     "handlePollAnswerTapped",
     "handlePollSubmitVote",
+    "handleSend",
+    "handleSendAnnouncement",
     "handleUpdateTimeSpentSessionId",
     "handleVisible",
     "handleRequiredAction",
