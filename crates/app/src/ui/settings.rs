@@ -311,6 +311,19 @@ impl App {
             &config::TRANSLUCENT,
             |app, on| app.theme.set_translucent(on),
         );
+        let sounds = group(
+            "Sounds",
+            "Neucord has only the new message sound so far; the client's voice and video sounds come with voice.",
+        );
+        option_switch(
+            self,
+            &sounds,
+            "Notification sounds",
+            "Turning this off keeps your choices below and brings them back when it is on.",
+            &config::ALL_SOUNDS,
+            |_, _| {},
+        );
+        option_switch(self, &sounds, "New message", "", &config::MESSAGE_SOUND, |_, _| {});
         let chat_box = group("Chat box", "");
         option_switch(self, &chat_box, "Show send message button", "", &config::SEND_BUTTON, |app, _| {
             app.refresh_chat_bar()
@@ -354,7 +367,8 @@ impl App {
             &config::UNREAD_BADGE,
             |app, _| app.refresh_badges(),
         );
-        let neucord = page("Neucord", "preferences-system-symbolic", &[&appearance, &chat_box, &typing, &background]);
+        let neucord =
+            page("Neucord", "preferences-system-symbolic", &[&appearance, &sounds, &chat_box, &typing, &background]);
         neucord.set_description("These are saved on this computer only, not to your Discord account.");
 
         let dialog = adw::PreferencesDialog::builder().title("Settings").build();
