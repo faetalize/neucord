@@ -561,6 +561,19 @@ impl Rest {
         Ok(())
     }
 
+    /// Edit a thread with `body`: close, reopen, lock or unlock it (`O` in
+    /// 7909). The thread's new state comes as an event.
+    pub async fn edit_thread(&self, thread: Snowflake, body: Value) -> Result<(), Error> {
+        let _: Value = self.request(call!(EDIT_CHANNEL, channel = thread), Some(body)).await?;
+        Ok(())
+    }
+
+    /// Delete a thread or a forum post (`deleteChannel` in 435183).
+    pub async fn delete_thread(&self, thread: Snowflake) -> Result<(), Error> {
+        let _: Value = self.request(call!(CLOSE_CHANNEL, channel = thread), None).await?;
+        Ok(())
+    }
+
     /// Join `thread` (`joinThread` in 7909): no body, and the `location` the
     /// client names where the join came from. Discord answers with who is in
     /// it now, which comes as events too.
