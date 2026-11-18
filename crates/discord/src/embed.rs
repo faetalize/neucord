@@ -13,9 +13,12 @@
 use serde::{Deserialize, Deserializer};
 
 use crate::Message;
+use crate::component::Component;
+use crate::experiments::Experiments;
 use crate::frecency::GifFormat;
 use crate::gifs::Starred;
 use crate::markup::{Span, Style};
+use crate::model::Snowflake;
 use crate::settings::MediaSettings;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -102,6 +105,9 @@ pub struct Embed {
     pub image: Option<EmbedMedia>,
     #[serde(default)]
     pub video: Option<EmbedMedia>,
+    /// What Discord says of the embed (`IS_CONTENT_INVENTORY_ENTRY` is one).
+    #[serde(default)]
+    pub flags: u64,
     /// Images of later embeds with the same `url`, gathered by [`merge`].
     #[serde(skip)]
     pub gallery: Vec<EmbedMedia>,
@@ -447,19 +453,134 @@ pub fn merge(embeds: &[Embed]) -> Vec<Embed> {
     merged
 }
 
+/// Whether the client leaves out the embeds of user-profile links: the
+/// Apex user experiment `2026-08-profile-embed-rendering` is on for us
+/// (variant 1, its `enabled`; off by default, as in 168543).
+pub fn hides_profile_links(experiments: &Experiments, me: Option<Snowflake>) -> bool {
+    me.and_then(|me| experiments.apex_user(me, "2026-08-profile-embed-rendering")).is_some_and(|a| a.variant == 1)
+}
+
 /// The embeds of `message` to show, merged, given the viewer's settings.
 /// The `SUPPRESS_EMBEDS` flag is honoured too, though Discord already
 /// removes the embeds of such messages. Link embeds of Conjure projects
 /// are hidden whatever the settings: the client draws its own card there.
-pub fn visible(message: &Message, settings: &MediaSettings) -> Vec<Embed> {
+pub fn visible(message: &Message, settings: &MediaSettings, profile_links: bool) -> Vec<Embed> {
     if message.embeds_suppressed() || !settings.render_embeds || !message.is_user_message() {
         return Vec::new();
     }
     merge(&message.embeds)
         .into_iter()
         .filter(|e| !matches!(e.kind, EmbedKind::Hidden | EmbedKind::PollResult))
+        .filter(|e| !is_shop_or_profile_article(e, profile_links) && !is_inventory_card(e, &message.components))
         .filter(|e| e.kind == EmbedKind::Rich || !e.url.as_deref().is_some_and(is_conjure_project_link))
         .collect()
+}
+
+/// The article embeds the client leaves out for links to its own pages
+/// (`renderEmbeds` in 190854, the tests in 659674): the shop, a game's shop
+/// page, a game's page and, with the experiment on, a user's profile.
+fn is_shop_or_profile_article(embed: &Embed, profile_links: bool) -> bool {
+    let Some(url) = embed.url.as_deref().filter(|_| embed.kind == EmbedKind::Article) else { return false };
+    let web = web_path(url);
+    // `V`: the shop's own host list, whose `.com` has an unescaped dot.
+    let shop = url.strip_prefix("https://").is_some_and(|rest| {
+        let rest = rest.strip_prefix("canary.").or_else(|| rest.strip_prefix("ptb.")).unwrap_or(rest);
+        let rest = rest.strip_prefix("discord").map(|r| r.strip_prefix("app").unwrap_or(r));
+        rest.and_then(|r| r.get(4..).filter(|_| r.get(1..4) == Some("com")))
+            .or_else(|| url.strip_prefix("https://staging.discord.co"))
+            .is_some_and(|path| path.starts_with("/shop"))
+    });
+    shop || web.is_some_and(|path| {
+        is_shop_channel_link(path)
+            || is_game_shop_link(path)
+            || is_game_page(path)
+            || (profile_links && is_profile_page(path))
+    })
+}
+
+/// What follows the host of a link to Discord's web app (`canary.`, `ptb.`
+/// and `www.` allowed, `discord.com` or `discordapp.com`, `http` or `https`).
+fn web_path(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
+    let rest = ["canary.", "ptb.", "www."].iter().find_map(|p| rest.strip_prefix(p)).unwrap_or(rest);
+    let rest = rest.strip_prefix("discord")?;
+    rest.strip_prefix("app.com").or_else(|| rest.strip_prefix(".com"))
+}
+
+/// `rest` after one or more ASCII digits.
+fn after_digits(rest: &str) -> Option<&str> {
+    let after = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    (after.len() < rest.len()).then_some(after)
+}
+
+/// `/channels/{id}/shop` or `/channels/{id}/shop/{id}`, whole (`p6`).
+fn is_shop_channel_link(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/channels/").and_then(after_digits).and_then(|r| r.strip_prefix("/shop"))
+    else {
+        return false;
+    };
+    rest.is_empty() || rest.strip_prefix('/').and_then(after_digits) == Some("")
+}
+
+/// The game shop's links (`G8`): where a prefix is all the client checks.
+fn is_game_shop_link(path: &str) -> bool {
+    let two_ids = |rest: &str| rest.strip_prefix('/').and_then(after_digits).is_some();
+    // `/channels/{id}/game-shop/{id}/{id}…`, `/game-shop/{id}/{id}…`
+    let channel = path.strip_prefix("/channels/").and_then(after_digits).and_then(|r| r.strip_prefix("/game-shop/"));
+    if channel.and_then(after_digits).is_some_and(two_ids) {
+        return true;
+    }
+    if let Some(rest) = path.strip_prefix("/game-shop/").and_then(after_digits) {
+        if two_ids(rest) {
+            return true;
+        }
+        // `/game-shop/{id}`, a slash if any, and a query that has `skuIds=`.
+        let query = rest.strip_prefix('/').unwrap_or(rest).strip_prefix('?');
+        if query.is_some_and(|q| q.contains("skuIds=")) {
+            return true;
+        }
+    }
+    // `/shop?` naming the game shops tab, an application and a SKU.
+    path.strip_prefix("/shop?").is_some_and(|q| {
+        let has = |key: &str| q.match_indices(key).any(|(at, _)| after_digits(&q[at + key.len()..]).is_some());
+        q.contains("tab=game-shops") && has("applicationId=") && has("skuId=")
+    })
+}
+
+/// `/games/{id}`, with a slug of letters, digits and dashes and a slash (`Xk`).
+fn is_game_page(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/games/").and_then(after_digits) else { return false };
+    let rest = match rest.strip_prefix('/') {
+        Some(slug) => slug.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '-'),
+        None => rest,
+    };
+    rest.is_empty() || rest == "/"
+}
+
+/// `/users/{id}`, with a slash (`nL`).
+fn is_profile_page(path: &str) -> bool {
+    path.strip_prefix("/users/").and_then(after_digits).is_some_and(|rest| matches!(rest, "" | "/"))
+}
+
+/// The embed of a content inventory entry that the client draws as its own
+/// card: flagged as one, with entries on the message that are all of kinds
+/// it knows (top artist, top and played game, watched media, a listening
+/// session, a launched activity).
+fn is_inventory_card(embed: &Embed, components: &[Component]) -> bool {
+    const IS_CONTENT_INVENTORY_ENTRY: u64 = 1 << 5;
+    const KNOWN: [u64; 6] = [6, 3, 1, 2, 5, 8];
+    if embed.flags & IS_CONTENT_INVENTORY_ENTRY == 0 {
+        return false;
+    }
+    let mut entries = components.iter().filter_map(|c| match c {
+        Component::InventoryEntry { content_type } => Some(content_type),
+        _ => None,
+    });
+    let mut any = false;
+    entries.all(|t| {
+        any = true;
+        KNOWN.contains(t)
+    }) && any
 }
 
 /// Whether `url` is a Conjure project link: `http(s)` on `conjure.town` or
@@ -791,10 +912,10 @@ mod tests {
         };
         let on = MediaSettings::default();
         let off = MediaSettings { render_embeds: false, ..on };
-        assert_eq!(visible(&message(""), &on).len(), 1, "poll results are hidden");
-        assert!(visible(&message(r#","flags":4"#), &on).is_empty(), "SUPPRESS_EMBEDS");
-        assert!(visible(&message(""), &off).is_empty());
-        assert!(visible(&message(r#","type":7"#), &on).is_empty(), "system messages show no embeds");
+        assert_eq!(visible(&message(""), &on, false).len(), 1, "poll results are hidden");
+        assert!(visible(&message(r#","flags":4"#), &on, false).is_empty(), "SUPPRESS_EMBEDS");
+        assert!(visible(&message(""), &off, false).is_empty());
+        assert!(visible(&message(r#","type":7"#), &on, false).is_empty(), "system messages show no embeds");
     }
 
     #[test]
@@ -808,10 +929,76 @@ mod tests {
             ]
         }))
         .unwrap();
-        let shown = visible(&message, &MediaSettings::default());
+        let shown = visible(&message, &MediaSettings::default(), false);
         assert_eq!(shown.len(), 2, "only the link embed of the project is hidden");
         assert_eq!(shown[0].kind, EmbedKind::Rich);
         assert_eq!(shown[1].url.as_deref(), Some("https://example.com/12345678901234567/my-project"));
+    }
+
+    fn shown_urls(embeds: serde_json::Value, extra: serde_json::Value, profile_links: bool) -> Vec<String> {
+        let mut value = json!({
+            "id": "1", "channel_id": "2", "author": {"id": "3", "username": "a"}, "timestamp": "t", "embeds": embeds
+        });
+        value.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let message: Message = serde_json::from_value(value).unwrap();
+        let shown = visible(&message, &MediaSettings::default(), profile_links);
+        shown.into_iter().filter_map(|e| e.url).collect()
+    }
+
+    #[test]
+    fn article_embeds_of_shop_game_and_profile_links_are_hidden() {
+        let hidden = [
+            "https://discord.com/channels/123/shop",
+            "http://ptb.discord.com/channels/123/shop/456",
+            "https://discord.com/shop",
+            "https://discordapp.com/shop/anything",
+            "https://staging.discord.co/shop",
+            "https://discord.com/game-shop/12/34",
+            "https://canary.discord.com/channels/1/game-shop/2/3?x=1",
+            "https://discord.com/game-shop/12?foo=1&skuIds=5",
+            "https://discord.com/game-shop/12/?skuIds=5",
+            "https://discord.com/shop?tab=game-shops&applicationId=1&skuId=2",
+            "https://www.discord.com/games/123",
+            "https://discord.com/games/123/some-game-1/",
+        ];
+        let shown = [
+            "https://discord.com/channels/123/shopping",
+            "https://discord.com/channels/123/shop/",
+            "https://discord.com/channels/123/shop/abc",
+            "https://www.discord.com/shop",
+            "https://discord.com/game-shop/12",
+            "https://discord.com/games/123/a/b",
+            "https://discord.com/games/abc",
+            "https://example.com/shop",
+            "https://discord.com.evil.example/games/123",
+            "https://discord.com/users/123/profile",
+        ];
+        let articles =
+            |urls: &[&str], kind: &str| json!(urls.iter().map(|u| json!({"type": kind, "url": u})).collect::<Vec<_>>());
+        assert!(shown_urls(articles(&hidden, "article"), json!({}), false).is_empty());
+        assert_eq!(shown_urls(articles(&shown, "article"), json!({}), false), shown);
+        assert_eq!(shown_urls(articles(&hidden, "link"), json!({}), false), hidden, "only articles are");
+    }
+
+    #[test]
+    fn profile_links_are_hidden_only_where_the_experiment_says() {
+        let embeds = json!([{"type": "article", "url": "https://discord.com/users/123"},
+                            {"type": "article", "url": "https://discordapp.com/users/123/"},
+                            {"type": "article", "url": "https://discord.com/users/123/x"}]);
+        assert_eq!(shown_urls(embeds.clone(), json!({}), false).len(), 3);
+        assert_eq!(shown_urls(embeds, json!({}), true), ["https://discord.com/users/123/x"]);
+    }
+
+    #[test]
+    fn content_inventory_embeds_are_hidden_when_every_entry_is_one_the_client_draws() {
+        let embeds = json!([{"type": "rich", "flags": 32, "url": "https://e.com/a"},
+                            {"type": "rich", "url": "https://e.com/b"}]);
+        let entry = |t: u64| json!({"type": 16, "content_inventory_entry": {"content_type": t}});
+        let with = |entries: Vec<serde_json::Value>| json!({"components": entries});
+        let urls = |entries| shown_urls(embeds.clone(), with(entries), false);
+        assert_eq!(urls(vec![entry(3), entry(8)]), ["https://e.com/b"], "top game, launched activity");
+        assert_eq!(urls(vec![entry(3), entry(7)]).len(), 2, "a custom status isn't one of them");
+        assert_eq!(urls(vec![]).len(), 2, "no entry, no hiding");
     }
 
     #[test]
