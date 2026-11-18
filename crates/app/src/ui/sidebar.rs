@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 use discord::channel_icon::{self, Glyph, Mark};
 use discord::notifications::Place;
+use discord::stage::{self, Participants};
 use discord::voice_states::VoiceState;
 use discord::{Channel, Snowflake};
 use gtk::prelude::*;
@@ -188,6 +189,9 @@ impl App {
                         self.append_voice_state(&state, voice);
                     }
                 }
+                if channel.kind == discord::ChannelKind::Stage {
+                    self.append_stage(&state, guild.id, channel.id);
+                }
                 let threads = state.sidebar_threads(guild, channel);
                 for (i, thread) in threads.iter().enumerate() {
                     self.append_thread(&state, thread, i + 1 == threads.len());
@@ -206,6 +210,42 @@ impl App {
                 menus::popup(&app, table, ChannelTarget(channel), row, at);
             }
         });
+    }
+
+    /// What a live stage shows under its name (`410828`, `616740`): its topic,
+    /// then who speaks, then how many are in the audience.
+    fn append_stage(&self, state: &super::state::State, guild: Snowflake, channel: Snowflake) {
+        let indented = || gtk::Box::builder().spacing(6).margin_start(GLYPH_WIDTH + 6).build();
+        if let Some(topic) = state.stage.of(channel).map(|i| i.topic.as_str()).filter(|t| !t.is_empty()) {
+            let row = indented();
+            row.append(
+                &gtk::Label::builder()
+                    .label(topic)
+                    .xalign(0.0)
+                    .hexpand(true)
+                    .ellipsize(pango::EllipsizeMode::End)
+                    .tooltip_text(topic)
+                    .css_classes(["caption", "dimmed"])
+                    .build(),
+            );
+            self.append_row(&row, None, false);
+        }
+        let participants = Participants::of(state.voice.in_channel(guild, channel, |v| state.voice_name(v)));
+        if participants.is_empty() {
+            return;
+        }
+        for speaker in &participants.speakers {
+            self.append_voice_state(state, speaker);
+        }
+        let counts = indented();
+        for (icon, words) in [
+            ("microphone-sensitivity-high-symbolic", stage::speaking_label(participants.speakers.len())),
+            ("system-users-symbolic", stage::audience_label(participants.audience)),
+        ] {
+            counts.append(&gtk::Image::builder().icon_name(icon).pixel_size(12).css_classes(["dimmed"]).build());
+            counts.append(&gtk::Label::builder().label(words).css_classes(["caption", "dimmed"]).build());
+        }
+        self.append_row(&counts, None, false);
     }
 
     /// Someone connected to the voice channel above, in line with its name.
