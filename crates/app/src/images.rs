@@ -66,7 +66,7 @@ struct Inner {
     /// Decoded still images by URL.
     textures: RefCell<Lru<gdk::Texture>>,
     /// The window's scale factor, for asking the proxy for enough pixels.
-    scale: Cell<i32>,
+    scale: Cell<f64>,
     /// The sizes the account's images snap to (`2026-07-attachment-image-ladder`).
     ladder: RefCell<Option<discord::cdn::Ladder>>,
     /// Images wait until they are near the screen (`2026-02-lazy-load-all-images`).
@@ -99,7 +99,7 @@ impl Images {
             video_dir,
             memory: RefCell::new(Lru::new(BYTES_BUDGET)),
             textures: RefCell::new(Lru::new(TEXTURE_BUDGET)),
-            scale: Cell::new(1),
+            scale: Cell::new(1.0),
             ladder: RefCell::default(),
             lazy: Cell::new(false),
             moving: RefCell::default(),
@@ -117,12 +117,12 @@ impl Images {
         images
     }
 
-    pub fn set_scale(&self, scale: i32) {
-        self.0.scale.set(scale.max(1));
+    pub fn set_scale(&self, scale: f64) {
+        self.0.scale.set(scale.max(1.0));
     }
 
-    /// The window's scale factor.
-    pub fn scale(&self) -> i32 {
+    /// The screen's device pixels to a pixel, as `devicePixelRatio` says it.
+    pub fn scale(&self) -> f64 {
         self.0.scale.get()
     }
 
@@ -263,7 +263,7 @@ impl Images {
         let scale = self.0.scale.get();
         let target = request_size(shown, scale, original);
         let ladder = self.0.ladder.borrow();
-        match discord::cdn::requested_size(target, original, ladder.as_ref(), scale.max(1) as u32) {
+        match discord::cdn::requested_size(target, original, ladder.as_ref(), scale) {
             Some((width, height)) => discord::cdn::proxy_sized(url, width, height),
             None => url.to_owned(),
         }
@@ -623,8 +623,8 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// The pixel size to request for an image shown at `shown` (logical pixels):
 /// enough for the screen's scale, but never more than the original has.
-pub fn request_size(shown: (i32, i32), scale: i32, original: Option<(u32, u32)>) -> (u32, u32) {
-    let scaled = |n: i32| (n.max(1) as u32) * scale.max(1) as u32;
+pub fn request_size(shown: (i32, i32), scale: f64, original: Option<(u32, u32)>) -> (u32, u32) {
+    let scaled = |n: i32| (f64::from(n.max(1)) * scale.max(1.0)).round() as u32;
     let (mut width, mut height) = (scaled(shown.0), scaled(shown.1));
     if let Some((w, h)) = original.filter(|&(w, h)| w > 0 && h > 0) {
         // Shrink both sides by the same factor, so the aspect ratio holds.
@@ -721,9 +721,14 @@ mod tests {
 
     #[test]
     fn requested_size_follows_scale_and_original() {
-        assert_eq!(request_size((400, 300), 1, Some((4000, 3000))), (400, 300));
-        assert_eq!(request_size((400, 300), 2, Some((4000, 3000))), (800, 600));
-        assert_eq!(request_size((400, 300), 2, Some((600, 450))), (600, 450), "no upscaling");
-        assert_eq!(request_size((80, 80), 1, None), (80, 80));
+        assert_eq!(request_size((400, 300), 1.0, Some((4000, 3000))), (400, 300));
+        assert_eq!(request_size((400, 300), 2.0, Some((4000, 3000))), (800, 600));
+        assert_eq!(
+            request_size((400, 300), 1.25, Some((4000, 3000))),
+            (500, 375),
+            "a fractional ratio asks for what it shows"
+        );
+        assert_eq!(request_size((400, 300), 2.0, Some((600, 450))), (600, 450), "no upscaling");
+        assert_eq!(request_size((80, 80), 1.0, None), (80, 80));
     }
 }

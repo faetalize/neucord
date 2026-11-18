@@ -524,10 +524,31 @@ impl App {
         this.build();
 
         // Images from the media proxy are requested at the pixels shown.
-        this.images.set_scale(this.window.scale_factor());
+        // At the screen's real ratio, which is fractional on many desktops
+        // (the window's scale factor is that rounded up): a sticker or banner
+        // is asked for at `devicePixelRatio` pixels as the client does.
+        let ratio = |window: &adw::ApplicationWindow| {
+            let surface = window.surface();
+            surface.map_or_else(|| f64::from(window.scale_factor()), |surface| surface.scale())
+        };
+        this.images.set_scale(ratio(&this.window));
         this.window.connect_scale_factor_notify({
             let images = this.images.clone();
-            move |window| images.set_scale(window.scale_factor())
+            move |window| images.set_scale(ratio(window))
+        });
+        this.window.connect_realize({
+            let images = this.images.clone();
+            move |window| {
+                images.set_scale(ratio(window));
+                if let Some(surface) = window.surface() {
+                    let (images, window) = (images.clone(), window.downgrade());
+                    surface.connect_scale_notify(move |surface| {
+                        if window.upgrade().is_some() {
+                            images.set_scale(surface.scale());
+                        }
+                    });
+                }
+            }
         });
 
         // Handlers hold weak references, so something must own the App while

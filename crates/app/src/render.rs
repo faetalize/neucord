@@ -508,10 +508,9 @@ impl<'a> Inline<'a> {
     }
 }
 
-/// The CDN size to ask for an emoji shown at `size`: enough pixels for the
-/// screen's scale, in the powers of two the CDN serves.
-fn emoji_request(size: i32, scale: i32) -> u16 {
-    ((size * scale.max(1)) as u32).next_power_of_two().clamp(16, 4096) as u16
+/// The CDN size to ask for an emoji shown at `size`, as the client does.
+fn emoji_request(size: i32, scale: f64) -> u16 {
+    discord::cdn::emoji_size(size.max(1) as u32, scale)
 }
 
 fn tags(style: Style) -> (&'static str, &'static str) {
