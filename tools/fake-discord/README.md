@@ -88,7 +88,9 @@ what arrived, IDENTIFY's key order and properties first.
   #general), `thread-settings <id>` and `thread-settings-save <name> <slowmode index> <archive index>` (a
   thread's settings form, opened and saved; `FAKE_THREADS=1`), `menu-key row|rail <n> [png]` (gives the nth sidebar row or rail
   button the focus, runs its Menu / Shift+F10 shortcut, says whether a menu
-  opened and shoots it), `quit`. It edits the copy by exact strings
+  opened and shoots it), `settings <page>` (the settings window on a page, `activity` for Activity
+  Privacy), `activity-share on|off` and `activity-default 1|2|3` (what its rows
+  save), `quit`. It edits the copy by exact strings
   and stops on the first that no longer matches: when the code it patches
   moves, update the string. The module it adds is only built here, so a
   change to what it calls needs a run to show it still builds.

@@ -41,7 +41,7 @@ pub(super) struct Form {
 }
 
 impl Form {
-    fn switch(
+    pub(super) fn switch(
         &mut self,
         group: &adw::PreferencesGroup,
         title: &str,
@@ -228,23 +228,10 @@ impl App {
         }
         let notifications = page("Notifications", "preferences-system-notifications-symbolic", &[&notify]);
 
-        let joining = group("Game joining", "Neucord shares no games, so this is for your other clients.");
-        form.switch(
-            &joining,
-            "Allow friends to join my game",
-            "",
-            |s| s.privacy.friends_join_game,
-            Setting::FriendsJoinGame,
-        );
-        form.switch(
-            &joining,
-            "Allow voice channel participants to join my game",
-            "",
-            |s| s.privacy.voice_participants_join_game,
-            Setting::VoiceParticipantsJoinGame,
-        );
         let [messaging, requests, profile] = self.privacy_groups(&mut form);
-        let privacy = page("Privacy", "channel-secure-symbolic", &[&messaging, &requests, &profile, &joining]);
+        let privacy = page("Privacy", "channel-secure-symbolic", &[&messaging, &requests, &profile]);
+        let [sharing, places, joining] = self.activity_privacy_groups(&mut form);
+        let activity = page("Activity Privacy", "applications-games-symbolic", &[&sharing, &places, &joining]);
 
         let language = group("Language", "Neucord shows English whatever this is; your other clients follow it.");
         form.choice(
@@ -375,6 +362,7 @@ impl App {
         dialog.add(&chat);
         dialog.add(&notifications);
         dialog.add(&privacy);
+        dialog.add(&activity);
         dialog.add(&language);
         dialog.add(&neucord);
         dialog.connect_closed({
