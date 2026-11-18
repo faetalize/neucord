@@ -30,6 +30,9 @@ names so two builds differ only where Discord changed something:
   `isSystemDM` is where the client shows no message box, and posting there
   anyway got an account flagged (#51). `getAlgorithm` is the gateway
   compression the client asks for, which Neucord asks for too (#75).
+  `handleSend` is where the send queue adds `mobile_network_type` to a
+  message's body: the request table only sees the identifier the queue passes
+  (#196).
 - The modules in `watch.json`'s `modules`, found by strings in them and
   reduced the same way: the code that builds Neucord's properties, its
   heartbeat session, the channel hiding and the image rules sit in no
