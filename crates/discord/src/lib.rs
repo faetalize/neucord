@@ -25,6 +25,7 @@ pub mod dice;
 pub mod edits;
 pub mod embed;
 pub mod emoji;
+pub mod emoticons;
 mod endpoints;
 pub mod experiments;
 pub mod forum;

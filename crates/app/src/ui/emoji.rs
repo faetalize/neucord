@@ -118,7 +118,10 @@ impl App {
             _ => false,
         };
         let guilds = state.guilds_in_picker_order(own);
-        Library::new(guilds, &state.limits(), &Place { guild: own, external })
+        Library {
+            emoticons: state.settings.media.convert_emoticons,
+            ..Library::new(guilds, &state.limits(), &Place { guild: own, external })
+        }
     }
 
     /// Open the picker over `parent`, for emoji to write in `channel`.
