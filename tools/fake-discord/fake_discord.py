@@ -655,6 +655,14 @@ def history(channel, body):
     return 200, messages(channel)
 
 
+@route("GET", r"/(?:guilds|channels)/(\d+)/messages/search")
+def search_messages(scope, body):
+    """The lines of #general that have the text asked for (`content`), a message to a result."""
+    text = QUERY.get("content", [""])[0].lower()
+    found = [m for m in messages("600") if text and text in m["content"].lower()]
+    return 200, {"messages": [[m] for m in found[:25]], "total_results": len(found)}
+
+
 # The pins of #600 are lines 5, 7 and 9, pinned in that order (newest pin first), two to a page.
 PINNED = ["5", "7", "9"]
 

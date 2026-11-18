@@ -1,6 +1,7 @@
-//! Searching messages (Ctrl+F, or the header's search button): a box with the
-//! search field, what it suggests, and the results, which open the message
-//! in its channel. The grammar, the request and when to ask again are
+//! Searching messages (Ctrl+F, or the header's search button): a sidebar, in
+//! the place of the member list, with the search field, what it suggests,
+//! and the results, which open the message in its channel and leave the
+//! sidebar where it is. The grammar, the request and when to ask again are
 //! [`discord::search`]; this draws them and sends.
 
 use std::cell::{Cell, RefCell};
@@ -37,9 +38,9 @@ pub(super) struct Saved {
     show_blocked: bool,
 }
 
-/// The box, open over the window.
+/// The sidebar, open in the pane on the right.
 pub(super) struct View {
-    dialog: adw::Dialog,
+    root: gtk::Box,
     context: Context,
     pub(super) entry: gtk::Entry,
     suggestions: gtk::ListBox,
@@ -193,25 +194,19 @@ impl App {
         Known { users: self.known_users(&state, guild), channels, me: state.me().unwrap_or_default() }
     }
 
-    /// Open the search box, or close it.
+    /// Open the search sidebar, or close it.
     pub(super) fn toggle_search(self: &Rc<Self>) {
-        if let Some(open) = self.search_view.take() {
-            open.dialog.force_close();
+        if self.search_view.borrow().is_some() {
+            self.close_search();
             return;
         }
         let Some(context) = self.search_context() else { return };
         let view = View::new(self, context);
         *self.search_view.borrow_mut() = Some(view.clone());
-        view.dialog.connect_closed({
-            let this = Rc::downgrade(self);
-            move |closed| {
-                let Some(this) = this.upgrade() else { return };
-                let ours = this.search_view.borrow().as_ref().is_some_and(|v| v.dialog == *closed);
-                if ours {
-                    this.search_view.take();
-                }
-            }
-        });
+        self.right_stack.add_named(&view.root, Some("search"));
+        self.right_stack.set_visible_child_name("search");
+        self.right.set_show_sidebar(true);
+        self.sync_members();
         let text = {
             let mut state = self.account.state.borrow_mut();
             let saved = state.searches.entry(context).or_default();
@@ -221,8 +216,37 @@ impl App {
         };
         // Setting the text suggests, which reads the session.
         view.entry.set_text(&text);
-        view.dialog.present(Some(&self.window));
+        view.entry.grab_focus();
         view.refresh(self);
+    }
+
+    /// Close the sidebar: the member list takes the pane back.
+    pub(super) fn close_search(self: &Rc<Self>) {
+        if self.take_search() {
+            // A pane over the chat goes with the search; the docked one is as
+            // it was left.
+            if self.right.is_collapsed() {
+                self.right.set_show_sidebar(false);
+            }
+            self.sync_members();
+        }
+    }
+
+    /// Take the sidebar out of the pane; whether there was one.
+    fn take_search(&self) -> bool {
+        let Some(view) = self.search_view.take() else { return false };
+        self.right_stack.set_visible_child_name("members");
+        self.right_stack.remove(&view.root);
+        true
+    }
+
+    /// A search is of a server or a DM, and ends when we leave it for another
+    /// place (or a page): the sidebar goes, and the pane is as before.
+    pub(super) fn search_follows_place(&self) {
+        let open = self.search_view.borrow().as_ref().map(|view| view.context);
+        if open.is_some() && open != self.search_context() {
+            self.take_search();
+        }
     }
 
     /// Ask Discord, `submitted` being the user's Enter rather than a change
@@ -365,15 +389,28 @@ impl View {
         content.append(&scroller);
         content.append(&message);
         content.append(&pager);
-        let dialog = adw::Dialog::builder()
-            .title("Search")
-            .content_width(640)
-            .content_height(640)
-            .focus_widget(&entry)
-            .child(&content)
+        let title = gtk::Label::builder().label("Search").xalign(0.0).hexpand(true).css_classes(["heading"]).build();
+        let close = gtk::Button::builder()
+            .icon_name("window-close-symbolic")
+            .tooltip_text("Close")
+            .css_classes(["flat", "circular"])
             .build();
+        let top = gtk::Box::builder().spacing(6).margin_top(6).margin_start(12).margin_end(6).build();
+        top.append(&title);
+        top.append(&close);
+        let root = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+        root.append(&top);
+        root.append(&content);
+        close.connect_clicked({
+            let app = Rc::downgrade(app);
+            move |_| {
+                if let Some(app) = app.upgrade() {
+                    app.close_search();
+                }
+            }
+        });
         let view = Rc::new(View {
-            dialog,
+            root,
             context,
             entry,
             suggestions,
@@ -477,7 +514,10 @@ impl View {
                 let message =
                     usize::try_from(row.index()).ok().and_then(|i| view.rows.borrow().get(i).cloned().flatten());
                 if let Some(message) = message {
-                    view.dialog.force_close();
+                    // The sidebar stays beside the message, unless it is over the chat.
+                    if app.right.is_collapsed() {
+                        app.close_search();
+                    }
                     app.open_search_result(&message);
                 }
             }
@@ -498,11 +538,12 @@ impl View {
                 };
                 self.select(Some(next));
             }
-            // Escape clears the box, then closes it.
+            // Escape clears the box, then closes the sidebar.
             gdk::Key::Escape if !self.entry.text().is_empty() => {
                 self.entry.set_text("");
                 self.suggest(app);
             }
+            gdk::Key::Escape => app.close_search(),
             _ => return glib::Propagation::Proceed,
         }
         glib::Propagation::Stop

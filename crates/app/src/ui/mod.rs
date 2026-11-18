@@ -110,6 +110,9 @@ pub struct App {
     split: adw::OverlaySplitView,
     /// The content, with room for a pane on its right.
     right: adw::OverlaySplitView,
+    /// What the pane on the right shows: the member list, or a search's
+    /// results while one is open.
+    right_stack: gtk::Stack,
     /// Home, pinned above the scrolling servers.
     home: gtk::Box,
     rail: gtk::Box,
@@ -367,6 +370,7 @@ impl App {
                 .show_sidebar(false)
                 .pin_sidebar(true)
                 .build(),
+            right_stack: gtk::Stack::new(),
             home: gtk::Box::builder().orientation(gtk::Orientation::Vertical).margin_top(6).build(),
             rail: gtk::Box::new(gtk::Orientation::Vertical, 0),
             guild_name: widgets::Title::new(""),
@@ -864,7 +868,8 @@ impl App {
         self.content.add_named(&self.build_requests(), Some("requests"));
         self.content.add_named(&self.build_forum(), Some("forum"));
         self.content.add_named(&self.build_age_gate(), Some("age-gate"));
-        self.right.set_sidebar(Some(&self.build_members()));
+        self.right_stack.add_named(&self.build_members(), Some("members"));
+        self.right.set_sidebar(Some(&self.right_stack));
         self.right.set_content(Some(&self.content));
         self.split.set_content(Some(&self.right));
 
