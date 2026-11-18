@@ -56,6 +56,7 @@ const FRIEND_ONLINE_NOTIFICATIONS: u32 = 12;
 const FRIEND_ANNIVERSARY_NOTIFICATIONS: u32 = 14;
 const PROFILE_UPDATES_NOTIFICATIONS: u32 = 16;
 const UPCOMING_SERVER_EVENT_NOTIFICATIONS: u32 = 22;
+const QUIET_MODE: u32 = 5;
 
 // PrivacySettings.
 const ALLOW_ACTIVITY_PARTY_FRIENDS: u32 = 1;
@@ -139,6 +140,7 @@ impl SettingsPatch {
                 profile_updates: notified(PROFILE_UPDATES_NOTIFICATIONS),
                 go_live: voice.as_ref().and_then(|v| v.bool_value(STREAM_NOTIFICATIONS_ENABLED)),
                 upcoming_event: notified(UPCOMING_SERVER_EVENT_NOTIFICATIONS),
+                quiet_mode: notified(QUIET_MODE),
             },
             privacy: PrivacyPatch {
                 friends_join_game: private(ALLOW_ACTIVITY_PARTY_FRIENDS),
@@ -636,6 +638,7 @@ mod tests {
             varint_field(REACTION_NOTIFICATIONS, 1),
             bool_wrapper(FRIEND_ONLINE_NOTIFICATIONS, false),
             bool_wrapper(PROFILE_UPDATES_NOTIFICATIONS, true),
+            bool_wrapper(QUIET_MODE, true),
         ]
         .concat();
         let proto = [
@@ -651,6 +654,7 @@ mod tests {
         assert_eq!(patch.notifications.friend_online, Some(false));
         assert_eq!(patch.notifications.profile_updates, Some(true));
         assert_eq!(patch.notifications.friend_anniversary, None);
+        assert_eq!(patch.notifications.quiet_mode, Some(true));
         assert_eq!(patch.privacy.voice_participants_join_game, Some(false));
         assert_eq!(patch.privacy.friends_join_game, None);
 
@@ -750,6 +754,7 @@ mod tests {
                     profile_updates: false,
                     go_live: false,
                     upcoming_event: false,
+                    quiet_mode: false,
                 },
                 privacy: Privacy {
                     friends_join_game: false,

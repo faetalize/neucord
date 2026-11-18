@@ -134,12 +134,12 @@ impl App {
     }
 
     /// Whether anything may notify us. Not while our status is Do Not
-    /// Disturb (`eA` in 534765, and `K` in 411238 for messages), which also
-    /// keeps their sound. Not while Discord requires a step: the official
+    /// Disturb or quiet mode is on (`eA` in 534765, and `K` in 411238 for
+    /// messages), which also keeps their sound. Not while Discord requires a step: the official
     /// client stays quiet then too, and a notification would lead nowhere.
     fn notifications_allowed(&self) -> bool {
         let state = self.account.state.borrow();
-        state.required_action.is_none() && !state.settings.do_not_disturb()
+        state.required_action.is_none() && !state.settings.silenced()
     }
 
     pub(super) fn withdraw_friend_request(self: &Rc<Self>, user: Snowflake) {
