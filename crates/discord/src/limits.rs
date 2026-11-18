@@ -217,6 +217,12 @@ pub enum Unavailable {
     /// client shows it locked, and offers Nitro on a click, which Neucord
     /// doesn't copy.
     Nitro,
+    /// It is of a role we don't hold that the server sells
+    /// (`ROLE_SUBSCRIPTION_LOCKED`). The client shows it locked.
+    RoleSubscription,
+    /// The same, where the server may not sell now
+    /// (`ROLE_SUBSCRIPTION_UNAVAILABLE`).
+    RoleSubscriptionUnavailable,
 }
 
 /// Why a sticker can't be sent where we are (`SENDABLE_WITH_PREMIUM`,
@@ -333,11 +339,16 @@ impl Limits<'_> {
     /// Whether we may send `emoji` in `place`, as the client's
     /// `getEmojiUnavailableReason` decides (for chat and reactions alike). An
     /// integration's emoji (`managed`) skips the Nitro check for other
-    /// servers, an animated one doesn't. Emoji bought with a server's role
-    /// subscription have a rule of their own, which needs those roles'
-    /// purchase data Neucord has none of; they only show to members who
-    /// hold the role (`GuildEmoji::usable_with`).
-    pub fn emoji(&self, emoji: &GuildEmoji, place: &Place) -> Result<(), Unavailable> {
+    /// servers, an animated one doesn't. `subscription` is what the server's
+    /// role subscriptions make of it ([`crate::emoji::Guild::emoji_subscription`]):
+    /// one we hold the role of is open and may be animated, one of a role
+    /// the server sells is locked.
+    pub fn emoji(
+        &self,
+        emoji: &GuildEmoji,
+        place: &Place,
+        subscription: crate::emoji::Subscription,
+    ) -> Result<(), Unavailable> {
         let internal = place.guild == Some(emoji.guild_id);
         if place.guild.is_some() && !internal && !place.external {
             return Err(Unavailable::NotHere);
@@ -347,6 +358,14 @@ impl Limits<'_> {
         }
         if !internal && !emoji.managed && !self.nitro.has(Perk::EmojisEverywhere) {
             return Err(Unavailable::Nitro);
+        }
+        use crate::emoji::Subscription;
+        match subscription {
+            Subscription::Locked => return Err(Unavailable::RoleSubscription),
+            Subscription::Unavailable => return Err(Unavailable::RoleSubscriptionUnavailable),
+            // A subscription role's emoji may be animated without Nitro.
+            Subscription::Held => return Ok(()),
+            Subscription::No => {}
         }
         if emoji.animated && !self.nitro.has(Perk::AnimatedEmojis) {
             return Err(Unavailable::Nitro);

@@ -462,15 +462,38 @@ pub struct Role {
     /// A gradient, in servers that have them (see [`crate::members`]).
     #[serde(default)]
     pub colors: Option<RoleColors>,
-    /// Given for linking an account of another service, which marks the role
-    /// by its tags holding `guild_connections`, with no value.
-    #[serde(default, rename = "tags", deserialize_with = "has_guild_connections")]
-    pub linked: bool,
+    /// What the role's tags say it is.
+    #[serde(default, deserialize_with = "role_tags")]
+    pub tags: RoleTags,
 }
 
-fn has_guild_connections<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
-    let tags = Option::<serde_json::Map<String, Value>>::deserialize(d)?;
-    Ok(tags.is_some_and(|tags| tags.contains_key("guild_connections")))
+/// What a role's `tags` mark it as.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RoleTags {
+    /// Given for linking an account of another service: the tags hold
+    /// `guild_connections`, with no value.
+    pub linked: bool,
+    /// The role of a server subscription: a `subscription_listing_id`
+    /// (`U` in 98318).
+    pub subscription: bool,
+    /// And it can be bought: `available_for_purchase` is there (`X`).
+    pub purchasable: bool,
+}
+
+fn role_tags<'de, D: Deserializer<'de>>(d: D) -> Result<RoleTags, D::Error> {
+    let tags = Option::<serde_json::Map<String, Value>>::deserialize(d)?.unwrap_or_default();
+    Ok(RoleTags {
+        linked: tags.contains_key("guild_connections"),
+        subscription: tags.get("subscription_listing_id").is_some_and(|id| !id.is_null()),
+        purchasable: tags.contains_key("available_for_purchase"),
+    })
+}
+
+impl Role {
+    /// Given for linking an account of another service.
+    pub fn linked(&self) -> bool {
+        self.tags.linked
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -1915,10 +1938,14 @@ mod tests {
     #[test]
     fn a_linked_role_is_told_by_its_tags() {
         let role = |tags: Value| serde_json::from_value::<Role>(serde_json::json!({"id": "3", "tags": tags})).unwrap();
-        assert!(role(serde_json::json!({"guild_connections": null})).linked);
-        assert!(!role(serde_json::json!({"bot_id": "9"})).linked);
-        assert!(!role(Value::Null).linked);
-        assert!(!serde_json::from_value::<Role>(serde_json::json!({"id": "3"})).unwrap().linked);
+        assert!(role(serde_json::json!({"guild_connections": null})).linked());
+        assert!(!role(serde_json::json!({"bot_id": "9"})).linked());
+        assert!(!role(Value::Null).linked());
+        assert!(!serde_json::from_value::<Role>(serde_json::json!({"id": "3"})).unwrap().linked());
+        let tags = role(serde_json::json!({"subscription_listing_id": "7", "available_for_purchase": null})).tags;
+        assert_eq!((tags.subscription, tags.purchasable, tags.linked), (true, true, false));
+        let sold = role(serde_json::json!({"subscription_listing_id": null, "available_for_purchase": "2026-01-01"}));
+        assert_eq!((sold.tags.subscription, sold.tags.purchasable), (false, true));
     }
 
     #[test]
