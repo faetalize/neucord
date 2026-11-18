@@ -198,9 +198,13 @@ fn button_widget(button: &Button, component: &Component, images: Option<&Images>
         (Some(url), _, _) if !button.disabled => {
             widget.set_tooltip_text(Some(url));
             let url = url.to_owned();
+            let app = live.map(|live| live.app.clone());
             widget.connect_clicked(move |widget| {
                 let window = widget.root().and_downcast::<gtk::Window>();
-                gtk::UriLauncher::new(&url).launch(window.as_ref(), gio::Cancellable::NONE, |_| {});
+                match app.as_ref().and_then(Weak::upgrade) {
+                    Some(app) => super::viewer::launch_uri(&app, &url, window.as_ref()),
+                    None => gtk::UriLauncher::new(&url).launch(window.as_ref(), gio::Cancellable::NONE, |_| {}),
+                }
             });
         }
         // Buying needs Discord's store, which Neucord doesn't have.

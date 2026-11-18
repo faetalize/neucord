@@ -135,7 +135,7 @@ const DETAILS_OPEN_LINK: MenuEntry<MessageTarget> = MenuEntry::Item(MenuItem {
     shows: |_, target| target.sticker().and_then(|s| s.link()).is_some(),
     kind: Kind::Action(|app, target| {
         if let Some(link) = target.sticker().and_then(|s| s.link()) {
-            gtk::UriLauncher::new(&link).launch(Some(&app.window), gtk::gio::Cancellable::NONE, |_| {});
+            super::viewer::open_link(app, &link);
         }
     }),
 });

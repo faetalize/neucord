@@ -993,7 +993,24 @@ pub(super) fn copy_link(app: &Rc<App>, url: &str) {
 }
 
 pub(super) fn open_link(app: &Rc<App>, url: &str) {
-    gtk::UriLauncher::new(url).launch(Some(&app.window), gio::Cancellable::NONE, |_| {});
+    launch_uri(app, url, Some(app.window.upcast_ref()));
+}
+
+/// Open `url` with the system (the OpenURI portal), and say so on a toast
+/// when it can't be: no handler, or the portal refusing. Closing the
+/// portal's own dialog is the user's answer, not a failure.
+pub(super) fn launch_uri(app: &Rc<App>, url: &str, parent: Option<&gtk::Window>) {
+    let app = Rc::downgrade(app);
+    gtk::UriLauncher::new(url).launch(parent, gio::Cancellable::NONE, move |result| {
+        let Err(e) = result else { return };
+        if e.matches(gtk::DialogError::Dismissed) {
+            return;
+        }
+        eprintln!("open link: {e}");
+        if let Some(app) = app.upgrade() {
+            app.toast("Could not open the link");
+        }
+    });
 }
 
 impl App {

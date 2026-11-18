@@ -2290,7 +2290,18 @@ impl App {
     /// roll the dice a roll's link names.
     fn link_follower(self: &Rc<Self>) -> render::LinkHandler {
         let this = Rc::downgrade(self);
-        Rc::new(move |url| this.upgrade().is_some_and(|this| this.follow_dice_link(url)))
+        Rc::new(move |url| {
+            let Some(this) = this.upgrade() else { return false };
+            if this.follow_dice_link(url) {
+                return true;
+            }
+            // The label would open it and say nothing if that fails.
+            let web = url.starts_with("https://") || url.starts_with("http://");
+            if web {
+                viewer::open_link(&this, url);
+            }
+            web
+        })
     }
 
     /// Whether the embeds of user-profile links are left out for this account.
