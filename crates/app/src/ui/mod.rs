@@ -607,6 +607,18 @@ impl App {
         self.stack.add_named(&self.build_choose_account(), Some("accounts"));
         self.stack.add_named(&self.build_main(), Some("main"));
         self.stack.add_named(&self.build_blocked(), Some("blocked"));
+        // The QR code's connection lives while its page is shown, as the
+        // client's does while the form is mounted: a lost connection that
+        // sends the user elsewhere, or another account taking the window,
+        // would otherwise leave it reconnecting behind the page.
+        let this = Rc::downgrade(self);
+        self.stack.connect_visible_child_name_notify(move |stack| {
+            if stack.visible_child_name().as_deref() != Some("login")
+                && let Some(this) = this.upgrade()
+            {
+                this.login.stop_qr();
+            }
+        });
         // The viewer covers everything but the toasts, which say how it went.
         let layers = gtk::Overlay::builder().child(&self.stack).build();
         layers.add_overlay(self.viewer.widget());
