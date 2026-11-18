@@ -86,6 +86,7 @@ pub mod settings;
 mod settings_proto;
 pub mod settings_sync;
 pub mod shape;
+pub mod stage;
 pub mod stickers;
 pub mod subscriptions;
 pub mod switcher;

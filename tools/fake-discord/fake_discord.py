@@ -272,6 +272,13 @@ def guild():
                             "member_count": 1, "rate_limit_per_user": 0, "flags": 0, "applied_tags": tags,
                             "thread_metadata": {"archived": False, "locked": False, "archive_timestamp": now,
                                                 "auto_archive_duration": 4320, "create_timestamp": now}})
+    stages = []
+    if os.environ.get("FAKE_STAGE"):
+        # FAKE_STAGE: a live stage (#606) with a topic; its speakers and audience are in supplemental().
+        channels.append({"id": "606", "type": 13, "name": "town-hall", "position": 6, "parent_id": None, "flags": 0,
+                         "permission_overwrites": []})
+        stages.append({"id": "8000", "guild_id": "500", "channel_id": "606", "privacy_level": 2,
+                       "topic": "Quarterly town hall: ask us anything about the roadmap", "discoverable_disabled": False})
     return {"id": "500", "properties": {"name": "Test Server", "owner_id": "100" if OWNER else "999", "icon": None, "features": [],
             "premium_tier": 0, "default_message_notifications": 0, "nsfw_level": NSFW["level"],
             "owner_configured_content_level": NSFW["owner"]}, "roles": [
@@ -280,7 +287,8 @@ def guild():
         {"id": "510", "name": "Mods", "permissions": "0", "position": 1, "color": 0, "hoist": False,
          "mentionable": True, "managed": False, "flags": 0}],
         "channels": channels, "emojis": custom_emoji(), "stickers": guild_stickers(), "threads": threads, "member_count": 3,
-        "data_mode": "full", "joined_at": "2026-01-01T00:00:00.000000+00:00", "large": False, "lazy": True}
+        "data_mode": "full", "joined_at": "2026-01-01T00:00:00.000000+00:00", "large": False, "lazy": True,
+            "stage_instances": stages}
 
 
 GUILD_CHANNELS = {c["id"] for c in guild()["channels"]}
@@ -322,9 +330,18 @@ def ready():
 
 
 def supplemental():
+    voice = [{"user_id": "301", "channel_id": "602", "session_id": "v1",
+              "deaf": False, "mute": False, "self_deaf": False, "self_mute": False}]
+    if os.environ.get("FAKE_STAGE"):
+        # Alice speaks on the stage, Bob and a made-up third listen.
+        voice += [{"user_id": "302", "channel_id": "606", "session_id": "v2", "suppress": False, "deaf": False,
+                   "mute": False, "self_deaf": False, "self_mute": False},
+                  {"user_id": "303", "channel_id": "606", "session_id": "v3", "suppress": True, "deaf": False,
+                   "mute": False, "self_deaf": False, "self_mute": False},
+                  {"user_id": "304", "channel_id": "606", "session_id": "v4", "suppress": True, "deaf": False,
+                   "mute": False, "self_deaf": False, "self_mute": False}]
     return {
-        "guilds": [{"id": "500", "voice_states": [{"user_id": "301", "channel_id": "602", "session_id": "v1",
-                                                  "deaf": False, "mute": False, "self_deaf": False, "self_mute": False}]}],
+        "guilds": [{"id": "500", "voice_states": voice}],
         "merged_members": [[{"user_id": "301", "roles": ["510"], "nick": "Al", "flags": 0, "joined_at": JOINED},
                             {"user_id": "302", "roles": [], "flags": 0, "joined_at": JOINED}]],
         "merged_presences": {"friends": [{"user_id": "301", "status": "online", "activities": [],

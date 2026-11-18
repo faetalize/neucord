@@ -192,6 +192,18 @@ impl App {
                     self.account.state.borrow_mut().voice.replace_guild(guild_id, states);
                     self.refresh_badges();
                 }
+                Event::GuildStageInstances { guild_id, instances } => {
+                    self.account.state.borrow_mut().stage.replace_guild(guild_id, instances);
+                    self.refresh_badges();
+                }
+                Event::StageInstance(instance) => {
+                    self.account.state.borrow_mut().stage.set(instance);
+                    self.refresh_badges();
+                }
+                Event::StageInstanceDelete { channel_id } => {
+                    self.account.state.borrow_mut().stage.remove(channel_id);
+                    self.refresh_badges();
+                }
                 Event::VoiceStates(updates) => {
                     let mut changed = false;
                     {
@@ -546,6 +558,7 @@ impl App {
             gates,
             unavailable_guilds,
             voice_states,
+            stage_instances,
             auth_token,
             qos_token,
         } = ready;
@@ -592,6 +605,7 @@ impl App {
             state.unavailable_guilds = unavailable_guilds;
             state.member_counts.clear();
             state.voice = voice_states;
+            state.stage = stage_instances;
             // A new session: every index is out of date, and no command is waiting on this one.
             state.commands.session_started();
             state.running.clear();
@@ -879,6 +893,7 @@ impl App {
             let gone: Vec<Snowflake> = guild.remove_channel(id).into_iter().chain([id]).collect();
             let mut timelines = self.account.timelines.borrow_mut();
             for channel in &gone {
+                state.stage.remove(*channel);
                 state.pins.forget(*channel);
                 state.mentions.remove_where(|m| m.channel_id == *channel);
                 state.read.remove(*channel);

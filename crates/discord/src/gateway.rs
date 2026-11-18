@@ -47,6 +47,7 @@ use crate::read_state::ReadStates;
 use crate::relationships::{Presence, Relationship, Relationships};
 use crate::settings::{Settings, SettingsPatch, UserStatus};
 use crate::settings_proto;
+use crate::stage::{StageInstance, StageInstances};
 use crate::stickers::Listed;
 use crate::verification::Account;
 use crate::voice_states::{self, VoiceState, VoiceStates};
@@ -108,6 +109,8 @@ pub struct Ready {
     pub unavailable_guilds: usize,
     /// Who is in the voice channels of every server READY carries.
     pub voice_states: VoiceStates,
+    /// The stages that are live in them.
+    pub stage_instances: StageInstances,
     /// A new token for the account, which the client switches to (`UPDATE_TOKEN`).
     pub auth_token: Option<String>,
     /// What IDENTIFY's `qos_token` sends back, see [`identity::learn_qos_token`].
@@ -136,6 +139,18 @@ pub enum Event {
     },
     /// People joining, moving in and leaving voice channels.
     VoiceStates(Vec<voice_states::Update>),
+    /// The stages live in a server, which follow its `GUILD_CREATE`.
+    GuildStageInstances {
+        guild_id: Snowflake,
+        instances: Vec<StageInstance>,
+    },
+    /// A stage went live, or its topic changed (`STAGE_INSTANCE_CREATE` and
+    /// `STAGE_INSTANCE_UPDATE`).
+    StageInstance(StageInstance),
+    /// A stage ended (`STAGE_INSTANCE_DELETE`).
+    StageInstanceDelete {
+        channel_id: Snowflake,
+    },
     /// The DMs READY left for later (`lazy_private_channels` of
     /// `READY_SUPPLEMENTAL`).
     LazyPrivateChannels(Vec<Channel>),
@@ -1203,13 +1218,14 @@ fn ready(parser: &Parser, data: Value, servers: impl Iterator<Item = Value>) {
     let Some(account) = Account::from_user(&data["user"]) else { return };
     parser.me.set(Some(user.id));
     // One server at a time, so only one is ever a tree of values.
-    let (mut guilds, mut voice_states, mut members, mut unavailable_guilds) =
-        (Vec::new(), VoiceStates::default(), Members::default(), 0);
+    let (mut guilds, mut voice_states, mut stage_instances, mut members, mut unavailable_guilds) =
+        (Vec::new(), VoiceStates::default(), StageInstances::default(), Members::default(), 0);
     for (i, g) in servers.enumerate() {
         let merged = &data["merged_members"][i];
         guilds.extend(guild_with_member(&g, merged, user.id));
         if let Some(id) = parse_id(&g["id"]) {
             voice_states.replace_guild(id, VoiceState::parse_list(&g["voice_states"]));
+            stage_instances.replace_guild(id, StageInstance::parse_list(&g["stage_instances"]));
             members.add(id, members_of(&g, merged), &[]);
         }
         unavailable_guilds += usize::from(g["unavailable"] == true);
@@ -1244,6 +1260,7 @@ fn ready(parser: &Parser, data: Value, servers: impl Iterator<Item = Value>) {
         gates: Gates::from_ready(&data),
         unavailable_guilds,
         voice_states,
+        stage_instances,
         auth_token: data["auth_token"].as_str().filter(|t| !t.is_empty()).map(str::to_owned),
         qos_token: data["qos_token"].as_str().map(str::to_owned),
         account,
@@ -1626,10 +1643,23 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
             };
             let voice =
                 Event::GuildVoiceStates { guild_id: guild.id, states: VoiceState::parse_list(&data["voice_states"]) };
+            let stages = Event::GuildStageInstances {
+                guild_id: guild.id,
+                instances: StageInstance::parse_list(&data["stage_instances"]),
+            };
             parser.push(Event::GuildCreate(guild));
             parser.push(voice);
+            parser.push(stages);
             members
         }
+        "STAGE_INSTANCE_CREATE" | "STAGE_INSTANCE_UPDATE" => match StageInstance::parse(&data) {
+            Some(instance) => Event::StageInstance(instance),
+            None => return,
+        },
+        "STAGE_INSTANCE_DELETE" => match parse_id(&data["channel_id"]) {
+            Some(channel_id) => Event::StageInstanceDelete { channel_id },
+            None => return,
+        },
         "VOICE_STATE_UPDATE" => match voice_states::Update::parse(&data) {
             Some(update) => Event::VoiceStates(vec![update]),
             None => return,
@@ -1913,8 +1943,16 @@ mod tests {
             panic!("expected READY and a dispatch")
         };
         assert!(
-            matches!(events[..], [Event::GuildCreate(_), Event::GuildVoiceStates { .. }, Event::Members { .. }]),
-            "the guild needs our id from READY, and its voice list follows it"
+            matches!(
+                events[..],
+                [
+                    Event::GuildCreate(_),
+                    Event::GuildVoiceStates { .. },
+                    Event::GuildStageInstances { .. },
+                    Event::Members { .. }
+                ]
+            ),
+            "the guild needs our id from READY, and its voice list and live stages follow it"
         );
     }
 
@@ -2269,6 +2307,27 @@ mod tests {
     }
 
     #[test]
+    fn stages_going_live_changing_and_ending_are_reported() {
+        let state = Parser::default();
+        let instance = json!({"id": "1", "guild_id": "2", "channel_id": "3", "topic": "Q&A", "privacy_level": 2});
+        dispatch(&state, "STAGE_INSTANCE_CREATE", instance.clone());
+        let Ok(Event::StageInstance(created)) = state.try_recv() else { panic!("no stage instance") };
+        assert_eq!((created.channel_id, created.topic.as_str()), (Snowflake(3), "Q&A"));
+        dispatch(
+            &state,
+            "STAGE_INSTANCE_UPDATE",
+            json!({"id": "1", "guild_id": "2", "channel_id": "3", "topic": "next"}),
+        );
+        let Ok(Event::StageInstance(updated)) = state.try_recv() else { panic!("no update") };
+        assert_eq!(updated.topic, "next");
+        dispatch(&state, "STAGE_INSTANCE_DELETE", instance);
+        let Ok(Event::StageInstanceDelete { channel_id }) = state.try_recv() else { panic!("no delete") };
+        assert_eq!(channel_id, Snowflake(3));
+        dispatch(&state, "STAGE_INSTANCE_CREATE", json!({"nonsense": true}));
+        assert!(state.try_recv().is_err(), "one that names no channel is nothing");
+    }
+
+    #[test]
     fn a_server_that_is_deleted_or_unavailable_is_reported() {
         let state = Parser::default();
         dispatch(&state, "GUILD_DELETE", json!({"id": "1"}));
@@ -2354,6 +2413,7 @@ mod tests {
         );
         assert!(matches!(state.try_recv(), Ok(Event::GuildCreate(_))));
         assert!(matches!(state.try_recv(), Ok(Event::GuildVoiceStates { .. })));
+        assert!(matches!(state.try_recv(), Ok(Event::GuildStageInstances { .. })));
         let Ok(Event::Members { guild_id, members, .. }) = state.try_recv() else { panic!("no members") };
         let roles = |ids: &[u64]| Known { roles: ids.iter().map(|&id| Snowflake(id)).collect(), ..Known::default() };
         assert_eq!((guild_id, members), (Snowflake(2), vec![(Snowflake(7), roles(&[41]))]));

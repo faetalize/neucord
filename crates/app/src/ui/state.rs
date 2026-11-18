@@ -298,6 +298,8 @@ pub(super) struct State {
     pub(super) members_closed: bool,
     /// Who is in each server's voice channels.
     pub(super) voice: VoiceStates,
+    /// The stages live in them, with their topics.
+    pub(super) stage: discord::stage::StageInstances,
     /// What each message search holds, by where it looks.
     pub(super) searches: HashMap<discord::search::Context, super::search::Saved>,
     /// The inbox's mentions, and what they include.
@@ -1139,6 +1141,16 @@ impl State {
                                 sig.push(hash.finish());
                             }
                         }
+                        if c.kind == ChannelKind::Stage {
+                            // Its topic, and who speaks and how many listen.
+                            let mut hash = std::collections::hash_map::DefaultHasher::new();
+                            self.stage.of(c.id).map(|i| &i.topic).hash(&mut hash);
+                            let in_stage = self.voice.in_channel(guild.id, c.id, |v| self.voice_name(v));
+                            for v in &in_stage {
+                                (v.user_id, v.suppress, v.muted(), v.deafened(), self.voice_name(v)).hash(&mut hash);
+                            }
+                            sig.push(hash.finish());
+                        }
                         for t in self.sidebar_threads(guild, c) {
                             // A muted thread shows as muted; its place stands for that.
                             sig.extend([t.id.0, Self::thread_muted(t) as u64]);
@@ -1200,6 +1212,7 @@ impl State {
         let at = self.guilds.iter().position(|g| g.id == id)?;
         let guild = self.guilds.remove(at);
         self.voice.replace_guild(id, Vec::new());
+        self.stage.forget_guild(id);
         let was_open = self.guild == Some(id);
         let gone: Vec<Snowflake> = guild.channels.iter().chain(&guild.threads).map(|c| c.id).collect();
         self.mentions.remove_where(|m| gone.contains(&m.channel_id));
