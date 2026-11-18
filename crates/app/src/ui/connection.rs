@@ -270,6 +270,7 @@ impl App {
                     self.rebuild_rail();
                     self.permissions_changed(Some(id));
                 }
+                Event::GuildDelete { id, unavailable } => self.on_guild_delete(id, unavailable),
                 Event::GuildEmojisUpdate { guild_id, emojis } => {
                     if let Some(guild) = self.account.state.borrow_mut().guilds.iter_mut().find(|g| g.id == guild_id) {
                         guild.emojis = emojis;
@@ -835,6 +836,25 @@ impl App {
             self.sync_threads_button();
         }
         self.permissions_changed(Some(guild_id));
+    }
+
+    /// A server is gone from the rail, with its messages. If it was open, Home
+    /// opens instead. One that is only unavailable stays.
+    fn on_guild_delete(self: &Rc<Self>, id: Snowflake, unavailable: bool) {
+        let Some((channels, was_open)) = self.account.state.borrow_mut().guild_deleted(id, unavailable) else {
+            return;
+        };
+        {
+            let mut timelines = self.account.timelines.borrow_mut();
+            for channel in channels {
+                timelines.remove(channel);
+            }
+        }
+        if was_open {
+            self.select_home();
+        }
+        self.rebuild_rail();
+        self.refresh_badges();
     }
 
     /// Threads in a server changed, as `change` makes them: created,

@@ -241,6 +241,12 @@ pub enum Event {
     /// A server's settings changed, its roles among them. It has no channels
     /// and no member of ours: see [`Guild::update`].
     GuildUpdate(Guild),
+    /// We left a server, were removed from it, or it is `unavailable`: an
+    /// outage, which leaves everything we know of it where it is.
+    GuildDelete {
+        id: Snowflake,
+        unavailable: bool,
+    },
     /// A role was created or changed.
     RoleUpdate {
         guild_id: Snowflake,
@@ -1324,6 +1330,10 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
             parser.push(Event::Members { guild_id, members, not_found, users: users.collect() });
             answer
         }
+        "GUILD_DELETE" => {
+            let Some(id) = parse_id(&data["id"]) else { return };
+            Event::GuildDelete { id, unavailable: data["unavailable"].as_bool() == Some(true) }
+        }
         "GUILD_UPDATE" => match Guild::from_value(&data) {
             Ok(guild) => Event::GuildUpdate(guild),
             Err(e) => return eprintln!("gateway: bad GUILD_UPDATE: {e}"),
@@ -2089,6 +2099,17 @@ mod tests {
             panic!("no recipient remove")
         };
         assert_eq!((channel_id, user_id), (Snowflake(9), Snowflake(7)));
+    }
+
+    #[test]
+    fn a_server_that_is_deleted_or_unavailable_is_reported() {
+        let state = Parser::default();
+        dispatch(&state, "GUILD_DELETE", json!({"id": "1"}));
+        let Ok(Event::GuildDelete { id, unavailable }) = state.try_recv() else { panic!("no guild delete") };
+        assert_eq!((id, unavailable), (Snowflake(1), false));
+        dispatch(&state, "GUILD_DELETE", json!({"id": "2", "unavailable": true}));
+        let Ok(Event::GuildDelete { id, unavailable }) = state.try_recv() else { panic!("no guild delete") };
+        assert_eq!((id, unavailable), (Snowflake(2), true));
     }
 
     #[test]
