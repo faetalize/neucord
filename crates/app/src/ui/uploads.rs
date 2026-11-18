@@ -525,9 +525,62 @@ impl App {
                 if let Some(pasted) = pasted.filter(|p| *p != Pasted::Text) {
                     view.stop_signal_emission_by_name("paste-clipboard");
                     this.paste_files(pasted == Pasted::Files);
+                } else if this.pastes_long_text_as_file() {
+                    // Whether it is too long is known once it is read.
+                    view.stop_signal_emission_by_name("paste-clipboard");
+                    this.paste_text_or_file();
                 }
             }
         });
+    }
+
+    /// A text pasted into the message box of a channel that takes files may
+    /// become a `message.txt` (`uploadLongMessages`, 84046): not while a
+    /// command or an edit has the box.
+    fn pastes_long_text_as_file(&self) -> bool {
+        !self.slash.is_active()
+            && self.editing().is_none()
+            && self.attach_channel().is_some()
+            && self.composer.clipboard().formats().contains_type(glib::Type::STRING)
+    }
+
+    /// Paste the clipboard's text, or attach it as `message.txt` when it is
+    /// longer than a message the account may send (`onPaste` in 84046).
+    fn paste_text_or_file(self: &Rc<Self>) {
+        let (clipboard, channel) = (self.composer.clipboard(), self.attach_channel());
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            let Ok(Some(text)) = clipboard.read_text_future().await else { return };
+            if text.is_empty() {
+                return;
+            }
+            let limit = this.account.state.borrow().limits().max_message_length();
+            match channel {
+                Some(channel) if uploads::pasted_text_becomes_file(&text, limit) => {
+                    let bytes = glib::Bytes::from_owned(text.as_bytes().to_vec());
+                    let file = File {
+                        filename: "message.txt".to_owned(),
+                        size: bytes.len() as u64,
+                        content_type: "text/plain".to_owned(),
+                        data: Data::Memory(bytes),
+                        original_md5: None,
+                    };
+                    this.add_files(channel, vec![file]).await;
+                }
+                _ => this.insert_pasted_text(&text),
+            }
+        });
+    }
+
+    /// Put `text` in the message box where the caret is, over the selection,
+    /// as a paste does.
+    fn insert_pasted_text(&self, text: &str) {
+        let (view, buffer) = (&self.composer, self.composer.buffer());
+        buffer.begin_user_action();
+        buffer.delete_selection(true, view.is_editable());
+        buffer.insert_interactive_at_cursor(text, view.is_editable());
+        buffer.end_user_action();
+        view.grab_focus();
     }
 
     /// What pasting the clipboard in the message box does now, and whether
@@ -565,15 +618,9 @@ impl App {
         let this = self.clone();
         glib::spawn_future_local(async move {
             let Ok(Some(text)) = clipboard.read_text_future().await else { return };
-            if text.is_empty() {
-                return;
+            if !text.is_empty() {
+                this.insert_pasted_text(&text);
             }
-            let (view, buffer) = (&this.composer, this.composer.buffer());
-            buffer.begin_user_action();
-            buffer.delete_selection(true, view.is_editable());
-            buffer.insert_interactive_at_cursor(&text, view.is_editable());
-            buffer.end_user_action();
-            view.grab_focus();
         });
     }
 
@@ -652,8 +699,13 @@ impl App {
                 }
             } else if let Ok(Some(texture)) = clipboard.read_texture_future().await {
                 let bytes = texture.save_to_png_bytes();
+                // From a web page, the clipboard also holds the page's HTML, which names the image.
+                let name = match clipboard.formats().contain_mime_type("text/html") {
+                    true => clipboard_html(&clipboard).await.and_then(|html| uploads::pasted_image_name(&html)),
+                    false => None,
+                };
                 let image = File {
-                    filename: "image.png".to_owned(),
+                    filename: name.unwrap_or_else(|| "image.png".to_owned()),
                     size: bytes.len() as u64,
                     content_type: "image/png".to_owned(),
                     data: Data::Memory(bytes),
@@ -1096,4 +1148,19 @@ impl App {
     pub(super) fn sizes(files: &[Rc<Upload>]) -> Vec<u64> {
         files.iter().map(|u| u.file.borrow().size).collect()
     }
+}
+
+/// The clipboard's `text/html`, as far as a name needs it: the first
+/// megabyte, read as UTF-8.
+async fn clipboard_html(clipboard: &gdk::Clipboard) -> Option<String> {
+    let (stream, _) = clipboard.read_future(&["text/html"], glib::Priority::DEFAULT).await.ok()?;
+    let mut html = Vec::new();
+    while html.len() < 1 << 20 {
+        let chunk = stream.read_bytes_future(1 << 16, glib::Priority::DEFAULT).await.ok()?;
+        if chunk.is_empty() {
+            break;
+        }
+        html.extend_from_slice(&chunk);
+    }
+    Some(String::from_utf8_lossy(&html).into_owned())
 }
