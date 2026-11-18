@@ -167,15 +167,7 @@ impl App {
     /// not at all while it holds one that is current, in the background while
     /// it holds an old one, and before showing anything if it holds none.
     pub(super) fn show_profile(self: &Rc<Self>, target: &UserTarget, note: bool) {
-        if !is_person(target) {
-            return;
-        }
-        let Some(me) = self.account.state.borrow().me() else { return };
-        let request = {
-            let state = self.account.state.borrow();
-            let role = target.guild.and_then(|g| state.connections_role(g, target.user.id, target.channel));
-            Request::popout(&target.user, me, target.guild, role)
-        };
+        let Some(request) = self.popout_request(target) else { return };
         let popover = gtk::Popover::builder().has_arrow(true).build();
         popover.set_parent(&self.window);
         if let Some(bounds) = target.anchor.compute_bounds(&self.window) {
@@ -217,6 +209,28 @@ impl App {
         }
         self.begin_profile(&view);
         popover.popup();
+    }
+
+    /// What `target`'s popout asks for, if it is of a person.
+    fn popout_request(&self, target: &UserTarget) -> Option<Request> {
+        if !is_person(target) {
+            return None;
+        }
+        let state = self.account.state.borrow();
+        let me = state.me()?;
+        let role = target.guild.and_then(|g| state.connections_role(g, target.user.id, target.channel));
+        Some(Request::popout(&target.user, me, target.guild, role))
+    }
+
+    /// The pointer went down on a name or an avatar that opens `target`'s
+    /// profile: ask for it now, as the client's popout does on mouse down
+    /// (`handlePreload` in 453903), so it is on its way by the click.
+    pub(super) fn prefetch_profile(self: &Rc<Self>, target: &UserTarget) {
+        let Some(request) = self.popout_request(target) else { return };
+        let plan = self.account.state.borrow().profiles.plan(&request, now_ms() as u64);
+        if plan != Fetch::No {
+            self.send_profile(request);
+        }
     }
 
     /// Show the profile of whoever the DM `channel` is with in `host`, the
@@ -261,9 +275,14 @@ impl App {
 
     /// Draw `view`, and ask for what it needs.
     fn begin_profile(self: &Rc<Self>, view: &Rc<View>) {
-        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
-        let plan = self.account.state.borrow().profiles.plan(&view.request, now_ms() as u64);
-        view.fill(self, plan == Fetch::Before);
+        let (plan, nothing_yet) = {
+            let state = self.account.state.borrow();
+            let plan = state.profiles.plan(&view.request, now_ms() as u64);
+            // One asked for already, on mouse down, still has nothing to show.
+            let on_its_way = state.profiles.is_asking(&view.request) && state.profiles.get(view.request.user).is_none();
+            (plan, on_its_way)
+        };
+        view.fill(self, plan == Fetch::Before || nothing_yet);
         self.load_note_then(view.target.user.id, {
             let (this, view) = (Rc::downgrade(self), view.clone());
             move || {
@@ -272,28 +291,33 @@ impl App {
                 }
             }
         });
-        if plan == Fetch::No {
-            return;
+        if plan != Fetch::No {
+            self.send_profile(view.request);
         }
-        self.account.state.borrow_mut().profiles.asked(&view.request);
-        let (this, view) = (self.clone(), view.clone());
+    }
+
+    /// Ask for `request`, and show what comes in the profiles on screen.
+    fn send_profile(self: &Rc<Self>, request: Request) {
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
+        self.account.state.borrow_mut().profiles.asked(&request);
+        let this = self.clone();
         glib::spawn_future_local(async move {
-            let answer = rest.profile(&view.request).await;
+            let answer = rest.profile(&request).await;
             let now = now_ms() as u64;
             {
                 let mut state = this.account.state.borrow_mut();
                 match answer {
-                    Ok(profile) => state.profiles.answered(&view.request, profile, now),
+                    Ok(profile) => state.profiles.answered(&request, profile, now),
                     Err(e) => {
                         let status = match &e {
                             discord::Error::Http { status, .. } => Some(*status),
                             _ => None,
                         };
-                        state.profiles.refused(&view.request, status, now);
+                        state.profiles.refused(&request, status, now);
                     }
                 }
             }
-            view.fill(&this, false);
+            this.refresh_profile_views();
         });
     }
 

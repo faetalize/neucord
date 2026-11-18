@@ -50,8 +50,28 @@ pub(super) struct MessageTarget {
     pub(super) link: Option<String>,
     /// The sticker the menu was opened on.
     pub(super) sticker: Option<Snowflake>,
+    /// The custom emoji it was opened on, and the link of its image.
+    pub(super) emoji: Option<ClickedEmoji>,
     /// The picture or video of the message the menu was opened on.
     pub(super) media: Option<discord::media::Item>,
+}
+
+/// What a message's menu was opened on, besides the message.
+#[derive(Default)]
+pub(super) struct Clicked {
+    pub(super) link: Option<String>,
+    pub(super) sticker: Option<Snowflake>,
+    pub(super) media: Option<usize>,
+    pub(super) emoji: Option<ClickedEmoji>,
+}
+
+/// A custom emoji in a message's text that a menu was opened on.
+#[derive(Clone)]
+pub(super) struct ClickedEmoji {
+    pub(super) id: u64,
+    /// What the client shows as its image's address: the emoji at the size it
+    /// is drawn.
+    pub(super) link: String,
 }
 
 impl MessageTarget {
@@ -167,7 +187,9 @@ pub(super) const OPEN_MEDIA_LINK: Entry<MessageTarget> =
 pub(super) const COPY_MESSAGE_ID: Entry<MessageTarget> = Entry::Item(Item {
     name: "copy-message-id",
     label: "Copy Message _ID",
-    shows: |app, target| app.account.state.borrow().settings.developer_mode && target.sticker().is_none(),
+    shows: |app, target| {
+        app.account.state.borrow().settings.developer_mode && target.sticker().is_none() && target.emoji.is_none()
+    },
     kind: menus::Kind::Action(copy_message_id),
 });
 
@@ -1788,14 +1810,14 @@ fn attach_message_menu(this: &std::rc::Weak<App>, item: &gtk::ListItem, cell: &M
     let row = &cell.parts().row;
     let open = Rc::new({
         let (this, item, row) = (this.clone(), item.downgrade(), row.downgrade());
-        move |at: At, link: Option<String>, sticker: Option<Snowflake>, media: Option<usize>| {
+        move |at: At, clicked: Clicked| {
             let (Some(this), Some(item), Some(row)) = (this.upgrade(), item.upgrade(), row.upgrade()) else { return };
             // Hidden rows: collapsed blocked messages, and those that show nothing.
             let Some(message) = item.item().and_downcast::<glib::BoxedAnyObject>().filter(|_| row.is_visible()) else {
                 return;
             };
             let message = message.borrow::<Message>().clone();
-            this.message_menu(&row, message, at, link, sticker, media);
+            this.message_menu(&row, message, at, clicked);
         }
     });
     menus::on_secondary(row, {
@@ -1832,11 +1854,12 @@ fn attach_message_menu(this: &std::rc::Weak<App>, item: &gtk::ListItem, cell: &M
             let link = row.as_ref().and_then(|row| link_at(row.upcast_ref(), x, y));
             let sticker = row.as_ref().and_then(|row| sticker_at(row.upcast_ref(), x, y));
             let media = row.as_ref().and_then(|row| media_at(row.upcast_ref(), x, y));
-            open(At::Point(x, y), link, sticker, media);
+            let emoji = row.as_ref().and_then(|row| emoji_at(row.upcast_ref(), x, y));
+            open(At::Point(x, y), Clicked { link, sticker, media, emoji });
         }
     });
     let action = gio::SimpleAction::new("menu", None);
-    action.connect_activate(move |_, _| open(At::Point(0.0, 0.0), None, None, None));
+    action.connect_activate(move |_, _| open(At::Point(0.0, 0.0), Clicked::default()));
     let actions = gio::SimpleActionGroup::new();
     actions.add_action(&action);
     cell.insert_action_group("message", Some(&actions));
@@ -1872,13 +1895,14 @@ fn attach_author(this: &std::rc::Weak<App>, item: &gtk::ListItem, cell: &Message
     parts.name.set_cursor_from_name(Some("pointer"));
     for anchor in [parts.name.clone().upcast::<gtk::Widget>(), parts.gutter.clone().upcast()] {
         let click = gtk::GestureClick::builder().button(gdk::BUTTON_PRIMARY).build();
-        click.connect_released({
+        // The author the pointer is on, if it is one to click.
+        let author = {
             let (this, item, cell, anchor) = (this.clone(), item.downgrade(), cell.downgrade(), anchor.downgrade());
-            move |_, _, x, y| {
+            move |x: f64, y: f64| {
                 let (Some(this), Some(item), Some(cell), Some(anchor)) =
                     (this.upgrade(), item.upgrade(), cell.upgrade(), anchor.upgrade())
                 else {
-                    return;
+                    return None;
                 };
                 // Only the avatar of a run's first message is one to click.
                 let parts = cell.parts();
@@ -1886,9 +1910,20 @@ fn attach_author(this: &std::rc::Weak<App>, item: &gtk::ListItem, cell: &Message
                     true => parts.header.is_visible(),
                     false => parts.shows_avatar() && anchor.contains(x, y),
                 };
-                if let (true, Some(target)) = (shown, this.author_target(&item, anchor)) {
-                    this.show_profile(&target, false);
+                shown.then(|| this.author_target(&item, anchor)).flatten().map(|target| (this, target))
+            }
+        };
+        click.connect_pressed({
+            let author = author.clone();
+            move |_, _, x, y| {
+                if let Some((this, target)) = author(x, y) {
+                    this.prefetch_profile(&target);
                 }
+            }
+        });
+        click.connect_released(move |_, _, x, y| {
+            if let Some((this, target)) = author(x, y) {
+                this.show_profile(&target, false);
             }
         });
         anchor.add_controller(click);
@@ -1968,7 +2003,7 @@ fn attach_message_actions(this: &std::rc::Weak<App>, cell: &MessageRow) {
             let row = &cell.parts().row;
             let Some(b) = button.compute_bounds(row) else { return };
             let rect = gdk::Rectangle::new(b.x() as i32, b.y() as i32, b.width() as i32, b.height() as i32);
-            this.message_menu(row, message, At::Below(rect), None, None, None);
+            this.message_menu(row, message, At::Below(rect), Clicked::default());
         }
     });
 }
@@ -2032,9 +2067,25 @@ fn sticker_at(row: &gtk::Widget, x: f64, y: f64) -> Option<Snowflake> {
     None
 }
 
+/// The custom emoji in the text at `(x, y)` in `row`, with the link of its
+/// image at the size it is drawn at.
+pub(super) fn emoji_at(row: &gtk::Widget, x: f64, y: f64) -> Option<ClickedEmoji> {
+    let mut widget = row.pick(x, y, gtk::PickFlags::DEFAULT);
+    while let Some(w) = widget.filter(|w| w != row) {
+        if let Ok(text) = w.clone().downcast::<crate::rich_text::RichText>() {
+            let point = row.compute_point(&text, &gtk::graphene::Point::new(x as f32, y as f32))?;
+            let (id, animated, size) = text.emoji_at(f64::from(point.x()), f64::from(point.y()))?;
+            let request = discord::cdn::emoji_size(size.max(1) as u32, f64::from(text.scale_factor()));
+            return Some(ClickedEmoji { id, link: discord::cdn::emoji_url(id, animated, request) });
+        }
+        widget = w.parent();
+    }
+    None
+}
+
 /// The place among a message's media of the picture or video at `(x, y)` in
 /// `row`, named by [`viewer::MediaCx`].
-fn media_at(row: &gtk::Widget, x: f64, y: f64) -> Option<usize> {
+pub(super) fn media_at(row: &gtk::Widget, x: f64, y: f64) -> Option<usize> {
     let mut widget = row.pick(x, y, gtk::PickFlags::DEFAULT);
     while let Some(w) = widget.filter(|w| w != row) {
         if let Some(index) = viewer::media_index(&w) {
@@ -2290,15 +2341,8 @@ impl App {
     }
 
     /// Open the menu for `message`, whose row is `row`, at `at` there.
-    fn message_menu(
-        self: &Rc<Self>,
-        row: &gtk::Box,
-        message: Message,
-        at: At,
-        link: Option<String>,
-        sticker: Option<Snowflake>,
-        media: Option<usize>,
-    ) {
+    pub(super) fn message_menu(self: &Rc<Self>, row: &gtk::Box, message: Message, at: At, clicked: Clicked) {
+        let Clicked { link, sticker, media, emoji } = clicked;
         let settings = self.account.state.borrow().settings.media;
         let media = media.and_then(|n| {
             let shown = message.thread_starter().unwrap_or(&message);
@@ -2311,6 +2355,7 @@ impl App {
             selection: selection_in(row.upcast_ref()),
             link,
             sticker,
+            emoji,
             media,
             message,
             row: row.clone().upcast(),
@@ -2762,6 +2807,14 @@ impl App {
             line.append(widget);
             widget.set_cursor_from_name(Some("pointer"));
             let click = gtk::GestureClick::builder().button(gdk::BUTTON_PRIMARY).build();
+            click.connect_pressed({
+                let (this, user, anchor) = (Rc::downgrade(self), user.clone(), widget.downgrade());
+                move |_, _, _, _| {
+                    if let (Some(this), Some(anchor)) = (this.upgrade(), anchor.upgrade()) {
+                        this.prefetch_profile(&this.user_target(user.clone(), channel, anchor));
+                    }
+                }
+            });
             click.connect_released({
                 let (this, user, anchor) = (Rc::downgrade(self), user.clone(), widget.downgrade());
                 move |_, _, _, _| {

@@ -569,6 +569,14 @@ impl App {
             }
         };
         let click = gtk::GestureClick::builder().button(gdk::BUTTON_PRIMARY).build();
+        click.connect_pressed({
+            let target = target.clone();
+            move |_, _, _, _| {
+                if let Some((this, target)) = target() {
+                    this.prefetch_profile(&target);
+                }
+            }
+        });
         click.connect_released({
             let target = target.clone();
             move |_, _, _, _| {

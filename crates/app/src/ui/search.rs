@@ -780,6 +780,7 @@ impl App {
                     selection: None,
                     link: None,
                     sticker: None,
+                    emoji: None,
                     media: None,
                 };
                 menus::popup(&app, menus::SEARCH_RESULT, target, &row, At::Point(x, y));

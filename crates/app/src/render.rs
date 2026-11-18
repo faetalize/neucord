@@ -419,6 +419,7 @@ impl<'a> Inline<'a> {
                     size: self.emoji_size,
                     alt: format!(":{name}:"),
                     paintable: None,
+                    emoji: Some((*id, *animated)),
                 };
                 self.emoji.push((image, Emoji { id: *id, animated: *animated }));
                 self.text_object();

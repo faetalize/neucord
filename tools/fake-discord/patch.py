@@ -33,7 +33,10 @@ use discord::Snowflake;
 use gtk::{gdk, gio, glib};
 
 use super::App;
+use super::chat::{Clicked, emoji_at, media_at};
 use super::composer::Completion;
+use super::menus::At;
+use super::message_row::MessageRow;
 
 thread_local! {
     /// Each `menus::extend`'s refill, the message box's first.
@@ -418,6 +421,87 @@ impl App {
                 if let Some(id) = first {
                     self.mention_done(id);
                 }
+            }
+            // The message menu on the custom emoji in the newest row that has one, found as a click would:
+            // `emoji-menu` turns Developer Mode on, scans the row for the emoji and opens the menu there.
+            Some("emoji-menu") => {
+                self.account.state.borrow_mut().settings.developer_mode = true;
+                let rows: Vec<MessageRow> = self.rows.borrow().iter().filter_map(|r| r.upgrade()).collect();
+                for row in rows {
+                    let parts = row.parts();
+                    let (Some(item), width, height) = (parts.item.upgrade(), parts.row.width(), parts.row.height())
+                    else {
+                        continue;
+                    };
+                    let Some(message) = item.item().and_downcast::<glib::BoxedAnyObject>() else { continue };
+                    let message = message.borrow::<discord::Message>().clone();
+                    if !message.content.contains("emoji-probe") {
+                        continue;
+                    }
+                    let mut hit = None;
+                    'scan: for y in (0..height).step_by(4) {
+                        for x in (0..width).step_by(2) {
+                            if let Some(emoji) = emoji_at(parts.row.upcast_ref(), f64::from(x), f64::from(y)) {
+                                hit = Some((f64::from(x), f64::from(y), emoji));
+                                break 'scan;
+                            }
+                        }
+                    }
+                    match hit {
+                        Some((x, y, emoji)) => {
+                            eprintln!("e2e: emoji {} at {x},{y}: {}", emoji.id, emoji.link);
+                            let clicked = Clicked { emoji: Some(emoji), ..Clicked::default() };
+                            self.message_menu(&parts.row, message, At::Point(x, y), clicked);
+                            // The popover is its own surface: shoot it once it is up, as `emoji-menu <png>`.
+                            let (anchor, path) = (parts.row.clone().upcast::<gtk::Widget>(), rest.trim().to_owned());
+                            glib::timeout_add_local_once(Duration::from_millis(600), move || {
+                                match popover_above(&anchor) {
+                                    Some(popover) if !path.is_empty() => shot(&popover, &path),
+                                    _ => eprintln!("e2e: no popover on the row"),
+                                }
+                            });
+                        }
+                        None => eprintln!("e2e: no emoji in the row"),
+                    }
+                    return;
+                }
+                eprintln!("e2e: no row with emoji-probe");
+            }
+            // The message menu on the picture in the row with `embed-probe`, found as a click would be: `embed-menu <png>`.
+            Some("embed-menu") => {
+                let rows: Vec<MessageRow> = self.rows.borrow().iter().filter_map(|r| r.upgrade()).collect();
+                for row in rows {
+                    let parts = row.parts();
+                    let (Some(item), width, height) = (parts.item.upgrade(), parts.row.width(), parts.row.height())
+                    else {
+                        continue;
+                    };
+                    let Some(message) = item.item().and_downcast::<glib::BoxedAnyObject>() else { continue };
+                    let message = message.borrow::<discord::Message>().clone();
+                    if !message.content.contains("embed-probe") {
+                        continue;
+                    }
+                    let mut hit = None;
+                    'scan: for y in (0..height).step_by(4) {
+                        for x in (0..width).step_by(4) {
+                            if let Some(media) = media_at(parts.row.upcast_ref(), f64::from(x), f64::from(y)) {
+                                hit = Some((f64::from(x), f64::from(y), media));
+                                break 'scan;
+                            }
+                        }
+                    }
+                    let Some((x, y, media)) = hit else { return eprintln!("e2e: no media in the row") };
+                    eprintln!("e2e: media {media} at {x},{y}");
+                    let clicked = Clicked { media: Some(media), ..Clicked::default() };
+                    self.message_menu(&parts.row, message, At::Point(x, y), clicked);
+                    let (anchor, path) = (parts.row.clone().upcast::<gtk::Widget>(), rest.trim().to_owned());
+                    glib::timeout_add_local_once(Duration::from_millis(600), move || match popover_above(&anchor) {
+                        Some(popover) if !path.is_empty() => shot(&popover, &path),
+                        _ => eprintln!("e2e: no popover on the row"),
+                    });
+                    return;
+                }
+                eprintln!("e2e: no row with embed-probe");
             }
             // Files dropped on the chat, as a drop does: `drop <path>` joins the draft, `drop-shift <path>` is sent
             // at once (Shift held); `drop-overlay` shows what a drag says.
@@ -1088,3 +1172,22 @@ if os.environ.get("FAKE_EMOJI_IMAGES"):
 # `FAKE_HOVER=1` shows every row's hover bar, which a pointer would only show on the row it is over.
 if os.environ.get("FAKE_HOVER"):
     edit("crates/app/src/style.css", ".message .message-action { opacity: 0;", ".message .message-action { opacity: 1;")
+
+# A friend's profile popout, as the pointer opens it: `profile-press <user id>` is the pointer going down on their
+# name, `profile-click <user id>` the click that opens the popout.
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(p) if p == "profile-press" || p == "profile-click" => self.e2e_profile(p, parts.next()),
+            Some("quit") => {''')
+open(f"{root}/crates/app/src/ui/profile.rs", "a").write(r"""
+impl App {
+    pub(super) fn e2e_profile(self: &Rc<Self>, command: &str, arg: Option<&str>) {
+        let id = Snowflake(arg.and_then(|a| a.parse().ok()).unwrap_or(0));
+        let user = self.account.state.borrow().relationships.get(id).map(|r| r.user.clone());
+        let Some(user) = user else { return eprintln!("e2e: no friend {id:?}") };
+        let target = UserTarget { user, guild: None, channel: None, presence: None, anchor: self.window.clone().upcast() };
+        match command {
+            "profile-press" => self.prefetch_profile(&target),
+            _ => self.show_profile(&target, false),
+        }
+    }
+}
+""")
