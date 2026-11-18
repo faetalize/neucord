@@ -14,7 +14,7 @@ use super::App;
 use super::menus::{self, Entry, Item, Kind};
 use super::state::{Page, now_ms, now_unix};
 use super::thread_line::ThreadLine;
-use super::widgets::{avatar_still, avatar_widget, badge, round_picture};
+use super::widgets::{avatar_still, avatar_widget, badge, importance_badge, round_picture};
 use crate::images::{Images, Row};
 
 /// What a channel row's menu acts on.
@@ -168,7 +168,8 @@ impl App {
                 if let Some(mark) = icon.and_then(|i| i.mark).filter(|&m| m != Mark::Locked) {
                     row.append(&mark_widget(mark));
                 }
-                if let Some(badge) = badge(state.mentions(channel.id)) {
+                if let Some(badge) = importance_badge(state.mentions(channel.id), state.read.low_importance(channel.id))
+                {
                     row.append(&badge);
                 }
                 let row = self.append_row(&row, Some(Target::Channel(channel.id)), state.channel == Some(channel.id));
@@ -181,7 +182,7 @@ impl App {
                 };
                 if state.notifications.channel_muted(&place, now_unix()) {
                     row.add_css_class("muted");
-                } else if state.is_unread(channel) {
+                } else if state.shows_unread(channel) {
                     row.add_css_class("unread");
                 }
                 if channel.kind == discord::ChannelKind::Voice {
@@ -284,7 +285,7 @@ impl App {
                 .ellipsize(pango::EllipsizeMode::End)
                 .build(),
         );
-        if let Some(badge) = badge(state.mentions(thread.id)) {
+        if let Some(badge) = importance_badge(state.mentions(thread.id), state.read.low_importance(thread.id)) {
             row.append(&badge);
         }
         self.thread_menu_on(&row, thread.id);

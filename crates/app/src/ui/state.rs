@@ -17,7 +17,7 @@ use discord::member_list::{self, MemberLists};
 use discord::members::{MemberSearch, Members, RoleColour};
 use discord::notice::Notice;
 use discord::notification_edit::{self, BulkAck};
-use discord::notifications::{Level, NotificationSettings, Place};
+use discord::notifications::{Level, NotificationSettings, Place, UnreadSetting};
 use discord::permissions;
 use discord::post_creation;
 use discord::read_state::ReadStates;
@@ -821,7 +821,7 @@ impl State {
             category_muted: channel
                 .parent_id
                 .is_some_and(|parent| self.notifications.channel_muted_itself(guild.id, parent, now)),
-            unread: self.is_unread(channel),
+            unread: self.shows_unread(channel),
             text_like: channel.kind.is_text() || channel.kind.is_forum_like(),
             vocal: channel.kind.is_vocal(),
         }
@@ -1026,6 +1026,34 @@ impl State {
         })
     }
 
+    /// A message of `channel` counts as a low-importance mention, one the
+    /// account asked for with `mentionOnAllMessages` (see
+    /// [`NotificationSettings::low_importance_mention`]); a DM's is always a
+    /// real one, or muted.
+    pub(super) fn low_importance_mention(&self, channel: Snowflake) -> bool {
+        let now = now_unix();
+        match self.find_channel(channel) {
+            Some((Some(_), thread)) if thread.kind.is_thread() => {
+                let parent = thread.parent_id.and_then(|id| self.place(id));
+                parent.is_some_and(|parent| self.notifications.low_importance_thread_mention(thread, &parent, now))
+            }
+            Some((Some(_), c)) => self
+                .place(channel)
+                .is_some_and(|p| self.notifications.low_importance_mention(&p, c.kind.is_vocal(), now)),
+            _ => false,
+        }
+    }
+
+    /// What the sidebar and the rail show of `channel`'s unread messages:
+    /// [`is_unread`](Self::is_unread), unless its unread setting leaves only
+    /// mentions (`resolveUnreadSetting` is asked before an unread dot shows,
+    /// 458294, 616740). Threads and DMs are always "all".
+    pub(super) fn shows_unread(&self, channel: &Channel) -> bool {
+        self.is_unread(channel)
+            && (channel.kind.is_thread()
+                || self.place(channel.id).is_none_or(|p| self.notifications.unread_setting(&p) == UnreadSetting::All))
+    }
+
     /// Whether unreads and mentions are kept for `channel`: not in an
     /// age-restricted one unless the account may see them (`G3`, 874850,
     /// asked by `canTrackUnreads` in 218461). A thread is as age-restricted
@@ -1071,7 +1099,7 @@ impl State {
         let opt_in = self.notifications.opt_in_enabled(guild.id) && guild.features.iter().any(|f| f == "COMMUNITY");
         // What a channel adds: its dot and mentions, trimmed by the server's opt-in channels.
         let count = |channel: &Channel, dot: bool| {
-            let (unread, mentions) = (dot && self.is_unread(channel), self.mentions(channel.id));
+            let (unread, mentions) = (dot && self.shows_unread(channel), self.mentions(channel.id));
             if !opt_in {
                 return (unread, mentions);
             }
@@ -1215,7 +1243,7 @@ impl State {
         for (place, channel) in channels {
             sig.extend([
                 channel.id.0,
-                self.is_unread(channel) as u64,
+                self.shows_unread(channel) as u64,
                 self.notifications.channel_muted(&place, now) as u64,
                 self.mentions(channel.id) as u64,
             ]);
@@ -1783,6 +1811,37 @@ mod tests {
         // The same chat in a text channel lights the dot.
         state.guilds[0].channels[0].kind = ChannelKind::Text;
         assert_eq!(state.guild_badge(&state.guilds[0]), (true, 2));
+    }
+
+    #[test]
+    fn a_channel_set_to_only_mentions_shows_no_unread_dot_under_the_new_levels() {
+        let mut state = open_server(None, json!({"last_message_id": "200"}));
+        state.guilds[0].set_role(serde_json::from_value(json!({"id": "1", "permissions": "1049600"})).unwrap());
+        state.read = ReadStates::from_ready(&json!([{"id": "9", "last_message_id": "100", "mention_count": 0}]));
+        // The server's level is mentions: without the flag the dot shows anyway.
+        state.notifications = NotificationSettings::from_ready(&json!([{"guild_id": "1", "message_notifications": 1}]));
+        let channel = state.guilds[0].channels[0].clone();
+        assert!(state.shows_unread(&channel));
+        assert_eq!(state.guild_badge(&state.guilds[0]), (true, 0));
+
+        state.notifications.set_flags(1 << 4);
+        assert!(state.is_unread(&channel), "it is unread all the same");
+        assert!(!state.shows_unread(&channel), "but only mentions light it");
+        assert_eq!(state.guild_badge(&state.guilds[0]), (false, 0));
+        assert_eq!(state.tray_alert(), Alert::Quiet);
+
+        state.read = ReadStates::from_ready(&json!([{"id": "9", "last_message_id": "100", "mention_count": 2}]));
+        assert_eq!(state.guild_badge(&state.guilds[0]), (false, 2), "a mention still shows");
+    }
+
+    #[test]
+    fn a_message_in_a_channel_notifying_for_all_is_a_low_importance_mention_when_asked() {
+        let mut state = open_server(None, json!({}));
+        state.notifications = NotificationSettings::from_ready(&json!([{"guild_id": "1", "message_notifications": 0}]));
+        assert!(!state.low_importance_mention(Snowflake(9)));
+        state.notifications.set_flags(1 << 5);
+        assert!(state.low_importance_mention(Snowflake(9)));
+        assert!(!state.low_importance_mention(Snowflake(404)), "a channel we don't know");
     }
 
     #[test]

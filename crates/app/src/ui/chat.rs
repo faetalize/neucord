@@ -9,7 +9,7 @@ use discord::held::Opening;
 use discord::history::{AROUND_PAGE, Around, KINETIC_INPUT, Load, Loadable, Position, SCROLL_INPUT, Viewport};
 use discord::interaction::Target;
 use discord::notifications;
-use discord::read_state::starts_unread;
+use discord::read_state::{Mention, starts_unread};
 use discord::rest::Page;
 use discord::system::{self, Kind};
 use discord::threads::{Anchor, Viewed};
@@ -496,7 +496,14 @@ impl App {
                         blocked,
                         now_unix(),
                     );
-                state.read.on_message(channel, counted);
+                let mention = if counted {
+                    Mention::High
+                } else if tracked && !notifications::is_dropped(&message, group_dm, blocked) {
+                    if state.low_importance_mention(channel) { Mention::Low } else { Mention::None }
+                } else {
+                    Mention::None
+                };
+                state.read.on_message(channel, mention);
                 place.filter(|_| notify)
             }
         };
