@@ -705,13 +705,27 @@ impl State {
         sections
     }
 
+    /// Whether Collapse All Categories shows in a category's menu: not for a
+    /// server with no category, nor when every one is folded already (914907,
+    /// which looks at all the server's categories, listed or not).
+    pub(super) fn offers_collapse_all(&self, guild: &Guild) -> bool {
+        let mut categories = guild.channels.iter().filter(|c| c.kind == ChannelKind::Category).peekable();
+        categories.peek().is_some() && !categories.all(|c| self.collapsed.contains(c.id))
+    }
+
+    /// What Collapse All Categories folds: the categories the sidebar lists
+    /// (`getChannels(guild)[GUILD_CATEGORY]`, 924985).
+    pub(super) fn listed_categories(&self, guild: &Guild) -> Vec<Snowflake> {
+        self.channels_by_category(guild).into_iter().filter_map(|(category, _)| Some(category?.id)).collect()
+    }
+
     fn list_facts(&self, guild: &Guild, channel: &Channel, now: i64) -> Facts {
         let open_thread = self.channel.and_then(|id| guild.thread(id)).is_some_and(|t| t.parent_id == Some(channel.id));
         Facts {
             selected: self.channel == Some(channel.id),
             thread_open: open_thread,
             has_threads: !self.sidebar_threads(guild, channel).is_empty(),
-            mentions: self.read.mentions(channel.id) > 0,
+            mentions: self.mentions(channel.id) > 0,
             muted: self.notifications.channel_muted_itself(guild.id, channel.id, now),
             category_muted: channel
                 .parent_id
@@ -800,7 +814,7 @@ impl State {
 
     /// Whether `channel` has anything unread or a mention waiting.
     pub(super) fn has_news(&self, channel: &Channel) -> bool {
-        self.is_unread(channel) || self.read.mentions(channel.id) > 0
+        self.is_unread(channel) || self.mentions(channel.id) > 0
     }
 
     /// What "Mark As Read" on a channel or a category acks, each with its
@@ -863,7 +877,7 @@ impl State {
     /// icon, or on a folder, is greyed by.
     pub(super) fn guild_has_news(&self, guild: &Guild) -> bool {
         let channels = self.visible(guild, |k| k.is_text() || k.is_vocal() || k.is_forum_like());
-        let mut channels = channels.filter(|c| !c.kind.is_vocal() || self.read.mentions(c.id) > 0);
+        let mut channels = channels.filter(|c| !c.kind.is_vocal() || self.mentions(c.id) > 0);
         channels.any(|c| self.has_news(c)) || threads::joined_active(guild).any(|t| self.has_news(t))
     }
 
@@ -921,7 +935,33 @@ impl State {
         })
     }
 
+    /// Whether unreads and mentions are kept for `channel`: not in an
+    /// age-restricted one unless the account may see them (`G3`, 874850,
+    /// asked by `canTrackUnreads` in 218461). A thread is as age-restricted
+    /// as its parent.
+    pub(super) fn tracks_unreads(&self, channel: &Channel) -> bool {
+        let Some((guild, channel)) = self.find_channel(channel.id) else { return true };
+        let by_level = self.limits().servers_by_nsfw_level();
+        let nsfw = channel.nsfw
+            || channel.kind.is_thread()
+                && channel.parent_id.and_then(|p| guild?.channel(p)).is_some_and(|parent| parent.nsfw);
+        let restricted = guild.is_some_and(|g| g.age_restricted(by_level));
+        self.account.as_ref().is_some_and(|me| me.tracks(nsfw, restricted))
+    }
+
+    /// A channel's mention count, which an age-restricted channel doesn't
+    /// have for an account that may not see it.
+    pub(super) fn mentions(&self, id: Snowflake) -> u32 {
+        match self.find_channel(id) {
+            Some((_, channel)) if !self.tracks_unreads(channel) => 0,
+            _ => self.read.mentions(id),
+        }
+    }
+
     pub(super) fn is_unread(&self, channel: &Channel) -> bool {
+        if !self.tracks_unreads(channel) {
+            return false;
+        }
         if channel.kind.is_thread() {
             let guild = self.guilds.iter().find(|g| g.thread(channel.id).is_some());
             return guild.is_some_and(|g| threads::is_unread(g, channel, &self.read));
@@ -940,7 +980,7 @@ impl State {
         let opt_in = self.notifications.opt_in_enabled(guild.id) && guild.features.iter().any(|f| f == "COMMUNITY");
         // What a channel adds: its dot and mentions, trimmed by the server's opt-in channels.
         let count = |channel: &Channel, dot: bool| {
-            let (unread, mentions) = (dot && self.is_unread(channel), self.read.mentions(channel.id));
+            let (unread, mentions) = (dot && self.is_unread(channel), self.mentions(channel.id));
             if !opt_in {
                 return (unread, mentions);
             }
@@ -963,7 +1003,7 @@ impl State {
         mentions += self.visible(guild, ChannelKind::is_vocal).map(|c| count(c, false).1).sum::<u32>();
         // Threads we've joined count too, unless muted, whatever their parent.
         for thread in threads::joined_active(guild) {
-            mentions += self.read.mentions(thread.id);
+            mentions += self.mentions(thread.id);
             unread = unread || (!guild_muted && !Self::thread_muted(thread) && self.is_unread(thread));
         }
         (unread, mentions)
@@ -1076,7 +1116,7 @@ impl State {
                 channel.id.0,
                 self.is_unread(channel) as u64,
                 self.notifications.channel_muted(&place, now) as u64,
-                self.read.mentions(channel.id) as u64,
+                self.mentions(channel.id) as u64,
             ]);
         }
         sig
@@ -1085,7 +1125,22 @@ impl State {
     /// Home's badge: every DM message counts as a mention, and so does a
     /// friend request.
     pub(super) fn home_badge(&self) -> u32 {
-        self.dms().map(|c| self.read.mentions(c.id)).sum::<u32>() + self.relationships.incoming()
+        self.dms().map(|c| self.mentions(c.id)).sum::<u32>() + self.relationships.incoming()
+    }
+
+    /// `GUILD_DELETE`: we left the server, or lost it. An unavailable one
+    /// stays as it is, as in the client's guild store (71393); a removed one
+    /// goes, with its voice states. Gives the ids of its channels and threads,
+    /// which are no one's now, and whether it was the open server.
+    pub(super) fn guild_deleted(&mut self, id: Snowflake, unavailable: bool) -> Option<(Vec<Snowflake>, bool)> {
+        if unavailable {
+            return None;
+        }
+        let at = self.guilds.iter().position(|g| g.id == id)?;
+        let guild = self.guilds.remove(at);
+        self.voice.replace_guild(id, Vec::new());
+        let was_open = self.guild == Some(id);
+        Some((guild.channels.iter().chain(&guild.threads).map(|c| c.id).collect(), was_open))
     }
 
     /// Record a new newest message for a channel wherever it lives.
@@ -1384,6 +1439,59 @@ mod tests {
     }
 
     #[test]
+    fn an_age_restricted_channel_keeps_no_unreads_or_mentions_for_an_account_that_may_not_see_it() {
+        let mut state = open_server(None, json!({"last_message_id": "200", "nsfw": true}));
+        state.guilds[0].set_role(serde_json::from_value(json!({"id": "1", "permissions": "1049600"})).unwrap());
+        state.guilds[0].threads = vec![
+            serde_json::from_value(
+                json!({"id": "40", "type": 11, "parent_id": "9", "last_message_id": "1570000000000000000",
+                "thread_metadata": {"archived": false, "auto_archive_duration": 60},
+                "member": {"flags": 0, "join_timestamp": "2026-10-28T00:00:00Z"}}),
+            )
+            .unwrap(),
+        ];
+        state.read = ReadStates::from_ready(&json!([
+            {"id": "9", "last_message_id": "100", "mention_count": 3},
+            {"id": "40", "last_message_id": "1", "mention_count": 2},
+        ]));
+        let channel = state.guilds[0].channels[0].clone();
+        let thread = state.guilds[0].threads[0].clone();
+        assert!(!state.is_unread(&channel) && !state.is_unread(&thread));
+        assert_eq!(
+            (state.mentions(Snowflake(9)), state.mentions(Snowflake(40))),
+            (0, 0),
+            "a thread goes by its parent"
+        );
+        assert_eq!(state.guild_badge(&state.guilds[0]), (false, 0));
+        assert!(!state.has_news(&channel));
+
+        state.account.as_mut().unwrap().nsfw_allowed = true;
+        assert!(state.is_unread(&channel) && state.is_unread(&thread));
+        assert_eq!((state.mentions(Snowflake(9)), state.mentions(Snowflake(40))), (3, 2), "an adult's");
+        assert_eq!(state.guild_badge(&state.guilds[0]), (true, 5));
+
+        // A server that is age-restricted makes all its channels so.
+        state.account.as_mut().unwrap().nsfw_allowed = false;
+        state.guilds[0].channels[0].nsfw = false;
+        assert_eq!(state.mentions(Snowflake(9)), 3, "an ordinary channel");
+        state.guilds[0].owner_configured_content_level = 3;
+        assert_eq!(state.mentions(Snowflake(9)), 0, "in an age-restricted server");
+    }
+
+    #[test]
+    fn collapse_all_categories_shows_while_a_category_is_open() {
+        let mut state = categorised(json!({}));
+        let guild = state.guilds[0].clone();
+        assert!(state.offers_collapse_all(&guild));
+        assert_eq!(state.listed_categories(&guild), [Snowflake(8)]);
+        state.collapsed.set(Snowflake(8), true);
+        assert!(!state.offers_collapse_all(&guild), "all of them are folded");
+        state.collapsed.set(Snowflake(8), false);
+        let bare = open_server(None, json!({}));
+        assert!(!bare.offers_collapse_all(&bare.guilds[0]), "no category");
+    }
+
+    #[test]
     fn a_servers_mark_as_read_leaves_out_threads_under_voice_channels() {
         let mut state = categorised(json!({}));
         let thread = |id: &str, parent: &str| -> Channel {
@@ -1591,6 +1699,16 @@ mod tests {
         let before = state.sidebar_signature();
         state.guilds[0].name = "Renamed".into();
         assert_ne!(state.sidebar_signature(), before);
+    }
+
+    #[test]
+    fn a_server_we_left_goes_and_one_in_an_outage_stays() {
+        let mut state = open_server(None, json!({}));
+        assert_eq!(state.guild_deleted(Snowflake(1), true), None);
+        assert_eq!(state.guilds.len(), 1, "an outage leaves what we know of it");
+        assert_eq!(state.guild_deleted(Snowflake(1), false), Some((vec![Snowflake(9)], true)));
+        assert!(state.guilds.is_empty());
+        assert_eq!(state.guild_deleted(Snowflake(1), false), None, "twice");
     }
 
     #[test]
