@@ -72,7 +72,7 @@ impl App {
         self.refresh_tray();
         let ((rail, count), sidebar) = {
             let state = self.account.state.borrow();
-            (state.rail_signature(), state.sidebar_signature())
+            (state.rail_signature(self.unread_badge_off()), state.sidebar_signature())
         };
         self.show_unread_count(count);
         let (rail_changed, sidebar_changed) = {

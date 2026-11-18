@@ -1000,8 +1000,8 @@ impl State {
     /// The rail's signature, and the count on the app icon and in the title
     /// (see [`discord::badge`]), from the one pass over every server. A
     /// server's dot counts, but not a DM's, as in the client (`hasAnyUnread`
-    /// in 458294 holds servers only).
-    pub(super) fn rail_signature(&self) -> (Vec<u64>, i64) {
+    /// in 458294 holds servers only). `hide_dot` is the unread badge being off.
+    pub(super) fn rail_signature(&self, hide_dot: bool) -> (Vec<u64>, i64) {
         let home = self.home_badge();
         let mut sig = vec![self.guild.map_or(0, |g| g.0), home as u64];
         let (mut mentions, mut any_unread) = (home, false);
@@ -1011,8 +1011,7 @@ impl State {
             mentions += guild_mentions;
             any_unread |= unread;
         }
-        // The client's "disable unread badge" setting is #86's.
-        (sig, discord::badge::count(mentions, any_unread, false))
+        (sig, discord::badge::count(mentions, any_unread, hide_dot))
     }
 
     /// The same for the sidebar: the open place, selection, order and markers.
@@ -1543,6 +1542,17 @@ mod tests {
         assert_eq!(state.tray_alert(), Alert::Unread);
         state.read = ReadStates::from_ready(&json!([{"id": "9", "last_message_id": "100", "mention_count": 2}]));
         assert_eq!(state.tray_alert(), Alert::Mentions(2));
+    }
+
+    #[test]
+    fn turning_the_unread_badge_off_drops_the_dot_from_the_count_but_not_the_mentions() {
+        let mut state = open_server(None, json!({"last_message_id": "200"}));
+        state.guilds[0].set_role(serde_json::from_value(json!({"id": "1", "permissions": "1049600"})).unwrap());
+        state.read = ReadStates::from_ready(&json!([{"id": "9", "last_message_id": "100", "mention_count": 0}]));
+        assert_eq!(state.rail_signature(false).1, discord::badge::DOT);
+        assert_eq!(state.rail_signature(true).1, 0, "no dot in the title or on the icon");
+        state.read = ReadStates::from_ready(&json!([{"id": "9", "last_message_id": "100", "mention_count": 2}]));
+        assert_eq!(state.rail_signature(true).1, 2);
     }
 
     #[test]

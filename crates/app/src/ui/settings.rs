@@ -322,10 +322,10 @@ impl App {
         option_switch(
             self,
             &background,
-            "Show unread messages on the tray icon",
-            "Adds a badge when you have unread messages or mentions.",
+            "Show unread messages on the tray icon and in the title",
+            "Marks them when something is unread; the count of mentions stays on the app icon and in the title.",
             &config::UNREAD_BADGE,
-            |app, _| app.refresh_tray(),
+            |app, _| app.refresh_badges(),
         );
         let neucord = page("Neucord", "preferences-system-symbolic", &[&appearance, &chat_box, &typing, &background]);
         neucord.set_description("These are saved on this computer only, not to your Discord account.");
