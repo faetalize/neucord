@@ -222,13 +222,16 @@ impl App {
                     self.forum_thread_created(guild_id, &thread, newly_created);
                 }
                 Event::ThreadDelete { guild_id, id } => self.on_thread_delete(guild_id, id),
-                Event::ThreadListSync { guild_id, threads, members, complete } => {
+                Event::ThreadListSync { guild_id, threads, members, recent, complete } => {
                     self.on_threads(guild_id, |g| {
                         for thread in threads {
                             g.set_thread(thread);
                         }
                         for (thread, member) in members {
                             g.set_thread_member(thread, Some(member));
+                        }
+                        for message in &recent {
+                            g.thread_message_created(message);
                         }
                     });
                     self.forum_synced(guild_id, complete);

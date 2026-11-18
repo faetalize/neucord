@@ -62,6 +62,13 @@ fn null_is_default<'de, D: Deserializer<'de>, T: Deserialize<'de> + Default>(d: 
     Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
+/// A message that is there if it reads: a thread's newest one is a preview,
+/// not worth losing the thread over.
+fn lenient_message<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Box<Message>>, D::Error> {
+    let value = Option::<Value>::deserialize(d)?;
+    Ok(value.and_then(|v| Message::deserialize(v).ok()).map(Box::new))
+}
+
 /// A custom emoji's id, which the client reads as none when it is 0 (`et` in
 /// 95701): Discord sends null, and an id as text.
 fn emoji_id<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Snowflake>, D::Error> {
@@ -323,6 +330,11 @@ pub struct Channel {
     /// How many messages a thread holds, as of when Discord sent it.
     #[serde(default)]
     pub message_count: Option<u32>,
+    /// A thread's newest message, which its row in the thread lists shows
+    /// (`ThreadMessageStore`, 456874): what a guild's threads carry and a
+    /// thread list sync brings, then what messages in it change.
+    #[serde(default, rename = "most_recent_message", deserialize_with = "lenient_message")]
+    pub recent_message: Option<Box<Message>>,
     /// The tags a forum or media channel's posts may carry.
     #[serde(default, deserialize_with = "null_is_default")]
     pub available_tags: Vec<Tag>,
@@ -735,9 +747,46 @@ impl Guild {
                     thread.member = existing.member.take();
                 }
                 thread.last_message_id = thread.last_message_id.max(existing.last_message_id);
+                if thread.recent_message.is_none() {
+                    thread.recent_message = existing.recent_message.take();
+                }
+                // A newer last message than the one held clears it (`S` in 456874).
+                let held = thread.recent_message.as_ref().map(|m| m.id);
+                if thread.last_message_id.is_some() && held.is_some() && held != thread.last_message_id {
+                    thread.recent_message = None;
+                }
                 *existing = thread;
             }
             None => self.threads.push(thread),
+        }
+    }
+
+    /// A message came to `thread` (not its starter message, nor a forum
+    /// post's first message): it is the newest (`MESSAGE_CREATE` in 456874).
+    pub fn thread_message_created(&mut self, message: &Message) {
+        let Some(thread) = self.threads.iter_mut().find(|t| t.id == message.channel_id) else { return };
+        if message.kind == Message::THREAD_STARTER || message.id.0 == thread.id.0 {
+            return;
+        }
+        thread.recent_message = Some(Box::new(message.clone()));
+    }
+
+    /// The newest message of `thread` changed, as `change` makes it, if it is
+    /// the one that has `id` (`MESSAGE_UPDATE`).
+    pub fn thread_message_changed(&mut self, thread: Snowflake, id: Snowflake, change: impl FnOnce(&mut Message)) {
+        if let Some(recent) = self.threads.iter_mut().find(|t| t.id == thread).and_then(|t| t.recent_message.as_mut())
+            && recent.id == id
+        {
+            change(recent);
+        }
+    }
+
+    /// The newest message of `thread` is gone if it is `id` (`MESSAGE_DELETE`).
+    pub fn thread_message_deleted(&mut self, thread: Snowflake, id: Snowflake) {
+        if let Some(t) = self.threads.iter_mut().find(|t| t.id == thread)
+            && t.recent_message.as_ref().is_some_and(|m| m.id == id)
+        {
+            t.recent_message = None;
         }
     }
 
@@ -1323,6 +1372,7 @@ impl Message {
     const FORWARD: u8 = 1;
     const THREAD_CREATED: u8 = 18;
     pub const THREAD_STARTER: u8 = 21;
+    pub const CHANNEL_PINNED_MESSAGE: u8 = 6;
     const AUTO_MODERATION_ACTION: u8 = 24;
     const MEDIA_MENTION: u8 = 68;
     /// Types nobody may delete (`UNDELETABLE` in 448761): calls, changes to
@@ -1455,6 +1505,39 @@ impl Message {
         blocked(self.author.id)
             || self.interaction_metadata.as_ref().is_some_and(|i| blocked(i.user.id))
             || leaderboard.is_some_and(|l| l.user_id.into_iter().chain(l.secondary_user_id).any(&blocked))
+    }
+
+    /// What a thread's row shows of its newest message (`V` in 448368): its
+    /// text, or for one that is blocked or ignored, pinning, or has no text,
+    /// the client's words for what it is.
+    pub fn thread_preview(&self, blocked: bool, ignored: bool) -> String {
+        if blocked {
+            return "Blocked message".into();
+        }
+        if ignored {
+            return "Ignored message".into();
+        }
+        if self.kind == Self::CHANNEL_PINNED_MESSAGE {
+            return "Message pinned.".into();
+        }
+        if !self.content.is_empty() {
+            return self.content.clone();
+        }
+        if let Some(question) = self.poll.as_ref().and_then(|p| p.question.text.clone()) {
+            return question;
+        }
+        if !self.sticker_items.is_empty() {
+            "Click to see sticker"
+        } else if self.interaction.is_some() {
+            "Click to see command"
+        } else if self.flags & Self::IS_VOICE_MESSAGE != 0 {
+            "Click to see voice message"
+        } else if self.is_components_v2() {
+            "Click to see message"
+        } else {
+            "Click to see attachment"
+        }
+        .into()
     }
 
     /// What a reply line shows for this message when it has no text to
@@ -1694,6 +1777,81 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn a_threads_newest_message_follows_what_happens_in_it() {
+        let mut guild: Guild = serde_json::from_str(
+            r#"{"id":"1","name":"G","channels":[{"id":"9","type":0}],"threads":[
+                {"id":"20","type":11,"parent_id":"9","last_message_id":"31",
+                 "most_recent_message":{"id":"31","channel_id":"20","content":"hello",
+                     "author":{"id":"6","username":"b"},"timestamp":"2026-10-28T00:00:00+00:00"}},
+                {"id":"21","type":11,"parent_id":"9","most_recent_message":"not a message"}]}"#,
+        )
+        .unwrap();
+        let recent = |g: &Guild, id: u64| {
+            g.thread(Snowflake(id)).and_then(|t| t.recent_message.as_ref().map(|m| m.content.clone()))
+        };
+        assert_eq!(recent(&guild, 20).as_deref(), Some("hello"));
+        assert_eq!(recent(&guild, 21), None, "one that doesn't read is no message, not a lost thread");
+        let message = |id: &str, extra: &str| -> Message {
+            ours(
+                json!({"id": id, "channel_id": "20", "content": "new", "type": 0})
+                    .as_object()
+                    .map(|o| {
+                        let mut o = o.clone();
+                        if let Some(extra) =
+                            serde_json::from_str::<serde_json::Value>(extra).ok().and_then(|v| v.as_object().cloned())
+                        {
+                            o.extend(extra);
+                        }
+                        serde_json::Value::Object(o)
+                    })
+                    .unwrap(),
+            )
+        };
+        guild.thread_message_created(&message("40", "{}"));
+        assert_eq!(recent(&guild, 20).as_deref(), Some("new"));
+        guild.thread_message_created(&message("41", r#"{"type":21,"content":"starter"}"#));
+        guild.thread_message_created(&message("20", r#"{"content":"first"}"#));
+        assert_eq!(recent(&guild, 20).as_deref(), Some("new"), "a starter message and a post's first one aren't it");
+        guild.thread_message_changed(Snowflake(20), Snowflake(9), |m| m.content = "other".into());
+        guild.thread_message_changed(Snowflake(20), Snowflake(40), |m| m.content = "edited".into());
+        assert_eq!(recent(&guild, 20).as_deref(), Some("edited"), "only the message that is the newest");
+        // An update that carries nothing of it keeps it, and one that knows a newer message drops it.
+        let update = |last: &str| -> Channel {
+            serde_json::from_str(&format!(r#"{{"id":"20","type":11,"parent_id":"9","last_message_id":"{last}"}}"#))
+                .unwrap()
+        };
+        guild.set_thread(update("40"));
+        assert_eq!(recent(&guild, 20).as_deref(), Some("edited"));
+        guild.set_thread(update("50"));
+        assert_eq!(recent(&guild, 20), None);
+        guild.thread_message_created(&message("51", "{}"));
+        guild.thread_message_deleted(Snowflake(20), Snowflake(7));
+        assert!(recent(&guild, 20).is_some());
+        guild.thread_message_deleted(Snowflake(20), Snowflake(51));
+        assert_eq!(recent(&guild, 20), None);
+    }
+
+    #[test]
+    fn a_threads_row_says_what_its_newest_message_is() {
+        let preview = |extra: serde_json::Value, blocked, ignored| {
+            let mut value = json!({"content": "", "type": 0});
+            value.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            ours(value).thread_preview(blocked, ignored)
+        };
+        assert_eq!(preview(json!({"content": "hi"}), false, false), "hi");
+        assert_eq!(preview(json!({"content": "hi"}), true, false), "Blocked message");
+        assert_eq!(preview(json!({"content": "hi"}), false, true), "Ignored message");
+        assert_eq!(preview(json!({"type": 6}), false, false), "Message pinned.");
+        assert_eq!(preview(json!({}), false, false), "Click to see attachment");
+        assert_eq!(preview(json!({"flags": 1 << 13}), false, false), "Click to see voice message");
+        assert_eq!(
+            preview(json!({"sticker_items": [{"id": "1", "name": "s", "format_type": 1}]}), false, false),
+            "Click to see sticker"
+        );
+        assert_eq!(preview(json!({"poll": {"question": {"text": "Q?"}, "answers": []}}), false, false), "Q?");
+    }
 
     #[test]
     fn a_forums_template_is_what_a_new_post_starts_with() {

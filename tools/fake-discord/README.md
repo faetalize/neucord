@@ -79,7 +79,9 @@ what arrived, IDENTIFY's key order and properties first.
   followed it or left it to the browser), `voice-draft <seconds>` (a made-up
   recording as the open channel's draft, there being no microphone),
   `voice-play`, `voice-scrub <0..1>` and `voice-state` (the draft player and
-  its clock), `menu-key row|rail <n> [png]` (gives the nth sidebar row or rail
+  its clock), `vmsg state|play|pause|scrub <0..1>` (the player of a voice
+  message in the channel, with `FAKE_VOICE=1`: 8 s of silence in #general),
+  `menu-key row|rail <n> [png]` (gives the nth sidebar row or rail
   button the focus, runs its Menu / Shift+F10 shortcut, says whether a menu
   opened and shoots it), `quit`. It edits the copy by exact strings
   and stops on the first that no longer matches: when the code it patches
@@ -122,6 +124,9 @@ what arrived, IDENTIFY's key order and properties first.
   `hover-bar` (with `FAKE_HOVER=1`, which shows every row's hover bar) shows
   the bar over a message and clicks its first quick reaction (`hover-react
   <n>`), which sends `location=Message Hover Bar`;
+  `thread-previews` (with `FAKE_THREADS=1`, two active threads of #general
+  synced with THREAD_LIST_SYNC, one with its newest message) opens the thread
+  browser, whose rows show that message or "No recent messages";
   `heartbeat` waits for five op 40s, the interval's among them;
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).

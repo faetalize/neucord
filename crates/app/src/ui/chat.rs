@@ -407,6 +407,7 @@ impl App {
             self.account.state.borrow_mut().members.add(guild, vec![(message.author.id, member.known())], &[]);
         }
         let channel = message.channel_id;
+        self.thread_recent(channel, |g| g.thread_message_created(&message));
         self.account.state.borrow_mut().typing.message(channel, message.author.id, false);
         self.refresh_typing();
         let viewing = self.account.state.borrow().channel == Some(channel) && self.chat_visible();
@@ -531,7 +532,21 @@ impl App {
         }
     }
 
+    /// Change what the server holds of a thread's newest message, which its
+    /// row in the thread browser shows, and draw the browser again.
+    fn thread_recent(self: &Rc<Self>, thread: Snowflake, change: impl FnOnce(&mut discord::Guild)) {
+        {
+            let mut state = self.account.state.borrow_mut();
+            let Some(guild) = state.guilds.iter_mut().find(|g| g.thread(thread).is_some()) else { return };
+            change(guild);
+        }
+        self.refresh_threads_view();
+    }
+
     pub(super) fn on_message_update(self: &Rc<Self>, edit: MessageEdit) {
+        self.thread_recent(edit.channel_id, |g| {
+            g.thread_message_changed(edit.channel_id, edit.id, |recent| edit.clone().apply(recent))
+        });
         self.forum_message_edited(&edit);
         self.account.state.borrow_mut().pins.edited(edit.channel_id, &edit);
         self.account.state.borrow_mut().mentions.edited(&edit);
@@ -561,6 +576,7 @@ impl App {
     }
 
     pub(super) fn on_message_delete(self: &Rc<Self>, id: Snowflake, channel_id: Snowflake) {
+        self.thread_recent(channel_id, |g| g.thread_message_deleted(channel_id, id));
         self.forum_message_deleted(id, channel_id);
         self.account.state.borrow_mut().pins.deleted(channel_id, id);
         self.account.state.borrow_mut().mentions.remove(id);
