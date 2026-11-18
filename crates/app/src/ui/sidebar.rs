@@ -389,7 +389,10 @@ pub(super) fn dm_icon(channel: &Channel, images: &Images) -> gtk::Widget {
     let icon: gtk::Widget = match (channel.kind, channel.recipients.first(), channel.icon.as_deref()) {
         (discord::ChannelKind::GroupDm, _, Some(hash)) => {
             let picture = round_picture(SIZE);
-            images.set(&picture, &discord::cdn::group_dm_icon_url(channel.id.0, hash, 64));
+            images.set(
+                &picture,
+                &discord::cdn::group_dm_icon_url(channel.id.0, hash, super::widgets::asked(SIZE, Some(images))),
+            );
             picture.upcast()
         }
         (discord::ChannelKind::Dm, Some(user), _) => avatar_widget(user, SIZE, Some(images), Row::Parent),

@@ -71,6 +71,14 @@ pub fn device_px(logical: u32, scale: f64) -> u32 {
 /// The size to ask the CDN for an emoji shown `logical` pixels wide
 /// (`getEmojiURL`, 486020: `kr(size * devicePixelRatio)`).
 pub fn emoji_size(logical: u32, scale: f64) -> u16 {
+    shown_size(logical, scale)
+}
+
+/// The size to ask the CDN for an avatar or icon shown `logical` pixels
+/// wide: `kr(size * devicePixelRatio)`, which `getUserAvatarURL` and the
+/// guild and channel icons compute from the size they are given, the one the
+/// avatar or icon is drawn at (`FT` in 778712 is that size).
+pub fn shown_size(logical: u32, scale: f64) -> u16 {
     asset_size(device_px(logical, scale))
 }
 
@@ -587,6 +595,15 @@ pub fn links_expired(message: &crate::Message, now_ms: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn avatars_and_icons_are_asked_for_at_the_size_they_are_shown() {
+        // A 40 px avatar: 40 at ratio 1, then the list's 60 at 1.25, 80 at 2; a 32 px icon at 1.5 is 48.
+        assert_eq!(
+            [shown_size(40, 1.0), shown_size(40, 1.25), shown_size(40, 2.0), shown_size(32, 1.5)],
+            [40, 56, 80, 48]
+        );
+    }
 
     #[test]
     fn stickers_count_the_pixel_ratio_up_to_two() {

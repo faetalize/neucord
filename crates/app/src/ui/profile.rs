@@ -495,8 +495,18 @@ impl View {
             .or_else(|| self.target.channel.and_then(|c| state.nick_in(c, user.id)))
             .unwrap_or_else(|| user.display_name().to_owned());
         let picture = match (member.as_ref().and_then(|m| m.avatar.as_deref()), self.target.guild) {
-            (Some(hash), Some(guild)) => Some((discord::cdn::member_avatar_url(guild.0, user.id.0, hash, 128), hash)),
-            _ => user.avatar.as_deref().map(|hash| (discord::cdn::avatar_url(user.id.0, hash, 128), hash)),
+            (Some(hash), Some(guild)) => Some((
+                discord::cdn::member_avatar_url(
+                    guild.0,
+                    user.id.0,
+                    hash,
+                    super::widgets::asked(AVATAR, Some(&app.images)),
+                ),
+                hash,
+            )),
+            _ => user.avatar.as_deref().map(|hash| {
+                (discord::cdn::avatar_url(user.id.0, hash, super::widgets::asked(AVATAR, Some(&app.images))), hash)
+            }),
         };
         let status = self.target.presence.clone().or_else(|| {
             let friend = state.relationships.get(user.id).is_some_and(|r| r.kind == Relation::Friend);
@@ -685,7 +695,8 @@ impl View {
                 let row = gtk::Box::builder().spacing(8).build();
                 let (icon, picture) = fixed_picture(24, 24, gtk::ContentFit::Cover);
                 if let Some(hash) = &guild.icon {
-                    app.images.set(&picture, &discord::cdn::guild_icon_url(guild.id.0, hash, 64));
+                    let ask = super::widgets::asked(24, Some(&app.images));
+                    app.images.set(&picture, &discord::cdn::guild_icon_url(guild.id.0, hash, ask));
                 }
                 row.append(&icon);
                 row.append(

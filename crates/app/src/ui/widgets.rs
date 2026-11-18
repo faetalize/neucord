@@ -26,12 +26,18 @@ pub(super) fn initials(name: &str) -> String {
     if letters.is_empty() { "?".into() } else { letters }
 }
 
+/// The size to ask the CDN for a picture shown `size` px wide on this screen.
+pub(super) fn asked(size: i32, images: Option<&Images>) -> u16 {
+    discord::cdn::shown_size(size.max(1) as u32, images.map_or(1.0, Images::scale))
+}
+
 /// A round avatar of `size` px: the user's picture over their initials, which
 /// show while it loads, or the initials alone when they have no picture. An
 /// animated one is a still, moving under the pointer, and for `row`'s
 /// pointer too if the account plays GIFs.
 pub(super) fn avatar_widget(user: &User, size: i32, images: Option<&Images>, row: Row) -> gtk::Widget {
-    let picture = user.avatar.as_deref().map(|hash| (discord::cdn::avatar_url(user.id.0, hash, 64), hash));
+    let ask = asked(size, images);
+    let picture = user.avatar.as_deref().map(|hash| (discord::cdn::avatar_url(user.id.0, hash, ask), hash));
     avatar_from(user.display_name(), size, images, picture, row)
 }
 
@@ -39,7 +45,8 @@ pub(super) fn avatar_widget(user: &User, size: i32, images: Option<&Images>, row
 /// avatar never moves: a voice participant in the channel list
 /// (`getAvatarURL` without `canAnimate`, in 293277, anchor `VoiceUser`).
 pub(super) fn avatar_still(user: &User, size: i32, images: Option<&Images>) -> gtk::Widget {
-    let picture = user.avatar.as_deref().map(|hash| (discord::cdn::avatar_url(user.id.0, hash, 64), hash));
+    let ask = asked(size, images);
+    let picture = user.avatar.as_deref().map(|hash| (discord::cdn::avatar_url(user.id.0, hash, ask), hash));
     avatar_with(user.display_name(), size, images, picture, None)
 }
 
@@ -54,7 +61,7 @@ pub(super) fn avatar_widget_in(
 ) -> gtk::Widget {
     match server {
         Some((guild, hash)) => {
-            let url = discord::cdn::member_avatar_url(guild.0, user.id.0, hash, 64);
+            let url = discord::cdn::member_avatar_url(guild.0, user.id.0, hash, asked(size, images));
             avatar_from(user.display_name(), size, images, Some((url, hash)), row)
         }
         None => avatar_widget(user, size, images, row),
