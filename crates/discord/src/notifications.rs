@@ -189,9 +189,28 @@ pub struct Place {
 #[derive(Clone, Debug, Default)]
 pub struct NotificationSettings {
     by_guild: HashMap<Option<Snowflake>, GuildSettings>,
+    /// The account's own flags (`notification_settings.flags` of READY), which
+    /// `NOTIFICATION_SETTINGS_UPDATE` replaces.
+    flags: u64,
 }
 
+/// What the flags say (`I.i` in 406535).
+const USE_NEW_NOTIFICATIONS: u64 = 1 << 4;
+const MENTION_ON_ALL_MESSAGES: u64 = 1 << 5;
+
 impl NotificationSettings {
+    pub fn set_flags(&mut self, flags: u64) {
+        self.flags = flags;
+    }
+
+    pub fn use_new_notifications(&self) -> bool {
+        self.flags & USE_NEW_NOTIFICATIONS != 0
+    }
+
+    pub fn mention_on_all_messages(&self) -> bool {
+        self.flags & MENTION_ON_ALL_MESSAGES != 0
+    }
+
     /// From READY's `user_guild_settings`: a plain array, or `{entries: [...]}`.
     pub fn from_ready(value: &Value) -> Self {
         let entries = value.get("entries").unwrap_or(value);
@@ -202,7 +221,7 @@ impl NotificationSettings {
             .filter_map(|raw| GuildSettings::deserialize(raw).ok())
             .map(|s| (s.guild_id, s))
             .collect();
-        NotificationSettings { by_guild }
+        NotificationSettings { by_guild, flags: 0 }
     }
 
     /// What we changed, as the client applies it before Discord's event
