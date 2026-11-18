@@ -740,6 +740,66 @@ edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''           
 # `paste` pastes the clipboard into the message box, as Ctrl+V does.
 edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("paste") => self.composer.emit_paste_clipboard(),
             Some("quit") => {''')
+
+# Voice messages need a microphone, which the scratch session has none of: `voice-draft <seconds>` puts a made-up
+# recording in the open channel as the recorder would have left it, `voice-play` clicks the player's button,
+# `voice-scrub <0..1>` presses the waveform there and lets go, `voice-state` prints the player.
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(v) if v.starts_with("voice") => self.e2e_voice(v, parts.next()),
+            Some("quit") => {''')
+open(f"{root}/crates/app/src/ui/voice.rs", "a").write(r"""
+impl App {
+    pub(super) fn e2e_voice(self: &Rc<Self>, command: &str, arg: Option<&str>) {
+        let number = arg.and_then(|a| a.parse::<f64>().ok()).unwrap_or(0.0);
+        match command {
+            "voice-draft" => {
+                let Some(channel) = self.account.state.borrow().channel else { return };
+                let id = self.voice.ids.get() + 1;
+                self.voice.ids.set(id);
+                self.voice.levels.borrow_mut().clear();
+                self.voice.draft.replace(Some(Draft {
+                    id,
+                    channel,
+                    phase: Phase::Requesting,
+                    recorder: None,
+                    capture: None,
+                    started: 0,
+                    millis: 0,
+                    recording: None,
+                    send_when_done: false,
+                    attempts: Rc::default(),
+                }));
+                self.voice_event(id, Event::Started);
+                for n in 0..(number * 50.0) as usize {
+                    // The silence packet of a recording, and a loudness that swells and falls.
+                    self.voice_event(id, Event::Packet(vec![0xf8, 0xff, 0xfe]));
+                    let swell = (((n as f64) / 12.0).sin().abs() * 20000.0) as i16;
+                    self.voice_event(id, Event::Samples(vec![swell; 960]));
+                }
+                self.voice_event(id, Event::Ended);
+                self.voice_ended(id);
+            }
+            "voice-play" => self.voice.play.emit_clicked(),
+            "voice-scrub" => {
+                let width = f64::from(self.voice.wave.width());
+                self.scrub(number * width, Scrub::Begin);
+                self.scrub(number * width, Scrub::End);
+            }
+            "voice-state" => {
+                let playback = self.voice.playback.borrow();
+                match playback.as_ref() {
+                    Some(p) => eprintln!(
+                        "e2e: voice player {:?} stream playing={} ended={} error={:?} time={:?} play-visible={}",
+                        p.player, p.stream.is_playing(), p.stream.is_ended(), p.stream.error().map(|e| e.to_string()),
+                        self.voice.time.label(), self.voice.play.is_visible()
+                    ),
+                    None => eprintln!("e2e: no voice player"),
+                }
+            }
+            _ => {}
+        }
+    }
+}
+""")
 # `clip-text <n>` puts n letters on the clipboard as text, `clip-page-image <src>` an image with the HTML a browser
 # copies with it (an `<img>` of that address), and `box-length` prints how long the message box's text is (#260).
 edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("clip-text") => {
