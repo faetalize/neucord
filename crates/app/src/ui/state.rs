@@ -296,6 +296,8 @@ pub(super) struct State {
     pub(super) voice: VoiceStates,
     /// What each message search holds, by where it looks.
     pub(super) searches: HashMap<discord::search::Context, super::search::Saved>,
+    /// The pinned messages of the channels whose list was opened.
+    pub(super) pins: discord::pins::Pins,
     /// Channels opened this session, newest first, for the quick switcher.
     pub(super) quick_history: Vec<Snowflake>,
 }

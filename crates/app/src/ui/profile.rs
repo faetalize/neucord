@@ -466,7 +466,7 @@ impl View {
         if let Some(banner) = shown.as_ref().and_then(|s| s.banner) {
             let (width, height) = self.banner;
             // The size the client asks the CDN for at this width on this screen.
-            let size = discord::cdn::asset_size(width as u32 * app.images.scale() as u32);
+            let size = discord::cdn::asset_size(discord::cdn::device_px(width as u32, app.images.scale()));
             let url = match banner {
                 Banner::User(hash) => discord::cdn::banner_url(user.id.0, hash, size),
                 Banner::Server { guild, hash } => discord::cdn::member_banner_url(guild.0, user.id.0, hash, size),

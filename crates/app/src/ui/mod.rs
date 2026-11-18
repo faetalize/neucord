@@ -39,6 +39,7 @@ mod panes;
 mod password_update;
 mod picker;
 mod pills;
+mod pin_list;
 mod pins;
 mod poll_composer;
 mod polls;
@@ -255,6 +256,10 @@ pub struct App {
     threads_button: gtk::Button,
     /// Opens the message search, from the chat's header.
     search_button: gtk::Button,
+    /// Opens the channel's pinned messages, from the chat's header.
+    pins_button: gtk::MenuButton,
+    /// The pins popover's parts, once it has been made.
+    pins_view: RefCell<Option<pin_list::PinsView>>,
     /// The message search box, while it's open.
     search_view: RefCell<Option<Rc<search::View>>>,
     /// The quick switcher, while it's open.
@@ -496,6 +501,12 @@ impl App {
                 .tooltip_text("Threads")
                 .visible(false)
                 .build(),
+            pins_button: gtk::MenuButton::builder()
+                .icon_name("view-pin-symbolic")
+                .tooltip_text("Pinned Messages")
+                .visible(false)
+                .build(),
+            pins_view: RefCell::default(),
             search_button: gtk::Button::builder()
                 .icon_name("system-search-symbolic")
                 .tooltip_text("Search")
@@ -529,10 +540,31 @@ impl App {
         this.build();
 
         // Images from the media proxy are requested at the pixels shown.
-        this.images.set_scale(this.window.scale_factor());
+        // At the screen's real ratio, which is fractional on many desktops
+        // (the window's scale factor is that rounded up): a sticker or banner
+        // is asked for at `devicePixelRatio` pixels as the client does.
+        let ratio = |window: &adw::ApplicationWindow| {
+            let surface = window.surface();
+            surface.map_or_else(|| f64::from(window.scale_factor()), |surface| surface.scale())
+        };
+        this.images.set_scale(ratio(&this.window));
         this.window.connect_scale_factor_notify({
             let images = this.images.clone();
-            move |window| images.set_scale(window.scale_factor())
+            move |window| images.set_scale(ratio(window))
+        });
+        this.window.connect_realize({
+            let images = this.images.clone();
+            move |window| {
+                images.set_scale(ratio(window));
+                if let Some(surface) = window.surface() {
+                    let (images, window) = (images.clone(), window.downgrade());
+                    surface.connect_scale_notify(move |surface| {
+                        if window.upgrade().is_some() {
+                            images.set_scale(surface.scale());
+                        }
+                    });
+                }
+            }
         });
 
         // Handlers hold weak references, so something must own the App while

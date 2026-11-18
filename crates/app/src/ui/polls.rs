@@ -351,7 +351,7 @@ pub(super) fn emoji_widget(emoji: &Emoji, images: &Images) -> gtk::Widget {
             if let Some(name) = &emoji.name {
                 picture.set_tooltip_text(Some(&format!(":{name}:")));
             }
-            let size = ((EMOJI * images.scale()) as u32).next_power_of_two().clamp(16, 4096) as u16;
+            let size = discord::cdn::emoji_size(EMOJI as u32, images.scale());
             if emoji.animated {
                 let (still, moving) =
                     (discord::cdn::emoji_url(id.0, false, size), discord::cdn::emoji_url(id.0, true, size));
