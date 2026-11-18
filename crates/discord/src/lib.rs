@@ -59,6 +59,7 @@ pub mod notification_edit;
 pub mod notifications;
 pub mod obfuscation;
 pub mod permissions;
+pub mod pins;
 pub mod poll;
 pub mod poll_draft;
 pub mod post_creation;

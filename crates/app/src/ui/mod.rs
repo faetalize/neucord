@@ -38,6 +38,7 @@ mod own_status;
 mod panes;
 mod picker;
 mod pills;
+mod pins;
 mod poll_composer;
 mod polls;
 mod privacy;

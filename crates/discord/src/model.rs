@@ -396,6 +396,18 @@ pub struct ThreadMember {
 }
 
 impl ThreadMember {
+    /// What the client holds of our membership of a forum post the moment we
+    /// join it, before Discord answers (`THREAD_MEMBER_LOCAL_UPDATE`, 152007):
+    /// no flags, muted with no end, joined now.
+    pub fn joined_locally(now_ms: i64) -> ThreadMember {
+        ThreadMember {
+            flags: 0,
+            muted: true,
+            mute_config: Some(crate::notifications::MuteConfig::default()),
+            join_timestamp: Some(now_ms),
+        }
+    }
+
     /// Muted, and the mute hasn't run out.
     pub fn is_muted(&self, now_unix: i64) -> bool {
         crate::notifications::mute_active(self.muted, self.mute_config.as_ref(), now_unix)
@@ -720,6 +732,13 @@ impl Guild {
         }
     }
 
+    /// We joined or left the forum post `thread` and Discord hasn't said so
+    /// yet: its membership is what [`ThreadMember::joined_locally`] holds, or
+    /// none (`THREAD_MEMBER_LOCAL_UPDATE`).
+    pub fn set_local_membership(&mut self, thread: Snowflake, joining: bool, now_ms: i64) {
+        self.set_thread_member(thread, joining.then(|| ThreadMember::joined_locally(now_ms)));
+    }
+
     /// We joined (`Some`) or left a thread.
     pub fn set_thread_member(&mut self, thread: Snowflake, member: Option<ThreadMember>) {
         if let Some(thread) = self.threads.iter_mut().find(|c| c.id == thread) {
@@ -1008,6 +1027,9 @@ pub struct Message {
     /// Set once the message has been edited.
     #[serde(default)]
     pub edited_timestamp: Option<String>,
+    /// Pinned to its channel.
+    #[serde(default)]
+    pub pinned: bool,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
     /// Users mentioned in `content`, resolved by Discord. Used to turn
@@ -1063,6 +1085,9 @@ pub struct Message {
     /// installed.
     #[serde(default)]
     pub interaction_metadata: Option<InteractionMetadata>,
+    /// For a server space's system message (a leaderboard's): whom it is about.
+    #[serde(default)]
+    pub guild_space_data: Option<GuildSpaceData>,
     /// For an app's answer: the command it answers, as the line above it
     /// names it. Discord calls it deprecated but sends it.
     #[serde(default)]
@@ -1119,6 +1144,24 @@ pub struct InteractionMetadata {
     /// For a modal's submit: the interaction that opened the modal.
     #[serde(default)]
     pub triggering_interaction_metadata: Option<Box<InteractionMetadata>>,
+}
+
+/// What a server space's system message carries; only the leaderboard's
+/// people matter here.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct GuildSpaceData {
+    #[serde(default)]
+    pub leaderboard: Option<LeaderboardEvent>,
+}
+
+/// A leaderboard message's subject and, when the lead changed hands, the
+/// previous leader (`e7` in 518782).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct LeaderboardEvent {
+    #[serde(default)]
+    pub user_id: Option<Snowflake>,
+    #[serde(default)]
+    pub secondary_user_id: Option<Snowflake>,
 }
 
 /// The command an app's answer answers (`interaction`, read by 432005).
@@ -1396,9 +1439,13 @@ impl Message {
 
     /// Whether the client counts this message as blocked
     /// (`isBlockedForMessage`, 994500), `blocked` saying whom we blocked:
-    /// its author, or for an app's answer who ran the command.
+    /// its author, for an app's answer who ran the command, and for a
+    /// server space's leaderboard message either person it names.
     pub fn is_blocked_by(&self, blocked: impl Fn(Snowflake) -> bool) -> bool {
-        blocked(self.author.id) || self.interaction_metadata.as_ref().is_some_and(|i| blocked(i.user.id))
+        let leaderboard = self.guild_space_data.as_ref().and_then(|d| d.leaderboard.as_ref());
+        blocked(self.author.id)
+            || self.interaction_metadata.as_ref().is_some_and(|i| blocked(i.user.id))
+            || leaderboard.is_some_and(|l| l.user_id.into_iter().chain(l.secondary_user_id).any(&blocked))
     }
 
     /// What a reply line shows for this message when it has no text to
@@ -1593,6 +1640,7 @@ pub struct MessageEdit {
     pub edited: bool,
     pub embeds: Option<Vec<Embed>>,
     pub flags: Option<u64>,
+    pub pinned: Option<bool>,
     /// A poll that changed, such as one ended early.
     pub poll: Option<crate::poll::Poll>,
     /// An app's response replacing the components.
@@ -1612,6 +1660,9 @@ impl MessageEdit {
         }
         if let Some(flags) = self.flags {
             message.flags = flags;
+        }
+        if let Some(pinned) = self.pinned {
+            message.pinned = pinned;
         }
         // When it ends and whether it has; the counts stay as the votes we
         // saw made them, since the client builds them from those.
@@ -1785,6 +1836,21 @@ mod tests {
         assert!(!answer("5").is_blocked_by(blocked));
         assert!(ours(json!({"author": {"id": "6", "username": "them"}})).is_blocked_by(blocked));
         assert!(!ours(json!({})).is_blocked_by(blocked));
+    }
+
+    #[test]
+    fn a_leaderboard_message_about_a_blocked_user_counts_as_blocked() {
+        let blocked = |id: Snowflake| id == Snowflake(6);
+        let leaderboard = |data: serde_json::Value| {
+            ours(json!({"author": {"id": "7", "username": "app"}, "guild_space_data": {"leaderboard": data}}))
+        };
+        assert!(leaderboard(json!({"user_id": "6"})).is_blocked_by(blocked), "the subject");
+        assert!(
+            leaderboard(json!({"user_id": "5", "secondary_user_id": "6"})).is_blocked_by(blocked),
+            "the previous leader"
+        );
+        assert!(!leaderboard(json!({"user_id": "5", "secondary_user_id": "4"})).is_blocked_by(blocked));
+        assert!(!ours(json!({"guild_space_data": {"music": {}}})).is_blocked_by(blocked), "no leaderboard");
     }
 
     #[test]
@@ -2043,6 +2109,23 @@ mod tests {
         assert_eq!(t.last_message_id, Some(Snowflake(30)), "and may not know of newer messages");
         g.set_thread_member(Snowflake(20), None);
         assert!(g.thread(Snowflake(20)).unwrap().member.is_none(), "we left");
+    }
+
+    #[test]
+    fn joining_a_post_locally_holds_a_muted_membership_until_discord_answers() {
+        let mut g: Guild = serde_json::from_str(
+            r#"{"id":"1","name":"G","channels":[{"id":"9","type":15}],"threads":[
+                {"id":"20","type":11,"parent_id":"9"}]}"#,
+        )
+        .unwrap();
+        g.set_local_membership(Snowflake(20), true, 1_000);
+        let member = g.thread(Snowflake(20)).unwrap().member.as_ref().unwrap();
+        assert_eq!((member.flags, member.muted, member.join_timestamp), (0, true, Some(1_000)));
+        assert!(member.is_muted(2), "muted, with no end");
+        g.set_local_membership(Snowflake(20), false, 2_000);
+        assert!(g.thread(Snowflake(20)).unwrap().member.is_none());
+        g.set_local_membership(Snowflake(99), true, 3_000);
+        assert!(g.thread(Snowflake(99)).is_none(), "a thread we don't hold stays unknown");
     }
 
     #[test]

@@ -572,6 +572,15 @@ impl State {
         }
     }
 
+    /// Whether Pin Message or Unpin Message shows on `message` (see
+    /// [`permissions::can_pin`]).
+    pub(super) fn can_pin(&self, message: &Message) -> bool {
+        match (self.find_channel(message.channel_id), &self.account) {
+            (Some((guild, channel)), Some(me)) => permissions::can_pin(guild, channel, message, me, now_unix()),
+            _ => false,
+        }
+    }
+
     /// What the client offers of reactions in the channel (see
     /// [`permissions::reacting`]).
     pub(super) fn reacting(&self, id: Snowflake) -> permissions::Reacting {

@@ -655,13 +655,29 @@ impl App {
     }
 
     fn change_membership(self: &Rc<Self>, thread: Snowflake, join: bool) {
-        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
+        let (rest, forum_guild) = {
+            let state = self.account.state.borrow();
+            let in_forum = |guild: &discord::Guild, c: &discord::Channel| {
+                c.parent_id.and_then(|p| guild.channel(p)).is_some_and(|p| p.kind.is_forum_like())
+            };
+            let forum_guild = state.find_channel(thread).and_then(|(guild, c)| guild.filter(|g| in_forum(g, c)));
+            (state.rest.clone(), forum_guild.map(|g| g.id))
+        };
+        let Some(rest) = rest else { return };
+        // A forum post shows the change at once, and the join is taken back if
+        // Discord refuses it (`joinThread` and `leaveThread`, 7909).
+        if let Some(guild) = forum_guild {
+            self.on_threads(guild, |g| g.set_local_membership(thread, join, now_ms()));
+        }
         let this = self.clone();
         glib::spawn_future_local(async move {
             let result = match join {
                 true => rest.join_thread(thread, MENU_LOCATION).await,
                 false => rest.leave_thread(thread, MENU_LOCATION).await,
             };
+            if let (Err(_), true, Some(guild)) = (&result, join, forum_guild) {
+                this.on_threads(guild, |g| g.set_local_membership(thread, false, now_ms()));
+            }
             if let Err(e) = result {
                 let verb = if join { "join" } else { "leave" };
                 this.show_composer_error(&format!("Could not {verb} the thread: {e}"));

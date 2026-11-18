@@ -1589,6 +1589,7 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
                 edited: !data["edited_timestamp"].is_null(),
                 embeds: data.get("embeds").and_then(|e| Vec::<Embed>::deserialize(e).ok()),
                 flags: data["flags"].as_u64(),
+                pinned: data["pinned"].as_bool(),
                 poll: data.get("poll").and_then(|p| crate::poll::Poll::deserialize(p).ok()),
                 components: data.get("components").and_then(|c| Vec::<Component>::deserialize(c).ok()),
             })
