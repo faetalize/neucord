@@ -897,8 +897,6 @@ impl App {
         self.permissions_changed(Some(guild_id));
     }
 
-    /// A server is gone from the rail, with its messages. If it was open, Home
-    /// opens instead. One that is only unavailable stays.
     /// Keep what `guild` (`None`: the account) says of `user`'s presence,
     /// anyone's but our own, which we know better (`v` in 290863).
     fn on_presence(
@@ -926,6 +924,8 @@ impl App {
         self.refresh_profile_views();
     }
 
+    /// A server is gone from the rail, with its messages. If it was open, Home
+    /// opens instead. One that is only unavailable stays.
     fn on_guild_delete(self: &Rc<Self>, id: Snowflake, unavailable: bool) {
         let Some((channels, was_open)) = self.account.state.borrow_mut().guild_deleted(id, unavailable) else {
             return;
