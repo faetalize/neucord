@@ -235,17 +235,40 @@ pub(super) struct FormUpload {
     pub(super) upload: Rc<Upload>,
 }
 
-/// What the message box has attached, by channel, and the tray showing it.
+/// Whose files a draft holds: a channel's message box, or the first message
+/// of the thread being started there (`FirstThreadMessage`, a draft of its
+/// own in the client). Uploads of both go to the channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum Draft {
+    Message(Snowflake),
+    FirstThreadMessage(Snowflake),
+}
+
+impl Draft {
+    pub(super) fn channel(self) -> Snowflake {
+        match self {
+            Draft::Message(channel) | Draft::FirstThreadMessage(channel) => channel,
+        }
+    }
+}
+
+impl From<Snowflake> for Draft {
+    fn from(channel: Snowflake) -> Self {
+        Draft::Message(channel)
+    }
+}
+
+/// What the message box has attached, by draft, and the tray showing it.
 pub(super) struct Drafts {
-    files: RefCell<HashMap<Snowflake, Vec<Rc<Upload>>>>,
+    files: RefCell<HashMap<Draft, Vec<Rc<Upload>>>>,
     /// Forms' files, kept across closing and reopening until a submit
     /// succeeds, in the order they were added.
     pub(super) forms: RefCell<Vec<FormUpload>>,
     /// A command's files while its run waits on them, which ending the
     /// command leaves going.
     pub(super) commands: RefCell<Vec<Rc<Upload>>>,
-    /// Channels with a message waiting on its files.
-    sending: RefCell<HashMap<Snowflake, Rc<Sending>>>,
+    /// Drafts with a message waiting on its files.
+    sending: RefCell<HashMap<Draft, Rc<Sending>>>,
     tray: gtk::Box,
     attach: gtk::Button,
     /// The same button on the notice that takes the message box's place,
@@ -283,13 +306,13 @@ impl Drafts {
         }
     }
 
-    pub(super) fn of(&self, channel: Snowflake) -> Vec<Rc<Upload>> {
-        self.files.borrow().get(&channel).cloned().unwrap_or_default()
+    pub(super) fn of(&self, draft: impl Into<Draft>) -> Vec<Rc<Upload>> {
+        self.files.borrow().get(&draft.into()).cloned().unwrap_or_default()
     }
 
     /// What a new message would take: not the files on their way in another.
     fn for_new_message(&self, channel: Snowflake) -> Vec<Rc<Upload>> {
-        let sending = self.sending.borrow().get(&channel).cloned();
+        let sending = self.sending.borrow().get(&Draft::Message(channel)).cloned();
         let mut files = self.of(channel);
         files.retain(|u| sending.as_ref().is_none_or(|s| !s.has(u)));
         files
@@ -455,10 +478,16 @@ impl App {
         allowed.then_some(channel)
     }
 
-    /// Whether `channel`'s draft takes files now: from the message box, or
-    /// from the form that starts a post there.
-    fn takes_files(&self, channel: Snowflake) -> bool {
-        self.attach_channel() == Some(channel) || self.post_form_channel() == Some(channel)
+    /// Whether `draft` takes files now: a channel's from the message box, or
+    /// from the form that starts a post there; the first message of a thread
+    /// from the form that starts it.
+    fn takes_files(&self, draft: Draft) -> bool {
+        match draft {
+            Draft::Message(channel) => {
+                self.attach_channel() == Some(channel) || self.post_form_channel() == Some(channel)
+            }
+            Draft::FirstThreadMessage(parent) => self.thread_form_channel() == Some(parent),
+        }
     }
 
     /// Show the attach button and the tray as they are now for the open
@@ -482,7 +511,7 @@ impl App {
             drafts.tray.remove(&child);
         }
         let files = channel.map(|c| drafts.of(c)).unwrap_or_default();
-        let sending = channel.and_then(|c| drafts.sending.borrow().get(&c).cloned());
+        let sending = channel.and_then(|c| drafts.sending.borrow().get(&Draft::Message(c)).cloned());
         if let Some(sending) = &sending {
             drafts.tray.append(&drafts.sending_bar);
             drafts.cancel.set_sensitive(!sending.posting.get());
@@ -496,30 +525,32 @@ impl App {
         self.refresh_stickers();
         self.refresh_voice();
         self.refresh_post_files();
+        self.refresh_thread_files();
     }
 
-    /// Put `channel`'s files in `tray`, as the message box's tray shows them,
+    /// Put `draft`'s files in `tray`, as the message box's tray shows them,
     /// and say whether a message waiting on them may still be called off.
-    pub(super) fn fill_tray(&self, tray: &gtk::Box, channel: Snowflake) -> bool {
+    pub(super) fn fill_tray(&self, tray: &gtk::Box, draft: impl Into<Draft>) -> bool {
+        let draft = draft.into();
         while let Some(child) = tray.first_child() {
             tray.remove(&child);
         }
-        let sending = self.drafts.sending.borrow().get(&channel).cloned();
-        for upload in self.drafts.of(channel) {
+        let sending = self.drafts.sending.borrow().get(&draft).cloned();
+        for upload in self.drafts.of(draft) {
             upload.lock(sending.as_ref().is_some_and(|s| s.has(&upload)));
             tray.append(&upload.row.root);
         }
         sending.is_some_and(|s| !s.posting.get())
     }
 
-    /// Take `channel`'s files out of the draft, unless a post is on its way
-    /// that names them.
-    pub(super) fn drop_post_files(self: &Rc<Self>, channel: Snowflake) {
-        if self.drafts.sending.borrow().contains_key(&channel) {
+    /// Take `draft`'s files out, unless a post is on its way that names them.
+    pub(super) fn drop_post_files(self: &Rc<Self>, draft: impl Into<Draft>) {
+        let draft = draft.into();
+        if self.drafts.sending.borrow().contains_key(&draft) {
             return;
         }
-        for upload in self.drafts.of(channel) {
-            self.remove_upload(channel, &upload);
+        for upload in self.drafts.of(draft) {
+            self.remove_upload(draft, &upload);
         }
     }
 
@@ -840,7 +871,7 @@ impl App {
     /// Forget the message's files in `channel` as a command takes the box
     /// (102077's `clearAll`): uploads stop, and nothing is asked of Discord.
     pub(super) fn forget_message_files(self: &Rc<Self>, channel: Snowflake) {
-        let files = self.drafts.files.borrow_mut().remove(&channel).unwrap_or_default();
+        let files = self.drafts.files.borrow_mut().remove(&Draft::Message(channel)).unwrap_or_default();
         for upload in files {
             upload.cancel(None);
         }
@@ -848,20 +879,21 @@ impl App {
     }
 
     /// Add what `paths` hold.
-    pub(super) async fn add_paths(self: &Rc<Self>, channel: Snowflake, paths: Vec<gio::File>) {
+    pub(super) async fn add_paths(self: &Rc<Self>, draft: impl Into<Draft>, paths: Vec<gio::File>) {
         let mut files = Vec::new();
         for path in paths {
             files.extend(file_at(path).await);
         }
-        self.add_files(channel, files).await;
+        self.add_files(draft.into(), files).await;
     }
 
-    /// Add files to `channel`'s draft as the client's `R` does (518960): an
+    /// Add files to `draft` as the client's `R` does (518960): an
     /// empty file is turned back first, then HEIC and JPEG XR files become
     /// JPEGs (all at once, unseen), and only then are the limits checked, on
     /// what will be uploaded.
-    async fn add_files(self: &Rc<Self>, channel: Snowflake, files: Vec<File>) {
-        if files.is_empty() || !self.takes_files(channel) {
+    async fn add_files(self: &Rc<Self>, draft: impl Into<Draft>, files: Vec<File>) {
+        let draft = draft.into();
+        if files.is_empty() || !self.takes_files(draft) {
             return;
         }
         if files.iter().any(|f| f.size == 0) {
@@ -872,28 +904,29 @@ impl App {
         for task in tasks {
             prepared.extend(task.await);
         }
-        self.add_prepared(channel, prepared);
+        self.add_prepared(draft, prepared);
     }
 
-    /// Put files in `channel`'s draft and start uploading them, unless
-    /// they're over what a message may carry, in which case none are added.
-    fn add_prepared(self: &Rc<Self>, channel: Snowflake, files: Vec<File>) {
-        if files.is_empty() || !self.takes_files(channel) {
+    /// Put files in `draft` and start uploading them, unless they're over
+    /// what a message may carry, in which case none are added.
+    fn add_prepared(self: &Rc<Self>, draft: impl Into<Draft>, files: Vec<File>) {
+        let draft = draft.into();
+        if files.is_empty() || !self.takes_files(draft) {
             return;
         }
         let limits = {
             let state = self.account.state.borrow();
-            state.limits().uploads(state.find_channel(channel).and_then(|(guild, _)| guild))
+            state.limits().uploads(state.find_channel(draft.channel()).and_then(|(guild, _)| guild))
         };
-        let queued: Vec<u64> = self.drafts.of(channel).iter().map(|u| u.file.borrow().size).collect();
+        let queued: Vec<u64> = self.drafts.of(draft).iter().map(|u| u.file.borrow().size).collect();
         let added: Vec<u64> = files.iter().map(|f| f.size).collect();
         if let Err(refusal) = uploads::check_added(&limits, &queued, &added) {
             return self.show_refusal(&refusal);
         }
         for file in files {
-            let upload = self.new_upload(channel, file);
+            let upload = self.new_upload(draft, file);
             self.start_upload(&upload);
-            self.drafts.files.borrow_mut().entry(channel).or_default().push(upload);
+            self.drafts.files.borrow_mut().entry(draft).or_default().push(upload);
         }
         self.refresh_attach();
     }
@@ -908,7 +941,7 @@ impl App {
         });
     }
 
-    fn new_upload(self: &Rc<Self>, channel: Snowflake, file: File) -> Rc<Upload> {
+    fn new_upload(self: &Rc<Self>, draft: Draft, file: File) -> Rc<Upload> {
         let spoiler = gtk::ToggleButton::builder()
             .icon_name("view-conceal-symbolic")
             .tooltip_text("Mark as spoiler")
@@ -919,7 +952,7 @@ impl App {
             .tooltip_text("Edit")
             .css_classes(["flat"])
             .build();
-        let upload = upload_of(channel, file, Some(spoiler), Some(edit), "Remove");
+        let upload = upload_of(draft.channel(), file, Some(spoiler), Some(edit), "Remove");
         if let Some(spoiler) = &upload.row.spoiler {
             spoiler.connect_toggled({
                 let upload = Rc::downgrade(&upload);
@@ -934,7 +967,7 @@ impl App {
             let (this, upload) = (Rc::downgrade(self), Rc::downgrade(&upload));
             move |_| {
                 if let (Some(this), Some(upload)) = (this.upgrade(), upload.upgrade()) {
-                    this.remove_upload(channel, &upload);
+                    this.remove_upload(draft, &upload);
                 }
             }
         });
@@ -1047,16 +1080,16 @@ impl App {
     /// Take every file out of the channel's draft, as Escape in the message
     /// box does (`clearAll`, 699344).
     pub(super) fn clear_uploads(self: &Rc<Self>, channel: Snowflake) {
-        let files = self.drafts.files.borrow().get(&channel).cloned().unwrap_or_default();
+        let files = self.drafts.of(channel);
         for upload in files {
-            self.remove_upload(channel, &upload);
+            self.remove_upload(Draft::Message(channel), &upload);
         }
     }
 
     /// Take a file out of the draft: its upload stops, or is deleted.
-    fn remove_upload(self: &Rc<Self>, channel: Snowflake, upload: &Rc<Upload>) {
+    fn remove_upload(self: &Rc<Self>, draft: Draft, upload: &Rc<Upload>) {
         upload.cancel(self.account.state.borrow().rest.clone());
-        if let Some(files) = self.drafts.files.borrow_mut().get_mut(&channel) {
+        if let Some(files) = self.drafts.files.borrow_mut().get_mut(&draft) {
             files.retain(|u| !Rc::ptr_eq(u, upload));
         }
         self.refresh_attach();
@@ -1135,16 +1168,29 @@ impl App {
         message: &Outgoing<'_>,
         files: Vec<Rc<Upload>>,
     ) -> Result<(), Stopped> {
+        self.send_draft(rest, Draft::Message(channel), channel, message, files).await
+    }
+
+    /// [`send_with_uploads`](Self::send_with_uploads) for the files of `draft`
+    /// going to `channel`: a thread's first message goes to the new thread.
+    pub(super) async fn send_draft(
+        self: &Rc<Self>,
+        rest: &Rest,
+        draft: Draft,
+        channel: Snowflake,
+        message: &Outgoing<'_>,
+        files: Vec<Rc<Upload>>,
+    ) -> Result<(), Stopped> {
         if files.is_empty() {
             return post(rest, channel, message, &[]).await;
         }
         let sending = Rc::new(Sending { files: files.clone(), posting: Cell::new(false) });
-        self.drafts.sending.borrow_mut().insert(channel, sending.clone());
+        self.drafts.sending.borrow_mut().insert(draft, sending.clone());
         self.refresh_attach();
         let result = self.upload_and_post(rest, channel, message, &sending).await;
-        self.drafts.sending.borrow_mut().remove(&channel);
+        self.drafts.sending.borrow_mut().remove(&draft);
         if result.is_ok() {
-            self.forget(channel, &sending);
+            self.forget(draft, &sending);
         }
         self.refresh_attach();
         result
@@ -1205,7 +1251,7 @@ impl App {
             return rest.create_post(forum, make(Vec::new())).await.map_err(Stopped::Send);
         }
         let sending = Rc::new(Sending { files, posting: Cell::new(false) });
-        self.drafts.sending.borrow_mut().insert(forum, sending.clone());
+        self.drafts.sending.borrow_mut().insert(Draft::Message(forum), sending.clone());
         self.refresh_attach();
         let result = match self.finish_uploads(&sending).await {
             Ok(uploaded) => {
@@ -1216,9 +1262,9 @@ impl App {
             }
             Err(stopped) => Err(stopped),
         };
-        self.drafts.sending.borrow_mut().remove(&forum);
+        self.drafts.sending.borrow_mut().remove(&Draft::Message(forum));
         if result.is_ok() {
-            self.forget(forum, &sending);
+            self.forget(Draft::Message(forum), &sending);
         }
         self.refresh_attach();
         result
@@ -1228,20 +1274,25 @@ impl App {
     /// the uploads that finished are deleted.
     pub(super) fn cancel_sending(self: &Rc<Self>) {
         let Some(channel) = self.account.state.borrow().channel else { return };
-        let sending = self.drafts.sending.borrow().get(&channel).cloned();
+        self.cancel_sending_of(Draft::Message(channel));
+    }
+
+    /// [`cancel_sending`](Self::cancel_sending) for the message `draft` has on its way.
+    pub(super) fn cancel_sending_of(self: &Rc<Self>, draft: Draft) {
+        let sending = self.drafts.sending.borrow().get(&draft).cloned();
         let Some(sending) = sending.filter(|s| !s.posting.get()) else { return };
         let rest = self.account.state.borrow().rest.clone();
         for upload in &sending.files {
             upload.cancel(rest.clone());
         }
-        self.forget(channel, &sending);
+        self.forget(draft, &sending);
         self.refresh_attach();
     }
 
     /// Drop the files a message took from the draft, and keep any added
     /// since.
-    fn forget(&self, channel: Snowflake, sending: &Sending) {
-        if let Some(files) = self.drafts.files.borrow_mut().get_mut(&channel) {
+    fn forget(&self, draft: Draft, sending: &Sending) {
+        if let Some(files) = self.drafts.files.borrow_mut().get_mut(&draft) {
             files.retain(|u| !sending.has(u));
         }
     }

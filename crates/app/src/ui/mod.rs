@@ -209,6 +209,8 @@ pub struct App {
     forum: forum::Page,
     /// The form that starts a post, while it is open.
     post_form: RefCell<Option<Rc<forum_post::PostForm>>>,
+    /// The form that starts a thread, while it is open.
+    thread_form: RefCell<Option<Rc<create_thread::Form>>>,
     composer_error: gtk::Label,
     images: Images,
     /// Autocomplete for mentions and emoji, anchored to the composer.
@@ -476,6 +478,7 @@ impl App {
             thread_waiters: RefCell::default(),
             forum: forum::Page::new(),
             post_form: RefCell::default(),
+            thread_form: RefCell::default(),
             composer_error: gtk::Label::builder()
                 .xalign(0.0)
                 .wrap(true)

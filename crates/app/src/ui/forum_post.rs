@@ -15,7 +15,7 @@ use discord::{ChannelKind, Snowflake};
 use gtk::glib;
 
 use super::state::now_ms;
-use super::uploads::Stopped;
+use super::uploads::{Draft as FilesDraft, Stopped};
 use super::{App, polls};
 
 /// The form's widgets, and what it has picked.
@@ -316,7 +316,7 @@ impl App {
                 let (this, forum) = (Rc::downgrade(self), form.forum);
                 move |_| {
                     if let Some(this) = this.upgrade() {
-                        this.choose_post_files(forum);
+                        this.choose_form_files(FilesDraft::Message(forum));
                     }
                 }
             });
@@ -403,9 +403,11 @@ impl App {
         }
     }
 
-    fn choose_post_files(self: &Rc<Self>, forum: Snowflake) {
+    /// The file picker, for a form's `draft`.
+    pub(super) fn choose_form_files(self: &Rc<Self>, draft: FilesDraft) {
         // The client's picker takes one file at a time where slowmode is on (316576).
-        let single = self.account.state.borrow().find_channel(forum).is_some_and(|(_, c)| c.rate_limit_per_user > 0);
+        let single =
+            self.account.state.borrow().find_channel(draft.channel()).is_some_and(|(_, c)| c.rate_limit_per_user > 0);
         let dialog = gtk::FileDialog::builder().title("Upload a File").build();
         let this = self.clone();
         glib::spawn_future_local(async move {
@@ -418,7 +420,7 @@ impl App {
                     .map(|list| list.iter::<gtk::gio::File>().flatten().collect())
             };
             if let Ok(files) = files {
-                this.add_paths(forum, files).await;
+                this.add_paths(draft, files).await;
             }
         });
     }

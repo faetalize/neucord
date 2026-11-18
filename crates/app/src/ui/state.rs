@@ -573,6 +573,15 @@ impl State {
         }
     }
 
+    /// Whether the form that starts a thread in the channel takes files (see
+    /// [`thread_creation::can_attach`]).
+    pub(super) fn can_attach_to_new_thread(&self, id: Snowflake) -> bool {
+        match (self.find_channel(id), &self.account) {
+            (Some((Some(guild), channel)), Some(me)) => thread_creation::can_attach(guild, channel, me, now_unix()),
+            _ => false,
+        }
+    }
+
     /// Whether a new thread in the channel may be private (see
     /// [`thread_creation::Privacy`]).
     pub(super) fn thread_privacy(&self, id: Snowflake) -> thread_creation::Privacy {

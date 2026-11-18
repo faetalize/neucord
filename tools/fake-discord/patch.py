@@ -17,6 +17,7 @@ edit("crates/discord/src/identity.rs",
 edit("crates/discord/src/cdn.rs", 'host == "media.discordapp.net" ||', 'host == "127.0.0.1:8099" || host == "media.discordapp.net" ||')
 edit("crates/discord/src/cdn.rs", 'let host = url.strip_prefix("https://").and_then(|rest| rest.split([\'/\', \'?\']).next()).unwrap_or_default();', 'let host = url.strip_prefix("http://").and_then(|rest| rest.split([\'/\', \'?\']).next()).unwrap_or_default();')
 edit("crates/app/src/ui/uploads.rs", "    attach: gtk::Button,", "    pub(super) attach: gtk::Button,")
+edit("crates/app/src/ui/create_thread.rs", "    parent: Snowflake,\n    dialog: adw::Dialog,", "    pub(super) parent: Snowflake,\n    pub(super) dialog: adw::Dialog,")
 edit("crates/app/src/ui/members.rs", "\n    scroller: gtk::ScrolledWindow,", "\n    pub(super) scroller: gtk::ScrolledWindow,")
 edit("crates/app/src/ui/mod.rs", "\n    members: members::Pane,", "\n    pub(super) members: members::Pane,")
 for field in ("stack: adw::ViewStack", "entry: gtk::Entry", "note: gtk::Entry", "note_left: gtk::Label", "note_hint: gtk::Label",
@@ -448,6 +449,41 @@ impl App {
                 match found {
                     Some(button) => button.emit_clicked(),
                     None => eprintln!("e2e: no Create button"),
+                }
+            }
+            // Files added to the open thread form's first message, as its picker or a drop does; the form's
+            // tray and buttons are printed by `thread-form-state`.
+            Some("thread-files") => {
+                let Some(parent) = self.thread_form_channel() else { return eprintln!("e2e: no thread form taking files") };
+                let files: Vec<gio::File> = rest.split_whitespace().map(gio::File::for_path).collect();
+                let this = self.clone();
+                glib::spawn_future_local(async move { this.add_paths(super::uploads::Draft::FirstThreadMessage(parent), files).await });
+            }
+            // The open thread form's name, as typed.
+            Some("thread-name") => {
+                fn entry(widget: &gtk::Widget) -> Option<gtk::Entry> {
+                    let mut child = widget.first_child();
+                    while let Some(c) = child {
+                        if let Some(found) = c.downcast_ref::<gtk::Entry>() {
+                            return Some(found.clone());
+                        }
+                        if let Some(found) = entry(&c) {
+                            return Some(found);
+                        }
+                        child = c.next_sibling();
+                    }
+                    None
+                }
+                match self.window.visible_dialog().and_then(|d| entry(d.upcast_ref())) {
+                    Some(name) => name.set_text(rest),
+                    None => eprintln!("e2e: no name field"),
+                }
+            }
+            Some("thread-form-state") => {
+                let form = self.thread_form.borrow().clone();
+                match form {
+                    Some(form) => eprintln!("e2e: thread form files={} can-close={}", self.drafts.of(super::uploads::Draft::FirstThreadMessage(form.parent)).len(), form.dialog.can_close()),
+                    None => eprintln!("e2e: no thread form"),
                 }
             }
             Some("reply-nudge") => {
