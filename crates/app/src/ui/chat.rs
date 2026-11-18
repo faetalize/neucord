@@ -884,6 +884,7 @@ impl App {
             let forum = found.is_some_and(|c| c.kind.is_forum_like());
             (title, forum, state.rest.clone(), left)
         };
+        self.persist_history();
         let subtitle = self.channel_subtitle(id);
         self.refresh_typing();
         // The channel we left shows only its newest messages, which live
