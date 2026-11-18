@@ -68,6 +68,7 @@ const ACTIVITY_RESTRICTED_GUILD_IDS: u32 = 13;
 const ACTIVITY_JOINING_RESTRICTED_GUILD_IDS: u32 = 15;
 const MESSAGE_REQUEST_RESTRICTED_GUILD_IDS: u32 = 16;
 const DEFAULT_MESSAGE_REQUEST_RESTRICTED: u32 = 17;
+const HIDE_FRIEND_REQUEST_NOTES: u32 = 33;
 const DEFAULT_GUILDS_RESTRICTED_V2: u32 = 27;
 const DEFAULT_GUILDS_ACTIVITY_RESTRICTED_V2: u32 = 29;
 const PROFILE_VISIBILITY: u32 = 32;
@@ -154,6 +155,7 @@ impl SettingsPatch {
                 servers_restricted_before: privacy.as_ref().map(|p| p.bool(DEFAULT_GUILDS_RESTRICTED).unwrap_or(false)),
                 restricted_servers: privacy.as_ref().map(|p| servers(p, RESTRICTED_GUILD_IDS)),
                 message_requests_restricted: private(DEFAULT_MESSAGE_REQUEST_RESTRICTED),
+                hide_friend_request_notes: private(HIDE_FRIEND_REQUEST_NOTES),
                 message_request_restricted_servers: privacy
                     .as_ref()
                     .map(|p| servers(p, MESSAGE_REQUEST_RESTRICTED_GUILD_IDS)),
@@ -284,6 +286,9 @@ pub enum Setting {
     ProfileUpdatesNotifications(bool),
     FriendsJoinGame(bool),
     VoiceParticipantsJoinGame(bool),
+    /// Privacy & Safety ▸ Friend Requests ▸ Show personalized messages, the
+    /// other way round: `hide_friend_request_notes` (`Zd` in 253932).
+    HideFriendRequestNotes(bool),
     /// The status picker (`827827`): the status, when it goes back to
     /// Online (0 for never) and the time now. The status keeps its creation
     /// time when it stays what it was.
@@ -371,6 +376,7 @@ impl Setting {
                 one(NOTIFICATIONS, PROFILE_UPDATES_NOTIFICATIONS, Some(bool_value(on)))
             }
             Setting::FriendsJoinGame(on) => one(PRIVACY, ALLOW_ACTIVITY_PARTY_FRIENDS, Some(bool_value(on))),
+            Setting::HideFriendRequestNotes(on) => one(PRIVACY, HIDE_FRIEND_REQUEST_NOTES, Some(bool_value(on))),
             Setting::VoiceParticipantsJoinGame(on) => {
                 one(PRIVACY, ALLOW_ACTIVITY_PARTY_VOICE_CHANNEL, Some(bool_value(on)))
             }
@@ -707,6 +713,7 @@ mod tests {
             ProfileUpdatesNotifications(false),
             FriendsJoinGame(false),
             VoiceParticipantsJoinGame(false),
+            HideFriendRequestNotes(true),
             Status { status: UserStatus::Idle, expires_at_ms: 50, now_ms: 40 },
             CustomStatus(Some(self::CustomStatus {
                 text: "hi".into(),
@@ -764,6 +771,7 @@ mod tests {
                     restricted_servers: vec![Snowflake(4), Snowflake(8)],
                     message_requests_restricted: Some(true),
                     message_request_restricted_servers: vec![Snowflake(8)],
+                    hide_friend_request_notes: Some(true),
                     profile_visibility: self::ProfileVisibility::FriendsOnly,
                     ..Privacy::default()
                 },

@@ -53,6 +53,58 @@ pub struct Relationship {
     /// `user_ignored`: we ignored them, which hides a request and silences
     /// their messages without blocking.
     pub ignored: bool,
+    /// The message that came with a friend request, which the sender wrote
+    /// (`note`, at most [`MAX_NOTE`]); it stays in our DMs if we accept.
+    pub note: Option<String>,
+}
+
+/// How long a friend request's message may be, in UTF-16 units as the
+/// client counts (the field's `maxLength` and `length`).
+pub const MAX_NOTE: usize = 120;
+
+/// What the client says of a message too long or refused by Discord
+/// (`ckHwck`).
+pub const NOTE_REFUSED: &str = "Notes can only contain plain text and must be under 120 characters.";
+
+/// The message to send with a friend request, as `237309` prepares it: too
+/// long (by the text as typed) is refused; line breaks become spaces and the
+/// ends are trimmed; nothing left is no message.
+pub fn request_note(text: &str) -> Result<Option<String>, &'static str> {
+    if text.encode_utf16().count() > MAX_NOTE {
+        return Err(NOTE_REFUSED);
+    }
+    let note = text.replace('\n', " ");
+    let note = note.trim();
+    Ok((!note.is_empty()).then(|| note.to_owned()))
+}
+
+/// Whether Discord's refusal of a friend request is about the message
+/// (`body.note != null`), which the client answers with [`NOTE_REFUSED`].
+pub fn note_refused(body: &str) -> bool {
+    serde_json::from_str::<Value>(body).is_ok_and(|v| !v["note"].is_null())
+}
+
+/// The body of a friend request: the user's name and discriminator as the
+/// client splits what was typed at `#` (no `#` is `null`, as `parseInt` of
+/// nothing is `NaN`, which JSON writes so), and the message when there is one.
+pub fn request_body(tag: &str, note: Option<&str>) -> Value {
+    let (username, discriminator) = match tag.split_once('#') {
+        Some((name, rest)) => (name, js_int(rest)),
+        None => (tag, None),
+    };
+    let mut body = serde_json::json!({ "username": username, "discriminator": discriminator });
+    if let Some(note) = note {
+        body["note"] = Value::String(note.to_owned());
+    }
+    body
+}
+
+/// JavaScript's `parseInt` for the leading digits of `text`, or `None`
+/// where it gives `NaN`.
+fn js_int(text: &str) -> Option<u64> {
+    let text = text.trim_start();
+    let digits: String = text.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
 }
 
 impl Relationship {
@@ -76,6 +128,7 @@ impl Relationship {
             spam: value["is_spam_request"].as_bool() == Some(true),
             stranger: value["is_stranger_request"].as_bool() == Some(true),
             ignored: value["user_ignored"].as_bool() == Some(true),
+            note: value["note"].as_str().map(String::from),
         })
     }
 }
@@ -214,17 +267,24 @@ impl Relationships {
         this
     }
 
-    /// Insert or replace (RELATIONSHIP_ADD).
-    pub fn add(&mut self, relationship: Relationship) {
+    /// Insert or replace (RELATIONSHIP_ADD). One that says no message keeps
+    /// the one held (an accepted request still has it): the client's store
+    /// sets a note when there is one and never clears it here.
+    pub fn add(&mut self, mut relationship: Relationship) {
         self.set_ignored(relationship.user.id, relationship.ignored);
+        if relationship.note.is_none() {
+            relationship.note = self.by_user.get(&relationship.user.id).and_then(|r| r.note.clone());
+        }
         self.by_user.insert(relationship.user.id, relationship);
     }
 
-    /// A RELATIONSHIP_UPDATE: the nickname and the ignore flag change this way.
-    pub fn update(&mut self, id: Snowflake, nickname: Option<String>, ignored: bool) {
+    /// A RELATIONSHIP_UPDATE: the nickname, the message and the ignore flag
+    /// change this way, and an update that has no message takes it away.
+    pub fn update(&mut self, id: Snowflake, nickname: Option<String>, note: Option<String>, ignored: bool) {
         self.set_ignored(id, ignored);
         if let Some(relationship) = self.by_user.get_mut(&id) {
             relationship.nickname = nickname;
+            relationship.note = note;
             relationship.ignored = ignored;
         }
     }
@@ -369,6 +429,56 @@ mod tests {
     }
 
     #[test]
+    fn a_requests_message_comes_with_it_and_is_kept_or_taken_away_as_the_client_does() {
+        let mut r = Relationships::from_ready(&json!({
+            "relationships": [{"id": "4", "type": 3, "note": "hi, we met at the meetup",
+                               "user": {"id": "4", "username": "new"}}],
+        }));
+        assert_eq!(r.get(Snowflake(4)).unwrap().note.as_deref(), Some("hi, we met at the meetup"));
+        // Accepting sends the relationship again, without the message: it stays.
+        let accepted = json!({"id": "4", "type": 1, "user": {"id": "4", "username": "new"}});
+        r.add(Relationship::from_value(&accepted, &HashMap::new()).unwrap());
+        assert_eq!(r.get(Snowflake(4)).unwrap().note.as_deref(), Some("hi, we met at the meetup"));
+        // An update that has none takes it away.
+        r.update(Snowflake(4), None, None, false);
+        assert_eq!(r.get(Snowflake(4)).unwrap().note, None);
+        // Not a note: a relationship with no message says none.
+        assert_eq!(ready().get(Snowflake(1)).unwrap().note, None);
+    }
+
+    #[test]
+    fn a_requests_message_is_trimmed_without_line_breaks_and_at_most_120_units() {
+        assert_eq!(request_note(""), Ok(None));
+        assert_eq!(request_note("  \n "), Ok(None), "nothing left");
+        assert_eq!(request_note("  hello\nthere  "), Ok(Some("hello there".into())));
+        assert_eq!(request_note(&"a".repeat(120)), Ok(Some("a".repeat(120))));
+        assert_eq!(request_note(&"a".repeat(121)), Err(NOTE_REFUSED));
+        // Counted in UTF-16 units: 60 emoji are 120, and one more is too many.
+        assert!(request_note(&"😀".repeat(60)).is_ok());
+        assert_eq!(request_note(&"😀".repeat(61)), Err(NOTE_REFUSED));
+        // By the text as typed, spaces included: 121 with the trim is too long.
+        assert_eq!(request_note(&format!(" {}", "a".repeat(120))), Err(NOTE_REFUSED));
+    }
+
+    #[test]
+    fn a_refusal_that_names_the_note_is_told_as_the_note() {
+        assert!(note_refused(r#"{"note": ["Too long"]}"#));
+        assert!(note_refused(r#"{"code": 50035, "note": "x"}"#));
+        assert!(!note_refused(r#"{"note": null, "code": 80004}"#));
+        assert!(!note_refused(r#"{"code": 80004}"#));
+        assert!(!note_refused("not json"));
+    }
+
+    #[test]
+    fn a_request_names_the_user_as_the_client_splits_what_was_typed() {
+        assert_eq!(request_body("zed", None), json!({"username": "zed", "discriminator": null}));
+        assert_eq!(request_body("zed#0042", None), json!({"username": "zed", "discriminator": 42}));
+        assert_eq!(request_body("zed#0", None), json!({"username": "zed", "discriminator": 0}));
+        assert_eq!(request_body("zed#", None), json!({"username": "zed", "discriminator": null}), "NaN");
+        assert_eq!(request_body("zed", Some("hi")), json!({"username": "zed", "discriminator": null, "note": "hi"}));
+    }
+
+    #[test]
     fn live_changes() {
         let mut r = ready();
         // Accepting a request arrives as RELATIONSHIP_ADD with the new type.
@@ -377,7 +487,7 @@ mod tests {
         assert_eq!(names(r.list(List::All)), ["Al", "bea", "new"]);
         assert_eq!(r.incoming(), 0);
 
-        r.update(Snowflake(4), Some("Newt".into()), false);
+        r.update(Snowflake(4), Some("Newt".into()), None, false);
         assert_eq!(r.get(Snowflake(4)).unwrap().name(), "Newt");
 
         assert!(r.set_presence(None, Snowflake(4), Presence { status: Status::Online, text: None, mobile: false }));
@@ -418,7 +528,7 @@ mod tests {
         r.add(Relationship::from_value(&unignored, &HashMap::new()).unwrap());
         assert!(!r.is_blocked_or_ignored(id(4)), "no flag, no longer ignored");
 
-        r.update(id(1), None, true);
+        r.update(id(1), None, None, true);
         assert!(r.is_ignored(id(1)), "RELATIONSHIP_UPDATE carries the flag too");
         r.remove(id(1), true);
         assert!(r.get(id(1)).is_none() && r.is_ignored(id(1)), "unfriending doesn't unignore");

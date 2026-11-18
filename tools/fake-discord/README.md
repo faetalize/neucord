@@ -141,6 +141,12 @@ what arrived, IDENTIFY's key order and properties first.
   page (`emoji-packs`, `packs-shot <png>`), pins the first pack with its
   button (`packs-pin <n>`, `PinnedEmojiPacks` in settings-proto 2), closes
   the page (`packs-close`) and shows the picker's "Blobs" section;
+  `friend-notes` (with `FAKE_FRIEND_NOTES=1`, Bob's request to us carries a
+  message) shows the Pending tab with "View Request" (`view-request`) opening
+  the message in place of the name's line, then fills the Add Friend form
+  (`friends add`, `friend-entry`, `friend-note`, `friend-send`,
+  `friend-state`) and checks the POST carries the trimmed `note` and that the
+  field keeps to 120 UTF-16 units;
   `heartbeat` waits for five op 40s, the interval's among them;
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).
