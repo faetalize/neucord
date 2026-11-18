@@ -754,6 +754,25 @@ impl App {
         }
     }
 
+    /// Close the DM `channel` (`closePrivateChannel` in 308528, from the row's
+    /// menu, 486524). It goes from here at once, and the one we had open
+    /// leaves for Friends, before Discord answers; its request is the one
+    /// that leaves a group, which asks for no confirmation here either.
+    pub(super) fn close_dm(self: &Rc<Self>, channel: Snowflake) {
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
+        if self.account.state.borrow().channel == Some(channel) {
+            self.account.state.borrow_mut().private_channels.retain(|c| c.id != channel);
+            self.show_friends();
+        } else {
+            self.on_private_channel_delete(channel);
+        }
+        glib::spawn_future_local(async move {
+            if let Err(e) = rest.leave_group(channel, false).await {
+                eprintln!("close DM: {e}");
+            }
+        });
+    }
+
     pub(super) fn on_private_channel_delete(self: &Rc<Self>, id: Snowflake) {
         let (home, was_open, was_request, requests_left) = {
             let mut state = self.account.state.borrow_mut();
