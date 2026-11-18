@@ -73,7 +73,7 @@ pub(super) const REMOVE_EMOJI_REACTIONS: Entry<MessageTarget> = Entry::Item(Item
 const EMOJI_TO_REMOVE: Table<MessageTarget> = &[&[Entry::Choices(Choices {
     name: "remove-emoji-reactions",
     choices: |_, target| {
-        let labels = emoji_with_reactions(&target.message).into_iter().map(|emoji| emoji_label(&emoji));
+        let labels = emoji_with_reactions(&target.message).into_iter().map(|emoji| emoji.label());
         labels.enumerate().map(|(n, label)| Choice { value: n.to_string(), label, ticked: false }).collect()
     },
     style: Style::Plain,
@@ -102,16 +102,6 @@ fn emoji_with_reactions(message: &Message) -> Vec<Emoji> {
         }
     }
     found
-}
-
-/// What the client calls an emoji (`b3` in 815807): `:name:`, or the emoji
-/// where it has no name for it.
-pub(super) fn emoji_label(emoji: &Emoji) -> String {
-    let name = emoji.name.as_deref().unwrap_or_default();
-    match emoji.id {
-        Some(_) => format!(":{name}:"),
-        None => Some(discord::emoji::unicode_label(name)).filter(|l| !l.is_empty()).unwrap_or_else(|| name.to_owned()),
-    }
 }
 
 /// How asking Discord ended, once the client's retry rule had its say.
@@ -170,8 +160,8 @@ impl App {
 
     /// The reactions under `message`, and the button that adds another:
     /// nothing without a reaction, or where the account hides them. A
-    /// thread's first message stands for one in the parent, whose reactions
-    /// this copy doesn't keep current. The add button's picker opens over
+    /// thread's first message stands for one in the parent and shows none
+    /// (`renderReactions: false` in 812266). The add button's picker opens over
     /// `content`, which stays while the row is built again: the button
     /// itself goes with the next change, and a picker left on it would
     /// outlive it.
@@ -214,6 +204,7 @@ impl App {
         content.append(&polls::emoji_widget(pill.emoji, &self.images));
         content.append(&gtk::Label::new(Some(&pill.count.to_string())));
         let button = gtk::ToggleButton::builder().child(&content).active(pill.me).build();
+        button.update_property(&[gtk::accessible::Property::Label(&pill.accessible_label())]);
         if !clickable || pill.kind == Kind::Burst {
             button.set_can_target(false);
             button.set_can_focus(false);
@@ -478,6 +469,7 @@ impl App {
         let dm = self.account.state.borrow().find_channel(channel).is_some_and(|(_, c)| c.kind == ChannelKind::Dm);
         // A post's card shows the top reaction of its first message.
         self.forum_change_first(channel, message, |m| change(m, dm));
+        self.change_thread_starter(message, |m| change(m, dm));
         let changed = self.account.timelines.borrow_mut().change(channel, message, |m| change(m, dm));
         if let Some((store, position)) = changed {
             self.rebind(&store, position, 1);

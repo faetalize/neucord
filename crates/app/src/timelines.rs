@@ -107,7 +107,7 @@ impl Timelines {
 
     pub fn clear(&mut self) {
         self.channels.clear();
-        self.held = Held::default();
+        self.held.reset();
     }
 
     /// A page of `channel` arrived for a request that `started`. Says whether
@@ -317,6 +317,23 @@ pub fn update_replies(store: &gio::ListStore, original: Snowflake, change: impl 
     replies
 }
 
+/// Apply `change` to the copy of `original` that a thread's first message
+/// carries, so what the thread shows follows edits and deletes of the message
+/// it was started from, as [`update_replies`] does for a reply. `store` is the
+/// thread's. Returns where the first message is.
+pub fn update_starter(store: &gio::ListStore, original: Snowflake, change: impl Fn(&mut Referenced)) -> Vec<u32> {
+    let mut starters = Vec::new();
+    for position in 0..store.n_items() {
+        let Some(object) = store.item(position).and_downcast::<glib::BoxedAnyObject>() else { continue };
+        let mut message = object.borrow_mut::<Message>();
+        if message.thread_starter().is_some_and(|m| m.id == original) {
+            change(&mut message.referenced_message);
+            starters.push(position);
+        }
+    }
+    starters
+}
+
 /// Prepend an older page (oldest first).
 pub fn prepend(store: &gio::ListStore, page: Vec<Message>) {
     let objects: Vec<glib::BoxedAnyObject> = page.into_iter().map(boxed).collect();
@@ -333,6 +350,31 @@ mod tests {
             "content": content, "timestamp": "2026-10-26T00:00:00+00:00"
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn a_page_asked_for_before_the_account_was_left_lands_stale_in_the_next_session() {
+        // A fatal close leaves the account, and the next login's READY would
+        // otherwise count the same as the one the request saw.
+        let mut timelines = Timelines::default();
+        timelines.held.opened();
+        let started = timelines.held.started();
+        timelines.clear();
+        timelines.held.opened();
+        assert!(timelines.landed(Snowflake(1), started));
+    }
+
+    #[test]
+    fn leaving_an_account_forgets_every_channel() {
+        let mut timelines = Timelines::default();
+        timelines.held.opened();
+        timelines.open(Snowflake(1));
+        let started = timelines.held.started();
+        timelines.landed(Snowflake(1), started);
+        timelines.clear();
+        assert!(timelines.get(Snowflake(1)).is_none());
+        let opening = discord::held::Opening { private: true, ..Default::default() };
+        assert!(timelines.held.fetch_on_open(Snowflake(1), opening));
     }
 
     #[test]
@@ -476,6 +518,33 @@ mod tests {
         update_replies(&store, Snowflake(2), |r| *r = Referenced::Deleted);
         assert!(matches!(original(), Referenced::Deleted));
         assert_eq!(ids(&store), [1, 2, 3]);
+    }
+
+    #[test]
+    fn a_thread_starts_from_the_live_message() {
+        let starter: Message = serde_json::from_value(serde_json::json!({
+            "id": "3", "channel_id": "2", "author": {"id": "5", "username": "a"}, "timestamp": "t", "type": 21,
+            "message_reference": {"channel_id": "1", "message_id": "2"},
+            "referenced_message": {"id": "2", "channel_id": "1", "author": {"id": "6", "username": "b"},
+                                   "content": "before", "timestamp": "t"}
+        }))
+        .unwrap();
+        let store = store_with(&[1]);
+        store.append(&boxed(starter));
+        let shown = || find(&store, Snowflake(3)).unwrap().1.thread_starter().map(|m| m.content.clone());
+
+        let object = store.item(1).unwrap();
+        let at = update_starter(&store, Snowflake(2), |r| {
+            if let Referenced::Message(m) = r {
+                m.content = "after".into();
+            }
+        });
+        assert_eq!(at, [1]);
+        assert_eq!(store.item(1).unwrap(), object, "changed in place");
+        assert_eq!(shown().as_deref(), Some("after"));
+        assert!(update_starter(&store, Snowflake(9), |_| unreachable!()).is_empty(), "another message's");
+        update_starter(&store, Snowflake(2), |r| *r = Referenced::Deleted);
+        assert_eq!(shown(), None);
     }
 
     #[test]

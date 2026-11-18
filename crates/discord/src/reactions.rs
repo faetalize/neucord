@@ -164,6 +164,38 @@ impl From<&emoji::Item> for Emoji {
     }
 }
 
+impl Emoji {
+    /// What the client calls an emoji (`b3` in 815807): `:name:`, or the emoji
+    /// where it has no name for it.
+    pub fn label(&self) -> String {
+        let name = self.name.as_deref().unwrap_or_default();
+        match self.id {
+            Some(_) => format!(":{name}:"),
+            None => Some(emoji::unicode_label(name)).filter(|l| !l.is_empty()).unwrap_or_else(|| name.to_owned()),
+        }
+    }
+}
+
+impl Pill<'_> {
+    /// What a screen reader says of it (`mb` in 815807): the emoji's name
+    /// with `:` and `_` read as spaces, how many reacted, and what pressing
+    /// it does.
+    pub fn accessible_label(&self) -> String {
+        let name = self.emoji.label().replace([':', '_'], " ");
+        let (name, count) = (name.trim(), self.count);
+        let (what, plural) = match self.kind {
+            Kind::Burst => ("super reaction", if count == 1 { "" } else { "s" }),
+            Kind::Normal => ("reaction", if count == 1 { "" } else { "s" }),
+        };
+        let press = match (self.me, self.kind) {
+            (true, _) => format!("remove your {what}"),
+            (false, Kind::Burst) => "super react".to_owned(),
+            (false, Kind::Normal) => "react".to_owned(),
+        };
+        format!("{name}, {count} {what}{plural}, press to {press}")
+    }
+}
+
 impl Message {
     /// The pills under it, in the client's order (`367790`): each emoji's
     /// super reactions, then its normal ones, only those someone made.
@@ -583,6 +615,26 @@ mod tests {
                 ("🔥".to_owned(), Kind::Burst, 1, true),
                 ("🔥".to_owned(), Kind::Normal, 2, false),
                 ("blob:12".to_owned(), Kind::Normal, 4, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn pills_read_out_what_they_are_and_do() {
+        let m = message(json!([
+            {"emoji": {"name": "🔥"}, "count_details": {"normal": 2, "burst": 1}, "me_burst": true},
+            {"emoji": {"id": "12", "name": "party_blob"}, "count_details": {"normal": 1, "burst": 0}},
+            {"emoji": {"id": "13", "name": "ok"}, "count_details": {"normal": 3, "burst": 1}, "me": true},
+        ]));
+        let labels: Vec<_> = m.reaction_pills().iter().map(Pill::accessible_label).collect();
+        assert_eq!(
+            labels,
+            [
+                "fire, 1 super reaction, press to remove your super reaction",
+                "fire, 2 reactions, press to react",
+                "party blob, 1 reaction, press to react",
+                "ok, 1 super reaction, press to super react",
+                "ok, 3 reactions, press to remove your reaction",
             ]
         );
     }

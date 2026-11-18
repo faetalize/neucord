@@ -16,7 +16,6 @@ use super::App;
 use super::chat::MessageTarget;
 use super::menus::{Entry, Item, Kind as MenuKind};
 use super::polls;
-use super::reactions::emoji_label;
 use super::widgets::avatar_widget_in;
 use crate::images::Row;
 use crate::timelines;
@@ -414,6 +413,6 @@ impl App {
             .cloned()
             .collect();
         let names: Vec<String> = users.iter().map(|u| state.name_in(channel, u)).collect();
-        who_reacted(&emoji_label(emoji), &names, count)
+        who_reacted(&emoji.label(), &names, count)
     }
 }

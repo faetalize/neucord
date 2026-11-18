@@ -25,9 +25,9 @@ use crate::Snowflake;
 /// The gateway connection as `GatewayConnectionStore` keeps it: whether a
 /// session is established, and `lastTimeConnectedChanged`, which READY moves,
 /// and a reset (`CONNECTION_CLOSED`: a rejected token, or the fifth failed
-/// reconnect in a row), which ends the session, so the READY after it moves
-/// it anyway. An ordinary close is `CONNECTION_INTERRUPTED`, which doesn't
-/// move it. A counter does for a timestamp, as nothing else reads it.
+/// reconnect in a row) too, ending the session ([`Held::reset`]). An ordinary
+/// close is `CONNECTION_INTERRUPTED`, which doesn't move it. A counter does
+/// for a timestamp, as nothing else reads it.
 #[derive(Debug, Default)]
 struct Link {
     established: bool,
@@ -83,6 +83,18 @@ impl Held {
     /// sent then counts as made without a session.
     pub fn closed(&mut self) {
         self.link.established = false;
+    }
+
+    /// The account was left, which the client sees as a reset
+    /// (`CONNECTION_CLOSED`): everything held is gone, the session ends and the
+    /// clock moves, so a request still on its way lands stale in whatever
+    /// session comes next. The clock only counts up: starting over would let
+    /// the next login's READY look like the one that request saw.
+    pub fn reset(&mut self) {
+        self.link.established = false;
+        self.link.changed += 1;
+        self.fresh.clear();
+        self.landed.clear();
     }
 
     /// A request is about to be sent.
