@@ -1160,6 +1160,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, voice_file(), "audio/ogg")
             if IMAGE_FAIL:
                 return self.send(404, b"")
+            # What asks for WebP (`format=webp`, `.webp`) gets one: a 16x16 picture, or a three-frame animation
+            # where it says `animated=true`, from Neucord's own test files.
+            if query.get("format") == "webp" or path.split("?")[0].endswith(".webp"):
+                name = "animated.webp" if query.get("animated") == "true" else "lossy.webp"
+                with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "crates", "discord", "testdata", name), "rb") as file:
+                    return self.send(200, file.read(), "image/webp")
             body = png(int(query.get("width", 1200)) // 4, int(query.get("height", 800)) // 4)
             return self.send(200, body, "image/png")
         self.answer()

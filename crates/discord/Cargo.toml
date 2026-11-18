@@ -11,6 +11,7 @@ description = "Discord protocol, REST, gateway and session storage. No GTK."
 glib.workspace = true
 gio.workspace = true
 gdk-pixbuf.workspace = true
+image-webp.workspace = true
 soup.workspace = true
 libsecret.workspace = true
 serde.workspace = true

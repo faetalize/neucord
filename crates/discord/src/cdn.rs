@@ -1,30 +1,35 @@
 //! Build Discord CDN URLs for avatars, guild icons and custom emoji, and
 //! sized requests to the media proxy.
 //!
-//! We always request an explicit extension so the bytes are a format
-//! gdk-pixbuf decodes (PNG for static, GIF for animated): `a_`-prefixed hashes
-//! are animated. `size` is a power of two in 16..=4096, or another size the
-//! client asks for ([`asset_size`]).
+//! Pictures are asked for as WebP where the official client asks for it
+//! (`canUseWebp`, true in the browser Neucord says it is; decoded by
+//! [`crate::webp`]), and as PNG where it asks for PNG. `a_`-prefixed hashes
+//! are animated: their URL carries `animated=true`, and without it the CDN
+//! sends the first frame. `size` is a power of two in 16..=4096, or another
+//! size the client asks for ([`asset_size`]).
 
 const CDN: &str = "https://cdn.discordapp.com";
 const CDN_HOST: &str = "cdn.discordapp.com";
 
-fn ext(hash: &str) -> &'static str {
-    if hash.starts_with("a_") { "gif" } else { "png" }
+/// The query of an avatar, icon or emoji (`size`, then `animated` for what
+/// moves, as `g` in 486020 puts them).
+fn query(size: u16, animated: bool) -> String {
+    if animated { format!("size={size}&animated=true") } else { format!("size={size}") }
 }
 
-/// True when the asset hash denotes an animated (GIF) image.
+/// True when the asset hash denotes an animated image.
 pub fn is_animated(hash: &str) -> bool {
     hash.starts_with("a_")
 }
 
+/// An avatar, animated if its hash says so ([`still`] for its first frame).
 pub fn avatar_url(user_id: u64, hash: &str, size: u16) -> String {
-    format!("{CDN}/avatars/{user_id}/{hash}.{}?size={size}", ext(hash))
+    format!("{CDN}/avatars/{user_id}/{hash}.webp?{}", query(size, is_animated(hash)))
 }
 
 /// A picture someone set for one server.
 pub fn member_avatar_url(guild_id: u64, user_id: u64, hash: &str, size: u16) -> String {
-    format!("{CDN}/guilds/{guild_id}/users/{user_id}/avatars/{hash}.{}?size={size}", ext(hash))
+    format!("{CDN}/guilds/{guild_id}/users/{user_id}/avatars/{hash}.webp?{}", query(size, is_animated(hash)))
 }
 
 /// A profile banner, still even where animated: the client animates one
@@ -94,22 +99,22 @@ pub fn badge_icon_url(icon: &str) -> String {
 }
 
 pub fn guild_icon_url(guild_id: u64, hash: &str, size: u16) -> String {
-    format!("{CDN}/icons/{guild_id}/{hash}.{}?size={size}", ext(hash))
+    format!("{CDN}/icons/{guild_id}/{hash}.webp?{}", query(size, is_animated(hash)))
 }
 
-/// The still of a CDN image asked for as a GIF (an avatar, icon or emoji),
-/// the same size as a PNG with its first frame. Any other URL comes back
-/// unchanged.
+/// The still of a CDN image asked for animated (an avatar, icon or emoji):
+/// the same without `animated=true`, which is how the client asks for a
+/// picture it doesn't move. Any other URL comes back unchanged.
 pub fn still(url: &str) -> String {
-    match url.strip_prefix(CDN).and_then(|rest| rest.split_once(".gif?")) {
-        Some((path, query)) => format!("{CDN}{path}.png?{query}"),
-        None => url.to_owned(),
-    }
+    let Some(rest) = url.strip_prefix(CDN) else { return url.to_owned() };
+    let Some((path, query)) = rest.split_once('?') else { return url.to_owned() };
+    let kept: Vec<&str> = query.split('&').filter(|param| *param != "animated=true").collect();
+    format!("{CDN}{path}?{}", kept.join("&"))
 }
 
-/// A guild icon as a still PNG, even for animated icons (their first frame).
+/// A guild icon without its animation, even for an animated one.
 pub fn guild_icon_still_url(guild_id: u64, hash: &str, size: u16) -> String {
-    format!("{CDN}/icons/{guild_id}/{hash}.png?size={size}")
+    format!("{CDN}/icons/{guild_id}/{hash}.webp?{}", query(size, false))
 }
 
 pub fn group_dm_icon_url(channel_id: u64, hash: &str, size: u16) -> String {
@@ -196,22 +201,64 @@ pub fn application_icon(
     bot.and_then(from_bot).flatten()
 }
 
+/// An emoji, moving if `animated` (`getEmojiURL`, 486020).
 pub fn emoji_url(emoji_id: u64, animated: bool, size: u16) -> String {
-    let ext = if animated { "gif" } else { "png" };
-    format!("{CDN}/emojis/{emoji_id}.{ext}?size={size}")
+    format!("{CDN}/emojis/{emoji_id}.webp?{}", query(size, animated))
 }
 
-/// Ask Discord's media proxy for an image scaled down to `width`×`height`,
-/// so it downloads and decodes at the size it is shown. Only the proxy
-/// resizes, so any other URL comes back unchanged.
-pub fn proxy_sized(url: &str, width: u32, height: u32) -> String {
+/// How an image of the media proxy is asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shown {
+    /// A picture that doesn't move, or the first frame of one that does:
+    /// WebP (`getFormatQuality`, 619517).
+    Still,
+    /// A picture left as it is so it moves: a GIF stays a GIF, and a WebP
+    /// or AVIF flagged as animated says so.
+    Moving,
+}
+
+/// Ask Discord's media proxy for an image as the client's image component
+/// does (`getFormatQuality` in 619517 and `AE` in 776231): as WebP when it
+/// is a still (lossless when the original is a PNG or AVIF, so a lossy
+/// WebP doesn't degrade it), left alone when it moves (`animated=true` for
+/// a WebP or AVIF), and scaled down to `size`, so it downloads and decodes
+/// at the size it is shown. An AVIF always comes as WebP. Only the proxy
+/// converts and resizes, so any other URL comes back unchanged.
+pub fn proxy_image(url: &str, size: Option<(u32, u32)>, shown: Shown) -> String {
     let host = url.strip_prefix("https://").and_then(|rest| rest.split(['/', '?']).next()).unwrap_or_default();
     let proxied =
         host == "media.discordapp.net" || (host.starts_with("images-ext-") && host.ends_with(".discordapp.net"));
     if !proxied {
         return url.to_owned();
     }
-    with_params(url, &[("width", &width.to_string()), ("height", &height.to_string())])
+    let path = url.split(['?', '#']).next().unwrap_or_default().to_ascii_lowercase();
+    let avif = path.ends_with(".avif");
+    let mut set: Vec<(&str, String)> = Vec::new();
+    match shown {
+        Shown::Still => {
+            set.push(("format", "webp".to_owned()));
+            if path.ends_with(".png") || avif {
+                set.push(("quality", "lossless".to_owned()));
+            }
+        }
+        Shown::Moving => {
+            if avif {
+                set.push(("format", "webp".to_owned()));
+            }
+            if avif || path.ends_with(".webp") {
+                set.push(("animated", "true".to_owned()));
+            }
+        }
+    }
+    if let Some((width, height)) = size {
+        set.push(("width", width.to_string()));
+        set.push(("height", height.to_string()));
+    }
+    if set.is_empty() {
+        return url.to_owned();
+    }
+    let set: Vec<(&str, &str)> = set.iter().map(|(name, value)| (*name, value.as_str())).collect();
+    with_params(url, &set)
 }
 
 /// A link to a file of Discord's own: an attachment of the CDN or the media
@@ -681,35 +728,35 @@ mod tests {
 
     #[test]
     fn static_avatar() {
-        assert_eq!(avatar_url(5, "abcdef", 64), "https://cdn.discordapp.com/avatars/5/abcdef.png?size=64");
+        assert_eq!(avatar_url(5, "abcdef", 64), "https://cdn.discordapp.com/avatars/5/abcdef.webp?size=64");
     }
 
     #[test]
-    fn animated_avatar_uses_gif() {
-        assert!(avatar_url(5, "a_1234", 64).ends_with("a_1234.gif?size=64"));
+    fn animated_avatar_asks_for_the_animation() {
+        assert!(avatar_url(5, "a_1234", 64).ends_with("a_1234.webp?size=64&animated=true"));
         assert!(is_animated("a_1234"));
         assert!(!is_animated("plain"));
     }
 
     #[test]
-    fn stills_of_gifs() {
-        assert_eq!(still(&avatar_url(5, "a_1234", 64)), "https://cdn.discordapp.com/avatars/5/a_1234.png?size=64");
-        assert_eq!(still(&emoji_url(7, true, 48)), "https://cdn.discordapp.com/emojis/7.png?size=48");
+    fn the_still_of_an_animation_is_the_same_without_asking_it_to_move() {
+        assert_eq!(still(&avatar_url(5, "a_1234", 64)), "https://cdn.discordapp.com/avatars/5/a_1234.webp?size=64");
+        assert_eq!(still(&emoji_url(7, true, 48)), "https://cdn.discordapp.com/emojis/7.webp?size=48");
         assert_eq!(
             still(&member_avatar_url(9, 5, "a_x", 64)),
-            "https://cdn.discordapp.com/guilds/9/users/5/avatars/a_x.png?size=64"
+            "https://cdn.discordapp.com/guilds/9/users/5/avatars/a_x.webp?size=64"
         );
         let plain = avatar_url(5, "b", 64);
         assert_eq!(still(&plain), plain);
-        let elsewhere = "https://example.com/a.gif?size=64";
-        assert_eq!(still(elsewhere), elsewhere, "only the CDN has the PNG");
+        let elsewhere = "https://example.com/a.webp?size=64&animated=true";
+        assert_eq!(still(elsewhere), elsewhere, "only the CDN answers to it");
     }
 
     #[test]
     fn profile_pictures() {
         assert_eq!(
             member_avatar_url(9, 5, "a_x", 64),
-            "https://cdn.discordapp.com/guilds/9/users/5/avatars/a_x.gif?size=64"
+            "https://cdn.discordapp.com/guilds/9/users/5/avatars/a_x.webp?size=64&animated=true"
         );
         assert_eq!(banner_url(5, "a_b", 600), "https://cdn.discordapp.com/banners/5/a_b.png?size=600");
         assert_eq!(
@@ -734,30 +781,92 @@ mod tests {
 
     #[test]
     fn icon_and_emoji() {
-        assert_eq!(guild_icon_url(9, "ic", 48), "https://cdn.discordapp.com/icons/9/ic.png?size=48");
-        assert_eq!(guild_icon_still_url(9, "a_ic", 32), "https://cdn.discordapp.com/icons/9/a_ic.png?size=32");
-        assert_eq!(emoji_url(42, true, 48), "https://cdn.discordapp.com/emojis/42.gif?size=48");
+        assert_eq!(guild_icon_url(9, "ic", 48), "https://cdn.discordapp.com/icons/9/ic.webp?size=48");
+        assert_eq!(guild_icon_url(9, "a_ic", 48), "https://cdn.discordapp.com/icons/9/a_ic.webp?size=48&animated=true");
+        assert_eq!(guild_icon_still_url(9, "a_ic", 32), "https://cdn.discordapp.com/icons/9/a_ic.webp?size=32");
+        assert_eq!(emoji_url(42, false, 48), "https://cdn.discordapp.com/emojis/42.webp?size=48");
+        assert_eq!(emoji_url(42, true, 48), "https://cdn.discordapp.com/emojis/42.webp?size=48&animated=true");
+    }
+
+    #[test]
+    fn what_the_client_asks_as_png_stays_png() {
+        // Banners move only for a pointer on them, group icons and apps' own icons never.
+        assert_eq!(group_dm_icon_url(3, "g", 64), "https://cdn.discordapp.com/channel-icons/3/g.png?size=64");
+        assert_eq!(app_icon_url(3, "i", 64), "https://cdn.discordapp.com/app-icons/3/i.png?size=64");
     }
 
     #[test]
     fn proxy_requests_carry_the_shown_size() {
+        let at = |url, size| proxy_image(url, size, Shown::Moving);
         assert_eq!(
-            proxy_sized("https://images-ext-1.discordapp.net/external/abc/https/e.com/a.png", 400, 300),
-            "https://images-ext-1.discordapp.net/external/abc/https/e.com/a.png?width=400&height=300"
+            at("https://images-ext-1.discordapp.net/external/abc/https/e.com/a.gif", Some((400, 300))),
+            "https://images-ext-1.discordapp.net/external/abc/https/e.com/a.gif?width=400&height=300"
         );
         // Signed attachment URLs keep their signature; an old size is replaced.
         assert_eq!(
-            proxy_sized("https://media.discordapp.net/attachments/1/2/a.gif?ex=1&hm=2&width=9", 80, 60),
+            at("https://media.discordapp.net/attachments/1/2/a.gif?ex=1&hm=2&width=9", Some((80, 60))),
             "https://media.discordapp.net/attachments/1/2/a.gif?ex=1&hm=2&width=80&height=60"
         );
         assert_eq!(
-            proxy_sized("https://cdn.discordapp.com/avatars/5/a.png?size=64", 1, 1),
+            proxy_image("https://cdn.discordapp.com/avatars/5/a.png?size=64", Some((1, 1)), Shown::Still),
             "https://cdn.discordapp.com/avatars/5/a.png?size=64"
         );
         assert_eq!(
-            proxy_sized("https://evil.com/images-ext-1.discordapp.net", 1, 1),
+            proxy_image("https://evil.com/images-ext-1.discordapp.net", Some((1, 1)), Shown::Still),
             "https://evil.com/images-ext-1.discordapp.net"
         );
+    }
+
+    #[test]
+    fn a_still_is_asked_for_as_webp_and_lossless_from_a_png_or_avif() {
+        let still = |url| proxy_image(url, Some((400, 300)), Shown::Still);
+        assert_eq!(
+            still("https://media.discordapp.net/attachments/1/2/a.jpg?ex=1&hm=2"),
+            "https://media.discordapp.net/attachments/1/2/a.jpg?ex=1&hm=2&format=webp&width=400&height=300"
+        );
+        assert_eq!(
+            still("https://media.discordapp.net/attachments/1/2/a.PNG?ex=1"),
+            "https://media.discordapp.net/attachments/1/2/a.PNG?ex=1&format=webp&quality=lossless&width=400&height=300"
+        );
+        assert_eq!(
+            still("https://images-ext-1.discordapp.net/external/k/https/e.com/a.avif"),
+            "https://images-ext-1.discordapp.net/external/k/https/e.com/a.avif?format=webp&quality=lossless&width=400&height=300"
+        );
+        // The first frame of a GIF is lossy WebP, as the client's frozen image is.
+        assert_eq!(
+            still("https://media.discordapp.net/attachments/1/2/a.gif"),
+            "https://media.discordapp.net/attachments/1/2/a.gif?format=webp&width=400&height=300"
+        );
+        // Still asked for in WebP without a size when the picture is that size already.
+        assert_eq!(
+            proxy_image("https://media.discordapp.net/attachments/1/2/a.png", None, Shown::Still),
+            "https://media.discordapp.net/attachments/1/2/a.png?format=webp&quality=lossless"
+        );
+        assert_eq!(
+            still("https://media.discordapp.net/attachments/1/2/a.png?format=png&width=9"),
+            "https://media.discordapp.net/attachments/1/2/a.png?format=webp&quality=lossless&width=400&height=300",
+            "what was asked before is replaced"
+        );
+    }
+
+    #[test]
+    fn a_moving_picture_is_left_as_it_is_and_a_flagged_webp_says_it_moves() {
+        let moving = |url, size| proxy_image(url, size, Shown::Moving);
+        assert_eq!(
+            moving("https://media.discordapp.net/attachments/1/2/a.gif?ex=1", Some((80, 60))),
+            "https://media.discordapp.net/attachments/1/2/a.gif?ex=1&width=80&height=60"
+        );
+        assert_eq!(
+            moving("https://media.discordapp.net/attachments/1/2/a.webp?ex=1", Some((80, 60))),
+            "https://media.discordapp.net/attachments/1/2/a.webp?ex=1&animated=true&width=80&height=60"
+        );
+        assert_eq!(
+            moving("https://media.discordapp.net/attachments/1/2/a.avif", Some((80, 60))),
+            "https://media.discordapp.net/attachments/1/2/a.avif?format=webp&animated=true&width=80&height=60",
+            "an AVIF is always WebP"
+        );
+        let gif = "https://media.discordapp.net/attachments/1/2/a.gif?ex=1";
+        assert_eq!(moving(gif, None), gif, "nothing to ask: no `?` added");
     }
 
     fn message(attachments: &[&str], embeds: serde_json::Value) -> crate::Message {
@@ -1008,12 +1117,12 @@ mod tests {
         // The bot's picture in the server comes first, a still even when animated.
         assert_eq!(
             app(Some("i1"), Some(bot), Some((5, "a_m1")), true).as_deref(),
-            Some("https://cdn.discordapp.com/guilds/5/users/9/avatars/a_m1.png?size=128")
+            Some("https://cdn.discordapp.com/guilds/5/users/9/avatars/a_m1.webp?size=128")
         );
         // Then its avatar, before the app icon only when asked.
         assert_eq!(
             app(Some("i1"), Some(IconBot { avatar: Some("a_b1"), ..bot }), None, true).as_deref(),
-            Some("https://cdn.discordapp.com/avatars/9/a_b1.png?size=128")
+            Some("https://cdn.discordapp.com/avatars/9/a_b1.webp?size=128")
         );
         assert_eq!(
             app(Some("i1"), Some(bot), None, false).as_deref(),
@@ -1028,7 +1137,7 @@ mod tests {
         // No app icon: the bot's avatar after all, else the bundled picture.
         assert_eq!(
             app(None, Some(bot), None, false).as_deref(),
-            Some("https://cdn.discordapp.com/avatars/9/b1.png?size=128")
+            Some("https://cdn.discordapp.com/avatars/9/b1.webp?size=128")
         );
         assert_eq!(app(None, Some(bare_discriminated), None, true), None);
         assert_eq!(app(None, None, None, true), None);
@@ -1048,7 +1157,7 @@ mod tests {
         // Only a bot gets them: a user with that hash is fetched as any avatar.
         assert_eq!(
             app(IconBot { avatar: Some("clyde"), bot: false, ..bot }).as_deref(),
-            Some("https://cdn.discordapp.com/avatars/9/clyde.png?size=128")
+            Some("https://cdn.discordapp.com/avatars/9/clyde.webp?size=128")
         );
         assert_eq!(
             app(IconBot { bot: false, ..bot }).as_deref(),

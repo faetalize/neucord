@@ -298,12 +298,12 @@ impl Embed {
             && let Some((width, height)) = video.sized()
         {
             let file = video.proxy_url.clone().filter(|u| !u.is_empty());
-            // A video without a still gets one from the proxy (the official
-            // client asks for WebP; PNG is what GTK can decode everywhere).
+            // A video without a still gets one from the proxy, as WebP as the
+            // client's poster is (`format=webp` on the video's `proxy_url`).
             if shaped.thumbnail.is_none()
                 && let Some(file) = &file
             {
-                let still = crate::cdn::with_params(file, &[("format", "png")]);
+                let still = crate::cdn::with_params(file, &[("format", "webp")]);
                 shaped.thumbnail =
                     Some(Media { original: still.clone(), url: still, width, height, animated: false, star: None });
             }
@@ -867,6 +867,18 @@ mod tests {
             youtube.display(true),
             Display::Card { media: Some(Large::Video { video: None, still }), thumbnail: None }
         );
+    }
+
+    #[test]
+    fn a_video_without_a_thumbnail_gets_its_still_from_the_proxy_as_webp() {
+        let video = embed(json!({
+            "type": "video", "url": "https://example.test/v",
+            "video": {"url": "https://example.test/v.mp4",
+                      "proxy_url": "https://images-ext-1.discordapp.net/external/k/https/example.test/v.mp4",
+                      "width": 640, "height": 360}
+        }));
+        let Display::Bare(Large::Video { still, .. }) = video.display(true) else { panic!() };
+        assert_eq!(still.url, "https://images-ext-1.discordapp.net/external/k/https/example.test/v.mp4?format=webp");
     }
 
     #[test]

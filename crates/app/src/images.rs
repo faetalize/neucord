@@ -9,7 +9,9 @@
 //! URL while anyone shows them) into a frame-stepping paintable that ticks
 //! only while it is playing and in view (GTK's `Picture` shows only the first
 //! frame otherwise). Images from Discord's media proxy are requested at the
-//! size they are shown, which keeps both downloads and decodes small.
+//! size they are shown, which keeps both downloads and decodes small. WebP,
+//! which the client asks for and gdk-pixbuf can't load, decodes on the pool
+//! ([`decode`], `discord::webp`).
 //!
 //! Disk reads and writes run on the pool (see CONTRIBUTING.md, "Threads").
 //!
@@ -34,6 +36,7 @@ mod play;
 pub use animated::Lease;
 use animated::{AnimatedPaintable, FramePaintable};
 use discord::animation::Subject;
+use discord::cdn::Shown;
 use lru::Lru;
 pub use play::{Motion, Row, Update};
 
@@ -182,12 +185,15 @@ impl Images {
             };
             // Another picture may have decoded it while we waited.
             let cached = this.0.textures.borrow_mut().get(&url);
-            let texture = match cached.map_or_else(|| gdk::Texture::from_bytes(&bytes), Ok) {
-                Ok(texture) => texture,
-                Err(_) => {
-                    eprintln!("images: could not decode {}", unsigned(&url));
-                    return failed();
-                }
+            let texture = match cached {
+                Some(texture) => texture,
+                None => match decode(&bytes).await {
+                    Some(texture) => texture,
+                    None => {
+                        eprintln!("images: could not decode {}", unsigned(&url));
+                        return failed();
+                    }
+                },
             };
             let size = texture.width() as u64 * texture.height() as u64 * 4;
             this.0.textures.borrow_mut().insert(&url, texture.clone(), size);
@@ -228,10 +234,10 @@ impl Images {
     }
 
     /// Like [`set`](Self::set), but asks Discord's media proxy for the image
-    /// at the size it is `shown` at most, never above `original`. Other URLs
-    /// load as they are.
+    /// as a still (WebP) at the size it is `shown` at most, never above
+    /// `original`. Other URLs load as they are.
     pub fn set_sized(&self, picture: &gtk::Picture, url: &str, shown: (i32, i32), original: Option<(u32, u32)>) {
-        let (this, picture_ref, url) = (self.clone(), picture.clone(), self.sized(url, shown, original));
+        let (this, picture_ref, url) = (self.clone(), picture.clone(), self.sized(url, shown, original, Shown::Still));
         self.when_wanted(picture, move || this.set(&picture_ref, &url));
     }
 
@@ -241,8 +247,9 @@ impl Images {
         if self.0.lazy.get() { lazy::when_near(picture, load) } else { load() }
     }
 
-    /// [`set_moving`](Self::set_moving) for an image whose still is its own
-    /// first frame, sized as [`set_sized`](Self::set_sized) does.
+    /// [`set_moving`](Self::set_moving) for an image whose still is the
+    /// proxy's, both sized as [`set_sized`](Self::set_sized) does: the still
+    /// asked for as WebP, the animation as it is.
     pub fn set_sized_moving(
         &self,
         picture: &gtk::Picture,
@@ -252,21 +259,21 @@ impl Images {
         subject: Subject,
         row: Row,
     ) {
-        let (this, picture_ref, url) = (self.clone(), picture.clone(), self.sized(url, shown, original));
-        self.when_wanted(picture, move || this.set_moving(&picture_ref, &url, &url, subject, row));
+        let (this, picture_ref) = (self.clone(), picture.clone());
+        let still = self.sized(url, shown, original, Shown::Still);
+        let moving = self.sized(url, shown, original, Shown::Moving);
+        self.when_wanted(picture, move || this.set_moving(&picture_ref, &still, &moving, subject, row));
     }
 
     /// The proxy's version of `url` at the size to request: the one shown, at
     /// the screen's scale, snapped to the account's ladder, and none at all
     /// for an image that size already (`AE` in 776231).
-    fn sized(&self, url: &str, shown: (i32, i32), original: Option<(u32, u32)>) -> String {
+    fn sized(&self, url: &str, shown: (i32, i32), original: Option<(u32, u32)>, look: Shown) -> String {
         let scale = self.0.scale.get();
         let target = request_size(shown, scale, original);
         let ladder = self.0.ladder.borrow();
-        match discord::cdn::requested_size(target, original, ladder.as_ref(), scale) {
-            Some((width, height)) => discord::cdn::proxy_sized(url, width, height),
-            None => url.to_owned(),
-        }
+        let size = discord::cdn::requested_size(target, original, ladder.as_ref(), scale);
+        discord::cdn::proxy_image(url, size, look)
     }
 
     /// Call `on_update` with where `widget`'s media stands under the rules
@@ -425,7 +432,10 @@ impl Images {
         if let Some(paintable) = held(self) {
             return Some(paintable);
         }
-        let paintable = apng_paintable(&bytes).or_else(|| animated_paintable(&bytes))?;
+        let paintable = match discord::webp::is_webp(&bytes) {
+            true => webp_paintable(&bytes).await,
+            false => apng_paintable(&bytes).or_else(|| animated_paintable(&bytes)),
+        }?;
         let mut moving = self.0.moving.borrow_mut();
         moving.retain(|_, weak| weak.upgrade().is_some());
         moving.insert(url.to_owned(), paintable.downgrade());
@@ -435,7 +445,7 @@ impl Images {
     /// The image at `url`, first frame only: for what takes a still, such as
     /// a notification's icon.
     pub async fn texture(&self, url: &str) -> Option<gdk::Texture> {
-        gdk::Texture::from_bytes(&self.load_bytes(url).await?).ok()
+        decode(&self.load_bytes(url).await?).await
     }
 
     /// Encoded bytes for a URL: memory → disk → network, filling caches.
@@ -635,24 +645,52 @@ pub fn request_size(shown: (i32, i32), scale: f64, original: Option<(u32, u32)>)
     (width, height)
 }
 
+/// The picture in `bytes` as a texture (of an animation, its first frame).
+/// WebP is decoded here, on the pool, as gdk-pixbuf has no loader for it;
+/// the rest is GTK's.
+pub async fn decode(bytes: &glib::Bytes) -> Option<gdk::Texture> {
+    if !discord::webp::is_webp(bytes) {
+        return gdk::Texture::from_bytes(bytes).ok();
+    }
+    let bytes = bytes.clone();
+    let still = gio::spawn_blocking(move || discord::webp::decode_still(&bytes)).await.ok()??;
+    Some(rgba_texture(still.width, still.height, still.rgba))
+}
+
+fn rgba_texture(width: u32, height: u32, rgba: Vec<u8>) -> gdk::Texture {
+    let (width, height) = (width as i32, height as i32);
+    let pixels = glib::Bytes::from_owned(rgba);
+    gdk::MemoryTexture::new(width, height, gdk::MemoryFormat::R8g8b8a8, &pixels, width as usize * 4).upcast()
+}
+
+/// An animated WebP's frames, decoded on the pool; `None` for one that
+/// doesn't move.
+async fn webp_paintable(bytes: &glib::Bytes) -> Option<gdk::Paintable> {
+    let bytes = bytes.clone();
+    let animation = gio::spawn_blocking(move || discord::webp::decode_animation(&bytes)).await.ok()??;
+    Some(frame_paintable(animation))
+}
+
 /// An APNG's frames, which gdk-pixbuf's loader doesn't have.
 fn apng_paintable(bytes: &glib::Bytes) -> Option<gdk::Paintable> {
     if !discord::apng::is_apng(bytes) {
         return None;
     }
     let animation = discord::apng::decode(bytes)?;
-    let (width, height) = (animation.width as i32, animation.height as i32);
+    Some(frame_paintable(animation))
+}
+
+fn frame_paintable(animation: discord::apng::Animation) -> gdk::Paintable {
+    let (width, height) = (animation.width, animation.height);
     let frames = animation
         .frames
         .into_iter()
         .map(|frame| {
-            let pixels = glib::Bytes::from_owned(frame.rgba);
-            let texture =
-                gdk::MemoryTexture::new(width, height, gdk::MemoryFormat::R8g8b8a8, &pixels, width as usize * 4);
-            (texture.upcast(), std::time::Duration::from_millis(u64::from(frame.delay_ms)))
+            let delay = std::time::Duration::from_millis(u64::from(frame.delay_ms));
+            (rgba_texture(width, height, frame.rgba), delay)
         })
         .collect();
-    Some(FramePaintable::new(frames, animation.plays).upcast())
+    FramePaintable::new(frames, animation.plays).upcast()
 }
 
 fn animated_paintable(bytes: &glib::Bytes) -> Option<gdk::Paintable> {
