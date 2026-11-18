@@ -386,7 +386,20 @@ impl App {
         };
         page.connect_top_bar_height_notify(pad.clone());
         page.connect_bottom_bar_height_notify(pad);
-        page.upcast()
+        self.drop_overlay.append(&self.drop_title);
+        self.drop_overlay.append(
+            &gtk::Label::builder()
+                .label("You can add comments before uploading.\nHold shift to upload directly.")
+                .justify(gtk::Justification::Center)
+                .margin_bottom(24)
+                .margin_start(32)
+                .margin_end(32)
+                .build(),
+        );
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(&page));
+        overlay.add_overlay(&self.drop_overlay);
+        overlay.upcast()
     }
 
     pub(super) fn on_message(self: &Rc<Self>, message: Message) {

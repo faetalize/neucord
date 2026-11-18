@@ -135,6 +135,8 @@ impl App {
                     self.view_poll_votes(&message, answer);
                 }
             }
+            // The emoji picker, from the message box's button.
+            Some("emoji-picker") => self.emoji_button.emit_clicked(),
             // Click the nth quick reaction on the bar of the first row that has them.
             Some("hover-react") => {
                 let n: i32 = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
@@ -180,6 +182,7 @@ impl App {
                     Some("composer") => Some(self.composer.clone().upcast()),
                     Some("composer_box") => Some(self.composer_box.clone().upcast()),
                     Some("gif_button") => Some(self.gif_button.clone().upcast()),
+                    Some("emoji_button") => Some(self.emoji_button.clone().upcast()),
                     Some("attach_button") => Some(self.drafts.attach.clone().upcast()),
                     Some("pins_button") => Some(self.pins_button.clone().upcast()),
                     Some("inbox_button") => Some(self.inbox_button.clone().upcast()),
@@ -373,6 +376,14 @@ impl App {
                     self.mention_done(id);
                 }
             }
+            // Files dropped on the chat, as a drop does: `drop <path>` joins the draft, `drop-shift <path>` is sent
+            // at once (Shift held); `drop-overlay` shows what a drag says.
+            Some(command @ ("drop" | "drop-shift")) => {
+                let (Some(channel), Some(path)) = (self.attach_channel(), parts.next()) else { return };
+                let (this, file, instant) = (self.clone(), gio::File::for_path(path), command == "drop-shift");
+                glib::spawn_future_local(async move { this.dropped(channel, vec![file], instant).await });
+            }
+            Some("drop-overlay") => self.show_drop_overlay(true),
             Some("send") => {
                 let button = &self.send_button;
                 if !button.is_visible() || !button.is_sensitive() {

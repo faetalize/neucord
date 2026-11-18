@@ -71,6 +71,50 @@ impl GuildEmoji {
     }
 }
 
+/// What a server's role subscriptions make of one of its emoji for us
+/// (`kT` and `JN` in 492494, over the `SubscriptionRoleStore`, 384684).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Subscription {
+    /// Not an emoji of a subscription role.
+    No,
+    /// One we hold the role of, or may use as the server's owner or an
+    /// administrator where it is: open to us, animated or not.
+    Held,
+    /// One of a role we could buy: shown locked.
+    Locked,
+    /// The same where the server may not sell now (its monetization is
+    /// restricted): shown, and unusable.
+    Unavailable,
+}
+
+impl Guild {
+    /// What `emoji`'s roles make of it for `me`, in a channel of `current`
+    /// (a server, or none in a DM). Only a server with role subscriptions
+    /// enabled has roles of that kind.
+    pub fn emoji_subscription(&self, emoji: &GuildEmoji, me: Snowflake, current: Option<Snowflake>) -> Subscription {
+        if emoji.roles.is_empty() || !self.features.iter().any(|f| f == "ROLE_SUBSCRIPTIONS_ENABLED") {
+            return Subscription::No;
+        }
+        let sold = |id: &Snowflake| self.roles.iter().any(|r| r.id == *id && r.tags.subscription && r.tags.purchasable);
+        if !emoji.roles.iter().any(sold) {
+            return Subscription::No;
+        }
+        let holds = |id: &Snowflake| self.my_roles.contains(id);
+        let admin = self.owner_id == Some(me)
+            || self
+                .roles
+                .iter()
+                .any(|r| holds(&r.id) && r.permissions.contains(crate::permissions::Permissions::ADMINISTRATOR));
+        if emoji.roles.iter().any(|r| sold(r) && holds(r)) || (current == Some(self.id) && admin) {
+            return Subscription::Held;
+        }
+        match self.features.iter().any(|f| f == "CREATOR_MONETIZABLE_RESTRICTED") {
+            true => Subscription::Unavailable,
+            false => Subscription::Locked,
+        }
+    }
+}
+
 /// Where emoji are being used: the open channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Place {
@@ -406,6 +450,76 @@ pub struct Translated {
     pub used: Vec<String>,
 }
 
+/// A server's top emoji, which the picker lists first for it
+/// (`TopEmojiStore` in 354430, with the one-day life `topEmojisTTL` gives
+/// them in 121681): the emoji Discord ranks highest, in order, as the ids or
+/// characters it names them by.
+#[derive(Debug, Default)]
+pub struct TopEmojis {
+    by_guild: HashMap<Snowflake, Top>,
+}
+
+#[derive(Debug, Default)]
+struct Top {
+    ids: Vec<String>,
+    /// When what is held stops being fresh, in the clock's milliseconds.
+    until: Option<u64>,
+    fetching: bool,
+}
+
+const TOP_EMOJIS_LIFE_MS: u64 = 24 * 60 * 60 * 1000;
+
+impl TopEmojis {
+    /// Whether opening the picker for `guild` at `now_ms` asks (`V` in 17591):
+    /// not while a fetch runs, nor while what we have is a day old at most.
+    pub fn wants_fetch(&self, guild: Snowflake, now_ms: u64) -> bool {
+        match self.by_guild.get(&guild) {
+            None => true,
+            Some(top) => !top.fetching && top.until.is_none_or(|until| now_ms >= until),
+        }
+    }
+
+    pub fn fetch_started(&mut self, guild: Snowflake) {
+        self.by_guild.entry(guild).or_default().fetching = true;
+    }
+
+    /// What the request answered, best first.
+    pub fn fetched(&mut self, guild: Snowflake, ids: Vec<String>, now_ms: u64) {
+        self.by_guild.insert(guild, Top { ids, until: Some(now_ms + TOP_EMOJIS_LIFE_MS), fetching: false });
+    }
+
+    /// A fetch that failed leaves what there was, and may be asked again.
+    pub fn failed(&mut self, guild: Snowflake) {
+        if let Some(top) = self.by_guild.get_mut(&guild) {
+            top.fetching = false;
+        }
+    }
+
+    pub fn ids(&self, guild: Snowflake) -> &[String] {
+        self.by_guild.get(&guild).map_or(&[], |top| &top.ids)
+    }
+}
+
+/// The top emoji a `GET /guilds/{id}/top-emojis` answer lists, by rank
+/// (`emoji_rank`, lowest first).
+pub fn top_emoji_ids(answer: &Value) -> Vec<String> {
+    let mut items: Vec<(i64, String)> = answer["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let id = match &item["emoji_id"] {
+                Value::String(s) => s.clone(),
+                Value::Number(n) => n.to_string(),
+                _ => return None,
+            };
+            Some((item["emoji_rank"].as_i64().unwrap_or(i64::MAX), id))
+        })
+        .collect();
+    items.sort_by_key(|(rank, _)| *rank);
+    items.into_iter().map(|(_, id)| id).collect()
+}
+
 /// How many emoji the `:name` list asks for (`s` in 496533): ten where
 /// stickers may be sent too, which share its rows, else fifty.
 pub fn autocomplete_search(stickers_allowed: bool) -> usize {
@@ -440,8 +554,13 @@ impl Library {
         let servers = guilds
             .into_iter()
             .map(|guild| {
-                let mut usable: Vec<&GuildEmoji> =
-                    guild.emojis.iter().filter(|e| e.usable_with(&guild.my_roles)).collect();
+                // An emoji of a subscription role is listed for everyone (`isUsable`, 121681).
+                let subscription = |e: &GuildEmoji| guild.emoji_subscription(e, limits.me, place.guild);
+                let mut usable: Vec<&GuildEmoji> = guild
+                    .emojis
+                    .iter()
+                    .filter(|e| e.usable_with(&guild.my_roles) || subscription(e) != Subscription::No)
+                    .collect();
                 usable.sort_by(|a, b| a.name.cmp(&b.name));
                 let emoji = usable
                     .into_iter()
@@ -449,7 +568,7 @@ impl Library {
                         let seen = taken.entry(e.name.clone()).or_insert(0);
                         let name = if *seen == 0 { e.name.clone() } else { format!("{}~{}", e.name, seen) };
                         *seen += 1;
-                        Named { status: limits.emoji(e, place), emoji: e.clone(), name }
+                        Named { status: limits.emoji(e, place, subscription(e)), emoji: e.clone(), name }
                     })
                     .collect();
                 Server { id: guild.id, name: guild.name.clone(), emoji }
@@ -487,6 +606,22 @@ impl Library {
         }
         let id = key.parse::<u64>().ok()?;
         self.custom().find(|n| n.emoji.id.0 == id).cloned().map(Item::Custom)
+    }
+
+    /// The emoji a server's top list names that the picker can show: a
+    /// custom emoji by its id, a Unicode one by the character
+    /// (`getTopEmojiWithoutFetchingLatest`, 121681), in the order given and
+    /// without those the channel rules out.
+    pub fn top(&self, ids: &[String]) -> Vec<Item> {
+        ids.iter()
+            .filter_map(|id| {
+                let custom = id.parse::<u64>().ok().and_then(|id| self.custom().find(|n| n.emoji.id.0 == id));
+                match custom {
+                    Some(n) => (n.status != Err(Unavailable::NotHere)).then(|| Item::Custom(n.clone())),
+                    None => unicode_glyph(id).map(Item::Unicode),
+                }
+            })
+            .collect()
     }
 
     fn custom(&self) -> impl Iterator<Item = &Named> {
@@ -568,7 +703,7 @@ impl Library {
         let mut used: Vec<String> = Vec::new();
         // What Nitro locks is told to the sender; the rest counts as used.
         fn note(n: &Named, locked: &mut Vec<GuildEmoji>, used: &mut Vec<String>) {
-            if n.status == Err(Unavailable::Nitro) {
+            if matches!(n.status, Err(Unavailable::Nitro | Unavailable::RoleSubscription)) {
                 locked.push(n.emoji.clone());
             } else {
                 used.push(n.emoji.id.0.to_string());
@@ -785,6 +920,88 @@ mod tests {
     }
 
     #[test]
+    fn the_picker_lists_a_subscription_roles_emoji_locked_unless_we_hold_it() {
+        let build = |mine: &[&str]| {
+            let mut home: Guild = serde_json::from_value(json!({
+                "id": "1", "name": "Server 1", "owner_id": "99", "features": ["ROLE_SUBSCRIPTIONS_ENABLED"],
+                "roles": [{"id": "7", "tags": {"subscription_listing_id": "70", "available_for_purchase": null}}],
+                "emojis": [custom("5", "plain", json!({})),
+                           custom("6", "paid", json!({"roles": ["7"], "animated": true}))],
+            }))
+            .unwrap();
+            home.my_roles = mine.iter().map(|r| Snowflake(r.parse().unwrap())).collect();
+            library(&[home], json!({}), here(true))
+        };
+        let status = |library: &Library, name: &str| library.custom().find(|n| n.name == name).map(|n| n.status);
+        let locked = build(&[]);
+        assert_eq!(status(&locked, "paid"), Some(Err(Unavailable::RoleSubscription)), "listed for everyone, locked");
+        assert_eq!(status(&locked, "plain"), Some(Ok(())));
+        assert_eq!(locked.picker()[0].emoji.last().map(|n| n.name.as_str()), Some("paid"), "after the open ones");
+        let held = build(&["7"]);
+        assert_eq!(status(&held, "paid"), Some(Ok(())), "held, and animated without Nitro");
+        assert!(locked.search("paid", 10, &Scores::default()).unlocked.is_empty(), "never a search result");
+        assert!(locked.translate(":paid:").locked.len() == 1, "and sending it is told as locked");
+    }
+
+    #[test]
+    fn a_subscription_roles_emoji_is_open_to_its_holders_and_locked_to_the_rest() {
+        let guild = |extra: serde_json::Value| -> Guild {
+            let mut value = json!({"id": "1", "name": "G", "owner_id": "99", "features": ["ROLE_SUBSCRIPTIONS_ENABLED"],
+                "roles": [{"id": "1", "permissions": "0"},
+                          {"id": "7", "tags": {"subscription_listing_id": "70", "available_for_purchase": null}},
+                          {"id": "8", "tags": {"subscription_listing_id": "80"}},
+                          {"id": "9", "permissions": "8"}]});
+            value.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let mut guild: Guild = serde_json::from_value(value).unwrap();
+            guild.my_roles = serde_json::from_value(extra["mine"].clone()).unwrap_or_default();
+            guild
+        };
+        let emoji = |roles: &[u64]| GuildEmoji {
+            roles: roles.iter().map(|&r| Snowflake(r)).collect(),
+            ..GuildEmoji::from_value(Snowflake(1), &json!({"id": "5", "name": "x", "available": true})).unwrap()
+        };
+        let me = Snowflake(5);
+        let here = Some(Snowflake(1));
+        let sub = |g: &Guild, roles: &[u64], current| g.emoji_subscription(&emoji(roles), me, current);
+        let g = guild(json!({}));
+        assert_eq!(sub(&g, &[], here), Subscription::No, "no roles");
+        assert_eq!(sub(&g, &[8], here), Subscription::No, "a role that isn't sold");
+        assert_eq!(sub(&g, &[7], here), Subscription::Locked);
+        assert_eq!(sub(&guild(json!({"mine": ["7"]})), &[7], here), Subscription::Held, "we hold it");
+        assert_eq!(sub(&guild(json!({"mine": ["9"]})), &[7], here), Subscription::Held, "an administrator, here");
+        assert_eq!(
+            sub(&guild(json!({"mine": ["9"]})), &[7], Some(Snowflake(2))),
+            Subscription::Locked,
+            "not elsewhere"
+        );
+        assert_eq!(sub(&guild(json!({"owner_id": "5"})), &[7], here), Subscription::Held, "the owner");
+        let restricted = guild(json!({"features": ["ROLE_SUBSCRIPTIONS_ENABLED", "CREATOR_MONETIZABLE_RESTRICTED"]}));
+        assert_eq!(sub(&restricted, &[7], here), Subscription::Unavailable);
+        let off = guild(json!({"features": []}));
+        assert_eq!(sub(&off, &[7], here), Subscription::No, "without role subscriptions enabled");
+    }
+
+    #[test]
+    fn a_servers_top_emoji_are_kept_for_a_day_and_named_by_id_or_character() {
+        let guild = Snowflake(5);
+        let mut top = TopEmojis::default();
+        assert!(top.wants_fetch(guild, 0), "never asked");
+        top.fetch_started(guild);
+        assert!(!top.wants_fetch(guild, 1), "while it is out");
+        top.failed(guild);
+        assert!(top.wants_fetch(guild, 2), "a failed one is asked again");
+        top.fetched(guild, vec!["7".into()], 1_000);
+        assert!(!top.wants_fetch(guild, 1_000 + 86_399_999));
+        assert!(top.wants_fetch(guild, 1_000 + 86_400_000));
+        assert_eq!((top.ids(guild), top.ids(Snowflake(6))), (&["7".to_owned()][..], &[][..]));
+
+        let answer = json!({"items": [{"emoji_id": "9", "emoji_rank": 2}, {"emoji_id": "🔥", "emoji_rank": 1},
+                                      {"emoji_id": 4, "emoji_rank": 3}, {"emoji_rank": 4}]});
+        assert_eq!(top_emoji_ids(&answer), ["🔥", "9", "4"]);
+        assert!(top_emoji_ids(&json!({})).is_empty());
+    }
+
+    #[test]
     fn the_name_list_shares_its_rows_with_stickers() {
         assert_eq!((autocomplete_search(true), autocomplete_search(false)), (10, 50));
         // Ten emoji found, ten stickers: four stickers, and the emoji keep six.
@@ -834,7 +1051,7 @@ mod tests {
         let nitro = |v: Value| Nitro::from_user(&v);
         let (none, basic) = (nitro(json!({})), nitro(json!({"premium_type": 3})));
         let experiments = Experiments::default();
-        let at = |n: &Nitro, e: &GuildEmoji, place| limits(n, &experiments).emoji(e, &place);
+        let at = |n: &Nitro, e: &GuildEmoji, place| limits(n, &experiments).emoji(e, &place, Subscription::No);
 
         assert_eq!(at(&none, &own, here(false)), Ok(()), "a server's own emoji, to anyone");
         assert_eq!(at(&none, &foreign, here(true)), Err(Unavailable::Nitro));

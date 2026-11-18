@@ -258,7 +258,7 @@ impl App {
             })
             .filter(|item| match item {
                 EmojiItem::Unicode(e) => !LEFT_OUT.contains(&e.names[0]),
-                EmojiItem::Custom(n) => n.status != Err(Unavailable::Nitro),
+                EmojiItem::Custom(n) => !matches!(n.status, Err(Unavailable::Nitro | Unavailable::RoleSubscription)),
             })
             .take(4)
             .map(|item| super::emoji::toned(item, tone))
