@@ -393,6 +393,10 @@ pub struct ThreadMetadata {
     /// When it was last archived or reopened, in milliseconds since 1970.
     #[serde(default, deserialize_with = "iso_ms")]
     pub archive_timestamp: Option<i64>,
+    /// Whether anyone in a private thread may add people to it; only those
+    /// have it.
+    #[serde(default)]
+    pub invitable: Option<bool>,
 }
 
 /// Our membership of a thread.

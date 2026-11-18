@@ -19,7 +19,7 @@ use super::chat::{self, MessageTarget};
 use super::{
     accounts, attachments, composer, create_thread, edits, emoji, forum, gifs, launcher, notify_menus, picker, pins,
     poll_composer, polls, profile, reactions, reactors, scheduling, server_privacy, sidebar, slash, spelling, stickers,
-    threads, uploads, viewer, voice,
+    thread_settings, threads, uploads, viewer, voice,
 };
 
 /// An item that copies or opens a link, shown when the link `$link` finds in
@@ -241,6 +241,8 @@ pub(super) const THREAD: Table<threads::ThreadTarget> = &[
         threads::LOCK_POST,
         threads::UNLOCK_THREAD,
         threads::UNLOCK_POST,
+        thread_settings::EDIT_THREAD,
+        thread_settings::EDIT_POST,
         forum::EDIT_TAGS,
         threads::COPY_THREAD_LINK,
     ],
@@ -1009,6 +1011,8 @@ mod tests {
                 "lock-post",
                 "unlock-thread",
                 "unlock-post",
+                "edit-thread",
+                "edit-post",
                 "edit-tags",
                 "copy-thread-link"
             ]

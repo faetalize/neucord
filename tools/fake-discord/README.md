@@ -85,7 +85,8 @@ what arrived, IDENTIFY's key order and properties first.
   `E2E_NO_PLAYER=1` to leave it no player, whose media stream keeps a window
   shot from finishing here), `vmsg state|play|pause|scrub <0..1>` (the player
   of a voice message in the channel, with `FAKE_VOICE=1`: 8 s of silence in
-  #general), `menu-key row|rail <n> [png]` (gives the nth sidebar row or rail
+  #general), `thread-settings <id>` and `thread-settings-save <name> <slowmode index> <archive index>` (a
+  thread's settings form, opened and saved; `FAKE_THREADS=1`), `menu-key row|rail <n> [png]` (gives the nth sidebar row or rail
   button the focus, runs its Menu / Shift+F10 shortcut, says whether a menu
   opened and shoots it), `quit`. It edits the copy by exact strings
   and stops on the first that no longer matches: when the code it patches
