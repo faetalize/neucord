@@ -78,6 +78,7 @@ pub mod regional;
 pub mod relationships;
 pub mod remote_auth;
 pub mod rest;
+pub mod restricted;
 pub mod scheduled;
 pub mod scrollback;
 pub mod search;

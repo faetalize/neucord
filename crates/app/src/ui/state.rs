@@ -22,6 +22,7 @@ use discord::permissions;
 use discord::post_creation;
 use discord::read_state::ReadStates;
 use discord::relationships::Relationships;
+use discord::restricted::RestrictedSchedule;
 use discord::settings::{RailEntry, Settings};
 use discord::stickers::Packs;
 use discord::subscriptions::Subscriptions;
@@ -166,6 +167,8 @@ pub(super) struct State {
     /// What servers' verification asks of us.
     pub(super) account: Option<Verification>,
     pub(super) nitro: Nitro,
+    /// Hours a parent holds notifications back (see [`discord::restricted`]).
+    pub(super) restricted_schedule: Option<RestrictedSchedule>,
     /// What Discord rolls out to the account and its servers.
     pub(super) experiments: Experiments,
     /// A step Discord requires before the account can be used.

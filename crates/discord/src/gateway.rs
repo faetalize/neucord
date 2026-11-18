@@ -45,6 +45,7 @@ use crate::qos;
 use crate::reactions::{self, Kind};
 use crate::read_state::ReadStates;
 use crate::relationships::{Presence, Relationship, Relationships};
+use crate::restricted::RestrictedSchedule;
 use crate::settings::{Settings, SettingsPatch, UserStatus};
 use crate::settings_proto;
 use crate::stage::{StageInstance, StageInstances};
@@ -78,6 +79,8 @@ pub struct Ready {
     /// What servers ask of the same user.
     pub account: Account,
     pub nitro: Nitro,
+    /// Hours a parent holds notifications back, if any.
+    pub restricted_schedule: Option<RestrictedSchedule>,
     pub guilds: Vec<Guild>,
     /// The other members READY carries.
     pub members: Members,
@@ -297,6 +300,8 @@ pub enum Event {
     /// Our account changed, for instance its email was verified, 2FA
     /// turned on or Nitro ran out.
     AccountUpdate(Account, Nitro),
+    /// Our `restricted_schedule` was set, changed or lifted (`None`).
+    RestrictedSchedule(Option<RestrictedSchedule>),
     /// Our own name, avatar or the like changed (`CURRENT_USER_UPDATE`). It
     /// comes before the [`AccountUpdate`](Self::AccountUpdate) of the same event.
     UserUpdate(Box<User>),
@@ -1309,6 +1314,7 @@ fn ready(parser: &Parser, data: Value, servers: impl Iterator<Item = Value>) {
         qos_token: data["qos_token"].as_str().map(str::to_owned),
         account,
         nitro: Nitro::from_user(&data["user"]),
+        restricted_schedule: RestrictedSchedule::from_user(&data["user"]),
         user,
         guilds,
         members,
@@ -1540,6 +1546,11 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
                 // A payload without a name is no user to show.
                 if let Ok(user) = User::deserialize(&data) {
                     parser.push(Event::UserUpdate(Box::new(user)));
+                }
+                // An update without the field leaves the schedule as it is
+                // (`void 0 !== restricted_schedule`, 287809).
+                if data.get("restricted_schedule").is_some() {
+                    parser.push(Event::RestrictedSchedule(RestrictedSchedule::from_user(&data)));
                 }
                 Event::AccountUpdate(account, Nitro::from_user(&data))
             }
@@ -2317,6 +2328,18 @@ mod tests {
         assert_eq!((user.id, user.display_name()), (Snowflake(5), "New Name"));
         assert!(matches!(state.try_recv(), Ok(Event::AccountUpdate(..))));
 
+        // Only an update that carries the field changes the schedule.
+        dispatch(&state, "USER_UPDATE", json!({"id": "5", "verified": true}));
+        assert!(matches!(state.try_recv(), Ok(Event::AccountUpdate(..))), "no schedule event without the field");
+        let rule = json!({"start_time": {"hours": 22}, "end_time": {"hours": 7}, "days": [1], "enabled": true});
+        dispatch(&state, "USER_UPDATE", json!({"id": "5", "restricted_schedule": {"rules": [rule]}}));
+        let Ok(Event::RestrictedSchedule(Some(schedule))) = state.try_recv() else { panic!("no schedule") };
+        assert!(schedule.is_active(1, 23 * 60));
+        assert!(matches!(state.try_recv(), Ok(Event::AccountUpdate(..))));
+        dispatch(&state, "USER_UPDATE", json!({"id": "5", "restricted_schedule": null}));
+        assert!(matches!(state.try_recv(), Ok(Event::RestrictedSchedule(None))), "lifted");
+        assert!(matches!(state.try_recv(), Ok(Event::AccountUpdate(..))));
+
         dispatch(&state, "CHANNEL_UPDATE", json!({"id": "9", "type": 0, "guild_id": "1", "rate_limit_per_user": 30}));
         let Ok(Event::GuildChannelUpdate { guild_id, channel }) = state.try_recv() else { panic!("no channel update") };
         assert_eq!((guild_id, channel.rate_limit_per_user), (Snowflake(1), 30));
@@ -2338,6 +2361,21 @@ mod tests {
         let Ok(Event::Ready(ready)) = state.try_recv() else { panic!("no READY") };
         assert!(ready.notification_settings.use_new_notifications());
         assert!(!ready.notification_settings.mention_on_all_messages());
+    }
+
+    #[test]
+    fn ready_carries_the_restricted_schedule_of_a_linked_teen() {
+        let state = Parser::default();
+        let rule = json!({"start_time": {"hours": 21}, "end_time": {"hours": 6}, "days": [3], "enabled": true});
+        let user = json!({"id": "5", "username": "me", "restricted_schedule": {"rules": [rule]}});
+        dispatch(&state, "READY", json!({"user": user}));
+        let Ok(Event::Ready(ready)) = state.try_recv() else { panic!("no READY") };
+        assert!(ready.restricted_schedule.is_some_and(|s| s.is_active(3, 22 * 60)));
+
+        state.me.set(None);
+        dispatch(&state, "READY", json!({"user": {"id": "5", "username": "me"}}));
+        let Ok(Event::Ready(ready)) = state.try_recv() else { panic!("no READY") };
+        assert!(ready.restricted_schedule.is_none());
     }
 
     #[test]

@@ -343,6 +343,7 @@ impl App {
                     // Nitro changes the length limit.
                     self.update_length_indicator();
                 }
+                Event::RestrictedSchedule(schedule) => self.account.state.borrow_mut().restricted_schedule = schedule,
                 Event::TypingStart { channel_id, user_id, user } => self.on_typing(channel_id, user_id, user.as_ref()),
                 Event::MessageCreate(message) => self.on_message(*message),
                 Event::MessageUpdate(edit) => self.on_message_update(edit),
@@ -564,6 +565,7 @@ impl App {
             user,
             account,
             nitro,
+            restricted_schedule,
             guilds,
             members,
             private_channels,
@@ -621,6 +623,7 @@ impl App {
             state.required_action = required_action;
             state.account = Some(account);
             state.nitro = nitro;
+            state.restricted_schedule = restricted_schedule;
             state.experiments = experiments;
             state.session_id = session_id;
             state.gates = gates;
