@@ -146,6 +146,16 @@ pub enum Event {
     PrivateChannelUpdate(Channel),
     /// A DM or group DM was closed, or we left the group.
     PrivateChannelDelete(Snowflake),
+    /// Someone joined a group DM.
+    RecipientAdd {
+        channel_id: Snowflake,
+        user: User,
+    },
+    /// Someone left, or was removed from, a group DM.
+    RecipientRemove {
+        channel_id: Snowflake,
+        user_id: Snowflake,
+    },
     /// A server channel changed: its name, topic or slowmode, say.
     GuildChannelUpdate {
         guild_id: Snowflake,
@@ -1250,6 +1260,16 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
             Ok(_) => return,
             Err(e) => return eprintln!("gateway: bad CHANNEL_CREATE: {e}"),
         },
+        "CHANNEL_RECIPIENT_ADD" | "CHANNEL_RECIPIENT_REMOVE" => {
+            let (Some(channel_id), Ok(user)) = (parse_id(&data["channel_id"]), User::deserialize(&data["user"])) else {
+                return;
+            };
+            if name == "CHANNEL_RECIPIENT_ADD" {
+                Event::RecipientAdd { channel_id, user }
+            } else {
+                Event::RecipientRemove { channel_id, user_id: user.id }
+            }
+        }
         "CHANNEL_UPDATE" => match (Channel::deserialize(&data), parse_id(&data["guild_id"])) {
             (Ok(channel), _) if channel.kind.is_private() => Event::PrivateChannelUpdate(channel),
             (Ok(channel), Some(guild_id)) => Event::GuildChannelUpdate { guild_id, channel },
@@ -2024,6 +2044,23 @@ mod tests {
         dispatch(&state, "CHANNEL_UPDATE", json!({"id": "9", "type": 0, "guild_id": "1", "rate_limit_per_user": 30}));
         let Ok(Event::GuildChannelUpdate { guild_id, channel }) = state.try_recv() else { panic!("no channel update") };
         assert_eq!((guild_id, channel.rate_limit_per_user), (Snowflake(1), 30));
+    }
+
+    #[test]
+    fn people_joining_and_leaving_a_group_dm_are_reported() {
+        let state = Parser::default();
+        dispatch(&state, "CHANNEL_RECIPIENT_ADD", json!({"channel_id": "9", "user": {"id": "7", "username": "new"}}));
+        let Ok(Event::RecipientAdd { channel_id, user }) = state.try_recv() else { panic!("no recipient add") };
+        assert_eq!((channel_id, user.id), (Snowflake(9), Snowflake(7)));
+        dispatch(
+            &state,
+            "CHANNEL_RECIPIENT_REMOVE",
+            json!({"channel_id": "9", "user": {"id": "7", "username": "new"}}),
+        );
+        let Ok(Event::RecipientRemove { channel_id, user_id }) = state.try_recv() else {
+            panic!("no recipient remove")
+        };
+        assert_eq!((channel_id, user_id), (Snowflake(9), Snowflake(7)));
     }
 
     #[test]

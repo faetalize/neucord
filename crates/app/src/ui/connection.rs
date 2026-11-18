@@ -208,6 +208,8 @@ impl App {
                     self.on_private_channel(channel)
                 }
                 Event::PrivateChannelDelete(id) => self.on_private_channel_delete(id),
+                Event::RecipientAdd { channel_id, user } => self.on_recipients(channel_id, Some(user), None),
+                Event::RecipientRemove { channel_id, user_id } => self.on_recipients(channel_id, None, Some(user_id)),
                 Event::GuildChannelUpdate { guild_id, channel } => self.on_guild_channel(guild_id, channel),
                 Event::GuildChannelDelete { guild_id, id } => self.on_guild_channel_delete(guild_id, id),
                 Event::ThreadUpdate { guild_id, thread } => {
@@ -691,6 +693,29 @@ impl App {
             state.guild.is_none()
         };
         self.refresh_home(home, false);
+    }
+
+    /// Someone joined (`added`) or left (`removed`) a group DM we know, as the
+    /// client's channel store applies it (734057): the name, the member list
+    /// and the rows that show them follow.
+    fn on_recipients(self: &Rc<Self>, channel: Snowflake, added: Option<discord::User>, removed: Option<Snowflake>) {
+        self.learn_users(added.iter());
+        let (home, open) = {
+            let mut state = self.account.state.borrow_mut();
+            let me = state.me();
+            let Some(dm) = state.private_channels.iter_mut().find(|c| c.id == channel) else { return };
+            if let Some(user) = added {
+                dm.add_recipient(user, me);
+            }
+            if let Some(id) = removed {
+                dm.remove_recipient(id);
+            }
+            (state.guild.is_none(), state.channel == Some(channel))
+        };
+        self.refresh_home(home, open);
+        if open {
+            self.refresh_member_rows();
+        }
     }
 
     pub(super) fn on_private_channel_delete(self: &Rc<Self>, id: Snowflake) {
