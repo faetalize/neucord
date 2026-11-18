@@ -101,7 +101,7 @@ impl App {
             let names = shown(
                 &typers,
                 me,
-                |id| state.relationships.is_blocked(id),
+                |id| state.relationships.is_blocked_or_ignored(id),
                 |id| state.nick_in(channel, id).or_else(|| state.users.get(&id.0).cloned()),
             );
             (names, state.typing.next_lapse(channel, now))

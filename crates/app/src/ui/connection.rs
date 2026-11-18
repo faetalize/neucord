@@ -374,7 +374,6 @@ impl App {
                 Event::FrecencyUpdate { patch, proto, partial } => self.frecency_updated(patch, &proto, partial),
                 Event::RelationshipAdd { relationship, notify } => {
                     self.learn_users(std::iter::once(&relationship.user));
-                    let blocked = relationship.kind == discord::relationships::Kind::Blocked;
                     let request = notify
                         .then_some(&relationship)
                         .filter(|r| r.kind == discord::relationships::Kind::Incoming && !r.spam);
@@ -383,24 +382,29 @@ impl App {
                     } else {
                         self.withdraw_friend_request(relationship.user.id);
                     }
-                    let was_blocked = self.account.state.borrow().relationships.is_blocked(relationship.user.id);
-                    self.account.state.borrow_mut().profiles.doubt(relationship.user.id);
-                    self.account.state.borrow_mut().relationships.add(relationship);
-                    self.relationships_changed(blocked != was_blocked);
-                }
-                Event::RelationshipUpdate { user_id, nickname } => {
+                    let user_id = relationship.user.id;
+                    let was_silenced = self.account.state.borrow().relationships.is_blocked_or_ignored(user_id);
                     self.account.state.borrow_mut().profiles.doubt(user_id);
-                    self.account.state.borrow_mut().relationships.update(user_id, nickname);
-                    self.relationships_changed(false);
+                    self.account.state.borrow_mut().relationships.add(relationship);
+                    let silenced = self.account.state.borrow().relationships.is_blocked_or_ignored(user_id);
+                    self.relationships_changed(silenced != was_silenced);
+                }
+                Event::RelationshipUpdate { user_id, nickname, ignored } => {
+                    let was_silenced = self.account.state.borrow().relationships.is_blocked_or_ignored(user_id);
+                    self.account.state.borrow_mut().profiles.doubt(user_id);
+                    self.account.state.borrow_mut().relationships.update(user_id, nickname, ignored);
+                    let silenced = self.account.state.borrow().relationships.is_blocked_or_ignored(user_id);
+                    self.relationships_changed(silenced != was_silenced);
                     // What we call them shows in DMs.
                     self.refresh_rows();
                 }
-                Event::RelationshipRemove(user_id) => {
+                Event::RelationshipRemove { user_id, ignored } => {
                     self.withdraw_friend_request(user_id);
-                    let was_blocked = self.account.state.borrow().relationships.is_blocked(user_id);
+                    let was_silenced = self.account.state.borrow().relationships.is_blocked_or_ignored(user_id);
                     self.account.state.borrow_mut().profiles.doubt(user_id);
-                    self.account.state.borrow_mut().relationships.remove(user_id);
-                    self.relationships_changed(was_blocked);
+                    self.account.state.borrow_mut().relationships.remove(user_id, ignored);
+                    let silenced = self.account.state.borrow().relationships.is_blocked_or_ignored(user_id);
+                    self.relationships_changed(silenced != was_silenced);
                 }
                 Event::UserNoteUpdate { user_id, note } => self.on_note(user_id, note),
                 Event::PresenceUpdate { user_id, guild_id, presence } => {

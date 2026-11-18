@@ -206,7 +206,7 @@ impl App {
                 .and_then(|g| state.guilds.iter().find(|guild| guild.id == g))
                 .map(|g| g.my_roles.clone())
                 .unwrap_or_default();
-            let blocked = |id| state.relationships.is_blocked(id);
+            let blocked = |id| state.relationships.is_blocked_or_ignored(id);
             let count = loaded
                 .iter()
                 .filter(|m| m.id > before)

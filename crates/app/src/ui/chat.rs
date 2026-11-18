@@ -382,7 +382,7 @@ impl App {
             let own = state.me() == Some(message.author.id);
             // No notifications for message requests, or for what `is_dropped` drops (as in Discord).
             let group_dm = state.find_channel(channel).is_some_and(|(_, c)| c.kind == ChannelKind::GroupDm);
-            let blocked = |id| state.relationships.is_blocked(id);
+            let blocked = |id| state.relationships.is_blocked_or_ignored(id);
             let quiet = state.find_channel(channel).is_some_and(|(_, c)| c.is_request())
                 || notifications::is_dropped(&message, group_dm, blocked);
             if own || viewing {

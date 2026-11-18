@@ -338,9 +338,14 @@ pub enum Event {
     RelationshipUpdate {
         user_id: Snowflake,
         nickname: Option<String>,
+        ignored: bool,
     },
-    /// Unfriended, unblocked, or a request withdrawn or ignored.
-    RelationshipRemove(Snowflake),
+    /// Unfriended, unblocked, or a request withdrawn or ignored; `ignored`
+    /// is whether the user stays ignored.
+    RelationshipRemove {
+        user_id: Snowflake,
+        ignored: bool,
+    },
     /// A note of ours on someone changed, from any of our sessions (see
     /// [`crate::notes`]); none for one that was emptied.
     UserNoteUpdate {
@@ -1328,10 +1333,12 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
         "RELATIONSHIP_UPDATE" => {
             let Some(user_id) = parse_id(&data["id"]) else { return };
             let nickname = data["nickname"].as_str().filter(|n| !n.is_empty()).map(String::from);
-            Event::RelationshipUpdate { user_id, nickname }
+            Event::RelationshipUpdate { user_id, nickname, ignored: data["user_ignored"].as_bool() == Some(true) }
         }
         "RELATIONSHIP_REMOVE" => match parse_id(&data["id"]) {
-            Some(id) => Event::RelationshipRemove(id),
+            Some(user_id) => {
+                Event::RelationshipRemove { user_id, ignored: data["user_ignored"].as_bool() == Some(true) }
+            }
             None => return,
         },
         "USER_NOTE_UPDATE" => match parse_id(&data["id"]) {
