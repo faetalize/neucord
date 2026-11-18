@@ -408,10 +408,10 @@ impl App {
                     let silenced = self.account.state.borrow().relationships.is_blocked_or_ignored(user_id);
                     self.relationships_changed(silenced != was_silenced);
                 }
-                Event::RelationshipUpdate { user_id, nickname, ignored } => {
+                Event::RelationshipUpdate { user_id, nickname, note, ignored } => {
                     let was_silenced = self.account.state.borrow().relationships.is_blocked_or_ignored(user_id);
                     self.account.state.borrow_mut().profiles.doubt(user_id);
-                    self.account.state.borrow_mut().relationships.update(user_id, nickname, ignored);
+                    self.account.state.borrow_mut().relationships.update(user_id, nickname, note, ignored);
                     let silenced = self.account.state.borrow().relationships.is_blocked_or_ignored(user_id);
                     self.relationships_changed(silenced != was_silenced);
                     // What we call them shows in DMs.

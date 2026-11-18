@@ -211,6 +211,14 @@ pub struct Notifications {
     /// Quiet mode (Focus Mode), which silences desktop notifications as Do
     /// Not Disturb does (`quietMode`).
     pub quiet_mode: bool,
+    /// Whether friends are told when we come online
+    /// (`notify_friends_on_come_online`), when we change our custom status
+    /// (`notify_friends_on_custom_status_update`), and members we talk to when
+    /// we start streaming (`notify_server_members_on_go_live`): all on until
+    /// turned off (253932).
+    pub share_online: bool,
+    pub share_custom_status: bool,
+    pub share_go_live: bool,
 }
 
 impl Default for Notifications {
@@ -222,6 +230,9 @@ impl Default for Notifications {
             profile_updates: true,
             go_live: true,
             upcoming_event: true,
+            share_online: true,
+            share_custom_status: true,
+            share_go_live: true,
             quiet_mode: false,
         }
     }
@@ -236,6 +247,9 @@ pub struct NotificationsPatch {
     pub go_live: Option<bool>,
     pub upcoming_event: Option<bool>,
     pub quiet_mode: Option<bool>,
+    pub share_online: Option<bool>,
+    pub share_custom_status: Option<bool>,
+    pub share_go_live: Option<bool>,
 }
 
 impl Notifications {
@@ -247,6 +261,9 @@ impl Notifications {
         self.go_live = patch.go_live.unwrap_or(self.go_live);
         self.upcoming_event = patch.upcoming_event.unwrap_or(self.upcoming_event);
         self.quiet_mode = patch.quiet_mode.unwrap_or(self.quiet_mode);
+        self.share_online = patch.share_online.unwrap_or(self.share_online);
+        self.share_custom_status = patch.share_custom_status.unwrap_or(self.share_custom_status);
+        self.share_go_live = patch.share_go_live.unwrap_or(self.share_go_live);
     }
 }
 
@@ -255,6 +272,13 @@ impl Notifications {
 /// `2026-04-upcoming-server-event` and hides it otherwise (212909).
 pub fn upcoming_event_toggle(experiments: &crate::experiments::Experiments, me: Snowflake) -> bool {
     experiments.apex_user(me, "2026-04-upcoming-server-event").is_some_and(|a| (1..=3).contains(&a.variant))
+}
+
+/// Whether Activity Privacy offers "Share when I update my custom status":
+/// the client shows it for variant 1 of the user experiment
+/// `2026-11-notify-friends-on-custom-status-update` (212909).
+pub fn share_custom_status_toggle(experiments: &crate::experiments::Experiments, me: Snowflake) -> bool {
+    experiments.apex_user(me, "2026-11-notify-friends-on-custom-status-update").is_some_and(|a| a.variant == 1)
 }
 
 /// How much of the profile others see (`profile_visibility`).
@@ -394,6 +418,9 @@ pub struct Privacy {
     /// Messages from people we may not know go to requests.
     pub message_requests_restricted: Option<bool>,
     pub message_request_restricted_servers: Vec<Snowflake>,
+    /// `hide_friend_request_notes`: none until set, when
+    /// [`Self::friend_request_notes_hidden`] follows the account's age.
+    pub hide_friend_request_notes: Option<bool>,
     pub profile_visibility: ProfileVisibility,
     /// `default_guilds_activity_restricted_v2`; none until set.
     pub activity_default: Option<ActivityDefault>,
@@ -453,6 +480,7 @@ impl Default for Privacy {
             restricted_servers: Vec::new(),
             message_requests_restricted: None,
             message_request_restricted_servers: Vec::new(),
+            hide_friend_request_notes: None,
             profile_visibility: ProfileVisibility::default(),
             activity_default: None,
             activity_restricted_servers: Vec::new(),
@@ -568,6 +596,7 @@ pub struct PrivacyPatch {
     pub restricted_servers: Option<Vec<Snowflake>>,
     pub message_requests_restricted: Option<bool>,
     pub message_request_restricted_servers: Option<Vec<Snowflake>>,
+    pub hide_friend_request_notes: Option<bool>,
     pub profile_visibility: Option<ProfileVisibility>,
     /// Inside, none is `UNSET`.
     pub activity_default: Option<Option<ActivityDefault>>,
@@ -576,6 +605,13 @@ pub struct PrivacyPatch {
 }
 
 impl Privacy {
+    /// Whether friend requests' messages are hidden: the setting, and until
+    /// it is set, for an account that may not see age-restricted content
+    /// (`q` in 420825).
+    pub fn friend_request_notes_hidden(&self, nsfw_allowed: bool) -> bool {
+        self.hide_friend_request_notes.unwrap_or(!nsfw_allowed)
+    }
+
     fn apply(&mut self, patch: PrivacyPatch) {
         self.friends_join_game = patch.friends_join_game.unwrap_or(self.friends_join_game);
         self.voice_participants_join_game =
@@ -590,6 +626,7 @@ impl Privacy {
         if let Some(servers) = patch.message_request_restricted_servers {
             self.message_request_restricted_servers = servers;
         }
+        self.hide_friend_request_notes = patch.hide_friend_request_notes.or(self.hide_friend_request_notes);
         self.profile_visibility = patch.profile_visibility.unwrap_or(self.profile_visibility);
         if let Some(default) = patch.activity_default {
             self.activity_default = default;
@@ -787,6 +824,9 @@ pub struct Settings {
     /// `show_command_suggestions`, as the account set it; see
     /// [`Self::command_suggestions`].
     pub show_command_suggestions: Option<bool>,
+    /// `status.show_current_game`, as the account set it; see
+    /// [`Self::shares_activity`].
+    pub show_current_game: Option<bool>,
 }
 
 /// The settings a payload mentions; the rest are `None`.
@@ -807,6 +847,7 @@ pub struct SettingsPatch {
     pub nsfw_commands_in_dms: Option<bool>,
     pub enable_tts_command: Option<bool>,
     pub show_command_suggestions: Option<bool>,
+    pub show_current_game: Option<bool>,
 }
 
 impl SettingsPatch {
@@ -853,6 +894,15 @@ impl Settings {
         if patch.show_command_suggestions.is_some() {
             self.show_command_suggestions = patch.show_command_suggestions;
         }
+        if patch.show_current_game.is_some() {
+            self.show_current_game = patch.show_current_game;
+        }
+    }
+
+    /// "Share my activity": on until the account turned it off (253932's
+    /// `showCurrentGame`).
+    pub fn shares_activity(&self) -> bool {
+        self.show_current_game.unwrap_or(true)
     }
 
     /// Take `patch` as all of the settings, as a replacing protobuf is: what
@@ -916,6 +966,17 @@ pub fn rail_layout(folders: &[GuildFolder], guilds: &[Snowflake]) -> Vec<RailEnt
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn friend_request_messages_are_hidden_by_the_setting_or_by_the_age_until_it_is_set() {
+        let mut privacy = Privacy::default();
+        assert!(privacy.friend_request_notes_hidden(false), "no setting, no age-restricted content: hidden");
+        assert!(!privacy.friend_request_notes_hidden(true), "no setting, an adult: shown");
+        privacy.hide_friend_request_notes = Some(false);
+        assert!(!privacy.friend_request_notes_hidden(false), "the setting beats the age");
+        privacy.hide_friend_request_notes = Some(true);
+        assert!(privacy.friend_request_notes_hidden(true));
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -1041,6 +1102,21 @@ mod tests {
         assert!([1, 2, 3].into_iter().all(|v| upcoming_event_toggle(&assign(v), me)));
         assert!(!upcoming_event_toggle(&assign(4), me));
         assert!(!upcoming_event_toggle(&Default::default(), me), "not assigned: the default config hides it");
+    }
+
+    #[test]
+    fn the_custom_status_sharing_toggle_is_for_variant_one() {
+        let assign = |variant: i64| {
+            crate::experiments::Experiments::from_ready(&json!({ "apex_experiments": { "assignments": { "1": { "10": {
+                "assignments": [[
+                    crate::experiments::murmur3("2026-11-notify-friends-on-custom-status-update"), variant, 0, 1
+                ]]
+            } } } } }))
+        };
+        let me = Snowflake(10);
+        assert!(share_custom_status_toggle(&assign(1), me));
+        assert!(!share_custom_status_toggle(&assign(0), me), "the control group");
+        assert!(!share_custom_status_toggle(&Default::default(), me), "not assigned: the default config hides it");
     }
 
     #[test]

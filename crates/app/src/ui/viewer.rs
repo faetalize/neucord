@@ -10,6 +10,8 @@
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
+use discord::Message;
+use discord::forward::Only;
 use discord::media::{self, Item, Kind, LinkKind, Source};
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -36,6 +38,15 @@ pub(super) struct Origin {
     pub(super) time: String,
 }
 
+/// The message the media came from, for Forward.
+#[derive(Clone)]
+pub(super) struct Forwarding {
+    message: Rc<Message>,
+    /// The embeds are as the message holds them, so a place among them names
+    /// one ([`Only::of_source`]).
+    embeds_as_held: bool,
+}
+
 /// What to open.
 pub(super) struct Show {
     pub(super) items: Vec<Item>,
@@ -45,6 +56,7 @@ pub(super) struct Show {
     pub(super) hide_options: bool,
     /// Where a video starts, in seconds.
     pub(super) start: f64,
+    pub(super) forwarding: Option<Forwarding>,
 }
 
 /// The layer itself; one lives in the window.
@@ -57,6 +69,7 @@ struct Inner {
     holder: gtk::Box,
     info: gtk::Label,
     zoom: gtk::Button,
+    forward: gtk::Button,
     save: gtk::Button,
     open: gtk::Button,
     more: gtk::MenuButton,
@@ -80,6 +93,7 @@ struct Open {
     origin: Option<Origin>,
     hide_options: bool,
     start: f64,
+    forwarding: Option<Forwarding>,
     /// Bumped with every item, so a load that finishes late is dropped.
     generation: u32,
     zoomed: bool,
@@ -118,6 +132,7 @@ impl Viewer {
         };
         let info = gtk::Label::builder().xalign(0.0).hexpand(true).css_classes(["heading"]).build();
         let zoom = round("zoom-in-symbolic", "Zoom In");
+        let forward = round("mail-forward-symbolic", "Forward");
         let save = round("document-save-symbolic", "Save Image");
         let open = round("external-link-symbolic", "Open in Browser");
         let more = gtk::MenuButton::builder()
@@ -136,6 +151,7 @@ impl Viewer {
         for widget in [
             info.upcast_ref::<gtk::Widget>(),
             zoom.upcast_ref(),
+            forward.upcast_ref(),
             save.upcast_ref(),
             open.upcast_ref(),
             more.upcast_ref(),
@@ -179,6 +195,7 @@ impl Viewer {
             holder,
             info,
             zoom,
+            forward,
             save,
             open,
             more,
@@ -223,6 +240,10 @@ impl Viewer {
         });
         inner.zoom.connect_clicked({
             let run = with(|v| v.toggle_zoom(None));
+            move |_| run()
+        });
+        inner.forward.connect_clicked({
+            let run = with(Viewer::forward);
             move |_| run()
         });
         inner.save.connect_clicked({
@@ -293,6 +314,7 @@ impl Viewer {
                 origin: show.origin,
                 hide_options: show.hide_options,
                 start: show.start,
+                forwarding: show.forwarding,
                 generation: 0,
                 zoomed: false,
                 fitted: (0, 0),
@@ -470,6 +492,7 @@ impl Viewer {
         inner.zoom.set_visible(image);
         inner.zoom.set_icon_name("zoom-in-symbolic");
         inner.zoom.set_tooltip_text(Some("Zoom In"));
+        inner.forward.set_visible(!hide && self.forwardable(&app, &item));
         inner.save.set_visible(!hide && if image { item.can_save() } else { true });
         inner.save.set_tooltip_text(Some(if image { "Save Image" } else { "Save Video" }));
         inner.open.set_visible(links);
@@ -819,6 +842,27 @@ impl Viewer {
         self.0.more.set_visible(section.n_items() > 0);
     }
 
+    /// What forwarding `item` sends, if Forward is offered on it: the message
+    /// can be forwarded, and the item names a part of it (`eF` in 2323).
+    fn forward_of(&self, app: &Rc<App>, item: &Item) -> Option<(Message, Only)> {
+        let forwarding = self.0.state.borrow().open.as_ref()?.forwarding.clone()?;
+        let only = Only::of_source(item.source, forwarding.embeds_as_held)?;
+        let message = (*forwarding.message).clone();
+        app.account.state.borrow().can_forward(&message).then_some((message, only))
+    }
+
+    fn forwardable(&self, app: &Rc<App>, item: &Item) -> bool {
+        self.forward_of(app, item).is_some()
+    }
+
+    /// Forward the item shown on its own; the viewer closes once it is sent.
+    fn forward(&self) {
+        let (Some(app), Some(item)) = (self.app(), self.item()) else { return };
+        let Some((message, only)) = self.forward_of(&app, &item) else { return };
+        let viewer = self.clone();
+        app.open_forward(message, only, Vec::new(), Some(Rc::new(move || viewer.close())));
+    }
+
     fn save(&self) {
         if let (Some(app), Some(item)) = (self.app(), self.item()) {
             save(&app, &item);
@@ -1030,25 +1074,27 @@ pub(super) struct MediaCx {
     items: Rc<Vec<Item>>,
     origin: Option<Origin>,
     hide_options: bool,
+    forwarding: Option<Forwarding>,
 }
 
 /// What a media widget is named before its place among the message's items.
 const MEDIA_NAME: &str = "media-";
 
 impl MediaCx {
-    pub(super) fn new(app: &Rc<App>, message: &discord::Message, items: Vec<Item>) -> MediaCx {
+    pub(super) fn new(app: &Rc<App>, message: &discord::Message, items: Vec<Item>, embeds_as_held: bool) -> MediaCx {
         let time = super::chat::parse_time(&message.timestamp).map(|t| super::chat::format_time(&t));
         MediaCx {
             app: Rc::downgrade(app),
             items: Rc::new(items),
             origin: Some(Origin { author: message.author.display_name().to_owned(), time: time.unwrap_or_default() }),
             hide_options: app.media_options_hidden(message.channel_id),
+            forwarding: Some(Forwarding { message: Rc::new(message.clone()), embeds_as_held }),
         }
     }
 
     /// For media that opens nothing.
     pub(super) fn none() -> MediaCx {
-        MediaCx { app: Weak::new(), items: Rc::default(), origin: None, hide_options: false }
+        MediaCx { app: Weak::new(), items: Rc::default(), origin: None, hide_options: false, forwarding: None }
     }
 
     /// The place of an attachment among the items.
@@ -1079,7 +1125,17 @@ impl MediaCx {
             return;
         }
         let (items, at) = media::gallery(&self.items, index);
-        app.viewer.open(&app, Show { items, at, origin: self.origin.clone(), hide_options: self.hide_options, start });
+        app.viewer.open(
+            &app,
+            Show {
+                items,
+                at,
+                origin: self.origin.clone(),
+                hide_options: self.hide_options,
+                start,
+                forwarding: self.forwarding.clone(),
+            },
+        );
     }
 
     /// Make `widget` open the item at `index` when clicked, and name it for

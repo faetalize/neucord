@@ -709,9 +709,32 @@ pub fn can_pin_post(guild: &Guild, post: &Channel, me: &Account, now: i64) -> bo
 
 /// A moderator report: a thread or post whose own flags, or its forum's,
 /// say so (`V` in 715757, `isModeratorReportChannel` in 95701).
-fn is_report(guild: &Guild, thread: &Channel) -> bool {
+pub(crate) fn is_report(guild: &Guild, thread: &Channel) -> bool {
     let forum = thread.parent_id.and_then(|id| guild.channel(id));
     (thread.flags | forum.map_or(0, |f| f.flags)) & IS_MODERATOR_REPORT_CHANNEL != 0
+}
+
+/// Whether Edit Thread, or Edit Post, shows on `thread` (200273): someone with
+/// Manage Threads in its parent, or its owner while it isn't locked (`NI` in
+/// 406704), as long as it isn't archived, or may be reopened ([`can_change`],
+/// `Id`), and not locked for someone without Manage Threads in it (`s5`).
+/// Never on a moderator report.
+pub fn can_edit_thread(guild: &Guild, thread: &Channel, me: &Account, now: i64) -> bool {
+    if !thread.kind.is_thread() || is_report(guild, thread) {
+        return false;
+    }
+    let Some(parent) = thread.parent_id.and_then(|id| guild.channel(id)) else { return false };
+    let manages_parent = in_channel(guild, parent, me, now).contains(Permissions::MANAGE_THREADS);
+    let owns_open = !thread.is_locked() && thread.owner_id == Some(me.id);
+    (manages_parent || owns_open)
+        && can_change(Some(guild), thread, me, now)
+        && !(thread.is_locked() && !thread_moderator(guild, thread, me, now))
+}
+
+/// Manage Threads on `thread` itself (`H_` in 406704): the slowmode of a
+/// thread is only theirs to set.
+pub fn thread_moderator(guild: &Guild, thread: &Channel, me: &Account, now: i64) -> bool {
+    in_channel(guild, thread, me, now).contains(Permissions::MANAGE_THREADS)
 }
 
 /// What a thread's menu offers as its close item.
@@ -1322,6 +1345,36 @@ mod tests {
         let report = json!({"owner_id": "5", "flags": IS_MODERATOR_REPORT_CHANNEL});
         let (guild, thread) = with_thread(channel(&[]), 11, report);
         assert_eq!(thread_close(&guild, &thread, &me, 0), None, "never a moderator report");
+    }
+
+    #[test]
+    fn editing_a_thread() {
+        let me = me();
+        let (guild, mine) = with_thread(channel(&[]), 11, json!({"owner_id": "5"}));
+        assert!(can_edit_thread(&guild, &mine, &me, 0), "its owner");
+        let (guild, other) = with_thread(channel(&[]), 11, json!({"owner_id": "6"}));
+        assert!(!can_edit_thread(&guild, &other, &me, 0), "someone else's");
+        let (mut guild, other) = with_thread(channel(&[]), 11, json!({"owner_id": "6"}));
+        manager(&mut guild);
+        assert!(can_edit_thread(&guild, &other, &me, 0), "a manager, whoever owns it");
+
+        let locked = json!({"owner_id": "5", "thread_metadata": {"archived": false, "locked": true}});
+        let (guild, thread) = with_thread(channel(&[]), 11, locked.clone());
+        assert!(!can_edit_thread(&guild, &thread, &me, 0), "its owner once it is locked");
+        let (mut guild, thread) = with_thread(channel(&[]), 11, locked);
+        manager(&mut guild);
+        assert!(can_edit_thread(&guild, &thread, &me, 0), "a manager, though locked");
+
+        let archived = json!({"owner_id": "5", "thread_metadata": {"archived": true, "locked": false}});
+        let (guild, thread) = with_thread(channel(&[(GUILD, Permissions::NONE, IN_THREADS)]), 11, archived.clone());
+        assert!(can_edit_thread(&guild, &thread, &me, 0), "archived, but we may reopen it");
+        let (guild, thread) = with_thread(channel(&[(GUILD, SEND, IN_THREADS)]), 11, archived);
+        assert!(!can_edit_thread(&guild, &thread, &me, 0), "archived, and we may not");
+
+        let report = json!({"owner_id": "5", "flags": IS_MODERATOR_REPORT_CHANNEL});
+        let (guild, thread) = with_thread(channel(&[]), 11, report);
+        assert!(!can_edit_thread(&guild, &thread, &me, 0), "never a moderator report");
+        assert!(!thread_moderator(&guild, &thread, &me, 0));
     }
 
     #[test]

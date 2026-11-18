@@ -85,9 +85,12 @@ what arrived, IDENTIFY's key order and properties first.
   `E2E_NO_PLAYER=1` to leave it no player, whose media stream keeps a window
   shot from finishing here), `vmsg state|play|pause|scrub <0..1>` (the player
   of a voice message in the channel, with `FAKE_VOICE=1`: 8 s of silence in
-  #general), `menu-key row|rail <n> [png]` (gives the nth sidebar row or rail
+  #general), `thread-settings <id>` and `thread-settings-save <name> <slowmode index> <archive index>` (a
+  thread's settings form, opened and saved; `FAKE_THREADS=1`), `menu-key row|rail <n> [png]` (gives the nth sidebar row or rail
   button the focus, runs its Menu / Shift+F10 shortcut, says whether a menu
-  opened and shoots it), `quit`. It edits the copy by exact strings
+  opened and shoots it), `settings <page>` (the settings window on a page, `activity` for Activity
+  Privacy), `activity-share on|off` and `activity-default 1|2|3` (what its rows
+  save), `quit`. It edits the copy by exact strings
   and stops on the first that no longer matches: when the code it patches
   moves, update the string. The module it adds is only built here, so a
   change to what it calls needs a run to show it still builds.
@@ -149,6 +152,12 @@ what arrived, IDENTIFY's key order and properties first.
   a message's menu (`message-more <id>`, `shot-popover row:<id> <png>
   [close]`) to see View Thread or Create Thread, and presses the `t`
   shortcut's action (`thread-key <id>`, location "Message Shortcut");
+  `friend-notes` (with `FAKE_FRIEND_NOTES=1`, Bob's request to us carries a
+  message) shows the Pending tab with "View Request" (`view-request`) opening
+  the message in place of the name's line, then fills the Add Friend form
+  (`friends add`, `friend-entry`, `friend-note`, `friend-send`,
+  `friend-state`) and checks the POST carries the trimmed `note` and that the
+  field keeps to 120 UTF-16 units;
   `heartbeat` waits for five op 40s, the interval's among them;
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).

@@ -17,6 +17,9 @@ edit("crates/discord/src/identity.rs",
 edit("crates/discord/src/cdn.rs", 'host == "media.discordapp.net" ||', 'host == "127.0.0.1:8099" || host == "media.discordapp.net" ||')
 edit("crates/discord/src/cdn.rs", 'let host = url.strip_prefix("https://").and_then(|rest| rest.split([\'/\', \'?\']).next()).unwrap_or_default();', 'let host = url.strip_prefix("http://").and_then(|rest| rest.split([\'/\', \'?\']).next()).unwrap_or_default();')
 edit("crates/app/src/ui/uploads.rs", "    attach: gtk::Button,", "    pub(super) attach: gtk::Button,")
+for field in ("stack: adw::ViewStack", "entry: gtk::Entry", "note: gtk::Entry", "note_left: gtk::Label", "note_hint: gtk::Label",
+              "send: gtk::Button", "add_status: gtk::Label"):
+    edit("crates/app/src/ui/friends.rs", f"\n    {field},", f"\n    pub(super) {field},")
 edit("crates/app/src/ui/mod.rs", "mod emoji;", "mod e2e;\nmod emoji;")
 # What a right-click does to the message box's menu before GTK opens it, for `composer-menu`.
 edit("crates/app/src/ui/menus.rs", "    view.add_controller(press);\n    on_keys(view, move |_| {",
@@ -155,6 +158,32 @@ impl App {
             }
             // The emoji picker, from the message box's button.
             Some("emoji-picker") => self.emoji_button.emit_clicked(),
+            // The friends page: `friends <tab>` shows it on a tab (online, all, pending, blocked, add),
+            // `friend-entry <text>` and `friend-note <text>` fill the Add Friend form, `friend-send` sends it,
+            // `view-request` presses the first View Request, `friend-state` prints what the form says.
+            Some("friends") => {
+                self.show_friends();
+                if let Some(tab) = parts.next() {
+                    self.friends.stack.set_visible_child_name(tab);
+                }
+            }
+            Some("friend-entry") => self.friends.entry.set_text(rest),
+            Some("friend-note") => self.friends.note.set_text(rest),
+            Some("friend-send") => self.friends.send.emit_clicked(),
+            Some("view-request") => {
+                match buttons_below(self.friends.root.upcast_ref(), |b| b.child().and_downcast::<adw::ButtonContent>().is_some_and(|c| c.label() == "View Request")).into_iter().next() {
+                    Some(button) => button.emit_clicked(),
+                    None => eprintln!("e2e: no View Request"),
+                }
+            }
+            Some("friend-state") => {
+                let page = &self.friends;
+                eprintln!(
+                    "e2e: friend-state status={:?} shown={} hint={} left={:?} note={:?}",
+                    page.add_status.label(), page.add_status.is_visible(), page.note_hint.is_visible(),
+                    page.note_left.label(), page.note.text()
+                );
+            }
             // The emoji packs page, as the open picker's button opens it (the packs must be fetched),
             // `packs-pin <n>` clicks the Pin or Unpin button of its nth pack, `packs-shot <png>` shoots it and
             // `packs-close` closes it.
@@ -1287,3 +1316,161 @@ impl App {
     }
 }
 """)
+
+# A thread's settings form: `thread-settings <id>` opens it (whoever owns the thread), `thread-settings-save <name>
+# <slowmode index> <archive index>` fills it and presses Save Changes.
+edit("crates/app/src/ui/thread_settings.rs", "        form.dialog.present(Some(&self.window));",
+     "        E2E_FORM.with(|f| *f.borrow_mut() = Some(form.clone()));\n        form.dialog.present(Some(&self.window));")
+open(f"{root}/crates/app/src/ui/thread_settings.rs", "a").write(r"""
+thread_local! {
+    static E2E_FORM: std::cell::RefCell<Option<Rc<Form>>> = std::cell::RefCell::default();
+}
+
+impl App {
+    pub(super) fn e2e_thread_settings(self: &Rc<Self>, command: &str, rest: &str) {
+        let mut words = rest.split_whitespace();
+        match command {
+            "thread-settings" => {
+                let id = Snowflake(words.next().and_then(|w| w.parse().ok()).unwrap_or(0));
+                {
+                    let state = self.account.state.borrow();
+                    eprintln!("e2e: thread known={} guild={} account={}", state.find_channel(id).is_some(),
+                              state.find_channel(id).is_some_and(|(g, _)| g.is_some()), state.account.is_some());
+                }
+                self.open_thread_settings(id);
+            }
+            _ => {
+                let Some(form) = E2E_FORM.with(|f| f.borrow().clone()) else { return eprintln!("e2e: no form") };
+                let name = words.next().unwrap_or_default().replace('_', " ");
+                form.name.set_text(&name);
+                form.slowmode.set_selected(words.next().and_then(|w| w.parse().ok()).unwrap_or(0));
+                form.archive.set_selected(words.next().and_then(|w| w.parse().ok()).unwrap_or(0));
+                form.save.emit_clicked();
+            }
+        }
+    }
+}
+""")
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(c) if c == "thread-settings" || c == "thread-settings-save" => self.e2e_thread_settings(c, rest),
+            Some("quit") => {''')
+
+# Forward: the picker, driven as hands would. `forward-menu <text> <png>` opens the menu of the message with <text>
+# and shoots it; `forward-open <text>` opens the picker on it (`forward-open <text> @<attachment id>` for one file);
+# `forward-viewer <text>` opens the media viewer on its first picture and `forward-viewer-click` presses its Forward;
+# `forward-rows`, `-state`, `-search <text>`, `-pick <n>`, `-comment <text>` and `-send` work the picker.
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("forward-menu") => {
+                let (needle, path) = (parts.next().unwrap_or_default().replace('_', " "), parts.next().unwrap_or_default().to_owned());
+                let Some((row, message)) = self.e2e_message(&needle) else { return eprintln!("e2e: no message {needle}") };
+                self.message_menu(&row.parts().row, message, At::Point(10.0, 10.0), Clicked::default());
+                let anchor = row.parts().row.clone().upcast::<gtk::Widget>();
+                glib::timeout_add_local_once(Duration::from_millis(600), move || match popover_above(&anchor) {
+                    Some(popover) => shot(&popover, &path),
+                    None => eprintln!("e2e: no popover on the row"),
+                });
+            }
+            Some(c) if c.starts_with("forward-") => {
+                let rest: Vec<&str> = parts.collect();
+                self.e2e_forward(c, &rest.join(" "));
+            }
+            Some("quit") => {''')
+open(f"{root}/crates/app/src/ui/forward.rs", "a").write(r"""
+thread_local! {
+    static E2E_PICKER: RefCell<Option<Rc<Picker>>> = const { RefCell::new(None) };
+}
+
+impl App {
+    pub(super) fn e2e_message(&self, needle: &str) -> Option<(super::message_row::MessageRow, Message)> {
+        let rows: Vec<_> = self.rows.borrow().iter().filter_map(|r| r.upgrade()).collect();
+        for row in rows {
+            let Some(item) = row.parts().item.upgrade() else { continue };
+            let Some(message) = item.item().and_downcast::<glib::BoxedAnyObject>() else { continue };
+            let message = message.borrow::<Message>().clone();
+            if message.content.contains(needle) {
+                return Some((row, message));
+            }
+        }
+        None
+    }
+
+    pub(super) fn e2e_forward(self: &Rc<Self>, command: &str, rest: &str) {
+        let picker = E2E_PICKER.with(|p| p.borrow().clone());
+        match (command, picker) {
+            ("forward-open", _) => {
+                let (needle, only) = match rest.split_once(" @") {
+                    Some((needle, id)) => (needle, id.parse().ok().map(|id| Only { attachments: Some(vec![Snowflake(id)]), embeds: None })),
+                    None => (rest, None),
+                };
+                let Some((_, message)) = self.e2e_message(needle) else { return eprintln!("e2e: no message {needle}") };
+                self.open_forward(message, only.unwrap_or_default(), Vec::new(), None);
+            }
+            ("forward-viewer", _) => {
+                let Some((_, message)) = self.e2e_message(rest) else { return eprintln!("e2e: no message {rest}") };
+                let settings = self.account.state.borrow().settings.media;
+                let items = discord::media::items(&message, &settings, false);
+                let held = discord::embed::visible(&message, &settings, false).len() == message.embeds.len();
+                super::viewer::MediaCx::new(self, &message, items, held).open(0, 0.0);
+            }
+            ("forward-viewer-click", _) => self.viewer.e2e_forward(),
+            ("forward-rows", Some(p)) => {
+                let rows: Vec<String> = p
+                    .shown
+                    .borrow()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, h)| format!("{} {:?} {} sensitive={}", h.comparator, h.kind, h.id.0, p.list.row_at_index(i as i32).is_some_and(|r| r.is_sensitive())))
+                    .collect();
+                eprintln!("e2e: forward rows {rows:?}");
+            }
+            ("forward-state", Some(p)) => eprintln!(
+                "e2e: forward selected={:?} send={:?} sensitive={} subtitle={:?} slowmode={:?}/{}",
+                p.selected.borrow().iter().map(|d| match d { Destination::User(i) | Destination::Channel(i) => i.0 }).collect::<Vec<_>>(),
+                p.send.label(), p.send.is_sensitive(), p.subtitle.label(), p.slowmode.label(), p.slowmode.is_visible(),
+            ),
+            ("forward-search", Some(p)) => p.entry.set_text(rest),
+            ("forward-pick", Some(p)) => p.toggle(self, rest.parse().unwrap_or(0)),
+            ("forward-comment", Some(p)) => p.comment.set_text(rest),
+            ("forward-send", Some(p)) => p.send.emit_clicked(),
+            (other, _) => eprintln!("e2e: no forward command {other} (or no picker)"),
+        }
+    }
+}
+""")
+edit("crates/app/src/ui/forward.rs", "        picker.dialog.present(Some(&self.window));\n        picker.refresh(self);\n", "        picker.dialog.present(Some(&self.window));\n        picker.refresh(self);\n        E2E_PICKER.with(|p| *p.borrow_mut() = Some(picker));\n")
+open(f"{root}/crates/app/src/ui/viewer.rs", "a").write(r"""
+impl Viewer {
+    pub(super) fn e2e_forward(&self) {
+        eprintln!("e2e: viewer forward visible={}", self.0.forward.is_visible());
+        self.0.forward.emit_clicked();
+    }
+}
+""")
+edit("crates/app/src/ui/viewer.rs", "    pub(super) fn open(&self, index: usize, start: f64) {", "    pub(super) fn open(&self, index: usize, start: f64) {")
+# The settings window: `settings <page>` opens it on a page by its name (`activity` is Activity Privacy),
+# `activity-share on|off` saves "Share my activity", and `activity-default <1..3>` saves the default (as a pick of its row).
+edit("crates/app/src/ui/settings.rs", "        dialog.add(&activity);\n", "        activity.set_name(Some(\"activity\"));\n        dialog.add(&activity);\n")
+open(f"{root}/crates/app/src/ui/settings.rs", "a").write(r"""
+impl App {
+    pub(super) fn e2e_settings(self: &Rc<Self>, command: &str, arg: &str) {
+        match command {
+            "settings" => {
+                self.show_settings();
+                if let Some(window) = self.settings_window.borrow().as_ref() {
+                    window.dialog.set_visible_page_name(arg);
+                }
+            }
+            "activity-share" => self.change_setting(Setting::ShowCurrentGame(arg == "on")),
+            _ => {
+                let default = match arg {
+                    "1" => discord::settings::ActivityDefault::Off,
+                    "2" => discord::settings::ActivityDefault::LargeServers,
+                    _ => discord::settings::ActivityDefault::On,
+                };
+                self.set_activity_default(default);
+            }
+        }
+    }
+}
+""")
+edit("crates/app/src/ui/activity_privacy.rs", "    fn set_activity_default(self: &Rc<Self>", "    pub(super) fn set_activity_default(self: &Rc<Self>")
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(c) if c == "settings" || c == "activity-share" || c == "activity-default" => self.e2e_settings(c, rest),
+            Some("quit") => {''')

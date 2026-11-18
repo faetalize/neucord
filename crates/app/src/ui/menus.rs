@@ -17,9 +17,9 @@ use gtk::{gdk, gio, glib};
 use super::App;
 use super::chat::{self, MessageTarget};
 use super::{
-    accounts, attachments, composer, create_thread, edits, emoji, forum, gifs, launcher, notify_menus, picker, pins,
-    poll_composer, polls, profile, reactions, reactors, scheduling, server_privacy, sidebar, slash, spelling, stickers,
-    threads, uploads, viewer, voice,
+    accounts, attachments, composer, create_thread, edits, emoji, forum, forward, gifs, launcher, notify_menus, picker,
+    pins, poll_composer, polls, profile, reactions, reactors, scheduling, server_privacy, sidebar, slash, spelling,
+    stickers, thread_settings, threads, uploads, viewer, voice,
 };
 
 /// An item that copies or opens a link, shown when the link `$link` finds in
@@ -132,7 +132,7 @@ pub(super) enum Style {
 pub(super) type Table<T, C = App> = &'static [&'static [Entry<T, C>]];
 
 /// A message's menu: what Neucord has of the official client's (761304),
-/// in its order. Create Thread follows Forward, which Neucord has no entry for.
+/// in its order. Forward follows Reply, and Create Thread follows it.
 /// The media group (Copy Image, Save Image, Save File) comes before the link
 /// group, which names a link by what it points to.
 /// Pin Message and Unpin Message follow Copy Text, and Apps follows them
@@ -141,7 +141,7 @@ pub(super) type Table<T, C = App> = &'static [&'static [Entry<T, C>]];
 const MESSAGE: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
     &[reactions::QUICK_REACTIONS, reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
-    &[edits::EDIT, composer::REPLY, create_thread::MESSAGE_MENU, create_thread::VIEW_THREAD],
+    &[edits::EDIT, composer::REPLY, forward::MESSAGE_MENU, create_thread::MESSAGE_MENU, create_thread::VIEW_THREAD],
     &[
         chat::COPY_TEXT,
         pins::PIN,
@@ -163,7 +163,7 @@ const MESSAGE: Table<MessageTarget> = &[
 const MESSAGE_REGULATED: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
     &[reactions::QUICK_REACTIONS, reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
-    &[edits::EDIT, composer::REPLY, create_thread::MESSAGE_MENU, create_thread::VIEW_THREAD],
+    &[edits::EDIT, composer::REPLY, forward::MESSAGE_MENU, create_thread::MESSAGE_MENU, create_thread::VIEW_THREAD],
     &[
         chat::COPY_TEXT,
         pins::PIN,
@@ -241,6 +241,8 @@ pub(super) const THREAD: Table<threads::ThreadTarget> = &[
         threads::LOCK_POST,
         threads::UNLOCK_THREAD,
         threads::UNLOCK_POST,
+        thread_settings::EDIT_THREAD,
+        thread_settings::EDIT_POST,
         forum::EDIT_TAGS,
         threads::COPY_THREAD_LINK,
     ],
@@ -1009,6 +1011,8 @@ mod tests {
                 "lock-post",
                 "unlock-thread",
                 "unlock-post",
+                "edit-thread",
+                "edit-post",
                 "edit-tags",
                 "copy-thread-link"
             ]
@@ -1026,9 +1030,14 @@ mod tests {
             assert_eq!(at("create-thread"), at(before) + 1);
             assert!(at("create-thread") < at(after));
         };
-        // After Reply, which the client follows with Forward and then it.
-        place(message(false), "reply", "copy-text");
-        place(message(true), "reply", "copy-text");
+        // After Forward, which follows Reply.
+        place(message(false), "forward", "copy-text");
+        place(message(true), "forward", "copy-text");
+        for table in [message(false), message(true)] {
+            let names = flat(table);
+            let at = |name: &str| names.iter().position(|n| *n == name).unwrap();
+            assert_eq!(at("forward"), at("reply") + 1);
+        }
         // The attach menu: after the uploads, before the poll.
         let attach: Vec<_> = ATTACH[0]
             .iter()

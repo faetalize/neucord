@@ -1,12 +1,15 @@
 //! Home's friends page: friends and their presence, pending requests,
 //! blocked users, and adding someone by username.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::future::Future;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use discord::relationships::{Kind, List, Presence, Relationship, Status};
+use discord::relationships::{
+    Kind, List, MAX_NOTE, NOTE_REFUSED, Presence, Relationship, Status, note_refused, request_note,
+};
 use discord::{ChannelKind, Rest, Snowflake};
 use gtk::glib;
 
@@ -51,8 +54,16 @@ pub(super) struct FriendsPage {
     lists: Vec<(List, gtk::Label, gtk::ListBox)>,
     error: gtk::Label,
     entry: gtk::Entry,
+    /// The message to send with the request, and how many characters are left.
+    note: gtk::Entry,
+    note_left: gtk::Label,
+    /// What the message is for, which an answer to the request replaces.
+    note_hint: gtk::Label,
     send: gtk::Button,
     add_status: gtk::Label,
+    /// Whose request's message was opened (View Request), which the rebuilds
+    /// of the list keep.
+    revealed: RefCell<HashSet<Snowflake>>,
     /// A rebuild is already scheduled.
     queued: Cell<bool>,
 }
@@ -76,6 +87,13 @@ impl FriendsPage {
             lists,
             error: label_builder().visible(false).css_classes(["error"]).build(),
             entry: gtk::Entry::builder().placeholder_text("Username").hexpand(true).build(),
+            note: gtk::Entry::builder().placeholder_text("Personalize your request (Optional)").hexpand(true).build(),
+            note_left: label_builder().label(MAX_NOTE.to_string()).css_classes(["dim-label"]).build(),
+            note_hint: label_builder()
+                .label("What you write here will also show up in your DM if you become friends.")
+                .css_classes(["dim-label", "caption"])
+                .build(),
+            revealed: RefCell::default(),
             send: gtk::Button::builder()
                 .label("Send Request")
                 .sensitive(false)
@@ -164,11 +182,47 @@ impl App {
         row.append(&page.entry);
         row.append(&page.send);
         column.append(&row);
+        let note = gtk::Box::builder().spacing(6).build();
+        note.append(&page.note);
+        note.append(&page.note_left);
+        column.append(&note);
+        column.append(&page.note_hint);
         column.append(&page.add_status);
 
+        // Typing a name clears what was said of the last request, as the
+        // client's form does, and its hint comes back.
         page.entry.connect_changed({
-            let send = page.send.clone();
-            move |entry| send.set_sensitive(!entry.text().trim().is_empty())
+            let (send, status, hint) = (page.send.clone(), page.add_status.clone(), page.note_hint.clone());
+            move |entry| {
+                send.set_sensitive(!entry.text().trim().is_empty());
+                status.set_visible(false);
+                hint.set_visible(true);
+            }
+        });
+        // The message is held to 120 UTF-16 units, which the field's own limit
+        // (in characters) doesn't count, and the count of what is left shows.
+        // Enter in it does nothing: a request goes out from the name's field.
+        page.note.connect_changed({
+            let left = page.note_left.clone();
+            move |note| {
+                let text = note.text();
+                if text.encode_utf16().count() > MAX_NOTE {
+                    let mut kept = String::new();
+                    let mut units = 0;
+                    for c in text.chars() {
+                        units += c.len_utf16();
+                        if units > MAX_NOTE {
+                            break;
+                        }
+                        kept.push(c);
+                    }
+                    note.set_text(&kept);
+                    return;
+                }
+                let remaining = MAX_NOTE - text.encode_utf16().count();
+                left.set_label(&remaining.to_string());
+                left.set_css_classes(if remaining == 0 { &["error"] } else { &["dim-label"] });
+            }
         });
         let send = {
             let this = Rc::downgrade(self);
@@ -281,12 +335,38 @@ impl App {
             (Kind::Other(_), _) => String::new(),
         };
         let subtitle = if detail.is_empty() { user.username.clone() } else { format!("{} · {detail}", user.username) };
+        // A request's message, unless the account hides them. We read one we
+        // got only when asked (View Request); one we sent shows at once.
+        let note = relationship.note.clone().filter(|_| {
+            matches!(relationship.kind, Kind::Incoming | Kind::Outgoing) && !self.friend_request_notes_hidden()
+        });
+        let opened = self.friends.revealed.borrow().contains(&user.id);
+        let hidden_note = note.is_some() && relationship.kind == Kind::Incoming && !opened;
         let row = adw::ActionRow::builder()
             .title(relationship.name())
-            .subtitle(subtitle)
+            // The message takes the place of the name's line, as in the client.
+            .subtitle(match &note {
+                Some(note) if !hidden_note => note.clone(),
+                _ => subtitle,
+            })
             .use_markup(false)
-            .subtitle_lines(1)
+            .subtitle_lines(if note.is_some() && !hidden_note { 0 } else { 1 })
             .build();
+        if hidden_note {
+            let view = gtk::Button::builder()
+                .child(&adw::ButtonContent::builder().label("View Request").icon_name("view-reveal-symbolic").build())
+                .valign(gtk::Align::Center)
+                .css_classes(["flat"])
+                .build();
+            let (this, id) = (Rc::downgrade(self), user.id);
+            view.connect_clicked(move |_| {
+                if let Some(this) = this.upgrade() {
+                    this.friends.revealed.borrow_mut().insert(id);
+                    this.rebuild_friends();
+                }
+            });
+            row.add_suffix(&view);
+        }
 
         let avatar = gtk::Overlay::builder()
             .child(&avatar_widget(user, 32, Some(&self.images), Row::None))
@@ -321,6 +401,14 @@ impl App {
         row.upcast()
     }
 
+    /// Whether the account hides friend requests' messages: its setting, or
+    /// until it has one, its age.
+    pub(super) fn friend_request_notes_hidden(&self) -> bool {
+        let state = self.account.state.borrow();
+        let adult = state.account.as_ref().is_none_or(|a| a.nsfw_allowed);
+        state.settings.privacy.friend_request_notes_hidden(adult)
+    }
+
     /// Open the DM with `user`, creating it if there is none yet.
     pub(super) fn message_user(self: &Rc<Self>, user: Snowflake) {
         let this = self.clone();
@@ -334,6 +422,14 @@ impl App {
     /// Open the DM with `user` and go to it (`openPrivateChannel` in
     /// 308528): the one we have with no request, else a new one. Its id.
     pub(super) async fn open_dm_with(self: &Rc<Self>, user: Snowflake) -> Result<Snowflake, discord::Error> {
+        let id = self.dm_with(user).await?;
+        self.open_channel(id);
+        Ok(id)
+    }
+
+    /// The DM with `user`, made if we have none, without going to it
+    /// (`getOrEnsurePrivateChannel` in 308528).
+    pub(super) async fn dm_with(self: &Rc<Self>, user: Snowflake) -> Result<Snowflake, discord::Error> {
         let existing = self
             .account
             .state
@@ -343,7 +439,6 @@ impl App {
             .find(|c| c.kind == ChannelKind::Dm && c.recipients.first().is_some_and(|u| u.id == user))
             .map(|c| c.id);
         if let Some(channel) = existing {
-            self.open_channel(channel);
             return Ok(channel);
         }
         let rest = self.account.state.borrow().rest.clone();
@@ -351,7 +446,6 @@ impl App {
         let channel = rest.open_dm(user).await?;
         let id = channel.id;
         self.on_private_channel(channel);
-        self.open_channel(id);
         Ok(id)
     }
 
@@ -441,30 +535,54 @@ impl App {
 
     fn send_friend_request(self: &Rc<Self>) {
         let page = &self.friends;
-        let username = page.entry.text().trim().trim_start_matches('@').to_owned();
+        // `@name` is how a username is written; with a `#` it is a tag.
+        let typed = page.entry.text();
+        let typed = typed.trim();
+        let tag = match typed.contains('#') {
+            false => typed.strip_prefix('@').unwrap_or(typed),
+            true => typed,
+        }
+        .to_owned();
         let Some(rest) = self.account.state.borrow().rest.clone() else { return };
-        if username.is_empty() {
+        if tag.is_empty() {
             return;
         }
+        let note = match request_note(&page.note.text()) {
+            Ok(note) => note,
+            Err(refused) => return self.say_friend_request(false, refused),
+        };
         page.send.set_sensitive(false);
         page.add_status.set_visible(false);
         let this = self.clone();
         glib::spawn_future_local(async move {
-            let result = rest.send_friend_request(&username).await;
+            let result = rest.send_friend_request(&tag, note.as_deref()).await;
             let page = &this.friends;
-            page.add_status.set_css_classes(&[if result.is_ok() { "success" } else { "error" }]);
             match result {
                 Ok(()) => {
-                    page.add_status.set_label(&format!("Friend request sent to {username}."));
+                    // Clearing the name clears what was said, so it is said after.
                     page.entry.set_text("");
+                    page.note.set_text("");
+                    this.say_friend_request(true, &format!("Friend request sent to {tag}."));
                 }
                 Err(e) => {
-                    page.add_status.set_label(&e.to_string());
+                    let said = match &e {
+                        discord::Error::Http { body, .. } if note_refused(body) => NOTE_REFUSED.to_owned(),
+                        _ => e.to_string(),
+                    };
+                    this.say_friend_request(false, &said);
                     page.send.set_sensitive(true);
                 }
             }
-            page.add_status.set_visible(true);
         });
+    }
+
+    /// What became of the request, which takes the place of the hint under the form.
+    fn say_friend_request(&self, success: bool, text: &str) {
+        let page = &self.friends;
+        page.add_status.set_css_classes(&[if success { "success" } else { "error" }]);
+        page.add_status.set_label(text);
+        page.add_status.set_visible(true);
+        page.note_hint.set_visible(false);
     }
 }
 

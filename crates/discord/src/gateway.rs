@@ -369,6 +369,8 @@ pub enum Event {
     RelationshipUpdate {
         user_id: Snowflake,
         nickname: Option<String>,
+        /// The message of a friend request; an update without it takes it away.
+        note: Option<String>,
         ignored: bool,
     },
     /// Unfriended, unblocked, or a request withdrawn or ignored; `ignored`
@@ -1492,7 +1494,8 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
         "RELATIONSHIP_UPDATE" => {
             let Some(user_id) = parse_id(&data["id"]) else { return };
             let nickname = data["nickname"].as_str().filter(|n| !n.is_empty()).map(String::from);
-            Event::RelationshipUpdate { user_id, nickname, ignored: data["user_ignored"].as_bool() == Some(true) }
+            let note = data["note"].as_str().map(String::from);
+            Event::RelationshipUpdate { user_id, nickname, note, ignored: data["user_ignored"].as_bool() == Some(true) }
         }
         "RELATIONSHIP_REMOVE" => match parse_id(&data["id"]) {
             Some(user_id) => {

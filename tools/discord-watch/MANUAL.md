@@ -109,6 +109,17 @@ changed for unrelated reasons only needs a note in the issue.
   `defaultAutoArchiveDuration`) and the `location`s, "Plus Button" in 747926
   and "Message" in 519222. The first message goes into the thread once the
   gateway has brought it (`Y` in 971389).
+- **Forwarding** (`forward.rs`, `ui/forward.rs`). Not watched: who is
+  offered it, `p` in 843626 (anchor `FORWARDING_DISABLED`: the kinds in 448761's
+  `FORWARDABLE`, the flags it bars, a poll, a call, an activity, Read Message
+  History); the picker in 92961 (anchor `forward-modal`), its `sendForward`
+  (`message_reference` of type 1 with `forward_only`, then the typed words as a
+  message of their own unless slowmode would refuse them, a leading `@silent`
+  on both), the limit of five places, and the failed-forward alert in 181622;
+  the places it lists, `Ay` in 223863 (history and frequent channels, the origin
+  left out unless picked, fifteen of them) and what greys a place out, `pE` in
+  969223 (age-restricted origin, attachments, embeds, voice messages); the
+  viewer's button, `eF` in 2323 (`onlyAttachmentIds` or `onlyEmbedIndices`).
 - **Starting a post** (`post_creation.rs`, `ui/forum_post.rs`). `REQUIRE_TAG`
   and the error codes are watched, and `POST CHANNEL_THREADS` is, but the
   snapshot holds only a plain thread's fields: the client builds a post's

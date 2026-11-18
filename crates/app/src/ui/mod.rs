@@ -3,6 +3,7 @@
 
 mod account;
 mod accounts;
+mod activity_privacy;
 mod attachments;
 mod background;
 mod builtins;
@@ -21,6 +22,7 @@ mod emoji_packs;
 mod favorites;
 mod forum;
 mod forum_post;
+mod forward;
 mod friends;
 mod gifs;
 mod identity;
@@ -63,6 +65,7 @@ mod state;
 mod stickers;
 mod switcher;
 mod thread_line;
+mod thread_settings;
 mod threads;
 mod typing;
 mod unread;

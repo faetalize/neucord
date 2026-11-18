@@ -38,6 +38,119 @@ pub fn lock_edits(archived: bool, lock: bool) -> Vec<Value> {
     edits
 }
 
+/// A thread's settings the client's form edits (336541): its name, how long
+/// members wait between messages, when it archives itself, who may invite to
+/// a private one, and whether it hides its media.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Settings {
+    pub name: String,
+    /// Seconds.
+    pub slowmode: u32,
+    /// Minutes.
+    pub archive_after: u32,
+    /// Only a private thread has the choice.
+    pub invitable: Option<bool>,
+    pub spoiler: bool,
+}
+
+/// `IS_SPOILER_CHANNEL`, in a channel's flags.
+const IS_SPOILER: u64 = 1 << 21;
+
+/// The seconds the form offers for slowmode (`s_7` in 652215), and the
+/// minutes for archiving after inactivity (`Gk` in 268761), when it is
+/// 3 days if the thread says nothing (`Gl`).
+pub const SLOWMODES: [u32; 14] = [0, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 21_600];
+pub const ARCHIVE_AFTER: [u32; 4] = [60, 1440, 4320, 10_080];
+const ARCHIVE_DEFAULT: u32 = 4320;
+
+impl Settings {
+    /// What the form starts from: the thread as it is.
+    pub fn of(thread: &Channel) -> Self {
+        let meta = thread.thread_metadata.as_ref();
+        let archive = meta.map_or(0, |m| m.auto_archive_duration);
+        Settings {
+            name: thread.name.clone().unwrap_or_default(),
+            slowmode: thread.rate_limit_per_user,
+            archive_after: if archive == 0 { ARCHIVE_DEFAULT } else { archive },
+            invitable: meta.and_then(|m| m.invitable).filter(|_| thread.kind == ChannelKind::PrivateThread),
+            spoiler: thread.flags & IS_SPOILER != 0,
+        }
+    }
+}
+
+/// Why the form's settings aren't sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Invalid {
+    /// The name is empty once its line breaks are spaces and it is trimmed.
+    NameRequired,
+}
+
+impl Invalid {
+    /// The words next to the name (`uXA573`).
+    pub fn words(self) -> &'static str {
+        "Thread Name is required"
+    }
+}
+
+/// The edit the form saves (`saveChannel` in 435183, from `onSave` in
+/// 336541). The client sends the channel record's fields through the getters
+/// it has defaults in, so a thread's carries a topic of "", a bitrate of
+/// 64000, a user limit of 0 and no NSFW; whatever the record lacks is left
+/// out.
+pub fn settings_body(thread: &Channel, settings: &Settings) -> Result<Value, Invalid> {
+    let name = crate::thread_creation::single_line(&settings.name, true);
+    if name.is_empty() {
+        return Err(Invalid::NameRequired);
+    }
+    let meta = thread.thread_metadata.as_ref();
+    let flags = if settings.spoiler { thread.flags | IS_SPOILER } else { thread.flags & !IS_SPOILER };
+    let mut body = json!({
+        "name": name,
+        "type": thread.kind.raw(),
+        "topic": "",
+        "bitrate": 64_000,
+        "user_limit": 0,
+        "nsfw": false,
+        "flags": flags,
+        "rate_limit_per_user": settings.slowmode,
+        "auto_archive_duration": settings.archive_after,
+        "locked": meta.is_some_and(|m| m.locked),
+    });
+    if let Some(invitable) = settings.invitable {
+        body["invitable"] = json!(invitable);
+    }
+    Ok(body)
+}
+
+/// How the form words an archiving time (`Gk` in 268761).
+pub fn archive_label(minutes: u32) -> String {
+    match minutes {
+        60 => "1 Hour".to_owned(),
+        1440 => "24 Hours".to_owned(),
+        4320 => "3 Days".to_owned(),
+        10_080 => "1 Week".to_owned(),
+        other => duration_label(other * 60, ""),
+    }
+}
+
+/// A wait or a duration as the form words it (`$` in 879631): the days if
+/// there are any, else the hours, minutes or seconds, and `off` for none.
+pub fn duration_label(seconds: u32, off: &str) -> String {
+    let (days, hours, minutes) = (seconds / 86_400 % 31, seconds / 3600 % 24, seconds / 60 % 60);
+    let plural = |n: u32, unit: &str| format!("{n} {unit}{}", if n == 1 { "" } else { "s" });
+    if days > 0 {
+        plural(days, "day")
+    } else if hours > 0 {
+        plural(hours, "hour")
+    } else if minutes > 0 {
+        plural(minutes, "minute")
+    } else if seconds > 0 {
+        plural(seconds % 60, "second")
+    } else {
+        off.to_owned()
+    }
+}
+
 /// The alert for a refused reopen (`unarchiveThread`, 7909): its heading
 /// and body, for a thread or a forum post.
 pub fn reopen_alert(error: &Error, post: bool) -> (&'static str, &'static str) {
@@ -398,6 +511,70 @@ mod tests {
 
     fn refused(status: u32, body: &str) -> Error {
         Error::Http { status, body: body.into() }
+    }
+
+    fn channel(extra: serde_json::Value) -> Channel {
+        let mut value = json!({"id": "9", "type": 11, "name": "plans", "parent_id": "2", "flags": 0});
+        value.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn the_form_starts_from_the_thread_and_saves_what_the_client_sends() {
+        let thread = channel(json!({
+            "rate_limit_per_user": 30, "flags": 1 << 1,
+            "thread_metadata": {"archived": false, "locked": true, "auto_archive_duration": 1440},
+        }));
+        let mut settings = Settings::of(&thread);
+        assert_eq!(
+            settings,
+            Settings { name: "plans".into(), slowmode: 30, archive_after: 1440, invitable: None, spoiler: false }
+        );
+        settings.name = "  new\nname ".into();
+        settings.spoiler = true;
+        assert_eq!(
+            settings_body(&thread, &settings),
+            Ok(json!({
+                "name": "new name", "type": 11, "topic": "", "bitrate": 64000, "user_limit": 0, "nsfw": false,
+                "flags": (1 << 1) | (1 << 21), "rate_limit_per_user": 30, "auto_archive_duration": 1440,
+                "locked": true,
+            })),
+            "line breaks are spaces, and it is trimmed; the lock stays; a public thread has no invitable"
+        );
+        settings.spoiler = false;
+        assert_eq!(settings_body(&thread, &settings).unwrap()["flags"], 1 << 1);
+    }
+
+    #[test]
+    fn a_private_thread_says_who_may_invite_and_a_thread_without_a_duration_gets_three_days() {
+        let thread = channel(json!({"type": 12, "thread_metadata": {"invitable": false}}));
+        let mut settings = Settings::of(&thread);
+        assert_eq!((settings.invitable, settings.archive_after), (Some(false), 4320));
+        settings.invitable = Some(true);
+        let body = settings_body(&thread, &settings).unwrap();
+        assert_eq!((&body["type"], &body["invitable"], &body["locked"]), (&json!(12), &json!(true), &json!(false)));
+        let public = channel(json!({"thread_metadata": {"invitable": true}}));
+        assert_eq!(Settings::of(&public).invitable, None, "only a private thread has the choice");
+    }
+
+    #[test]
+    fn a_name_of_nothing_is_refused() {
+        let thread = channel(json!({}));
+        let mut settings = Settings::of(&thread);
+        settings.name = " \r\n ".into();
+        assert_eq!(settings_body(&thread, &settings), Err(Invalid::NameRequired));
+        assert_eq!(Invalid::NameRequired.words(), "Thread Name is required");
+    }
+
+    #[test]
+    fn durations_are_worded_by_their_largest_part() {
+        let words: Vec<_> = SLOWMODES.iter().map(|&s| duration_label(s, "Off")).collect();
+        assert_eq!(words[0], "Off");
+        assert_eq!(&words[1..6], ["5 seconds", "10 seconds", "15 seconds", "30 seconds", "1 minute"]);
+        assert_eq!(&words[11..], ["1 hour", "2 hours", "6 hours"]);
+        let archive: Vec<_> = ARCHIVE_AFTER.iter().map(|&m| archive_label(m)).collect();
+        assert_eq!(archive, ["1 Hour", "24 Hours", "3 Days", "1 Week"], "the form's own words for these");
+        assert_eq!(archive_label(2880), "2 days", "any other is worded as a duration");
     }
 
     #[test]
