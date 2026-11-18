@@ -517,6 +517,7 @@ impl App {
         self.account.timelines.borrow_mut().held.opened();
         // The pins of an old session may have changed (`CONNECTION_OPEN`, 966833).
         self.account.state.borrow_mut().pins.clear();
+        self.account.state.borrow_mut().mentions.clear();
         // `CONNECTION_OPEN` closes the app launcher.
         self.close_launcher();
         self.forum_new_session();
@@ -784,6 +785,7 @@ impl App {
             let was_request = state.private_channels.iter().any(|c| c.id == id && c.is_request());
             state.private_channels.retain(|c| c.id != id);
             state.pins.forget(id);
+            state.mentions.remove_where(|m| m.channel_id == id);
             (state.guild.is_none(), state.channel == Some(id), was_request, !state.requests().is_empty())
         };
         if was_open && was_request && requests_left {
@@ -874,6 +876,7 @@ impl App {
             let mut timelines = self.account.timelines.borrow_mut();
             for channel in &gone {
                 state.pins.forget(*channel);
+                state.mentions.remove_where(|m| m.channel_id == *channel);
                 state.read.remove(*channel);
                 timelines.remove(*channel);
             }

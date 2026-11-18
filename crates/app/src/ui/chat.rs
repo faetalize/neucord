@@ -318,6 +318,12 @@ impl App {
                 }
             }
         });
+        header.pack_end(&self.inbox_button);
+        {
+            let view = super::inbox::InboxView::new(self);
+            self.inbox_button.set_popover(Some(view.popover()));
+            *self.inbox_view.borrow_mut() = Some(view);
+        }
         header.pack_end(&self.pins_button);
         {
             let view = pin_list::PinsView::new(self);
@@ -394,6 +400,9 @@ impl App {
         };
         self.learn_users(std::iter::once(&message.author).chain(&message.mentions).chain(original));
         self.forum_message(&message);
+        if self.account.state.borrow_mut().note_mention(&message) {
+            self.show_mentions();
+        }
         if let (Some(guild), Some(member)) = (message.guild_id, &message.member) {
             self.account.state.borrow_mut().members.add(guild, vec![(message.author.id, member.known())], &[]);
         }
@@ -525,6 +534,7 @@ impl App {
     pub(super) fn on_message_update(self: &Rc<Self>, edit: MessageEdit) {
         self.forum_message_edited(&edit);
         self.account.state.borrow_mut().pins.edited(edit.channel_id, &edit);
+        self.account.state.borrow_mut().mentions.edited(&edit);
         self.show_pins();
         self.change_thread_starter(edit.id, |copy| edit.clone().apply(copy));
         let Some(store) = self.account.timelines.borrow().get(edit.channel_id).map(|t| t.store.clone()) else { return };
@@ -553,6 +563,7 @@ impl App {
     pub(super) fn on_message_delete(self: &Rc<Self>, id: Snowflake, channel_id: Snowflake) {
         self.forum_message_deleted(id, channel_id);
         self.account.state.borrow_mut().pins.deleted(channel_id, id);
+        self.account.state.borrow_mut().mentions.remove(id);
         self.show_pins();
         if let Some(store) = self.account.timelines.borrow().get(Snowflake(id.0)).map(|t| t.store.clone()) {
             for position in timelines::update_starter(&store, id, |copy| *copy = Referenced::Deleted) {

@@ -124,6 +124,7 @@ impl App {
                     Some("composer_box") => Some(self.composer_box.clone().upcast()),
                     Some("gif_button") => Some(self.gif_button.clone().upcast()),
                     Some("pins_button") => Some(self.pins_button.clone().upcast()),
+                    Some("inbox_button") => Some(self.inbox_button.clone().upcast()),
                     other => return eprintln!("e2e: no widget {other:?}"),
                 };
                 match anchor.and_then(|w| popover_on(&w)) {
@@ -276,6 +277,16 @@ impl App {
             Some("pins-open") => self.pins_button.popup(),
             // The next page, as the button under the list or a scroll near its end asks.
             Some("pins-more") => self.more_pins(),
+            // The inbox, as its header button opens it: shoot it with `shot-popover inbox_button`.
+            Some("inbox-open") => self.inbox_button.popup(),
+            Some("inbox-more") => self.more_mentions(),
+            // The first mention marked done, as its button does.
+            Some("inbox-done") => {
+                let first = self.account.state.borrow().mentions.list().first().map(|m| m.id);
+                if let Some(id) = first {
+                    self.mention_done(id);
+                }
+            }
             Some("send") => {
                 let button = &self.send_button;
                 if !button.is_visible() || !button.is_sensitive() {

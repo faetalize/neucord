@@ -511,7 +511,8 @@ pub fn is_dropped(message: &Message, group_dm: bool, blocked: impl Fn(Snowflake)
 
 const RECIPIENT_REMOVE: u8 = 2;
 
-fn mentions(message: &Message, me: Snowflake, my_roles: &[Snowflake], no_everyone: bool, no_roles: bool) -> bool {
+/// Whether `message` mentions `me` or one of `my_roles`, unless the kind is suppressed.
+pub fn mentions(message: &Message, me: Snowflake, my_roles: &[Snowflake], no_everyone: bool, no_roles: bool) -> bool {
     message.mentions.iter().any(|u| u.id == me)
         || (message.mention_everyone && !no_everyone)
         || (!no_roles && message.mention_roles.iter().any(|r| my_roles.contains(r)))

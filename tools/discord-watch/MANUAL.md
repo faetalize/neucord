@@ -144,6 +144,13 @@ changed for unrelated reasons only needs a note in the issue.
   `LOAD_PINNED_MESSAGES`) keeps the list on events, and the popout in 945830
   (anchor `Channel Pins`: Jump, Unpin, the next page within 250 px of the
   end), aren't.
+- **The inbox's Mentions tab** (`discord::mentions`, `ui/inbox.rs`). The
+  requests are watched (`fetchRecentMentions`: `MENTIONS`, `before`, `limit`,
+  `guild_id`, `roles`, `everyone`; `deleteRecentMention`). Not watched: when
+  the inbox asks (713024's `sj`, anchor `Recent Mentions`: the first page once,
+  a changed filter again, the next within 250 px of the end, 25 kept on close)
+  and how `RecentMentionsStore` (849171, anchor `recentMentionFilterSettings`)
+  keeps the list and decides which new messages join it (`G`).
 - **Voting on polls** (`Poll::view`, `Poll::set_my_votes`, `permissions::vote_held_back`,
   `polls::END_POLL`). The requests, and what tapping, submitting and ending
   do, are watched (`handlePollAnswerTapped`, `handlePollSubmitVote`,

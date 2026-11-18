@@ -528,6 +528,23 @@ def pins(channel, body):
     return 200, {"items": items[:2], "has_more": len(items) > 2}
 
 
+# The inbox: every line of #general mentions the account, 25 to a page, newest first. Marked done are kept here.
+MENTION_DONE = set()
+
+
+@route("GET", r"/users/@me/mentions")
+def mentions(body):
+    before = int(QUERY.get("before", ["9" * 30])[0])
+    lines = [dict(m, mentions=[ME]) for m in messages("600") if int(m["id"]) < before and m["id"] not in MENTION_DONE]
+    return 200, lines[:25]
+
+
+@route("DELETE", r"/users/@me/mentions/(\d+)")
+def mention_done(message, body):
+    MENTION_DONE.add(message)
+    return 204, None
+
+
 @route("POST", r"/channels/(\d+)/messages")
 def send_message(channel, body):
     content = body.get("content", "")
