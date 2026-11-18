@@ -93,6 +93,8 @@ changed for unrelated reasons only needs a note in the issue.
   covers. Posting in an archived thread sends nothing first:
   `sendMessage` in 138399 doesn't call `unarchiveThreadIfNecessary`
   (7909), while edits and deletes do.
+- **What Clyde says of a refused send** (`clyde.rs`). The table of codes and
+  words is `sendClydeError`'s in 138399 (anchor `sendClydeError`), unwatched.
 - **Starting a thread** (`thread_creation.rs`, `ui/create_thread.rs`). The
   request, its error codes, the permission bits and `HAS_THREAD` are watched
   (`POST CHANNEL_THREADS` carries the body of both endpoints). Not watched:

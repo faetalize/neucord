@@ -228,7 +228,7 @@ impl App {
     }
 
     /// Clyde's line in `channel`, as the client's `sendBotMessage` adds it.
-    fn clyde(self: &Rc<Self>, channel: Snowflake, notice: Notice) {
+    pub(super) fn clyde(self: &Rc<Self>, channel: Snowflake, notice: Notice) {
         self.local_message(notice.message(channel, Snowflake::now(), &scheduled::iso(now_unix())));
     }
 
@@ -244,6 +244,19 @@ impl App {
         if at_bottom {
             self.scroll_to_end();
         }
+    }
+}
+
+impl App {
+    /// Clyde's line for a refusal Discord gave with a code and no message
+    /// (`sendClydeError`, 138399).
+    pub(super) fn clyde_refusal(self: &Rc<Self>, channel: Snowflake, code: u64) {
+        let here = {
+            let state = self.account.state.borrow();
+            state.find_channel(channel).map(|(_, c)| discord::clyde::Where::of(c, state.is_forum_post(channel)))
+        };
+        let Some(here) = here else { return };
+        self.clyde(channel, Notice::Refused(discord::clyde::send_failure(code, &here)));
     }
 }
 

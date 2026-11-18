@@ -531,8 +531,8 @@ impl App {
         if let Some(at) = at {
             self.rebind(&store, at, 1);
         }
-        if failure.is_some_and(|f| f.is_announced()) {
-            self.show_composer_error("Your message could not be delivered.");
+        if let Some(code) = failure.filter(|f| f.is_announced()).and_then(|f| f.code) {
+            self.clyde_refusal(channel, code);
         }
     }
 }

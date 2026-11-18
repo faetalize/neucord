@@ -1035,12 +1035,11 @@ impl App {
             self.account.state.borrow_mut().commands_out_of_date(command.application, running.channel);
         }
         self.refresh_command_status();
-        let text = match (&failure.message, failure.is_announced()) {
-            (Some(message), _) => message.clone(),
-            (None, true) => "Your message could not be delivered.".to_owned(),
-            (None, false) => "This interaction failed".to_owned(),
-        };
-        self.show_composer_error(&text);
+        match (&failure.message, failure.code.filter(|_| failure.is_announced())) {
+            (Some(message), _) => self.show_composer_error(message),
+            (None, Some(code)) => self.clyde_refusal(running.channel, code),
+            (None, None) => self.show_composer_error("This interaction failed"),
+        }
     }
 
     /// Say what the commands running in the open channel are doing.
