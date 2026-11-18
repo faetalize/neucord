@@ -59,9 +59,43 @@ fn status_item(label: &str, status: UserStatus, duration_ms: Option<u64>) -> gio
     item
 }
 
+/// The window action that turns Focus Mode on for the time it names, in
+/// milliseconds (0 for ever), or off with `off`.
+const FOCUS_ACTION: &str = "win.set-focus";
+
+fn focus_item(label: &str, target: &str) -> gio::MenuItem {
+    let item = gio::MenuItem::new(Some(label), None);
+    item.set_action_and_target_value(Some(FOCUS_ACTION), Some(&target.to_variant()));
+    item
+}
+
+/// Focus Mode's submenu (166783): the times it can last, as the status
+/// picker's have, under what it does, or until when it is on; and a way to
+/// turn it off while it is.
+fn focus_menu(focus: Option<u64>) -> gio::MenuItem {
+    let durations = gio::Menu::new();
+    for (label, duration) in DURATIONS {
+        durations.append_item(&focus_item(label, &duration.unwrap_or(0).to_string()));
+    }
+    let words = match focus {
+        Some(0) => "ON".to_owned(),
+        Some(ends) => until(ends).map_or_else(|| "ON".to_owned(), |until| format!("ON, {until}")),
+        None => "Disables desktop notifications & message sounds.".to_owned(),
+    };
+    let submenu = gio::Menu::new();
+    submenu.append_section(Some(&words), &durations);
+    if focus.is_some() {
+        let off = gio::Menu::new();
+        off.append_item(&focus_item("Turn off Focus Mode", "off"));
+        submenu.append_section(None, &off);
+    }
+    gio::MenuItem::new_submenu(Some("Focus Mode (BETA)"), &submenu)
+}
+
 /// The status picker's menu: Online, then each other status with the times
-/// it can last, then the custom status.
-fn menu(status: &StatusSettings) -> gio::Menu {
+/// it can last, then Focus Mode, then the custom status. `focus` is when
+/// Focus Mode ends (0 for never) while it is on.
+fn menu(status: &StatusSettings, focus: Option<u64>) -> gio::Menu {
     let menu = gio::Menu::new();
     let statuses = gio::Menu::new();
     statuses.append_item(&status_item(UserStatus::Online.label(), UserStatus::Online, None));
@@ -76,6 +110,10 @@ fn menu(status: &StatusSettings) -> gio::Menu {
         others.append_submenu(Some(which.label()), &durations);
     }
     menu.append_section(None, &others);
+
+    let focus_section = gio::Menu::new();
+    focus_section.append_item(&focus_menu(focus));
+    menu.append_section(None, &focus_section);
 
     let custom = gio::Menu::new();
     let label = if status.custom.is_some() { "Edit Custom _Status…" } else { "Set a Custom _Status…" };
@@ -115,7 +153,7 @@ impl App {
             .direction(gtk::ArrowType::Up)
             .css_classes(["flat"])
             .build();
-        button.set_menu_model(Some(&menu(&StatusSettings::default())));
+        button.set_menu_model(Some(&menu(&StatusSettings::default(), None)));
         *self.status_button.borrow_mut() = Some(button.clone());
         button
     }
@@ -145,13 +183,30 @@ impl App {
             })
             .build();
         let clear = gio::ActionEntry::builder("clear-custom-status")
-            .activate(move |_: &adw::ApplicationWindow, _, _| {
-                if let Some(this) = this.upgrade() {
-                    this.change_setting(Setting::CustomStatus(None));
+            .activate({
+                let this = this.clone();
+                move |_: &adw::ApplicationWindow, _, _| {
+                    if let Some(this) = this.upgrade() {
+                        this.change_setting(Setting::CustomStatus(None));
+                    }
                 }
             })
             .build();
-        vec![set, custom, clear]
+        let focus = gio::ActionEntry::builder("set-focus")
+            .parameter_type(Some(glib::VariantTy::STRING))
+            .activate(move |_: &adw::ApplicationWindow, _, target| {
+                let target = target.and_then(|t| t.str());
+                let duration = target.and_then(|t| t.parse::<u64>().ok());
+                if let Some(this) = this.upgrade() {
+                    match (target, duration) {
+                        (Some("off"), _) => this.set_focus_mode(false, None),
+                        (_, Some(ms)) => this.set_focus_mode(true, Some(ms).filter(|ms| *ms != 0)),
+                        _ => {}
+                    }
+                }
+            })
+            .build();
+        vec![set, custom, clear, focus]
     }
 
     /// The status picker (827827): the status, and when it goes back to
@@ -160,6 +215,36 @@ impl App {
         let now_ms = now_ms() as u64;
         let expires_at_ms = duration_ms.map_or(0, |d| now_ms + d);
         self.change_setting(Setting::Status { status, expires_at_ms, now_ms });
+    }
+
+    /// Focus Mode on for `duration_ms`, or for ever, or off (`ES` in
+    /// 970931). Turning it on for ever while the status is Do Not Disturb
+    /// asks whether to go Online, which silences as well.
+    fn set_focus_mode(self: &Rc<Self>, on: bool, duration_ms: Option<u64>) {
+        let expires_at_ms = duration_ms.map_or(0, |d| now_ms() as u64 + d);
+        self.change_setting(Setting::FocusMode { on, expires_at_ms });
+        if !(on && duration_ms.is_none() && self.account.state.borrow().settings.do_not_disturb()) {
+            return;
+        }
+        let dialog = adw::AlertDialog::new(
+            Some("Switch to Online?"),
+            Some(
+                "With Focus Mode, Discord will no longer show in-app, desktop notifications or play message sounds, \
+                 just like with DND. Would you like to switch to Online?",
+            ),
+        );
+        dialog.add_responses(&[("cancel", "No thanks"), ("confirm", "Okay")]);
+        dialog.set_response_appearance("confirm", adw::ResponseAppearance::Suggested);
+        dialog.set_close_response("cancel");
+        dialog.connect_response(None, {
+            let this = Rc::downgrade(self);
+            move |_, response| {
+                if let (Some(this), "confirm") = (this.upgrade(), response) {
+                    this.set_status(UserStatus::Online, None);
+                }
+            }
+        });
+        dialog.present(Some(&self.window));
     }
 
     /// Show the status in the account panel and its menu.
@@ -205,7 +290,9 @@ impl App {
         };
         if let Some(button) = self.status_button.borrow().as_ref() {
             button.set_tooltip_text(Some(&tooltip));
-            button.set_menu_model(Some(&menu(&status)));
+            let settings = &self.account.state.borrow().settings;
+            let focus = settings.focus_mode(now_ms() as u64).then_some(settings.notifications.focus_expires_at_ms);
+            button.set_menu_model(Some(&menu(&status, focus)));
         }
     }
 
@@ -302,6 +389,16 @@ impl App {
         };
         if let Some(wait) = expiries.custom {
             later(wait, |app| app.change_setting(Setting::CustomStatus(None)));
+        }
+        let focus = {
+            let state = self.account.state.borrow();
+            let (now, ends) = (now_ms() as u64, state.settings.notifications.focus_expires_at_ms);
+            // A time with quiet mode off is nothing.
+            (state.settings.notifications.quiet_mode && ends != 0)
+                .then(|| Duration::from_millis(ends.saturating_sub(now)))
+        };
+        if let Some(wait) = focus {
+            later(wait, |app| app.set_focus_mode(false, None));
         }
         if let Some(wait) = expiries.status {
             later(wait, |app| {

@@ -90,7 +90,8 @@ what arrived, IDENTIFY's key order and properties first.
   button the focus, runs its Menu / Shift+F10 shortcut, says whether a menu
   opened and shoots it), `settings <page>` (the settings window on a page, `activity` for Activity
   Privacy), `activity-share on|off` and `activity-default 1|2|3` (what its rows
-  save), `quit`. It edits the copy by exact strings
+  save), `focus-mode <ms>|forever|off`, `focus-state` and `status-menu <png>` (Focus Mode, with
+  `FAKE_NSFW=dms=1` so the settings are in READY), `quit`. It edits the copy by exact strings
   and stops on the first that no longer matches: when the code it patches
   moves, update the string. The module it adds is only built here, so a
   change to what it calls needs a run to show it still builds.

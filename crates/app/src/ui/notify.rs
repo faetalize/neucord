@@ -146,7 +146,7 @@ impl App {
     /// client stays quiet then too, and a notification would lead nowhere.
     fn notifications_allowed(&self) -> bool {
         let state = self.account.state.borrow();
-        state.required_action.is_none() && !state.settings.silenced()
+        state.required_action.is_none() && !state.settings.silenced(now_ms() as u64)
     }
 
     pub(super) fn withdraw_friend_request(self: &Rc<Self>, user: Snowflake) {
