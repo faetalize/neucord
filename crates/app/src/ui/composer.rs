@@ -440,6 +440,18 @@ impl App {
         if key == Key::Up && alone && self.composer.buffer().char_count() == 0 && self.edit_last() {
             return glib::Propagation::Stop;
         }
+        // Files waiting go before the reply (`handleKeyDown` in 699344 clears
+        // them and stops there; the reply, the schedule and a sticker are
+        // its caller's), and only with no modifier held.
+        let plain = !modifiers.intersects(gtk::accelerator_get_default_mod_mask());
+        if key == Key::Escape
+            && plain
+            && let Some(channel) =
+                self.account.state.borrow().channel.filter(|c| !self.files_for_message(*c).is_empty())
+        {
+            self.clear_uploads(channel);
+            return glib::Propagation::Stop;
+        }
         if key == Key::Escape && self.reply.borrow().is_some() {
             self.set_reply(None);
             return glib::Propagation::Stop;
