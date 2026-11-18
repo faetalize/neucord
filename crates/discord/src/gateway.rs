@@ -368,6 +368,9 @@ pub enum Event {
     MemberList(Box<MemberListUpdate>),
     /// Our notification settings for one server (or DMs) changed.
     NotificationSettingsUpdate(GuildSettings),
+    /// The account's notification flags changed (`NOTIFICATION_SETTINGS_UPDATE`),
+    /// on any client.
+    NotificationFlagsUpdate(u64),
     /// The user changed settings (on any client). With `replace`, the patch
     /// is all of them and what it leaves out is back to its default. From
     /// the protobuf form, `proto` is what arrived.
@@ -1118,7 +1121,11 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
                 private_channels: private_channels(&data),
                 relationships: Relationships::from_ready(&data),
                 read_states: ReadStates::from_ready(&data["read_state"]),
-                notification_settings: NotificationSettings::from_ready(&data["user_guild_settings"]),
+                notification_settings: {
+                    let mut settings = NotificationSettings::from_ready(&data["user_guild_settings"]);
+                    settings.set_flags(data["notification_settings"]["flags"].as_u64().unwrap_or(0));
+                    settings
+                },
                 collapsed: Collapsed::from_ready(&data["user_guild_settings"]),
                 settings: {
                     // The protobuf is what the official client reads, so it
@@ -1241,6 +1248,9 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
             };
             Event::SettingsUpdate { patch, replace: data["partial"].as_bool() != Some(true), proto: Some(proto) }
         }
+        // The declarative settings proto in it isn't read: nothing here
+        // applies the notification categories it holds.
+        "NOTIFICATION_SETTINGS_UPDATE" => Event::NotificationFlagsUpdate(data["flags"].as_u64().unwrap_or(0)),
         "USER_GUILD_SETTINGS_UPDATE" => match GuildSettings::deserialize(&data) {
             Ok(settings) => Event::NotificationSettingsUpdate(settings),
             Err(e) => return eprintln!("gateway: bad USER_GUILD_SETTINGS_UPDATE: {e}"),
@@ -2024,6 +2034,24 @@ mod tests {
         dispatch(&state, "CHANNEL_UPDATE", json!({"id": "9", "type": 0, "guild_id": "1", "rate_limit_per_user": 30}));
         let Ok(Event::GuildChannelUpdate { guild_id, channel }) = state.try_recv() else { panic!("no channel update") };
         assert_eq!((guild_id, channel.rate_limit_per_user), (Snowflake(1), 30));
+    }
+
+    #[test]
+    fn the_accounts_notification_flags_are_reported_and_read_from_ready() {
+        let state = Parser::default();
+        dispatch(&state, "NOTIFICATION_SETTINGS_UPDATE", json!({"flags": 48}));
+        let Ok(Event::NotificationFlagsUpdate(flags)) = state.try_recv() else { panic!("no flags update") };
+        assert_eq!(flags, 48);
+        dispatch(&state, "NOTIFICATION_SETTINGS_UPDATE", json!({"declarative_settings_proto": "AAAA"}));
+        let Ok(Event::NotificationFlagsUpdate(flags)) = state.try_recv() else { panic!("no flags update") };
+        assert_eq!(flags, 0, "no flags is none set");
+
+        state.me.set(None);
+        let ready = json!({"user": {"id": "5", "username": "me"}, "notification_settings": {"flags": 16}});
+        dispatch(&state, "READY", ready);
+        let Ok(Event::Ready(ready)) = state.try_recv() else { panic!("no READY") };
+        assert!(ready.notification_settings.use_new_notifications());
+        assert!(!ready.notification_settings.mention_on_all_messages());
     }
 
     #[test]
