@@ -406,6 +406,21 @@ pub struct Translated {
     pub used: Vec<String>,
 }
 
+/// How many emoji the `:name` list asks for (`s` in 496533): ten where
+/// stickers may be sent too, which share its rows, else fifty.
+pub fn autocomplete_search(stickers_allowed: bool) -> usize {
+    if stickers_allowed { 10 } else { 50 }
+}
+
+/// How the `:name` list divides its rows between the `emoji` and the
+/// `stickers` found, as `queryResults` in 496533 does: at most
+/// `max(4, 8 - emoji)` stickers, then at most `max(6, search - stickers)`
+/// emoji. Returns what to show of each.
+pub fn autocomplete_rows(emoji: usize, stickers: usize, search: usize) -> (usize, usize) {
+    let stickers = stickers.min(4.max(8usize.saturating_sub(emoji)));
+    (emoji.min(6.max(search.saturating_sub(stickers))), stickers)
+}
+
 /// The emoji the open channel's account has: every server's custom ones we
 /// may see, and the Unicode ones.
 pub struct Library {
@@ -767,6 +782,19 @@ mod tests {
 
     fn names(item: &[Item]) -> Vec<&str> {
         item.iter().map(Item::name).collect()
+    }
+
+    #[test]
+    fn the_name_list_shares_its_rows_with_stickers() {
+        assert_eq!((autocomplete_search(true), autocomplete_search(false)), (10, 50));
+        // Ten emoji found, ten stickers: four stickers, and the emoji keep six.
+        assert_eq!(autocomplete_rows(10, 10, 10), (6, 4));
+        // Two emoji leave six rows of eight for stickers.
+        assert_eq!(autocomplete_rows(2, 10, 10), (2, 6));
+        assert_eq!(autocomplete_rows(0, 3, 10), (0, 3));
+        assert_eq!(autocomplete_rows(8, 2, 10), (8, 2));
+        // Without stickers nothing is taken from the emoji.
+        assert_eq!(autocomplete_rows(50, 0, 50), (50, 0));
     }
 
     #[test]

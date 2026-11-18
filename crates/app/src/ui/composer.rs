@@ -113,6 +113,9 @@ impl LengthIndicator {
     }
 }
 
+/// The size a sticker of the `:name` list is shown at (`size: 40` in 496533).
+const STICKER_SIZE: i32 = 40;
+
 /// What accepting a row of the autocomplete popup writes.
 pub(super) enum Completion {
     Mention(u64, String),
@@ -135,6 +138,9 @@ pub(super) enum Completion {
     Here,
     /// A line that can't be picked: loading, a failure, nothing found.
     Status(String),
+    /// A sticker the `:name` list offers: picking it sends it (or holds it
+    /// above the box) and takes the `:name` out of the text.
+    Sticker(Box<discord::stickers::Entry>),
 }
 
 impl Completion {
@@ -159,6 +165,7 @@ impl Completion {
             Completion::Option { display_name, .. } => display_name.clone(),
             Completion::Choice(name) | Completion::Status(name) => name.clone(),
             Completion::Channel(_, name) => format!("#{name}"),
+            Completion::Sticker(entry) => entry.listed.sticker.name.clone(),
             Completion::Everyone => "@everyone".to_owned(),
             Completion::Here => "@here".to_owned(),
         }
@@ -185,6 +192,22 @@ impl Completion {
             Completion::Emoji(item) => {
                 let line = gtk::Box::builder().spacing(8).build();
                 line.append(&super::emoji::glyph(item, images));
+                line.append(&gtk::Label::builder().label(self.label()).xalign(0.0).build());
+                line.upcast()
+            }
+            Completion::Sticker(entry) => {
+                let line = gtk::Box::builder().spacing(8).build();
+                let picture = gtk::Picture::builder()
+                    .width_request(STICKER_SIZE)
+                    .height_request(STICKER_SIZE)
+                    .content_fit(gtk::ContentFit::Contain)
+                    .build();
+                let size = crate::images::request_size((STICKER_SIZE, STICKER_SIZE), images.scale(), None).0;
+                // A Lottie sticker, which Neucord can't draw yet (#46), keeps the space.
+                if let Some(url) = entry.listed.sticker.still(size) {
+                    images.set(&picture, &url);
+                }
+                line.append(&picture);
                 line.append(&gtk::Label::builder().label(self.label()).xalign(0.0).build());
                 line.upcast()
             }
@@ -774,18 +797,14 @@ impl App {
             let headers = header.map(|h| vec![(0, h)]).unwrap_or_default();
             return self.show_listed(MentionCtx { start, candidates, headers, ..MentionCtx::default() }, Some(0));
         }
-        let found = emoji_token(&buffer).map(|(start, query)| (start, self.emoji_candidates(&query)));
+        let found = emoji_token(&buffer).map(|(start, query)| (start, self.name_candidates(&query)));
         match found {
-            Some((start, candidates)) => self.show_completions(start, candidates),
+            Some((start, (candidates, headers))) => {
+                self.show_listed(MentionCtx { start, candidates, headers, ..MentionCtx::default() }, Some(0))
+            }
             None if self.bot_command_popup(true) => {}
             None => self.mention_popover.popdown(),
         }
-    }
-
-    /// Show `candidates` in the popup, for the token starting at `start`,
-    /// the first selected.
-    pub(super) fn show_completions(self: &Rc<Self>, start: i32, candidates: Vec<Completion>) {
-        self.show_listed(MentionCtx { start, candidates, ..MentionCtx::default() }, Some(0));
     }
 
     /// Show what `ctx` lists in the popup, under its headers, `selected`
@@ -884,6 +903,55 @@ impl App {
         found.unlocked.into_iter().map(|item| Completion::Emoji(super::emoji::toned(item, tone))).collect()
     }
 
+    /// What the `:name` list offers in the message box (`queryResults` in
+    /// 496533): emoji, then the stickers we may send that match, which share
+    /// its rows, each under its header.
+    pub(super) fn name_candidates(
+        self: &Rc<Self>,
+        query: &str,
+    ) -> (Vec<Completion>, Vec<(usize, discord::command_line::Header)>) {
+        use discord::command_line::Header;
+        let Some(channel) = self.account.state.borrow().channel else { return Default::default() };
+        let stickers_allowed = self.sticker_channel() == Some(channel);
+        self.load_frecency(|| {});
+        let search = discord::emoji::autocomplete_search(stickers_allowed);
+        let tone = self.account.state.borrow().settings.skin_tone;
+        let scores = self.emoji_scores(Intention::Chat);
+        let mut found = self.emoji_library(channel).search(query, search, &scores).unlocked;
+        // A leading `-` asks for that name exactly.
+        if query.starts_with('-') {
+            found.retain(|item| item.name() == query);
+        }
+        let mut stickers = Vec::new();
+        if stickers_allowed {
+            // The standard packs are asked for the first time stickers are searched (`YB`).
+            self.fetch_sticker_packs(|| {});
+            let hits = self.sticker_search_library(channel).search(query, &self.sticker_scores()).unlocked;
+            stickers = hits
+                .into_iter()
+                .filter(|entry| !query.starts_with('-') || entry.listed.sticker.name == query)
+                .collect();
+        }
+        let (emoji_rows, sticker_rows) = discord::emoji::autocomplete_rows(found.len(), stickers.len(), search);
+        let mut candidates: Vec<Completion> =
+            found.into_iter().take(emoji_rows).map(|item| Completion::Emoji(super::emoji::toned(item, tone))).collect();
+        let mut headers = Vec::new();
+        let words = |plain: &'static str, matching: &'static str, matched: Option<String>| Header {
+            words: if matched.is_some() { matching } else { plain }.into(),
+            query: matched,
+        };
+        let typed = (!query.is_empty()).then(|| query.to_owned());
+        if !candidates.is_empty() {
+            headers.push((0, words("Emoji", "Emoji matching", typed.as_ref().map(|q| format!(":{q}")))));
+        }
+        if sticker_rows > 0 {
+            headers.push((candidates.len(), words("Sticker", "Stickers matching", typed)));
+            candidates
+                .extend(stickers.into_iter().take(sticker_rows).map(|entry| Completion::Sticker(Box::new(entry))));
+        }
+        (candidates, headers)
+    }
+
     /// Put `item` in the message box at the cursor, as the picker chooses it.
     pub(super) fn insert_emoji(&self, item: &Emoji) {
         self.composer.buffer().insert_at_cursor(&item.text());
@@ -946,10 +1014,11 @@ impl App {
         if let Some(id) = command {
             return self.activate_command(&id, discord::commands::RunFrom::CHAT);
         }
-        let (start, text) = {
+        let (start, text, sticker) = {
             let ctx = self.mention.borrow();
             match ctx.candidates.get(index.max(0) as usize) {
-                Some(candidate) => (ctx.start, candidate.text()),
+                Some(Completion::Sticker(entry)) => (ctx.start, String::new(), Some((**entry).clone())),
+                Some(candidate) => (ctx.start, candidate.text(), None),
                 None => return,
             }
         };
@@ -962,6 +1031,10 @@ impl App {
         buffer.insert(&mut at, &text);
         self.mention_popover.popdown();
         self.composer.grab_focus();
+        // The `:name` is gone from the text, and the sticker goes as the picker's does.
+        if let (Some(entry), Some(channel)) = (sticker, self.sticker_channel()) {
+            self.pick_sticker(channel, &entry);
+        }
     }
 
     /// The caret's rectangle in composer coordinates, for popover anchoring.
