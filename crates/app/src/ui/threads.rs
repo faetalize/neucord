@@ -532,7 +532,6 @@ impl App {
         Some(button.upcast())
     }
 
-    /// Join `thread`, as its menu does. What joined comes back as events.
     /// What `rule` makes of `thread` for us: none without an account or a server.
     fn thread_rule<T>(
         &self,
@@ -646,6 +645,7 @@ impl App {
         });
     }
 
+    /// Join `thread`, as its menu does. What joined comes back as events.
     fn join_thread(self: &Rc<Self>, thread: Snowflake) {
         self.change_membership(thread, true);
     }
