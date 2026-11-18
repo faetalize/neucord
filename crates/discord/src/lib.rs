@@ -31,6 +31,7 @@ pub mod emoticons;
 mod endpoints;
 pub mod experiments;
 pub mod forum;
+pub mod forward;
 pub mod frecency;
 pub mod gates;
 pub mod gateway;

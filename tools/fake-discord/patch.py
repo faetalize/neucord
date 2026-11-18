@@ -1276,3 +1276,95 @@ impl App {
 """)
 edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(c) if c == "thread-settings" || c == "thread-settings-save" => self.e2e_thread_settings(c, rest),
             Some("quit") => {''')
+
+# Forward: the picker, driven as hands would. `forward-menu <text> <png>` opens the menu of the message with <text>
+# and shoots it; `forward-open <text>` opens the picker on it (`forward-open <text> @<attachment id>` for one file);
+# `forward-viewer <text>` opens the media viewer on its first picture and `forward-viewer-click` presses its Forward;
+# `forward-rows`, `-state`, `-search <text>`, `-pick <n>`, `-comment <text>` and `-send` work the picker.
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("forward-menu") => {
+                let (needle, path) = (parts.next().unwrap_or_default().replace('_', " "), parts.next().unwrap_or_default().to_owned());
+                let Some((row, message)) = self.e2e_message(&needle) else { return eprintln!("e2e: no message {needle}") };
+                self.message_menu(&row.parts().row, message, At::Point(10.0, 10.0), Clicked::default());
+                let anchor = row.parts().row.clone().upcast::<gtk::Widget>();
+                glib::timeout_add_local_once(Duration::from_millis(600), move || match popover_above(&anchor) {
+                    Some(popover) => shot(&popover, &path),
+                    None => eprintln!("e2e: no popover on the row"),
+                });
+            }
+            Some(c) if c.starts_with("forward-") => {
+                let rest: Vec<&str> = parts.collect();
+                self.e2e_forward(c, &rest.join(" "));
+            }
+            Some("quit") => {''')
+open(f"{root}/crates/app/src/ui/forward.rs", "a").write(r"""
+thread_local! {
+    static E2E_PICKER: RefCell<Option<Rc<Picker>>> = const { RefCell::new(None) };
+}
+
+impl App {
+    pub(super) fn e2e_message(&self, needle: &str) -> Option<(super::message_row::MessageRow, Message)> {
+        let rows: Vec<_> = self.rows.borrow().iter().filter_map(|r| r.upgrade()).collect();
+        for row in rows {
+            let Some(item) = row.parts().item.upgrade() else { continue };
+            let Some(message) = item.item().and_downcast::<glib::BoxedAnyObject>() else { continue };
+            let message = message.borrow::<Message>().clone();
+            if message.content.contains(needle) {
+                return Some((row, message));
+            }
+        }
+        None
+    }
+
+    pub(super) fn e2e_forward(self: &Rc<Self>, command: &str, rest: &str) {
+        let picker = E2E_PICKER.with(|p| p.borrow().clone());
+        match (command, picker) {
+            ("forward-open", _) => {
+                let (needle, only) = match rest.split_once(" @") {
+                    Some((needle, id)) => (needle, id.parse().ok().map(|id| Only { attachments: Some(vec![Snowflake(id)]), embeds: None })),
+                    None => (rest, None),
+                };
+                let Some((_, message)) = self.e2e_message(needle) else { return eprintln!("e2e: no message {needle}") };
+                self.open_forward(message, only.unwrap_or_default(), Vec::new(), None);
+            }
+            ("forward-viewer", _) => {
+                let Some((_, message)) = self.e2e_message(rest) else { return eprintln!("e2e: no message {rest}") };
+                let settings = self.account.state.borrow().settings.media;
+                let items = discord::media::items(&message, &settings, false);
+                let held = discord::embed::visible(&message, &settings, false).len() == message.embeds.len();
+                super::viewer::MediaCx::new(self, &message, items, held).open(0, 0.0);
+            }
+            ("forward-viewer-click", _) => self.viewer.e2e_forward(),
+            ("forward-rows", Some(p)) => {
+                let rows: Vec<String> = p
+                    .shown
+                    .borrow()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, h)| format!("{} {:?} {} sensitive={}", h.comparator, h.kind, h.id.0, p.list.row_at_index(i as i32).is_some_and(|r| r.is_sensitive())))
+                    .collect();
+                eprintln!("e2e: forward rows {rows:?}");
+            }
+            ("forward-state", Some(p)) => eprintln!(
+                "e2e: forward selected={:?} send={:?} sensitive={} subtitle={:?} slowmode={:?}/{}",
+                p.selected.borrow().iter().map(|d| match d { Destination::User(i) | Destination::Channel(i) => i.0 }).collect::<Vec<_>>(),
+                p.send.label(), p.send.is_sensitive(), p.subtitle.label(), p.slowmode.label(), p.slowmode.is_visible(),
+            ),
+            ("forward-search", Some(p)) => p.entry.set_text(rest),
+            ("forward-pick", Some(p)) => p.toggle(self, rest.parse().unwrap_or(0)),
+            ("forward-comment", Some(p)) => p.comment.set_text(rest),
+            ("forward-send", Some(p)) => p.send.emit_clicked(),
+            (other, _) => eprintln!("e2e: no forward command {other} (or no picker)"),
+        }
+    }
+}
+""")
+edit("crates/app/src/ui/forward.rs", "        picker.dialog.present(Some(&self.window));\n        picker.refresh(self);\n", "        picker.dialog.present(Some(&self.window));\n        picker.refresh(self);\n        E2E_PICKER.with(|p| *p.borrow_mut() = Some(picker));\n")
+open(f"{root}/crates/app/src/ui/viewer.rs", "a").write(r"""
+impl Viewer {
+    pub(super) fn e2e_forward(&self) {
+        eprintln!("e2e: viewer forward visible={}", self.0.forward.is_visible());
+        self.0.forward.emit_clicked();
+    }
+}
+""")
+edit("crates/app/src/ui/viewer.rs", "    pub(super) fn open(&self, index: usize, start: f64) {", "    pub(super) fn open(&self, index: usize, start: f64) {")

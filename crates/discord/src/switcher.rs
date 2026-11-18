@@ -196,8 +196,18 @@ impl Sources<'_> {
         self.guilds.iter().find_map(|g| g.find(id).map(|c| (Some(g), c)))
     }
 
+    /// A person we know of (a friend, or someone in a DM) as a result.
+    pub fn user_hit(&self, id: Snowflake) -> Option<Hit> {
+        let user = self
+            .relationships
+            .get(id)
+            .map(|r| &r.user)
+            .or_else(|| self.private_channels.iter().flat_map(|c| &c.recipients).find(|u| u.id == id))?;
+        Some(Hit { kind: Kind::User, id, score: 0.0, comparator: self.user_name(user), sortable: None })
+    }
+
     /// A channel as a result (`$` in 174768): a DM is its person.
-    fn as_hit(&self, id: Snowflake) -> Option<Hit> {
+    pub fn as_hit(&self, id: Snowflake) -> Option<Hit> {
         let (_, channel) = self.find(id)?;
         let comparator = self.channel_name(channel);
         let (kind, id) = match channel.kind {

@@ -21,6 +21,7 @@ mod emoji_packs;
 mod favorites;
 mod forum;
 mod forum_post;
+mod forward;
 mod friends;
 mod gifs;
 mod identity;
