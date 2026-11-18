@@ -120,7 +120,7 @@ impl App {
         }
     }
 
-    fn show_typing(&self, names: &[String]) {
+    fn show_typing(self: &Rc<Self>, names: &[String]) {
         let markup = |narrow| -> String {
             sentence(names, narrow)
                 .iter()
@@ -137,5 +137,29 @@ impl App {
         if room > 0 && line.measure(gtk::Orientation::Horizontal, -1).1 > room {
             line.set_markup(&markup(true));
         }
+        self.typing_width.set(self.composer_box.width());
+        self.watch_typing_width(!names.is_empty());
+    }
+
+    /// Fit the line again when the room for it changes (a narrower window
+    /// or a sidebar opening, and back), for as long as it shows anyone. A
+    /// tick keeps the frame clock running, so it ends with the line, and the
+    /// flag it clears is what stops a second one starting.
+    fn watch_typing_width(self: &Rc<Self>, shown: bool) {
+        if !shown || self.typing_watching.replace(true) {
+            return;
+        }
+        let this = Rc::downgrade(self);
+        self.typing_line.add_tick_callback(move |line, _| {
+            let Some(this) = this.upgrade() else { return glib::ControlFlow::Break };
+            if line.text().is_empty() {
+                this.typing_watching.set(false);
+                return glib::ControlFlow::Break;
+            }
+            if this.composer_box.width() != this.typing_width.get() {
+                this.refresh_typing();
+            }
+            glib::ControlFlow::Continue
+        });
     }
 }
