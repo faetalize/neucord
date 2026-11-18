@@ -10,7 +10,7 @@ apps' answers to commands others ran. $FAKE_NSFW sets what decides
 age-restricted commands, e.g. "allowed=1,dms=1,status=3,gated=0,level=0,owner=0"
 (those are the defaults but dms, which is 0).
 """
-import base64, json, os, re, socket, struct, sys, threading, time, urllib.parse, zlib
+import base64, json, os, re, socket, struct, subprocess, sys, tempfile, threading, time, urllib.parse, zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = 8099
@@ -327,12 +327,36 @@ def messages(channel):
             out += answers(out)
         if os.environ.get("FAKE_POLL"):
             out.append(poll_message(60))
+        if os.environ.get("FAKE_VOICE"):
+            out.append(voice_message(61))
     return list(reversed(out + POSTED.get(channel, [])))
 
 
 # FAKE_POLL: a poll that is over, so its counts show. Its first answer has 130 voters (more than a page of 100),
 # the second one, the third none.
 POLL_VOTERS = {1: 130, 2: 1, 3: 0}
+
+
+# FAKE_VOICE: a voice message of 8 s of silence in #general, and its Ogg Opus file, made by GStreamer.
+VOICE_SECS = 8
+
+
+def voice_file():
+    path = os.path.join(tempfile.gettempdir(), "fake-discord-voice-%d.ogg" % VOICE_SECS)
+    if not os.path.exists(path):
+        buffers = int(VOICE_SECS * 44100 / 1024)
+        subprocess.run(["gst-launch-1.0", "-q", "audiotestsrc", "num-buffers=%d" % buffers, "wave=silence", "!",
+                        "audioconvert", "!", "audioresample", "!", "opusenc", "!", "oggmux", "!", "filesink",
+                        "location=" + path], check=True)
+    return open(path, "rb").read()
+
+
+def voice_message(n):
+    url = f"http://127.0.0.1:{PORT}/attachments/1/{900 + n}/voice-message.ogg?ex=ffffffff&is=1&hm=2&"
+    waveform = base64.b64encode(bytes(int(127 + 120 * ((k * 7) % 11 - 5) / 5) for k in range(256))).decode()
+    file = {"id": str(900 + n), "filename": "voice-message.ogg", "size": 9000, "content_type": "audio/ogg",
+            "duration_secs": float(VOICE_SECS), "waveform": waveform, "url": url, "proxy_url": url}
+    return {**message(n, ALICE, "", (file,)), "flags": 1 << 13}
 
 
 def poll_message(n):
@@ -953,6 +977,8 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/attachments/"):
             query = dict(p.split("=", 1) for p in path.split("?", 1)[-1].split("&") if "=" in p)
             log(kind="image", path=path, width=query.get("width"), height=query.get("height"), at=time.time())
+            if path.split("?")[0].endswith(".ogg"):
+                return self.send(200, voice_file(), "audio/ogg")
             if IMAGE_FAIL:
                 return self.send(404, b"")
             body = png(int(query.get("width", 1200)) // 4, int(query.get("height", 800)) // 4)

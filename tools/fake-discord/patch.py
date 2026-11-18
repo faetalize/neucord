@@ -837,3 +837,39 @@ edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''           
                 eprintln!("e2e: box {}", text.chars().count());
             }
             Some("quit") => {''')
+
+# A voice message in a channel (run with FAKE_VOICE=1): `vmsg state` prints its player,
+# `vmsg play|pause` press its button, `vmsg scrub <0..1>` presses the waveform there and lets go.
+edit("crates/app/src/ui/attachments.rs", "    wave.set_draw_func({\n        let voice = voice.clone();",
+     "    E2E_VOICES.with(|v| v.borrow_mut().push(voice.clone()));\n    wave.set_draw_func({\n        let voice = voice.clone();")
+open(f"{root}/crates/app/src/ui/attachments.rs", "a").write(r"""
+thread_local! {
+    static E2E_VOICES: RefCell<Vec<Rc<VoiceMessage>>> = RefCell::default();
+}
+
+pub(super) fn e2e_voice_message(what: &str, arg: Option<&str>) {
+    let Some(voice) = E2E_VOICES.with(|v| v.borrow().last().cloned()) else { return eprintln!("e2e: no voice message") };
+    let number = arg.and_then(|a| a.parse::<f64>().ok()).unwrap_or(0.0);
+    match what {
+        "state" => eprintln!(
+            "e2e: vmsg {:?} stream playing={} time={:?}",
+            voice.player.borrow(),
+            voice.stream.borrow().as_ref().is_some_and(|s| s.is_playing()),
+            voice.time.upgrade().map(|t| t.label())
+        ),
+        "play" | "pause" => {
+            if voice.player.borrow().is_playing() == (what == "pause") {
+                voice.toggle();
+            }
+        }
+        "scrub" => {
+            let width = voice.wave.upgrade().map_or(0.0, |w| f64::from(w.width()));
+            voice.scrub(number * width, Scrub::Begin);
+            voice.scrub(number * width, Scrub::End);
+        }
+        _ => {}
+    }
+}
+""")
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("vmsg") => super::attachments::e2e_voice_message(parts.next().unwrap_or_default(), parts.next()),
+            Some("quit") => {''')
