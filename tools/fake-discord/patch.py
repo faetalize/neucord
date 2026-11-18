@@ -17,7 +17,7 @@ edit("crates/discord/src/identity.rs",
 edit("crates/discord/src/cdn.rs", 'host == "media.discordapp.net" ||', 'host == "127.0.0.1:8099" || host == "media.discordapp.net" ||')
 edit("crates/discord/src/cdn.rs", 'let host = url.strip_prefix("https://").and_then(|rest| rest.split([\'/\', \'?\']).next()).unwrap_or_default();', 'let host = url.strip_prefix("http://").and_then(|rest| rest.split([\'/\', \'?\']).next()).unwrap_or_default();')
 edit("crates/app/src/ui/uploads.rs", "    attach: gtk::Button,", "    pub(super) attach: gtk::Button,")
-edit("crates/app/src/ui/create_thread.rs", "    fn pick_form_sticker(", "    pub(super) fn pick_form_sticker(")
+edit("crates/app/src/ui/thread_completion.rs", "    popover: gtk::Popover,\n    list: gtk::ListBox,\n    candidates:", "    pub(super) popover: gtk::Popover,\n    pub(super) list: gtk::ListBox,\n    pub(super) candidates:")
 edit("crates/app/src/ui/create_thread.rs", "    parent: Snowflake,\n    dialog: adw::Dialog,", "    pub(super) parent: Snowflake,\n    pub(super) dialog: adw::Dialog,")
 edit("crates/app/src/ui/members.rs", "\n    scroller: gtk::ScrolledWindow,", "\n    pub(super) scroller: gtk::ScrolledWindow,")
 edit("crates/app/src/ui/mod.rs", "\n    members: members::Pane,", "\n    pub(super) members: members::Pane,")
@@ -494,6 +494,34 @@ impl App {
                 };
                 self.fetch_sticker_packs(pick.clone());
                 pick();
+            }
+            // Typed at the caret of the open thread form's message, which opens its `@` and `:` lists; the list
+            // as it is now (`*` on the selected row), a row accepted (`thread-pick <n>`), and a key in the message.
+            Some("thread-type") => {
+                let form = self.thread_form.borrow().clone();
+                match form {
+                    Some(form) => form.message.buffer().insert_at_cursor(rest),
+                    None => eprintln!("e2e: no thread form"),
+                }
+            }
+            Some("thread-list") => {
+                let form = self.thread_form.borrow().clone();
+                let Some(form) = form else { return eprintln!("e2e: no thread form") };
+                let popup = &form.completion;
+                let rows: Vec<String> = popup.candidates.borrow().iter().enumerate().map(|(i, c)| {
+                    let selected = popup.list.selected_row().is_some_and(|r| r.index() == i as i32);
+                    format!("{}{}", if selected { "*" } else { "" }, c.label())
+                }).collect();
+                let text = { let b = form.message.buffer(); b.text(&b.start_iter(), &b.end_iter(), false) };
+                eprintln!("e2e: thread list visible={} rows={:?} text={:?}", popup.popover.is_visible(), rows, text);
+            }
+            Some("thread-pick") => {
+                let form = self.thread_form.borrow().clone();
+                let row = form.and_then(|f| f.completion.list.row_at_index(rest.trim().parse().unwrap_or(0)));
+                match row {
+                    Some(row) => drop(row.activate()),
+                    None => eprintln!("e2e: no row"),
+                }
             }
             Some("thread-form-state") => {
                 let form = self.thread_form.borrow().clone();

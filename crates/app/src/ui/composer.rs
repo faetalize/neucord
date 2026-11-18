@@ -146,7 +146,7 @@ pub(super) enum Completion {
 
 impl Completion {
     /// The text that replaces the token, with the space that follows it.
-    fn text(&self) -> String {
+    pub(super) fn text(&self) -> String {
         match self {
             Completion::Mention(id, _) => format!("<@{id}> "),
             Completion::Role(id, _) => format!("<@&{id}> "),
@@ -172,7 +172,7 @@ impl Completion {
         }
     }
 
-    fn row(&self, images: &crate::images::Images) -> gtk::Widget {
+    pub(super) fn row(&self, images: &crate::images::Images) -> gtk::Widget {
         let described = |name: &str, description: &str| {
             let line = gtk::Box::builder().spacing(12).build();
             line.append(&gtk::Label::builder().label(name).xalign(0.0).build());

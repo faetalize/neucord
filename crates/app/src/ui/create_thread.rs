@@ -68,7 +68,7 @@ pub(super) struct Form {
     name: gtk::Entry,
     name_error: gtk::Label,
     private: adw::SwitchRow,
-    message: gtk::TextView,
+    pub(super) message: gtk::TextView,
     message_error: gtk::Label,
     /// The files' rows, which `uploads.rs` fills.
     files: gtk::Box,
@@ -77,6 +77,8 @@ pub(super) struct Form {
     /// The sticker waiting to go with the message, and where one is picked.
     strip: super::stickers::Strip,
     sticker_button: Option<gtk::Button>,
+    /// The `@` and `:` lists of the message.
+    pub(super) completion: super::thread_completion::Popup,
     /// What Create does, which a sticker picked from an empty form does too.
     submit: RefCell<Option<Rc<dyn Fn()>>>,
     /// The wait slowmode asks before another thread, which the client shows
@@ -147,6 +149,7 @@ impl App {
         self.guard_thread_form(&form);
         self.connect_thread_files(&form);
         self.connect_thread_stickers(&form);
+        self.connect_thread_completion(&form);
         if from.is_none() {
             let buffer = self.composer.buffer();
             let typed = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
@@ -369,6 +372,7 @@ impl App {
             attach,
             strip,
             sticker_button,
+            completion: super::thread_completion::Popup::new(),
             submit: RefCell::default(),
             slowmode,
             create,
@@ -460,6 +464,7 @@ impl App {
         if self.thread_form.borrow().as_ref().is_some_and(|open| Rc::ptr_eq(open, form)) {
             self.thread_form.replace(None);
         }
+        form.completion.unparent();
         self.drop_post_files(Draft::FirstThreadMessage(form.parent));
         self.waiting.set(Draft::FirstThreadMessage(form.parent), None);
     }
@@ -515,7 +520,7 @@ impl App {
     /// it, Create at once with the sticker alone, as a box sends one; else
     /// it waits for the message. Create turning it down (no name, say) keeps
     /// nothing, as the client does.
-    fn pick_form_sticker(self: &Rc<Self>, form: &Rc<Form>, entry: &discord::stickers::Entry) {
+    pub(super) fn pick_form_sticker(self: &Rc<Self>, form: &Rc<Form>, entry: &discord::stickers::Entry) {
         let draft = Draft::FirstThreadMessage(form.parent);
         let alone =
             form.text().trim().is_empty() && self.drafts.of(draft).is_empty() && self.waiting.of(draft).is_none();
