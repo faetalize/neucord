@@ -80,7 +80,10 @@ what arrived, IDENTIFY's key order and properties first.
   recording as the open channel's draft, there being no microphone),
   `voice-play`, `voice-scrub <0..1>` and `voice-state` (the draft player and
   its clock), `vmsg state|play|pause|scrub <0..1>` (the player of a voice
-  message in the channel, with `FAKE_VOICE=1`: 8 s of silence in #general), `quit`. It edits the copy by exact strings
+  message in the channel, with `FAKE_VOICE=1`: 8 s of silence in #general),
+  `menu-key row|rail <n> [png]` (gives the nth sidebar row or rail
+  button the focus, runs its Menu / Shift+F10 shortcut, says whether a menu
+  opened and shoots it), `quit`. It edits the copy by exact strings
   and stops on the first that no longer matches: when the code it patches
   moves, update the string. The module it adds is only built here, so a
   change to what it calls needs a run to show it still builds.
@@ -118,6 +121,9 @@ what arrived, IDENTIFY's key order and properties first.
   `poll-votes` (with `FAKE_POLL=1`, a finished poll in #general whose first
   answer has 130 voters) opens the list of who voted (`poll-votes <message>
   <answer>`) and asks for the first page of voters (`limit=100&type=2`);
+  `thread-previews` (with `FAKE_THREADS=1`, two active threads of #general
+  synced with THREAD_LIST_SYNC, one with its newest message) opens the thread
+  browser, whose rows show that message or "No recent messages";
   `heartbeat` waits for five op 40s, the interval's among them;
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).

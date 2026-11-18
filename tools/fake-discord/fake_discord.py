@@ -224,6 +224,19 @@ def guild():
          "permission_overwrites": [], "flags": 0},
     ]
     threads = []
+    if os.environ.get("FAKE_THREADS"):
+        # Two active threads of #general (#323): one with its newest message, one without.
+        now = time.strftime("%Y-%m-%dT%H:%M:%S.000000+00:00", time.gmtime())
+        recent = {"id": snowflake_now(), "channel_id": "7201", "author": ALICE, "content": "see you there at **noon**",
+                  "timestamp": now, "edited_timestamp": None, "tts": False, "mention_everyone": False, "mentions": [],
+                  "mention_roles": [], "attachments": [], "embeds": [], "pinned": False, "type": 0, "flags": 0}
+        for tid, name, last in [("7201", "lunch plans", recent), ("7202", "quiet corner", None)]:
+            threads.append({"id": tid, "type": 11, "guild_id": "500", "parent_id": "600", "name": name,
+                            "owner_id": "301", "last_message_id": last["id"] if last else None, "message_count": 1,
+                            "member_count": 1, "rate_limit_per_user": 0, "flags": 0,
+                            "thread_metadata": {"archived": False, "locked": False, "archive_timestamp": now,
+                                                "auto_archive_duration": 4320, "create_timestamp": now},
+                            **({"most_recent_message": last} if last else {})})
     if os.environ.get("FAKE_FORUM"):
         # A forum (#605) with two tags and three active posts, as THREAD_LIST_SYNC and the guild's threads have them.
         channels.append({"id": "605", "type": 15, "name": "ideas", "position": 5, "parent_id": None, "flags": 0,
@@ -1073,6 +1086,12 @@ class Handler(BaseHTTPRequestHandler):
                     log(kind="identify", raw=text, at=time.time())
                     send(0, ready(), "READY")
                     send(0, supplemental(), "READY_SUPPLEMENTAL")
+                    threads = guild()["threads"]
+                    if threads:
+                        # The active threads, with the newest message of those that have one, as Discord syncs them.
+                        recent = [t.pop("most_recent_message") for t in threads if "most_recent_message" in t]
+                        send(0, {"guild_id": "500", "threads": threads, "members": [], "most_recent_messages": recent},
+                             "THREAD_LIST_SYNC")
                     SESSION[0] = send
                     if IDENTIFIES[0] == 1 and os.environ.get("FAKE_REIDENTIFY"):
                         threading.Timer(float(os.environ["FAKE_REIDENTIFY"]), lambda: send(9, False)).start()
