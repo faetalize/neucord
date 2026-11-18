@@ -967,7 +967,6 @@ impl App {
         upload.task.replace(Some(task));
     }
 
-    /// Take a file out of the draft: its upload stops, or is deleted.
     /// Take every file out of the channel's draft, as Escape in the message
     /// box does (`clearAll`, 699344).
     pub(super) fn clear_uploads(self: &Rc<Self>, channel: Snowflake) {
@@ -977,6 +976,7 @@ impl App {
         }
     }
 
+    /// Take a file out of the draft: its upload stops, or is deleted.
     fn remove_upload(self: &Rc<Self>, channel: Snowflake, upload: &Rc<Upload>) {
         upload.cancel(self.account.state.borrow().rest.clone());
         if let Some(files) = self.drafts.files.borrow_mut().get_mut(&channel) {
