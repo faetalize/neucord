@@ -206,15 +206,28 @@ pub(super) const SEARCH_RESULT: Table<MessageTarget> = &[
 /// A thread's menu, from its row in the sidebar or the browser and the box
 /// under the message that started it: what Neucord has of the client's
 /// (949488), and from a forum post's card. Mark As Read comes first, Join
-/// Thread and Edit Tags are in the group of the thread's actions, the mute
-/// and Notification Settings follow it, Pin Post and Unpin Post are in the
-/// moderators', Leave Thread after. Edit Tags and the pins show on forum
+/// Thread, Close or Open, Lock or Unlock, Edit Tags and Copy Link are in the
+/// group of the thread's actions, the mute and Notification Settings follow
+/// it, Pin Post, Unpin Post and Delete are in the moderators', Leave Thread
+/// after, and Copy Thread ID last. Edit Tags and the pins show on forum
 /// posts only, and the mute and settings greyed on a thread we haven't
 /// joined. Remove From Thread is on a thread's members (202643), whose list
 /// Neucord doesn't show yet.
 pub(super) const THREAD: Table<threads::ThreadTarget> = &[
     &[notify_menus::MARK_THREAD_READ, notify_menus::MARK_THREAD_UNREAD],
-    &[threads::JOIN_THREAD, forum::EDIT_TAGS],
+    &[
+        threads::JOIN_THREAD,
+        threads::CLOSE_THREAD,
+        threads::CLOSE_POST,
+        threads::OPEN_THREAD,
+        threads::OPEN_POST,
+        threads::LOCK_THREAD,
+        threads::LOCK_POST,
+        threads::UNLOCK_THREAD,
+        threads::UNLOCK_POST,
+        forum::EDIT_TAGS,
+        threads::COPY_THREAD_LINK,
+    ],
     &[
         notify_menus::MUTE_THREAD,
         notify_menus::UNMUTE_THREAD,
@@ -225,8 +238,9 @@ pub(super) const THREAD: Table<threads::ThreadTarget> = &[
         notify_menus::THREAD_NOTIFICATIONS,
         notify_menus::THREAD_NOTIFICATIONS_OFF,
     ],
-    &[forum::PIN_POST, forum::UNPIN_POST],
+    &[forum::PIN_POST, forum::UNPIN_POST, threads::DELETE_THREAD, threads::DELETE_POST, threads::DELETE_MESSAGE],
     &[threads::LEAVE_THREAD],
+    &[threads::COPY_THREAD_ID],
 ];
 
 /// A forum's tag, on its filter (`forum-tag`, 960015): Copy Tag ID, in
@@ -799,6 +813,29 @@ mod tests {
     fn a_search_result_offers_mark_unread_before_its_link_as_the_message_menu_does() {
         let names = names(SEARCH_RESULT);
         assert_eq!(names[0][..2], ["mark-unread", "copy-message-link"]);
+    }
+
+    #[test]
+    fn a_threads_menu_closes_locks_and_deletes_where_the_client_puts_them() {
+        let names = names(THREAD);
+        assert_eq!(
+            names[1],
+            [
+                "join-thread",
+                "close-thread",
+                "close-post",
+                "open-thread",
+                "open-post",
+                "lock-thread",
+                "lock-post",
+                "unlock-thread",
+                "unlock-post",
+                "edit-tags",
+                "copy-thread-link"
+            ]
+        );
+        assert_eq!(names[3][2..], ["delete-thread", "delete-post", "delete-post-message"], "after the pins");
+        assert_eq!(names.last().unwrap(), &["copy-thread-id"]);
     }
 
     #[test]

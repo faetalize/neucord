@@ -688,6 +688,83 @@ pub fn can_pin_post(guild: &Guild, post: &Channel, me: &Account, now: i64) -> bo
     forum_of(guild, post).is_some() && in_channel(guild, post, me, now).contains(Permissions::MANAGE_THREADS)
 }
 
+/// A moderator report: a thread or post whose own flags, or its forum's,
+/// say so (`V` in 715757, `isModeratorReportChannel` in 95701).
+fn is_report(guild: &Guild, thread: &Channel) -> bool {
+    let forum = thread.parent_id.and_then(|id| guild.channel(id));
+    (thread.flags | forum.map_or(0, |f| f.flags)) & IS_MODERATOR_REPORT_CHANNEL != 0
+}
+
+/// What a thread's menu offers as its close item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Close {
+    Close,
+    Open,
+}
+
+/// Close or Open on `thread` (182061): to reopen an archived one, what
+/// [`can_unarchive`] says; to close an open one, Manage Threads in its
+/// parent, or being its owner while it isn't locked (`NI` in 406704).
+/// Never on a moderator report.
+pub fn thread_close(guild: &Guild, thread: &Channel, me: &Account, now: i64) -> Option<Close> {
+    if !thread.kind.is_thread() || is_report(guild, thread) {
+        return None;
+    }
+    if thread.is_archived() {
+        return can_unarchive(guild, thread, me, now).then_some(Close::Open);
+    }
+    let parent = thread.parent_id.and_then(|id| guild.channel(id))?;
+    let manage = in_channel(guild, parent, me, now).contains(Permissions::MANAGE_THREADS);
+    (manage || (!thread.is_locked() && thread.owner_id == Some(me.id))).then_some(Close::Close)
+}
+
+/// What a thread's menu offers as its lock item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lock {
+    Lock,
+    Unlock,
+}
+
+/// Lock or Unlock on `thread` (707792): Manage Threads on it, and not on a
+/// moderator report.
+pub fn thread_lock(guild: &Guild, thread: &Channel, me: &Account, now: i64) -> Option<Lock> {
+    if !thread.kind.is_thread() || is_report(guild, thread) {
+        return None;
+    }
+    in_channel(guild, thread, me, now)
+        .contains(Permissions::MANAGE_THREADS)
+        .then(|| if thread.is_locked() { Lock::Unlock } else { Lock::Lock })
+}
+
+/// What Delete on a thread's menu deletes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delete {
+    /// A thread.
+    Thread,
+    /// A forum post, whole.
+    Post,
+    /// Only the post's own message, as its author may once others replied.
+    Message,
+}
+
+/// Delete on `thread` (307623): in a plain thread with Manage Threads; in a
+/// forum post with Manage Threads, or as its author while nobody has
+/// replied (the whole post), or once they have, only its first message.
+/// Neucord can't tell that message is gone, so it is taken to be there.
+/// Needs View Channel, and never on a moderator report.
+pub fn thread_delete(guild: &Guild, thread: &Channel, me: &Account, now: i64) -> Option<Delete> {
+    if !thread.kind.is_thread() || is_report(guild, thread) || !guild.can_view(thread, me, now) {
+        return None;
+    }
+    let manage = in_channel(guild, thread, me, now).contains(Permissions::MANAGE_THREADS);
+    if forum_of(guild, thread).is_none() {
+        return manage.then_some(Delete::Thread);
+    }
+    let owner = thread.owner_id == Some(me.id);
+    let replied = thread.message_count.unwrap_or(0) > 0;
+    if manage || (owner && !replied) { Some(Delete::Post) } else { (owner && replied).then_some(Delete::Message) }
+}
+
 /// Whether Edit Tags shows on `post` (565846, with `NI` in 406704): for
 /// someone with Manage Threads, or the post's author unless it's locked, in
 /// a forum that has tags, as long as the post is open or can be reopened
@@ -1189,6 +1266,86 @@ mod tests {
         guild.roles[1].permissions = MANAGE_THREADS;
         guild.my_roles.push(Snowflake(MOD));
         assert!(can_send(Some(&guild), &private, &me, 0), "and moderators");
+    }
+
+    fn manager(guild: &mut Guild) {
+        guild.roles[1].permissions = MANAGE_THREADS;
+        guild.my_roles.push(Snowflake(MOD));
+    }
+
+    fn forum() -> Channel {
+        serde_json::from_value(json!({"id": "9", "type": 15})).unwrap()
+    }
+
+    #[test]
+    fn closing_and_opening_a_thread() {
+        let me = me();
+        let owned = json!({"owner_id": "5"});
+        let (guild, thread) = with_thread(channel(&[]), 11, owned.clone());
+        assert_eq!(thread_close(&guild, &thread, &me, 0), Some(Close::Close), "its owner may close it");
+        let (guild, stranger) = with_thread(channel(&[]), 11, json!({"owner_id": "6"}));
+        assert_eq!(thread_close(&guild, &stranger, &me, 0), None, "someone else's");
+        let (mut guild, stranger) = with_thread(channel(&[]), 11, json!({"owner_id": "6"}));
+        manager(&mut guild);
+        assert_eq!(thread_close(&guild, &stranger, &me, 0), Some(Close::Close), "a manager may close any");
+
+        let locked = json!({"owner_id": "5", "thread_metadata": {"archived": false, "locked": true}});
+        let (guild, thread) = with_thread(channel(&[]), 11, locked);
+        assert_eq!(thread_close(&guild, &thread, &me, 0), None, "its owner can't once it is locked");
+
+        let archived = json!({"owner_id": "5", "thread_metadata": {"archived": true, "locked": false}});
+        let (guild, thread) = with_thread(channel(&[(GUILD, Permissions::NONE, IN_THREADS)]), 11, archived);
+        assert_eq!(thread_close(&guild, &thread, &me, 0), Some(Close::Open), "we may post in it, so reopen it");
+        let archived = json!({"owner_id": "5", "thread_metadata": {"archived": true, "locked": false}});
+        let (guild, thread) = with_thread(channel(&[(GUILD, SEND, IN_THREADS)]), 11, archived);
+        assert_eq!(thread_close(&guild, &thread, &me, 0), None, "we may not");
+
+        let report = json!({"owner_id": "5", "flags": IS_MODERATOR_REPORT_CHANNEL});
+        let (guild, thread) = with_thread(channel(&[]), 11, report);
+        assert_eq!(thread_close(&guild, &thread, &me, 0), None, "never a moderator report");
+    }
+
+    #[test]
+    fn locking_and_unlocking_a_thread() {
+        let me = me();
+        let (mut guild, thread) = with_thread(channel(&[]), 11, json!({"owner_id": "5"}));
+        assert_eq!(thread_lock(&guild, &thread, &me, 0), None, "owning it isn't managing it");
+        manager(&mut guild);
+        assert_eq!(thread_lock(&guild, &thread, &me, 0), Some(Lock::Lock));
+        let locked = json!({"thread_metadata": {"archived": false, "locked": true}});
+        let (mut guild, thread) = with_thread(channel(&[]), 11, locked);
+        manager(&mut guild);
+        assert_eq!(thread_lock(&guild, &thread, &me, 0), Some(Lock::Unlock));
+        let report = json!({"flags": IS_MODERATOR_REPORT_CHANNEL});
+        let (mut guild, thread) = with_thread(channel(&[]), 11, report);
+        manager(&mut guild);
+        assert_eq!(thread_lock(&guild, &thread, &me, 0), None);
+    }
+
+    #[test]
+    fn deleting_a_thread_or_a_post() {
+        let me = me();
+        let (mut guild, thread) = with_thread(channel(&[]), 11, json!({"owner_id": "5"}));
+        assert_eq!(thread_delete(&guild, &thread, &me, 0), None, "a plain thread wants Manage Threads");
+        manager(&mut guild);
+        assert_eq!(thread_delete(&guild, &thread, &me, 0), Some(Delete::Thread));
+
+        let post = |extra: serde_json::Value| with_thread(forum(), 11, extra);
+        let (guild, mine) = post(json!({"owner_id": "5", "message_count": 0}));
+        assert_eq!(thread_delete(&guild, &mine, &me, 0), Some(Delete::Post), "its author, unanswered");
+        let (guild, answered) = post(json!({"owner_id": "5", "message_count": 3}));
+        assert_eq!(thread_delete(&guild, &answered, &me, 0), Some(Delete::Message), "answered: only the message");
+        let (guild, other) = post(json!({"owner_id": "6", "message_count": 0}));
+        assert_eq!(thread_delete(&guild, &other, &me, 0), None, "someone else's");
+        let (mut guild, other) = post(json!({"owner_id": "6", "message_count": 3}));
+        manager(&mut guild);
+        assert_eq!(thread_delete(&guild, &other, &me, 0), Some(Delete::Post), "a manager deletes it whole");
+        let (mut guild, report) = post(json!({"owner_id": "6", "flags": IS_MODERATOR_REPORT_CHANNEL}));
+        manager(&mut guild);
+        assert_eq!(thread_delete(&guild, &report, &me, 0), None, "never a moderator report");
+        let (mut guild, hidden) = with_thread(channel(&[(GUILD, VIEW, Permissions::NONE)]), 11, json!({}));
+        manager(&mut guild);
+        assert_eq!(thread_delete(&guild, &hidden, &me, 0), None, "one we can't see");
     }
 
     #[test]

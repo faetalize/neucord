@@ -10,13 +10,56 @@
 
 use std::collections::HashMap;
 
+use serde_json::{Value, json};
+
 use crate::read_state::ReadStates;
-use crate::{Channel, ChannelKind, Guild, Snowflake, ThreadMember};
+use crate::{Channel, ChannelKind, Error, Guild, Snowflake, ThreadMember};
 
 /// What the client sends as `location` when a thread is joined or left from
 /// a context menu (`joinThread` and `leaveThread` in 7909, called from the
 /// thread menu, 949488).
 pub const MENU_LOCATION: &str = "Context Menu";
+
+/// The edits that close or reopen a thread, then lock or unlock it, in
+/// order (`archiveThread`, `unarchiveThread`, `lockThread` and
+/// `unlockThread` in 7909). Locking an archived thread reopens it first
+/// and archives it again with the lock; unlocking one reopens it, unlocked,
+/// and archives it again.
+pub fn close_edit(close: bool) -> Value {
+    json!({ "archived": close })
+}
+
+pub fn lock_edits(archived: bool, lock: bool) -> Vec<Value> {
+    let mut edits = Vec::new();
+    if archived {
+        edits.push(if lock { json!({ "archived": false }) } else { json!({ "archived": false, "locked": false }) });
+    }
+    edits.push(json!({ "locked": lock, "archived": archived }));
+    edits
+}
+
+/// The alert for a refused reopen (`unarchiveThread`, 7909): its heading
+/// and body, for a thread or a forum post.
+pub fn reopen_alert(error: &Error, post: bool) -> (&'static str, &'static str) {
+    use crate::thread_creation::Refused;
+    let title = if post { "Cannot reopen post" } else { "Cannot reopen thread" };
+    let archived = if post { "This post is archived." } else { "This thread is archived." };
+    let full = if post {
+        "This server has reached the maximum number of active posts. Free up space by archiving a post."
+    } else {
+        "This server has reached the maximum number of active threads. Free up space by archiving a thread."
+    };
+    match (Refused::from(error), error) {
+        (Refused::TooManyThreads, _) => (title, full),
+        (Refused::TooManyAnnouncementThreads, _) => (
+            "Cannot reopen thread",
+            "This server has reached the maximum number of active announcement threads. Free up space by archiving a thread.",
+        ),
+        (Refused::RateLimited | Refused::Slowmode(_), _) => (title, "You are being rate limited."),
+        (_, Error::Http { status: 403, .. }) => (title, archived),
+        _ => ("Error", "An error occurred, please try again."),
+    }
+}
 
 /// How long a thread we opened is remembered as opened (`M` in 123363).
 const VIEWED_FOR_MS: u64 = 90 * 24 * 60 * 60 * 1000;
@@ -349,6 +392,46 @@ fn window_end(thread: &Channel) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn refused(status: u32, body: &str) -> Error {
+        Error::Http { status, body: body.into() }
+    }
+
+    #[test]
+    fn closing_locking_and_reopening_send_the_clients_edits() {
+        assert_eq!(close_edit(true), json!({"archived": true}));
+        assert_eq!(close_edit(false), json!({"archived": false}));
+        assert_eq!(lock_edits(false, true), [json!({"locked": true, "archived": false})]);
+        assert_eq!(lock_edits(false, false), [json!({"locked": false, "archived": false})]);
+        assert_eq!(
+            lock_edits(true, true),
+            [json!({"archived": false}), json!({"locked": true, "archived": true})],
+            "an archived thread is reopened to be locked, and archived again"
+        );
+        assert_eq!(
+            lock_edits(true, false),
+            [json!({"archived": false, "locked": false}), json!({"locked": false, "archived": true})]
+        );
+    }
+
+    #[test]
+    fn a_refused_reopen_says_why() {
+        assert_eq!(
+            reopen_alert(&refused(400, r#"{"code": 160006}"#), true),
+            (
+                "Cannot reopen post",
+                "This server has reached the maximum number of active posts. Free up space by archiving a post."
+            )
+        );
+        assert_eq!(reopen_alert(&refused(400, r#"{"code": 160006}"#), false).0, "Cannot reopen thread");
+        assert_eq!(reopen_alert(&refused(400, r#"{"code": 160007}"#), true).0, "Cannot reopen thread");
+        assert_eq!(reopen_alert(&refused(429, "{}"), false), ("Cannot reopen thread", "You are being rate limited."));
+        assert_eq!(reopen_alert(&refused(403, "{}"), true), ("Cannot reopen post", "This post is archived."));
+        assert_eq!(reopen_alert(&refused(500, "{}"), true), ("Error", "An error occurred, please try again."));
+    }
 
     #[test]
     fn a_thread_never_opened_starts_at_its_start_once() {
@@ -376,9 +459,6 @@ mod tests {
         kept.sort();
         assert_eq!(kept, [2, 9], "the one from 100 days before went");
     }
-    use serde_json::json;
-
-    use super::*;
 
     const HOUR: i64 = 3_600_000;
     /// 2026-10-28T00:00:00Z.

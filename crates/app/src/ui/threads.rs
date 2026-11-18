@@ -7,13 +7,15 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
+use discord::permissions::{self, Close, Delete, Lock};
 use discord::threads::{self, Archive, MENU_LOCATION};
 use discord::{Channel, ChannelKind, Message, Snowflake, system};
 use gtk::glib;
 
 use super::App;
+use super::friends::confirm;
 use super::menus::{self, At, Entry, Item, Kind};
-use super::state::now_ms;
+use super::state::{now_ms, now_unix};
 
 /// How close to the end of the list scrolling asks for the next page (the
 /// client asks within 200 pixels).
@@ -39,6 +41,94 @@ pub(super) const LEAVE_THREAD: Entry<ThreadTarget> = Entry::Item(Item {
     shows: |app, target| app.account.state.borrow().thread_joined(target.0) == Some(true),
     kind: Kind::Action(|app, target| app.leave_thread(target.0)),
 });
+
+/// Copy Link on a thread or a forum post (886393).
+pub(super) const COPY_THREAD_LINK: Entry<ThreadTarget> = Entry::Item(Item {
+    name: "copy-thread-link",
+    label: "Copy _Link",
+    shows: |_, _| true,
+    kind: Kind::Action(|app, target| {
+        let link = app.account.state.borrow().find_channel(target.0).map(|(guild, c)| c.link(guild.map(|g| g.id)));
+        if let Some(link) = link {
+            app.copy(&link);
+        }
+    }),
+});
+
+/// Copy Thread ID, only in Developer Mode.
+pub(super) const COPY_THREAD_ID: Entry<ThreadTarget> = Entry::Item(Item {
+    name: "copy-thread-id",
+    label: "Copy Thread _ID",
+    shows: |app, _| app.account.state.borrow().settings.developer_mode,
+    kind: Kind::Action(|app, target| app.copy(&target.0.to_string())),
+});
+
+/// Close or Open on a thread, and Lock or Unlock: a thread's and a forum
+/// post's differ in their words (182061, 707792).
+macro_rules! manage_item {
+    ($name:ident, $id:literal, $label:literal, $rule:ident, $is:expr, $post:literal, $action:expr) => {
+        pub(super) const $name: Entry<ThreadTarget> = Entry::Item(Item {
+            name: $id,
+            label: $label,
+            shows: |app, target| {
+                app.thread_rule(target.0, |g, t, me| permissions::$rule(g, t, me, now_unix())).is_some_and($is)
+                    && app.account.state.borrow().is_forum_post(target.0) == $post
+            },
+            kind: Kind::Action(|app, target| $action(app, target.0)),
+        });
+    };
+}
+manage_item!(
+    CLOSE_THREAD,
+    "close-thread",
+    "Close _Thread",
+    thread_close,
+    |c| c == Close::Close,
+    false,
+    App::close_thread
+);
+manage_item!(CLOSE_POST, "close-post", "Close _Post", thread_close, |c| c == Close::Close, true, App::close_thread);
+manage_item!(OPEN_THREAD, "open-thread", "Open _Thread", thread_close, |c| c == Close::Open, false, App::reopen_thread);
+manage_item!(OPEN_POST, "open-post", "Open _Post", thread_close, |c| c == Close::Open, true, App::reopen_thread);
+manage_item!(LOCK_THREAD, "lock-thread", "_Lock Thread", thread_lock, |l| l == Lock::Lock, false, App::lock_thread);
+manage_item!(LOCK_POST, "lock-post", "_Lock Post", thread_lock, |l| l == Lock::Lock, true, App::lock_thread);
+manage_item!(
+    UNLOCK_THREAD,
+    "unlock-thread",
+    "Un_lock Thread",
+    thread_lock,
+    |l| l == Lock::Unlock,
+    false,
+    App::unlock_thread
+);
+manage_item!(UNLOCK_POST, "unlock-post", "Un_lock post", thread_lock, |l| l == Lock::Unlock, true, App::unlock_thread);
+manage_item!(
+    DELETE_THREAD,
+    "delete-thread",
+    "_Delete Thread",
+    thread_delete,
+    |d| d == Delete::Thread,
+    false,
+    App::confirm_delete_thread
+);
+manage_item!(
+    DELETE_POST,
+    "delete-post",
+    "_Delete Post",
+    thread_delete,
+    |d| d == Delete::Post,
+    true,
+    App::confirm_delete_thread
+);
+manage_item!(
+    DELETE_MESSAGE,
+    "delete-post-message",
+    "_Delete Message",
+    thread_delete,
+    |d| d == Delete::Message,
+    true,
+    App::confirm_delete_thread
+);
 
 /// The browser, open over the window.
 pub(super) struct View {
@@ -443,6 +533,119 @@ impl App {
     }
 
     /// Join `thread`, as its menu does. What joined comes back as events.
+    /// What `rule` makes of `thread` for us: none without an account or a server.
+    fn thread_rule<T>(
+        &self,
+        thread: Snowflake,
+        rule: impl Fn(&discord::Guild, &Channel, &discord::verification::Account) -> Option<T>,
+    ) -> Option<T> {
+        let state = self.account.state.borrow();
+        match (state.find_channel(thread), &state.account) {
+            (Some((Some(guild), thread)), Some(me)) => rule(guild, thread, me),
+            _ => None,
+        }
+    }
+
+    fn close_thread(self: &Rc<Self>, thread: Snowflake) {
+        self.edit_thread(thread, vec![threads::close_edit(true)], false);
+    }
+
+    fn reopen_thread(self: &Rc<Self>, thread: Snowflake) {
+        self.edit_thread(thread, vec![threads::close_edit(false)], true);
+    }
+
+    fn lock_thread(self: &Rc<Self>, thread: Snowflake) {
+        self.lock_edit(thread, true);
+    }
+
+    fn unlock_thread(self: &Rc<Self>, thread: Snowflake) {
+        self.lock_edit(thread, false);
+    }
+
+    fn lock_edit(self: &Rc<Self>, thread: Snowflake, lock: bool) {
+        let archived = self.account.state.borrow().find_channel(thread).is_some_and(|(_, t)| t.is_archived());
+        self.edit_thread(thread, threads::lock_edits(archived, lock), archived);
+    }
+
+    /// Send the edits one after another; the thread's new state arrives as an
+    /// event. A refused reopening gets the client's alert (`unarchiveThread`
+    /// in 7909), which only the first edit of a reopen or a lock can be.
+    fn edit_thread(self: &Rc<Self>, thread: Snowflake, edits: Vec<serde_json::Value>, reopens: bool) {
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
+        let post = self.account.state.borrow().is_forum_post(thread);
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            for (n, edit) in edits.into_iter().enumerate() {
+                if let Err(e) = rest.edit_thread(thread, edit).await {
+                    eprintln!("thread {thread}: {}", e.for_log());
+                    let (title, body) = if reopens && n == 0 {
+                        threads::reopen_alert(&e, post)
+                    } else {
+                        ("Error", "An error occurred, please try again.")
+                    };
+                    let dialog = adw::AlertDialog::new(Some(title), Some(body));
+                    dialog.add_response("ok", "_OK");
+                    dialog.present(Some(&this.window));
+                    return;
+                }
+            }
+        });
+    }
+
+    /// Ask before deleting a thread or a post, in the client's words
+    /// (894533), then delete it, or only a post's own message.
+    fn confirm_delete_thread(self: &Rc<Self>, thread: Snowflake) {
+        let (what, name, manager) = {
+            let state = self.account.state.borrow();
+            let Some((Some(guild), channel)) = state.find_channel(thread) else { return };
+            let Some(me) = &state.account else { return };
+            let manager = permissions::in_channel(guild, channel, me, now_unix())
+                .contains(permissions::Permissions::MANAGE_THREADS);
+            let what = permissions::thread_delete(guild, channel, me, now_unix());
+            (what, channel.name.clone().unwrap_or_default(), manager)
+        };
+        let Some(what) = what else { return };
+        let (title, body) = match what {
+            Delete::Thread => (
+                "Delete Thread",
+                format!("Are you sure you want to delete <b>{}</b>? This cannot be undone.", glib::markup_escape_text(&name)),
+            ),
+            Delete::Post if !manager => (
+                "Delete Post",
+                format!("Are you sure you want to delete <b>{}</b>? This cannot be undone.", glib::markup_escape_text(&name)),
+            ),
+            Delete::Post => (
+                "Delete Post",
+                format!(
+                    "Are you sure you want to delete <b>{}</b>? All message replies will also be deleted. This cannot be undone.",
+                    glib::markup_escape_text(&name)
+                ),
+            ),
+            Delete::Message => (
+                "Delete Message",
+                "Are you sure you want to delete your message? Since other members have replied to your post, only your original message will be deleted. This cannot be undone.".to_owned(),
+            ),
+        };
+        let dialog = confirm(title, &body, &format!("_{title}"), adw::ResponseAppearance::Destructive);
+        dialog.set_body_use_markup(true);
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            if dialog.choose_future(Some(&this.window)).await != "confirm" {
+                return;
+            }
+            let Some(rest) = this.account.state.borrow().rest.clone() else { return };
+            let result = match what {
+                // The post's own message has the post's id.
+                Delete::Message => rest.delete_message(thread, thread).await,
+                _ => rest.delete_thread(thread).await,
+            };
+            if let Err(e) = result {
+                eprintln!("delete {thread}: {}", e.for_log());
+                this.show_composer_error(&format!("Could not delete it: {e}"));
+            }
+        });
+    }
+
     fn join_thread(self: &Rc<Self>, thread: Snowflake) {
         self.change_membership(thread, true);
     }
