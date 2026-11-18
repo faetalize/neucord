@@ -73,7 +73,7 @@ pub(super) const REMOVE_EMOJI_REACTIONS: Entry<MessageTarget> = Entry::Item(Item
 const EMOJI_TO_REMOVE: Table<MessageTarget> = &[&[Entry::Choices(Choices {
     name: "remove-emoji-reactions",
     choices: |_, target| {
-        let labels = emoji_with_reactions(&target.message).into_iter().map(|emoji| emoji_label(&emoji));
+        let labels = emoji_with_reactions(&target.message).into_iter().map(|emoji| emoji.label());
         labels.enumerate().map(|(n, label)| Choice { value: n.to_string(), label, ticked: false }).collect()
     },
     style: Style::Plain,
@@ -102,16 +102,6 @@ fn emoji_with_reactions(message: &Message) -> Vec<Emoji> {
         }
     }
     found
-}
-
-/// What the client calls an emoji (`b3` in 815807): `:name:`, or the emoji
-/// where it has no name for it.
-pub(super) fn emoji_label(emoji: &Emoji) -> String {
-    let name = emoji.name.as_deref().unwrap_or_default();
-    match emoji.id {
-        Some(_) => format!(":{name}:"),
-        None => Some(discord::emoji::unicode_label(name)).filter(|l| !l.is_empty()).unwrap_or_else(|| name.to_owned()),
-    }
 }
 
 /// How asking Discord ended, once the client's retry rule had its say.
@@ -214,6 +204,7 @@ impl App {
         content.append(&polls::emoji_widget(pill.emoji, &self.images));
         content.append(&gtk::Label::new(Some(&pill.count.to_string())));
         let button = gtk::ToggleButton::builder().child(&content).active(pill.me).build();
+        button.update_property(&[gtk::accessible::Property::Label(&pill.accessible_label())]);
         if !clickable || pill.kind == Kind::Burst {
             button.set_can_target(false);
             button.set_can_focus(false);
