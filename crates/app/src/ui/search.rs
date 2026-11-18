@@ -118,6 +118,12 @@ impl App {
 
     pub(super) fn sync_search_button(&self) {
         self.search_button.set_visible(self.search_context().is_some());
+        let pins = {
+            let state = self.account.state.borrow();
+            let open = state.channel.filter(|_| state.page.is_none()).and_then(|id| state.find_channel(id));
+            open.is_some_and(|(_, channel)| super::pin_list::offered(channel.kind))
+        };
+        self.pins_button.set_visible(pins);
     }
 
     /// People we hold the details of: friends, the people in our DMs, and
@@ -699,6 +705,17 @@ fn describe(filter: search::Filter) -> &'static str {
 impl App {
     /// A result: who wrote it and when, where, and the text.
     fn search_result_row(self: &Rc<Self>, message: &Message, context: Context) -> gtk::ListBoxRow {
+        self.message_summary_row(message, context, None)
+    }
+
+    /// A message as a list row, with `actions` under it if there are any: the
+    /// pins list's buttons. Its menu is a result's.
+    pub(super) fn message_summary_row(
+        self: &Rc<Self>,
+        message: &Message,
+        context: Context,
+        actions: Option<&gtk::Widget>,
+    ) -> gtk::ListBoxRow {
         let column = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(2)
@@ -747,7 +764,11 @@ impl App {
         column.append(
             &gtk::Label::builder().label(text).xalign(0.0).wrap(true).wrap_mode(pango::WrapMode::WordChar).build(),
         );
-        let row = gtk::ListBoxRow::builder().child(&column).build();
+        let activatable = actions.is_none();
+        if let Some(actions) = actions {
+            column.append(actions);
+        }
+        let row = gtk::ListBoxRow::builder().child(&column).activatable(activatable).build();
         let (app, message) = (Rc::downgrade(self), message.clone());
         menus::on_secondary(&row, {
             let row = row.downgrade();

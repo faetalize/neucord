@@ -10,7 +10,7 @@ apps' answers to commands others ran. $FAKE_NSFW sets what decides
 age-restricted commands, e.g. "allowed=1,dms=1,status=3,gated=0,level=0,owner=0"
 (those are the defaults but dms, which is 0).
 """
-import base64, json, os, re, socket, struct, sys, threading, time, zlib
+import base64, json, os, re, socket, struct, sys, threading, time, urllib.parse, zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = 8099
@@ -490,6 +490,8 @@ def dispatch(t, d):
 
 
 ROUTES = []
+# The query string of the request being answered, by name, each with its values.
+QUERY = {}
 
 
 def route(method, pattern):
@@ -504,6 +506,24 @@ def route(method, pattern):
 @route("GET", r"/channels/(\d+)/messages")
 def history(channel, body):
     return 200, messages(channel)
+
+
+# The pins of #600 are lines 5, 7 and 9, pinned in that order (newest pin first), two to a page.
+PINNED = ["5", "7", "9"]
+
+
+@route("GET", r"/channels/(\d+)/messages/pins")
+def pins(channel, body):
+    if channel != "600":
+        return 200, {"items": [], "has_more": False}
+    lines = {m["id"]: m for m in messages(channel)}
+    by_number = {str(n): snowflake(1000 + n * 100, n) for n in range(40)}
+    items = [{"pinned_at": "2026-01-02T10:%02d:00.123456+00:00" % int(n), "message": dict(lines[by_number[n]], pinned=True)}
+             for n in reversed(PINNED)]
+    before = QUERY.get("before", [None])[0]
+    if before:
+        items = [i for i in items if i["pinned_at"][:19] < before[:19]]
+    return 200, {"items": items[:2], "has_more": len(items) > 2}
 
 
 @route("POST", r"/channels/(\d+)/messages")
@@ -832,6 +852,8 @@ class Handler(BaseHTTPRequestHandler):
     def answer(self):
         body = self.record()
         path = self.path.split("?")[0]
+        QUERY.clear()
+        QUERY.update(urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query))
         for method, pattern, handle in ROUTES:
             match = pattern.fullmatch(path)
             if method == self.command and match:

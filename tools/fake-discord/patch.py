@@ -123,6 +123,7 @@ impl App {
                     Some("composer") => Some(self.composer.clone().upcast()),
                     Some("composer_box") => Some(self.composer_box.clone().upcast()),
                     Some("gif_button") => Some(self.gif_button.clone().upcast()),
+                    Some("pins_button") => Some(self.pins_button.clone().upcast()),
                     other => return eprintln!("e2e: no widget {other:?}"),
                 };
                 match anchor.and_then(|w| popover_on(&w)) {
@@ -257,6 +258,10 @@ impl App {
                     Err(e) => eprintln!("e2e: {e}"),
                 }
             }
+            // The pinned messages popover, as its header button opens it: shoot it with `shot-popover pins_button`.
+            Some("pins-open") => self.pins_button.popup(),
+            // The next page, as the button under the list or a scroll near its end asks.
+            Some("pins-more") => self.more_pins(),
             Some("send") => {
                 let button = &self.send_button;
                 if !button.is_visible() || !button.is_sensitive() {
