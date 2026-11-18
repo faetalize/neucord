@@ -23,6 +23,7 @@ use super::chat::{self, MessageTarget};
 use super::menus::{self, Entry as MenuEntry, Item as MenuItem, Kind};
 use super::picker::{self, Row, Spec, Target};
 use super::state::{now_ms, now_unix};
+use super::uploads::Draft;
 
 /// Stickers to a row of the picker.
 const COLUMNS: usize = 4;
@@ -181,18 +182,25 @@ const DETAILS_OPEN_LINK: MenuEntry<MessageTarget> = MenuEntry::Item(MenuItem {
     }),
 });
 
-/// The sticker waiting to be sent with the next message, by channel, and
-/// the strip above the message box that shows it. The client keeps one a
-/// channel, and a new pick replaces it (`StickerMessagePreviewStore`).
+/// The sticker waiting to be sent with the next message, by draft (a
+/// channel's message box, or the first message of a thread being started
+/// there), and the strip above the message box that shows it. The client
+/// keeps one a draft, and a new pick replaces it (`StickerMessagePreviewStore`).
 pub(super) struct Waiting {
-    by_channel: RefCell<HashMap<Snowflake, Listed>>,
-    bar: gtk::Box,
-    image: gtk::Picture,
-    name: gtk::Label,
-    remove: gtk::Button,
+    by_draft: RefCell<HashMap<Draft, Listed>>,
+    strip: Strip,
 }
 
-impl Waiting {
+/// The strip that shows a waiting sticker: its picture and name, and a
+/// button that takes it back.
+pub(super) struct Strip {
+    pub(super) bar: gtk::Box,
+    image: gtk::Picture,
+    name: gtk::Label,
+    pub(super) remove: gtk::Button,
+}
+
+impl Strip {
     pub(super) fn new() -> Self {
         let image = gtk::Picture::builder()
             .width_request(WAITING)
@@ -210,17 +218,36 @@ impl Waiting {
         bar.append(&image);
         bar.append(&name);
         bar.append(&remove);
-        Waiting { by_channel: RefCell::default(), bar, image, name, remove }
+        Strip { bar, image, name, remove }
     }
 
-    pub(super) fn of(&self, channel: Snowflake) -> Option<Listed> {
-        self.by_channel.borrow().get(&channel).cloned()
+    /// Show `listed`, or hide the strip.
+    pub(super) fn show(&self, app: &App, listed: Option<Listed>) {
+        self.bar.set_visible(listed.is_some());
+        if let Some(listed) = listed {
+            self.name.set_label(&listed.sticker.name);
+            match listed.sticker.still(request(app)) {
+                Some(url) => app.images.set(&self.image, &url),
+                None => self.image.set_paintable(None::<&gtk::gdk::Paintable>),
+            }
+        }
+    }
+}
+
+impl Waiting {
+    pub(super) fn new() -> Self {
+        Waiting { by_draft: RefCell::default(), strip: Strip::new() }
     }
 
-    pub(super) fn set(&self, channel: Snowflake, listed: Option<Listed>) {
+    pub(super) fn of(&self, draft: impl Into<Draft>) -> Option<Listed> {
+        self.by_draft.borrow().get(&draft.into()).cloned()
+    }
+
+    pub(super) fn set(&self, draft: impl Into<Draft>, listed: Option<Listed>) {
+        let draft = draft.into();
         match listed {
-            Some(listed) => self.by_channel.borrow_mut().insert(channel, listed),
-            None => self.by_channel.borrow_mut().remove(&channel),
+            Some(listed) => self.by_draft.borrow_mut().insert(draft, listed),
+            None => self.by_draft.borrow_mut().remove(&draft),
         };
     }
 }
@@ -281,8 +308,8 @@ impl App {
     }
 
     pub(super) fn build_stickers(self: &Rc<Self>, area: &gtk::Box) {
-        area.append(&self.waiting.bar);
-        self.waiting.remove.connect_clicked({
+        area.append(&self.waiting.strip.bar);
+        self.waiting.strip.remove.connect_clicked({
             let this = Rc::downgrade(self);
             move |_| {
                 if let Some(this) = this.upgrade()
@@ -297,7 +324,7 @@ impl App {
             move |button| {
                 let Some(this) = this.upgrade() else { return };
                 if let Some(channel) = this.sticker_channel() {
-                    this.open_sticker_picker(channel, button);
+                    this.open_sticker_picker(channel, button, move |app, entry| app.pick_sticker(channel, entry));
                 }
             }
         });
@@ -309,14 +336,7 @@ impl App {
         let channel = self.sticker_channel();
         self.refresh_chat_bar();
         let waiting = channel.and_then(|c| self.waiting.of(c));
-        self.waiting.bar.set_visible(waiting.is_some());
-        if let Some(listed) = waiting {
-            self.waiting.name.set_label(&listed.sticker.name);
-            match listed.sticker.still(request(self)) {
-                Some(url) => self.images.set(&self.waiting.image, &url),
-                None => self.waiting.image.set_paintable(None::<&gtk::gdk::Paintable>),
-            }
-        }
+        self.waiting.strip.show(self, waiting);
     }
 
     /// Wait to send `listed` with the next message in `channel`, or stop
@@ -326,10 +346,16 @@ impl App {
         self.refresh_stickers();
     }
 
-    /// Open the picker over `parent`, for stickers to send in `channel`.
-    /// The standard packs are fetched as the client does when its sticker
-    /// view opens: unless a fetch is running or one finished within the hour.
-    pub(super) fn open_sticker_picker(self: &Rc<Self>, channel: Snowflake, parent: &impl IsA<gtk::Widget>) {
+    /// Open the picker over `parent`, for stickers to send in `channel`;
+    /// `picked` hears each one chosen. The standard packs are fetched as the
+    /// client does when its sticker view opens: unless a fetch is running or
+    /// one finished within the hour.
+    pub(super) fn open_sticker_picker(
+        self: &Rc<Self>,
+        channel: Snowflake,
+        parent: &impl IsA<gtk::Widget>,
+        picked: impl Fn(&Rc<App>, &Entry) + 'static,
+    ) {
         let library = Rc::new(RefCell::new(Rc::new(self.sticker_library(channel))));
         let spec = Spec {
             placeholder: "Search stickers",
@@ -353,7 +379,7 @@ impl App {
                 }
             }),
         };
-        let reload = picker::open(self, parent, spec, move |app, entry: &Entry| app.pick_sticker(channel, entry));
+        let reload = picker::open(self, parent, spec, picked);
         // The favourites and the counts come from Discord the first time, and fill in then.
         self.load_frecency({
             let reload = reload.clone();

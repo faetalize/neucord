@@ -4,11 +4,12 @@
 //! (a thread on that message); here it is a dialog. What it asks Discord for
 //! is in [`discord::thread_creation`].
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
 use adw::prelude::*;
+use discord::chat_bar;
 use discord::cooldowns::wait_words;
 use discord::thread_creation::{
     self, FROM_ATTACH_MENU, FROM_MESSAGE_MENU, FROM_SHORTCUT, Missing, NAME_MAX, NAME_PLACEHOLDER, Privacy, Refused,
@@ -73,6 +74,11 @@ pub(super) struct Form {
     files: gtk::Box,
     /// Where files may be added, if the form takes them.
     attach: Option<gtk::Button>,
+    /// The sticker waiting to go with the message, and where one is picked.
+    strip: super::stickers::Strip,
+    sticker_button: Option<gtk::Button>,
+    /// What Create does, which a sticker picked from an empty form does too.
+    submit: RefCell<Option<Rc<dyn Fn()>>>,
     /// The wait slowmode asks before another thread, which the client shows
     /// and doesn't hold Create for (420018).
     slowmode: gtk::Label,
@@ -98,8 +104,8 @@ impl Form {
         self.name.set_sensitive(!busy);
         self.private.set_sensitive(!busy);
         self.message.set_sensitive(!busy);
-        if let Some(attach) = &self.attach {
-            attach.set_sensitive(!busy);
+        for button in self.attach.iter().chain(&self.sticker_button) {
+            button.set_sensitive(!busy);
         }
         self.stop.set_visible(false);
     }
@@ -140,19 +146,25 @@ impl App {
         self.thread_form.replace(Some(form.clone()));
         self.guard_thread_form(&form);
         self.connect_thread_files(&form);
+        self.connect_thread_stickers(&form);
         if from.is_none() {
             let buffer = self.composer.buffer();
             let typed = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
             form.message.buffer().set_text(&typed);
         }
-        let this = Rc::downgrade(self);
-        form.create.connect_clicked({
-            let (this, form, from, default) = (this.clone(), form.clone(), from.clone(), default.clone());
-            move |_| {
-                if let Some(this) = this.upgrade() {
+        // Create, Enter, and a sticker picked from an empty form all go the same way.
+        let submit: Rc<dyn Fn()> = Rc::new({
+            let (this, form) = (Rc::downgrade(self), Rc::downgrade(&form));
+            move || {
+                if let (Some(this), Some(form)) = (this.upgrade(), form.upgrade()) {
                     this.submit_thread_form(&form, parent, from.as_ref(), privacy, default.as_deref(), location);
                 }
             }
+        });
+        form.submit.replace(Some(submit.clone()));
+        form.create.connect_clicked({
+            let submit = submit.clone();
+            move |_| submit()
         });
         form.name.connect_activate({
             let form = Rc::downgrade(&form);
@@ -164,18 +176,14 @@ impl App {
         });
         // Enter creates the thread, as in the message box; Shift+Enter breaks the line.
         let keys = gtk::EventControllerKey::new();
-        keys.connect_key_pressed({
-            let (this, form, from, default) = (this, form.clone(), from, default);
-            move |_, key, _, modifiers| {
-                use gtk::gdk::{Key, ModifierType};
-                let enter = matches!(key, Key::Return | Key::KP_Enter);
-                let Some(this) = this.upgrade().filter(|_| enter && !modifiers.contains(ModifierType::SHIFT_MASK))
-                else {
-                    return glib::Propagation::Proceed;
-                };
-                this.submit_thread_form(&form, parent, from.as_ref(), privacy, default.as_deref(), location);
-                glib::Propagation::Stop
+        keys.connect_key_pressed(move |_, key, _, modifiers| {
+            use gtk::gdk::{Key, ModifierType};
+            let enter = matches!(key, Key::Return | Key::KP_Enter);
+            if !enter || modifiers.contains(ModifierType::SHIFT_MASK) {
+                return glib::Propagation::Proceed;
             }
+            submit();
+            glib::Propagation::Stop
         });
         form.message.add_controller(keys);
         self.refresh_thread_slowmode(&form, parent);
@@ -323,10 +331,21 @@ impl App {
             self.account.state.borrow().can_attach_to_new_thread(parent).then(|| {
                 gtk::Button::builder().label("Add Files").halign(gtk::Align::Start).css_classes(["flat"]).build()
             });
-        body.append(&files);
-        if let Some(attach) = &attach {
-            body.append(attach);
+        let strip = super::stickers::Strip::new();
+        let stickers = {
+            let bar = chat_bar::Bar { open: true, customizable: self.chat_bar_customizable(), ..Default::default() };
+            chat_bar::shown(bar, self.chat_bar_prefs()).sticker
+        };
+        let sticker_button = stickers.then(|| {
+            gtk::Button::builder().label("Add Sticker").halign(gtk::Align::Start).css_classes(["flat"]).build()
+        });
+        let buttons = gtk::Box::builder().spacing(6).build();
+        for button in attach.iter().chain(&sticker_button) {
+            buttons.append(button);
         }
+        body.append(&strip.bar);
+        body.append(&files);
+        body.append(&buttons);
         body.append(&slowmode);
 
         let create = gtk::Button::builder().label("Create").css_classes(["suggested-action"]).build();
@@ -348,6 +367,9 @@ impl App {
             message_error,
             files,
             attach,
+            strip,
+            sticker_button,
+            submit: RefCell::default(),
             slowmode,
             create,
             stop,
@@ -422,7 +444,8 @@ impl App {
     fn refresh_thread_guard(&self, form: &Form) {
         let empty = form.name.text().is_empty()
             && form.text().trim().is_empty()
-            && self.drafts.of(Draft::FirstThreadMessage(form.parent)).is_empty();
+            && self.drafts.of(Draft::FirstThreadMessage(form.parent)).is_empty()
+            && self.waiting.of(Draft::FirstThreadMessage(form.parent)).is_none();
         form.dialog.set_can_close(empty && !form.submitting.get());
     }
 
@@ -438,6 +461,7 @@ impl App {
             self.thread_form.replace(None);
         }
         self.drop_post_files(Draft::FirstThreadMessage(form.parent));
+        self.waiting.set(Draft::FirstThreadMessage(form.parent), None);
     }
 
     /// The channel whose first-message draft the open form takes files for now.
@@ -452,6 +476,59 @@ impl App {
         let may_stop = self.fill_tray(&form.files, Draft::FirstThreadMessage(form.parent));
         form.stop.set_sensitive(may_stop);
         self.refresh_thread_guard(&form);
+    }
+
+    /// Wire the form's sticker button: the picker, and taking a pick back.
+    fn connect_thread_stickers(self: &Rc<Self>, form: &Rc<Form>) {
+        if let Some(button) = &form.sticker_button {
+            button.connect_clicked({
+                let (this, form) = (Rc::downgrade(self), Rc::downgrade(form));
+                move |button| {
+                    let (Some(this), Some(form)) = (this.upgrade(), form.upgrade()) else { return };
+                    let weak = Rc::downgrade(&form);
+                    this.open_sticker_picker(form.parent, button, move |app, entry| {
+                        if let Some(form) = weak.upgrade() {
+                            app.pick_form_sticker(&form, entry);
+                        }
+                    });
+                }
+            });
+        }
+        form.strip.remove.connect_clicked({
+            let (this, form) = (Rc::downgrade(self), Rc::downgrade(form));
+            move |_| {
+                if let (Some(this), Some(form)) = (this.upgrade(), form.upgrade()) {
+                    this.set_form_sticker(&form, None);
+                }
+            }
+        });
+    }
+
+    /// Wait to send `listed` with the first message, or stop waiting (`None`).
+    fn set_form_sticker(&self, form: &Form, listed: Option<discord::stickers::Listed>) {
+        self.waiting.set(Draft::FirstThreadMessage(form.parent), listed.clone());
+        form.strip.show(self, listed);
+        self.refresh_thread_guard(form);
+    }
+
+    /// What a pick does in the form (`nE` in 989161): with nothing else in
+    /// it, Create at once with the sticker alone, as a box sends one; else
+    /// it waits for the message. Create turning it down (no name, say) keeps
+    /// nothing, as the client does.
+    fn pick_form_sticker(self: &Rc<Self>, form: &Rc<Form>, entry: &discord::stickers::Entry) {
+        let draft = Draft::FirstThreadMessage(form.parent);
+        let alone =
+            form.text().trim().is_empty() && self.drafts.of(draft).is_empty() && self.waiting.of(draft).is_none();
+        self.set_form_sticker(form, Some(entry.listed.clone()));
+        if alone {
+            let submit = form.submit.borrow().clone();
+            if let Some(submit) = submit {
+                submit();
+            }
+            if !form.submitting.get() {
+                self.set_form_sticker(form, None);
+            }
+        }
     }
 
     /// Wire the form's file buttons: adding by the picker or by a drop, and
@@ -504,9 +581,10 @@ impl App {
         }
         let draft = Draft::FirstThreadMessage(parent);
         let files = self.drafts.of(draft);
+        let waiting = self.waiting.of(draft);
         let text = form.text().trim().to_owned();
         let name = form.name.text().to_string();
-        let missing = thread_creation::missing(from.is_some(), &name, &text, !files.is_empty());
+        let missing = thread_creation::missing(from.is_some(), &name, &text, !files.is_empty() || waiting.is_some());
         let says = |what| missing.contains(&what);
         form.show_errors(
             says(Missing::Name).then_some("Thread Name is required"),
@@ -515,10 +593,17 @@ impl App {
         if !missing.is_empty() {
             return;
         }
+        // What was true when the sticker was picked may not be now.
+        if let Some(listed) = &waiting
+            && self.sticker_sendable(parent, listed).is_err()
+        {
+            self.set_form_sticker(form, None);
+            return form.show_errors(None, Some("That sticker can't be sent here."));
+        }
         // `:name:`s go out as emoji, and the length is of what goes out.
         let library = self.emoji_library(parent);
         let translated = library.translate(&text);
-        let text = translated.text;
+        let (text, used) = (translated.text, translated.used);
         if let Err(too_long) = self.account.state.borrow().limits().check_length(&text) {
             let dialog = adw::AlertDialog::new(Some(too_long.heading()), Some(&too_long.body()));
             dialog.add_response("okay", "_Okay");
@@ -574,9 +659,12 @@ impl App {
                 dialog.present(Some(&form.dialog));
                 return;
             }
-            let message = Outgoing { text: &text, reply: None, sticker: None, at: None, tts: false };
+            let sticker = waiting.as_ref().map(|w| w.sticker.id);
+            let message = Outgoing { text: &text, reply: None, sticker, at: None, tts: false };
             match this.send_draft(&rest, draft, thread, &message, files).await {
                 Ok(()) => {
+                    this.track_message_use(&used, sticker);
+                    this.set_form_sticker(&form, None);
                     this.message_sent(thread);
                     form.dialog.force_close();
                     if from_composer {
