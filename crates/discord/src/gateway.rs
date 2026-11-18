@@ -151,6 +151,11 @@ pub enum Event {
         guild_id: Snowflake,
         channel: Channel,
     },
+    /// A server's channel or category was deleted.
+    GuildChannelDelete {
+        guild_id: Snowflake,
+        id: Snowflake,
+    },
     /// A thread was created or changed: renamed, archived, locked, reopened.
     /// It may leave out our membership (see [`Guild::set_thread`]).
     ThreadUpdate {
@@ -1441,10 +1446,10 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
             }
         }
         "CHANNEL_DELETE" => {
-            let is_private = data["guild_id"].is_null();
-            match parse_id(&data["id"]) {
-                Some(id) if is_private => Event::PrivateChannelDelete(id),
-                _ => return,
+            let Some(id) = parse_id(&data["id"]) else { return };
+            match parse_id(&data["guild_id"]) {
+                Some(guild_id) => Event::GuildChannelDelete { guild_id, id },
+                None => Event::PrivateChannelDelete(id),
             }
         }
         "GUILD_CREATE" => {
@@ -2019,6 +2024,16 @@ mod tests {
         dispatch(&state, "CHANNEL_UPDATE", json!({"id": "9", "type": 0, "guild_id": "1", "rate_limit_per_user": 30}));
         let Ok(Event::GuildChannelUpdate { guild_id, channel }) = state.try_recv() else { panic!("no channel update") };
         assert_eq!((guild_id, channel.rate_limit_per_user), (Snowflake(1), 30));
+    }
+
+    #[test]
+    fn a_servers_channel_that_is_deleted_is_reported() {
+        let state = Parser::default();
+        dispatch(&state, "CHANNEL_DELETE", json!({"id": "9", "type": 0, "guild_id": "1", "parent_id": "4"}));
+        let Ok(Event::GuildChannelDelete { guild_id, id }) = state.try_recv() else { panic!("no channel delete") };
+        assert_eq!((guild_id, id), (Snowflake(1), Snowflake(9)));
+        dispatch(&state, "CHANNEL_DELETE", json!({"id": "9", "type": 1}));
+        assert!(matches!(state.try_recv(), Ok(Event::PrivateChannelDelete(Snowflake(9)))), "a DM stays as it was");
     }
 
     #[test]

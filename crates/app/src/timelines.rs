@@ -95,6 +95,13 @@ impl Timelines {
         self.channels.get_mut(&channel)
     }
 
+    /// The channel is gone: so are its messages (`CHANNEL_DELETE` clears them
+    /// in the client, 596344).
+    pub fn remove(&mut self, channel: Snowflake) {
+        self.channels.remove(&channel);
+        self.held.forget(channel);
+    }
+
     pub fn clear(&mut self) {
         self.channels.clear();
         self.held.reset();
@@ -335,6 +342,19 @@ mod tests {
         let started = timelines.held.started();
         timelines.landed(Snowflake(1), started);
         timelines.clear();
+        assert!(timelines.get(Snowflake(1)).is_none());
+        let opening = discord::held::Opening { private: true, ..Default::default() };
+        assert!(timelines.held.fetch_on_open(Snowflake(1), opening));
+    }
+
+    #[test]
+    fn a_removed_channel_is_forgotten() {
+        let mut timelines = Timelines::default();
+        timelines.held.opened();
+        timelines.open(Snowflake(1));
+        let started = timelines.held.started();
+        timelines.landed(Snowflake(1), started);
+        timelines.remove(Snowflake(1));
         assert!(timelines.get(Snowflake(1)).is_none());
         let opening = discord::held::Opening { private: true, ..Default::default() };
         assert!(timelines.held.fetch_on_open(Snowflake(1), opening));
