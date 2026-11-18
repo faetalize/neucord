@@ -150,7 +150,12 @@ impl App {
                 let icon = channel_icon::of(guild, channel);
                 // A listed channel always has an icon; a server never holds a DM.
                 let glyph = glyph_widget(icon.map_or(Glyph::Text, |i| i.glyph));
-                row.append(&glyph);
+                // The client draws the lock into the glyph (`TextLockIcon` and the like, 713654).
+                if icon.and_then(|i| i.mark) == Some(Mark::Locked) {
+                    row.append(&locked(&glyph));
+                } else {
+                    row.append(&glyph);
+                }
                 row.append(
                     &gtk::Label::builder()
                         .label(channel.shown_name().unwrap_or("unnamed"))
@@ -159,7 +164,7 @@ impl App {
                         .ellipsize(pango::EllipsizeMode::End)
                         .build(),
                 );
-                if let Some(mark) = icon.and_then(|i| i.mark) {
+                if let Some(mark) = icon.and_then(|i| i.mark).filter(|&m| m != Mark::Locked) {
                     row.append(&mark_widget(mark));
                 }
                 if let Some(badge) = badge(state.mentions(channel.id)) {
@@ -339,6 +344,19 @@ pub(super) fn glyph_widget(glyph: Glyph) -> gtk::Widget {
         .width_request(GLYPH_WIDTH)
         .build()
         .upcast()
+}
+
+/// `glyph` with a small lock at its corner.
+fn locked(glyph: &gtk::Widget) -> gtk::Widget {
+    let lock = gtk::Image::builder()
+        .icon_name("channel-secure-symbolic")
+        .pixel_size(8)
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::End)
+        .build();
+    let overlay = gtk::Overlay::builder().child(glyph).tooltip_text("Limited").build();
+    overlay.add_overlay(&lock);
+    overlay.upcast()
 }
 
 /// After a channel's name, for what sets it apart.
