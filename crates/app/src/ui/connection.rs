@@ -423,6 +423,12 @@ impl App {
                     self.account.state.borrow_mut().notifications.update(settings);
                     self.refresh_badges();
                 }
+                // What the client re-evaluates on it: every guild's unread
+                // state (`RECOMPUTE_READ_STATES`), here the badges.
+                Event::NotificationFlagsUpdate(flags) => {
+                    self.account.state.borrow_mut().notifications.set_flags(flags);
+                    self.refresh_badges();
+                }
                 Event::Resumed => {
                     {
                         let mut state = self.account.state.borrow_mut();
