@@ -837,3 +837,52 @@ edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''           
                 eprintln!("e2e: box {}", text.chars().count());
             }
             Some("quit") => {''')
+
+# The keyboard's menu on a sidebar row or a rail button: `menu-key row <n> [png]` and `menu-key rail <n> [png]` give
+# the nth one the focus and run its Menu / Shift+F10 shortcut (the keys themselves can't be sent here), then say
+# whether a menu opened on it and shoot it.
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("menu-key") => {
+                let (kind, n) = (parts.next().unwrap_or_default(), parts.next().and_then(|n| n.parse::<usize>().ok()));
+                let has_keys = |w: &gtk::Widget| {
+                    let controllers = w.observe_controllers();
+                    (0..controllers.n_items()).any(|i| controllers.item(i).is_some_and(|c| c.is::<gtk::ShortcutController>()))
+                };
+                let target: Option<gtk::Widget> = match kind {
+                    "row" => {
+                        let mut rows = Vec::new();
+                        widgets::<gtk::ListBoxRow>(self.window.upcast_ref(), &mut rows);
+                        rows.into_iter().map(|r| r.upcast::<gtk::Widget>()).filter(|r| has_keys(r)).nth(n.unwrap_or(0))
+                    }
+                    _ => {
+                        let mut found = Vec::new();
+                        buttons(self.window.upcast_ref(), &mut found);
+                        found.into_iter().map(|b| b.upcast::<gtk::Widget>()).filter(|b| b.has_css_class("guild") && has_keys(b)).nth(n.unwrap_or(0))
+                    }
+                };
+                let Some(target) = target else { return eprintln!("e2e: no {kind} {n:?}") };
+                target.grab_focus();
+                let controllers = target.observe_controllers();
+                let mut ran = false;
+                for i in 0..controllers.n_items() {
+                    let Some(shortcuts) = controllers.item(i).and_downcast::<gtk::ShortcutController>() else { continue };
+                    for j in 0..shortcuts.n_items() {
+                        let Some(shortcut) = shortcuts.item(j).and_downcast::<gtk::Shortcut>() else { continue };
+                        let Some(action) = shortcut.action() else { continue };
+                        ran |= action.activate(gtk::ShortcutActionFlags::empty(), &target, None);
+                    }
+                }
+                let (png, what) = (parts.next().map(str::to_owned), kind.to_owned());
+                // The menu maps on the next turn of the loop.
+                glib::timeout_add_local_once(Duration::from_millis(300), move || {
+                    let popover = popover_on(&target);
+                    eprintln!("e2e: menu-key {what} ran={ran} opened={} on {:?} {:?}", popover.is_some(), target.css_classes(), target.widget_name());
+                    if let Some(popover) = popover {
+                        // With a picture the menu is shot and closed; without, it is left open.
+                        if let Some(png) = png {
+                            shot(&popover, &png);
+                            popover.popdown();
+                        }
+                    }
+                });
+            }
+            Some("quit") => {''')
