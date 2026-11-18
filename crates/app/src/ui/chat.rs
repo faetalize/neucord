@@ -1895,13 +1895,14 @@ fn attach_author(this: &std::rc::Weak<App>, item: &gtk::ListItem, cell: &Message
     parts.name.set_cursor_from_name(Some("pointer"));
     for anchor in [parts.name.clone().upcast::<gtk::Widget>(), parts.gutter.clone().upcast()] {
         let click = gtk::GestureClick::builder().button(gdk::BUTTON_PRIMARY).build();
-        click.connect_released({
+        // The author the pointer is on, if it is one to click.
+        let author = {
             let (this, item, cell, anchor) = (this.clone(), item.downgrade(), cell.downgrade(), anchor.downgrade());
-            move |_, _, x, y| {
+            move |x: f64, y: f64| {
                 let (Some(this), Some(item), Some(cell), Some(anchor)) =
                     (this.upgrade(), item.upgrade(), cell.upgrade(), anchor.upgrade())
                 else {
-                    return;
+                    return None;
                 };
                 // Only the avatar of a run's first message is one to click.
                 let parts = cell.parts();
@@ -1909,9 +1910,20 @@ fn attach_author(this: &std::rc::Weak<App>, item: &gtk::ListItem, cell: &Message
                     true => parts.header.is_visible(),
                     false => parts.shows_avatar() && anchor.contains(x, y),
                 };
-                if let (true, Some(target)) = (shown, this.author_target(&item, anchor)) {
-                    this.show_profile(&target, false);
+                shown.then(|| this.author_target(&item, anchor)).flatten().map(|target| (this, target))
+            }
+        };
+        click.connect_pressed({
+            let author = author.clone();
+            move |_, _, x, y| {
+                if let Some((this, target)) = author(x, y) {
+                    this.prefetch_profile(&target);
                 }
+            }
+        });
+        click.connect_released(move |_, _, x, y| {
+            if let Some((this, target)) = author(x, y) {
+                this.show_profile(&target, false);
             }
         });
         anchor.add_controller(click);
@@ -2795,6 +2807,14 @@ impl App {
             line.append(widget);
             widget.set_cursor_from_name(Some("pointer"));
             let click = gtk::GestureClick::builder().button(gdk::BUTTON_PRIMARY).build();
+            click.connect_pressed({
+                let (this, user, anchor) = (Rc::downgrade(self), user.clone(), widget.downgrade());
+                move |_, _, _, _| {
+                    if let (Some(this), Some(anchor)) = (this.upgrade(), anchor.upgrade()) {
+                        this.prefetch_profile(&this.user_target(user.clone(), channel, anchor));
+                    }
+                }
+            });
             click.connect_released({
                 let (this, user, anchor) = (Rc::downgrade(self), user.clone(), widget.downgrade());
                 move |_, _, _, _| {
