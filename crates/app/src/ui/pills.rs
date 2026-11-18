@@ -1100,6 +1100,11 @@ impl App {
         if self.slash.is_active() && self.mention_popover.is_visible() {
             self.update_command_popup();
         }
+        // The search box's names, if it asked.
+        let view = self.search_view.borrow().clone();
+        if let Some(view) = view {
+            view.suggest(self);
+        }
     }
 
     fn show_listing(self: &Rc<Self>, listing: Listing) {
