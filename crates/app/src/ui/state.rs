@@ -1088,6 +1088,21 @@ impl State {
         self.dms().map(|c| self.read.mentions(c.id)).sum::<u32>() + self.relationships.incoming()
     }
 
+    /// `GUILD_DELETE`: we left the server, or lost it. An unavailable one
+    /// stays as it is, as in the client's guild store (71393); a removed one
+    /// goes, with its voice states. Gives the ids of its channels and threads,
+    /// which are no one's now, and whether it was the open server.
+    pub(super) fn guild_deleted(&mut self, id: Snowflake, unavailable: bool) -> Option<(Vec<Snowflake>, bool)> {
+        if unavailable {
+            return None;
+        }
+        let at = self.guilds.iter().position(|g| g.id == id)?;
+        let guild = self.guilds.remove(at);
+        self.voice.replace_guild(id, Vec::new());
+        let was_open = self.guild == Some(id);
+        Some((guild.channels.iter().chain(&guild.threads).map(|c| c.id).collect(), was_open))
+    }
+
     /// Record a new newest message for a channel wherever it lives.
     pub(super) fn bump_last_message(&mut self, channel: Snowflake, message: Snowflake) {
         let slot = self
@@ -1591,6 +1606,16 @@ mod tests {
         let before = state.sidebar_signature();
         state.guilds[0].name = "Renamed".into();
         assert_ne!(state.sidebar_signature(), before);
+    }
+
+    #[test]
+    fn a_server_we_left_goes_and_one_in_an_outage_stays() {
+        let mut state = open_server(None, json!({}));
+        assert_eq!(state.guild_deleted(Snowflake(1), true), None);
+        assert_eq!(state.guilds.len(), 1, "an outage leaves what we know of it");
+        assert_eq!(state.guild_deleted(Snowflake(1), false), Some((vec![Snowflake(9)], true)));
+        assert!(state.guilds.is_empty());
+        assert_eq!(state.guild_deleted(Snowflake(1), false), None, "twice");
     }
 
     #[test]
