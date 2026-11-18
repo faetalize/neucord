@@ -102,6 +102,12 @@ pub fn can_start_private(guild: &Guild, channel: &Channel, me: &Account, now: i6
     offered(channel, None, allowed) && channel.kind == ChannelKind::Text
 }
 
+/// Whether the form takes files for the thread's first message: Attach Files
+/// in the channel the thread is started in, which the new thread inherits.
+pub fn can_attach(guild: &Guild, channel: &Channel, me: &Account, now: i64) -> bool {
+    in_channel(guild, channel, me, now).contains(Permissions::ATTACH_FILES)
+}
+
 /// Whether the attach menu offers Create Thread in `channel`.
 pub fn offered_in_attach_menu(guild: &Guild, channel: &Channel, me: &Account, now: i64) -> bool {
     can_start(guild, channel, None, me, now) || can_start_private(guild, channel, me, now)
@@ -398,6 +404,16 @@ mod tests {
         assert!(!offered_in_attach_menu(&guild, &channel, &me(), 0));
         assert!(Privacy::PrivateOnly.is_private(false) && !Privacy::Choice.is_private(false));
         assert!(Privacy::Choice.is_private(true) && !Privacy::Public.is_private(true));
+    }
+
+    #[test]
+    fn the_first_message_takes_files_with_attach_files_in_the_channel() {
+        let attach = |granted| {
+            let (guild, channel) = place(granted, 0);
+            can_attach(&guild, &channel, &me(), 0)
+        };
+        assert!(attach(Permissions::ATTACH_FILES));
+        assert!(!attach(PUBLIC), "starting a thread doesn't allow files");
     }
 
     #[test]

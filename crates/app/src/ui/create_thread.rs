@@ -20,7 +20,7 @@ use super::App;
 use super::chat::MessageTarget;
 use super::menus::{Entry, Item, Kind};
 use super::state::now_ms;
-use super::uploads::Stopped;
+use super::uploads::{Draft, Outgoing, Stopped};
 use crate::render;
 
 /// Create Thread in the attach menu, where the client offers it
@@ -59,19 +59,31 @@ pub(super) const VIEW_THREAD: Entry<MessageTarget> = Entry::Item(Item {
 });
 
 /// The form's widgets.
-struct Form {
+pub(super) struct Form {
+    /// The channel the thread is started in, whose draft of the first
+    /// message's files the form keeps.
+    parent: Snowflake,
     dialog: adw::Dialog,
     name: gtk::Entry,
     name_error: gtk::Label,
     private: adw::SwitchRow,
     message: gtk::TextView,
     message_error: gtk::Label,
+    /// The files' rows, which `uploads.rs` fills.
+    files: gtk::Box,
+    /// Where files may be added, if the form takes them.
+    attach: Option<gtk::Button>,
     /// The wait slowmode asks before another thread, which the client shows
     /// and doesn't hold Create for (420018).
     slowmode: gtk::Label,
     create: gtk::Button,
+    /// While the files go up, which the message waits for.
+    stop: gtk::Button,
     /// The request is out: nothing changes until it answers.
     submitting: Cell<bool>,
+    /// The thread, once Discord has made it: another go sends the message
+    /// into it, not into a second thread.
+    created: Cell<Option<Snowflake>>,
 }
 
 impl Form {
@@ -86,6 +98,10 @@ impl Form {
         self.name.set_sensitive(!busy);
         self.private.set_sensitive(!busy);
         self.message.set_sensitive(!busy);
+        if let Some(attach) = &self.attach {
+            attach.set_sensitive(!busy);
+        }
+        self.stop.set_visible(false);
     }
 
     fn show_errors(&self, name: Option<&str>, message: Option<&str>) {
@@ -112,12 +128,18 @@ impl App {
     /// in the channel starts with what is in the message box, which the
     /// client moves into the form.
     pub(super) fn open_thread_form(self: &Rc<Self>, parent: Snowflake, from: Option<Message>, location: &'static str) {
+        if self.thread_form.borrow().is_some() {
+            return;
+        }
         let privacy = match from {
             Some(_) => Privacy::Public,
             None => self.account.state.borrow().thread_privacy(parent),
         };
         let default = from.as_ref().map(|message| self.default_thread_name(message));
-        let form = Rc::new(self.build_thread_form(privacy, default.as_deref()));
+        let form = Rc::new(self.build_thread_form(parent, privacy, default.as_deref()));
+        self.thread_form.replace(Some(form.clone()));
+        self.guard_thread_form(&form);
+        self.connect_thread_files(&form);
         if from.is_none() {
             let buffer = self.composer.buffer();
             let typed = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
@@ -209,7 +231,7 @@ impl App {
         thread_creation::default_name(title, question, &text)
     }
 
-    fn build_thread_form(self: &Rc<Self>, privacy: Privacy, default: Option<&str>) -> Form {
+    fn build_thread_form(self: &Rc<Self>, parent: Snowflake, privacy: Privacy, default: Option<&str>) -> Form {
         let name = gtk::Entry::builder()
             .placeholder_text(default.filter(|d| !d.is_empty()).unwrap_or(NAME_PLACEHOLDER))
             .activates_default(false)
@@ -296,27 +318,42 @@ impl App {
         body.append(&label("Message"));
         body.append(&scroller);
         body.append(&message_error);
+        let files = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+        let attach =
+            self.account.state.borrow().can_attach_to_new_thread(parent).then(|| {
+                gtk::Button::builder().label("Add Files").halign(gtk::Align::Start).css_classes(["flat"]).build()
+            });
+        body.append(&files);
+        if let Some(attach) = &attach {
+            body.append(attach);
+        }
         body.append(&slowmode);
 
         let create = gtk::Button::builder().label("Create").css_classes(["suggested-action"]).build();
+        let stop = gtk::Button::builder().label("Cancel").visible(false).build();
         let header = adw::HeaderBar::new();
         header.pack_end(&create);
+        header.pack_start(&stop);
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&header);
         toolbar.set_content(Some(&body));
         let dialog = adw::Dialog::builder().title("Create Thread").content_width(480).child(&toolbar).build();
         let form = Form {
+            parent,
             dialog,
             name,
             name_error,
             private,
             message,
             message_error,
+            files,
+            attach,
             slowmode,
             create,
+            stop,
             submitting: Cell::new(false),
+            created: Cell::new(None),
         };
-        self.guard_thread_form(&form);
         // A refusal is said until its field is changed, which answers it.
         form.name.connect_changed({
             let error = form.name_error.downgrade();
@@ -337,27 +374,23 @@ impl App {
         form
     }
 
-    /// Closing a form with something typed asks first, as the client does.
-    fn guard_thread_form(self: &Rc<Self>, form: &Form) {
-        let update = {
-            let (dialog, name, message) = (form.dialog.downgrade(), form.name.downgrade(), form.message.downgrade());
-            move || {
-                let (Some(dialog), Some(name), Some(message)) = (dialog.upgrade(), name.upgrade(), message.upgrade())
-                else {
-                    return;
-                };
-                let buffer = message.buffer();
-                let typed = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
-                dialog.set_can_close(name.text().is_empty() && typed.trim().is_empty());
-            }
+    /// Closing a form with something typed, or files added, asks first, as
+    /// the client does; not at all while its message is on its way.
+    fn guard_thread_form(self: &Rc<Self>, form: &Rc<Form>) {
+        self.refresh_thread_guard(form);
+        let changed = {
+            let (this, form) = (Rc::downgrade(self), Rc::downgrade(form));
+            Rc::new(move || {
+                if let (Some(this), Some(form)) = (this.upgrade(), form.upgrade()) {
+                    this.refresh_thread_guard(&form);
+                }
+            })
         };
-        let update = Rc::new(update);
-        update();
         form.name.connect_changed({
-            let update = update.clone();
-            move |_| update()
+            let changed = changed.clone();
+            move |_| changed()
         });
-        form.message.buffer().connect_changed(move |_| update());
+        form.message.buffer().connect_changed(move |_| changed());
         form.dialog.connect_close_attempt({
             let (this, dialog) = (Rc::downgrade(self), form.dialog.downgrade());
             move |_| {
@@ -376,6 +409,85 @@ impl App {
                 });
             }
         });
+        form.dialog.connect_closed({
+            let (this, form) = (Rc::downgrade(self), Rc::downgrade(form));
+            move |_| {
+                if let (Some(this), Some(form)) = (this.upgrade(), form.upgrade()) {
+                    this.thread_form_closed(&form);
+                }
+            }
+        });
+    }
+
+    fn refresh_thread_guard(&self, form: &Form) {
+        let empty = form.name.text().is_empty()
+            && form.text().trim().is_empty()
+            && self.drafts.of(Draft::FirstThreadMessage(form.parent)).is_empty();
+        form.dialog.set_can_close(empty && !form.submitting.get());
+    }
+
+    /// The form's request starts or ends.
+    fn thread_form_busy(&self, form: &Form, busy: bool) {
+        form.set_busy(busy);
+        self.refresh_thread_guard(form);
+    }
+
+    /// The form is gone: the files it had go too, unless they went in a message.
+    fn thread_form_closed(self: &Rc<Self>, form: &Rc<Form>) {
+        if self.thread_form.borrow().as_ref().is_some_and(|open| Rc::ptr_eq(open, form)) {
+            self.thread_form.replace(None);
+        }
+        self.drop_post_files(Draft::FirstThreadMessage(form.parent));
+    }
+
+    /// The channel whose first-message draft the open form takes files for now.
+    pub(super) fn thread_form_channel(&self) -> Option<Snowflake> {
+        let parent = self.thread_form.borrow().as_ref()?.parent;
+        self.account.state.borrow().can_attach_to_new_thread(parent).then_some(parent)
+    }
+
+    /// Show the open form's files as the draft is now.
+    pub(super) fn refresh_thread_files(self: &Rc<Self>) {
+        let Some(form) = self.thread_form.borrow().clone() else { return };
+        let may_stop = self.fill_tray(&form.files, Draft::FirstThreadMessage(form.parent));
+        form.stop.set_sensitive(may_stop);
+        self.refresh_thread_guard(&form);
+    }
+
+    /// Wire the form's file buttons: adding by the picker or by a drop, and
+    /// taking back what is going up.
+    fn connect_thread_files(self: &Rc<Self>, form: &Rc<Form>) {
+        let draft = Draft::FirstThreadMessage(form.parent);
+        if let Some(attach) = &form.attach {
+            attach.connect_clicked({
+                let this = Rc::downgrade(self);
+                move |_| {
+                    if let Some(this) = this.upgrade() {
+                        this.choose_form_files(draft);
+                    }
+                }
+            });
+        }
+        form.stop.connect_clicked({
+            let this = Rc::downgrade(self);
+            move |_| {
+                if let Some(this) = this.upgrade() {
+                    this.cancel_sending_of(draft);
+                }
+            }
+        });
+        let target = gtk::DropTarget::new(gtk::gdk::FileList::static_type(), gtk::gdk::DragAction::COPY);
+        target.connect_drop({
+            let this = Rc::downgrade(self);
+            move |_, value, _, _| {
+                let (Some(this), Ok(list)) = (this.upgrade(), value.get::<gtk::gdk::FileList>()) else { return false };
+                let files = list.files();
+                glib::spawn_future_local(async move { this.add_paths(draft, files).await });
+                true
+            }
+        });
+        form.dialog.add_controller(target);
+        self.refresh_thread_files();
     }
 
     fn submit_thread_form(
@@ -390,10 +502,11 @@ impl App {
         if form.submitting.get() {
             return;
         }
-        let typed = form.text().trim().to_owned();
-        let text = typed.clone();
+        let draft = Draft::FirstThreadMessage(parent);
+        let files = self.drafts.of(draft);
+        let text = form.text().trim().to_owned();
         let name = form.name.text().to_string();
-        let missing = thread_creation::missing(from.is_some(), &name, &text, false);
+        let missing = thread_creation::missing(from.is_some(), &name, &text, !files.is_empty());
         let says = |what| missing.contains(&what);
         form.show_errors(
             says(Missing::Name).then_some("Thread Name is required"),
@@ -412,57 +525,89 @@ impl App {
             dialog.present(Some(&form.dialog));
             return;
         }
-        let (rest, channel) = {
+        let (rest, channel, limits) = {
             let state = self.account.state.borrow();
-            (state.rest.clone(), state.find_channel(parent).map(|(_, c)| c.clone()))
+            let found = state.find_channel(parent);
+            let limits = state.limits().uploads(found.and_then(|(guild, _)| guild));
+            (state.rest.clone(), found.map(|(_, c)| c.clone()), limits)
         };
         let (Some(rest), Some(channel)) = (rest, channel) else { return };
+        if !files.is_empty()
+            && let Err(refusal) = discord::uploads::check_send(&limits, &Self::sizes(&files))
+        {
+            return self.show_refusal(&refusal);
+        }
         let private = from.is_none() && privacy.is_private(form.private.is_active());
         let name = if name.is_empty() { default.unwrap_or_default().to_owned() } else { name };
         let body = thread_creation::body(&channel, &name, private, location);
         let from_message = from.map(|m| m.id);
         let from_composer = from.is_none();
-        form.set_busy(true);
+        self.thread_form_busy(form, true);
+        form.stop.set_visible(!files.is_empty());
         form.show_errors(None, None);
         let (this, form) = (self.clone(), form.clone());
         glib::spawn_future_local(async move {
-            let thread = match rest.create_thread(parent, from_message, body).await {
-                Ok(thread) => thread,
-                Err(error) => {
-                    form.set_busy(false);
-                    return this.thread_refused(&form, parent, &Refused::from(&error), &error);
-                }
+            let thread = match form.created.get() {
+                Some(thread) => thread,
+                None => match rest.create_thread(parent, from_message, body).await {
+                    Ok(thread) => {
+                        this.record_slowmode(parent, |slowmode, c, bypass| slowmode.thread_made(c, bypass, now_ms()));
+                        form.created.set(Some(thread.id));
+                        thread.id
+                    }
+                    Err(error) => {
+                        this.thread_form_busy(&form, false);
+                        return this.thread_refused(&form, parent, &Refused::from(&error), &error);
+                    }
+                },
             };
-            this.record_slowmode(parent, |slowmode, c, bypass| slowmode.thread_made(c, bypass, now_ms()));
             // The client waits for the gateway to bring the thread, and sends
             // the first message into it once it's there.
-            if !this.thread_arrived(thread.id).await {
-                // Another go would start a second thread, so the form closes,
-                // and its message goes back to the message box.
-                form.dialog.force_close();
-                this.set_composer_text(&typed);
+            if !this.thread_arrived(thread).await {
+                // Another go sends into this thread, not into a second one.
+                this.thread_form_busy(&form, false);
                 let dialog = adw::AlertDialog::new(
                     Some("Cannot create thread"),
-                    Some(
-                        "The thread was created, but Discord hasn't announced it yet. Your message is in the message box.",
-                    ),
+                    Some("The thread was created, but Discord hasn't announced it yet. Try again in a moment."),
                 );
                 dialog.add_response("okay", "_Okay");
-                dialog.present(Some(&this.window));
+                dialog.present(Some(&form.dialog));
                 return;
             }
-            form.dialog.force_close();
-            if from_composer {
-                this.set_composer_text("");
-            }
-            if this.account.state.borrow().channel == Some(parent) {
-                this.select_channel(thread.id);
-            }
-            match rest.send_message(thread.id, &text, None, &[], None, false).await {
-                Ok(_) => this.message_sent(thread.id),
-                Err(error) => this.message_stopped(thread.id, &Stopped::Send(error)),
+            let message = Outgoing { text: &text, reply: None, sticker: None, at: None, tts: false };
+            match this.send_draft(&rest, draft, thread, &message, files).await {
+                Ok(()) => {
+                    this.message_sent(thread);
+                    form.dialog.force_close();
+                    if from_composer {
+                        this.set_composer_text("");
+                    }
+                    if this.account.state.borrow().channel == Some(parent) {
+                        this.select_channel(thread);
+                    }
+                }
+                Err(stopped) => {
+                    this.thread_form_busy(&form, false);
+                    this.thread_message_stopped(&form, thread, &stopped);
+                }
             }
         });
+    }
+
+    /// Say why the first message didn't go out, with the thread made: next
+    /// to the message, or an alert for a file, as the client does. The files
+    /// stay for another go, unless they were taken back.
+    fn thread_message_stopped(self: &Rc<Self>, form: &Form, thread: Snowflake, stopped: &Stopped) {
+        let why = self.record_stopped(thread, stopped);
+        match (stopped, why) {
+            (Stopped::Upload(why), _) => {
+                let dialog = adw::AlertDialog::new(Some("Upload Failed"), Some(why));
+                dialog.add_response("okay", "_Okay");
+                dialog.present(Some(&form.dialog));
+            }
+            (_, Some(why)) => form.show_errors(None, Some(&why)),
+            (_, None) => {}
+        }
     }
 
     /// Say why Discord turned a thread down, as the client does: an alert for

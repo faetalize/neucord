@@ -46,7 +46,8 @@ what arrived, IDENTIFY's key order and properties first.
 - **`patch.py`**: points the copy's API, gateway and CDN at the fake, and adds
   a command file the scenario writes to: `home`, `guild <id>`,
   `channel <id>`, `attach`, `thread-form` (Create Thread for the open
-  channel), `shot <png>`, `shot-popover <widget> <png>` (the
+  channel), `thread-name <text>`, `thread-files <path>…` and `thread-form-state` (its name, the
+  files added to its first message, and what it holds), `shot <png>`, `shot-popover <widget> <png>` (the
   popover showing on `composer`, `composer_box` or `gif_button`),
   `type <text>` (as typed), `set <text>` (as the app sets it),
   `backspace` (GTK's own Backspace at the caret), `suggestions [png]`
@@ -106,6 +107,7 @@ what arrived, IDENTIFY's key order and properties first.
   `pills` fills a command's options in the box, searches members (the fake
   answers op 8 with a `query` with its people whose username or name starts
   with it), and ends commands by Backspace, a reply and a channel switch;
+  `thread-first-message` (with `FAKE_OWNER=1`) makes a thread whose first message carries two files;
   `thread` (with `FAKE_OWNER=1`) runs /thread, and `thread-slowmode` (with
   `FAKE_OWNER=1 FAKE_SLOWMODE=30`) has it refused, which shows in Create
   Thread and not in the message box; `dice` (with
