@@ -79,7 +79,9 @@ what arrived, IDENTIFY's key order and properties first.
   followed it or left it to the browser), `voice-draft <seconds>` (a made-up
   recording as the open channel's draft, there being no microphone),
   `voice-play`, `voice-scrub <0..1>`, `voice-state` (the draft player and
-  its clock) and `voice-finishing` (the draft as just stopped; run with
+  its clock), `voice-recording <s>` (a recording that began that long ago;
+  `voice-recording-elsewhere` in #general), `voice-record` (Record Voice
+  Message), `voice-blink <s>` (the clock's colour, logged) and `voice-finishing` (the draft as just stopped; run with
   `E2E_NO_PLAYER=1` to leave it no player, whose media stream keeps a window
   shot from finishing here), `vmsg state|play|pause|scrub <0..1>` (the player
   of a voice message in the channel, with `FAKE_VOICE=1`: 8 s of silence in
