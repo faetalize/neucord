@@ -735,7 +735,7 @@ mod tests {
         let g = guild(json!([thread(1, 10, 2 * HOUR), thread(2, 10, 3 * HOUR), pinned, thread(4, 10, 6 * HOUR)]));
         // The first has a message we haven't read, the second mentions us.
         let mut read = read_upto(&g, &[(0, NOW - 3 * HOUR)]);
-        read.on_message(g.threads[1].id, true);
+        read.on_message(g.threads[1].id, crate::read_state::Mention::High);
         let listed = listed(&g, g.channel(Snowflake(10)).unwrap(), None, false, &read, NOW);
         assert_eq!(ids(&listed), [g.threads[2].id, g.threads[1].id, g.threads[0].id]);
     }

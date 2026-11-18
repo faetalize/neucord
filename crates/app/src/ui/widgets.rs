@@ -15,6 +15,11 @@ pub(super) fn badge(count: u32) -> Option<gtk::Label> {
     })
 }
 
+/// [`badge`], dimmed when every mention is low importance.
+pub(super) fn importance_badge(count: u32, low: bool) -> Option<gtk::Label> {
+    badge(count).inspect(|label| label.set_css_classes(if low { &["badge", "low"] } else { &["badge"] }))
+}
+
 /// Show `count` on a badge, hiding it at zero.
 pub(super) fn set_badge(label: &gtk::Label, count: u32) {
     label.set_label(&if count > 99 { "99+".to_owned() } else { count.to_string() });

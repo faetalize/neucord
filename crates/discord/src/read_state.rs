@@ -21,7 +21,24 @@ struct Entry {
     /// Discord knows of it: READY listed it, or we acked it. An entry made
     /// by a message arriving isn't (`_persisted` in 218461).
     persisted: bool,
+    /// Every mention counted is low importance (`isMentionLowImportance`,
+    /// flag 4 of the read state in 218461).
+    low_importance: bool,
 }
+
+/// What a message adds to a channel's mention count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mention {
+    None,
+    /// A mention, or a DM.
+    High,
+    /// Every message of a channel that notifies for all, under
+    /// `mentionOnAllMessages`: counted, but its badge is dimmed.
+    Low,
+}
+
+/// The read state `flags` bit that says the mentions are low importance.
+const LOW_IMPORTANCE: u64 = 4;
 
 #[derive(Clone, Debug, Default)]
 pub struct ReadStates {
@@ -43,6 +60,8 @@ impl ReadStates {
             /// (`read_state_type ?? CHANNEL`, 218461; `CHANNEL` is 0).
             #[serde(default)]
             read_state_type: Option<u8>,
+            #[serde(default)]
+            flags: Option<u64>,
         }
         let entries = value.get("entries").unwrap_or(value);
         let channels = entries
@@ -60,7 +79,8 @@ impl ReadStates {
                     .and_then(|s| s.parse().ok())
                     .filter(|&n: &u64| n != 0)
                     .map(Snowflake);
-                (raw.id, Entry { acked, mentions: raw.mention_count, persisted: true })
+                let low_importance = raw.flags.is_some_and(|f| f & LOW_IMPORTANCE != 0);
+                (raw.id, Entry { acked, mentions: raw.mention_count, persisted: true, low_importance })
             })
             .collect();
         ReadStates { channels }
@@ -89,13 +109,25 @@ impl ReadStates {
         self.channels.get(&channel).map_or(0, |e| e.mentions)
     }
 
+    /// The channel's mentions are all low importance (`getIsMentionLowImportance`):
+    /// its badge is dimmed.
+    pub fn low_importance(&self, channel: Snowflake) -> bool {
+        self.channels.get(&channel).is_some_and(|e| e.low_importance)
+    }
+
     /// A message arrived that we have not seen. Creates the entry if missing,
     /// so live messages make a channel unread even without prior history.
-    pub fn on_message(&mut self, channel: Snowflake, mentioned: bool) {
+    /// The importance flag follows the client's setter: a low mention sets it
+    /// only on the first of the count, a high one always clears it, so it
+    /// stays while every mention counted is low.
+    pub fn on_message(&mut self, channel: Snowflake, mention: Mention) {
         let entry = self.channels.entry(channel).or_default();
-        if mentioned {
-            entry.mentions += 1;
+        match mention {
+            Mention::None => return,
+            Mention::Low => entry.low_importance |= entry.mentions == 0,
+            Mention::High => entry.low_importance = false,
         }
+        entry.mentions += 1;
     }
 
     /// Read up to `message` and no further, even after reading beyond it, with
@@ -121,6 +153,7 @@ impl ReadStates {
         if entry.acked.is_none_or(|acked| message >= acked) {
             entry.acked = Some(message);
             entry.mentions = 0;
+            entry.low_importance = false;
             entry.persisted = true;
         }
     }
@@ -174,7 +207,7 @@ mod tests {
     fn only_what_discord_has_a_read_state_for_is_persisted() {
         let mut s = states();
         assert!(s.persisted(Snowflake(1)) && s.persisted(Snowflake(2)), "READY lists them");
-        s.on_message(Snowflake(3), false);
+        s.on_message(Snowflake(3), Mention::None);
         assert!(!s.persisted(Snowflake(3)), "a message arriving makes only a local entry");
         s.ack(Snowflake(3), Snowflake(9));
         assert!(s.persisted(Snowflake(3)), "an ack is sent");
@@ -228,9 +261,40 @@ mod tests {
     }
 
     #[test]
+    fn mentions_stay_low_importance_only_while_every_one_is() {
+        let mut s = states();
+        let c = Snowflake(3);
+        s.on_message(c, Mention::Low);
+        assert!(s.low_importance(c) && s.mentions(c) == 1);
+        s.on_message(c, Mention::Low);
+        assert!(s.low_importance(c) && s.mentions(c) == 2);
+        s.on_message(c, Mention::High);
+        assert!(!s.low_importance(c) && s.mentions(c) == 3, "a real mention makes the count count");
+        s.on_message(c, Mention::Low);
+        assert!(!s.low_importance(c), "and a later low one doesn't take it back");
+
+        s.ack(c, Snowflake(50));
+        assert!(!s.low_importance(c) && s.mentions(c) == 0);
+        s.on_message(c, Mention::Low);
+        assert!(s.low_importance(c), "a new count starts over");
+        s.on_message(Snowflake(4), Mention::None);
+        assert!(!s.low_importance(Snowflake(4)) && s.mentions(Snowflake(4)) == 0);
+    }
+
+    #[test]
+    fn ready_says_which_counts_are_low_importance() {
+        let s = ReadStates::from_ready(&json!([
+            {"id": "1", "last_message_id": "9", "mention_count": 2, "flags": 4},
+            {"id": "2", "last_message_id": "9", "mention_count": 2, "flags": 1},
+            {"id": "3", "last_message_id": "9", "mention_count": 2},
+        ]));
+        assert_eq!([1, 2, 3].map(|id| s.low_importance(Snowflake(id))), [true, false, false]);
+    }
+
+    #[test]
     fn live_messages_and_acks() {
         let mut s = states();
-        s.on_message(Snowflake(3), true);
+        s.on_message(Snowflake(3), Mention::High);
         assert!(s.is_unread(Snowflake(3), Some(Snowflake(50))));
         assert_eq!(s.mentions(Snowflake(3)), 1);
 

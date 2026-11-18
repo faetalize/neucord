@@ -60,6 +60,9 @@
   background-color: var(--neucord-badge-bg); color: var(--neucord-badge-fg); font-size: 11px; font-weight: bold;
 }
 
+/* Mentions that are only a channel notifying for all messages. */
+.badge.low { background-color: alpha(currentColor, 0.25); color: inherit; }
+
 /* Channel list */
 .category { margin-top: 12px; font-size: 0.82em; font-weight: bold; }
 .navigation-sidebar > row.unread { font-weight: bold; }

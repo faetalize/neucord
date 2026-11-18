@@ -203,6 +203,8 @@ impl NotificationSettings {
         self.flags = flags;
     }
 
+    /// The account uses the newer notification levels, with unread settings
+    /// of their own (`useNewNotifications`).
     pub fn use_new_notifications(&self) -> bool {
         self.flags & USE_NEW_NOTIFICATIONS != 0
     }
@@ -399,6 +401,50 @@ impl NotificationSettings {
         }
     }
 
+    /// `resolveUnreadSetting` (543465) of a server channel; a thread or a DM is
+    /// always [`All`](UnreadSetting::All) (`Le` and `Gw`, 95701), which callers
+    /// settle. Without `useNewNotifications` it is always `All`; with it, the
+    /// channel's own setting, its category's, the server's, then whether the
+    /// level is "all messages".
+    pub fn unread_setting(&self, place: &Place) -> UnreadSetting {
+        let Some(guild) = place.guild.filter(|_| self.use_new_notifications()) else { return UnreadSetting::All };
+        let from = |flags: u64, all, only| {
+            if flags & all != 0 {
+                Some(UnreadSetting::All)
+            } else if flags & only != 0 {
+                Some(UnreadSetting::OnlyMentions)
+            } else {
+                None
+            }
+        };
+        [Some(place.channel), place.parent]
+            .into_iter()
+            .flatten()
+            .find_map(|id| from(self.channel_flags(guild, id), unread_flags::ALL_MESSAGES, unread_flags::ONLY_MENTIONS))
+            .or_else(|| {
+                let flags = self.by_guild.get(&place.guild).map_or(0, |s| s.flags);
+                from(flags, guild_flags::UNREADS_ALL_MESSAGES, guild_flags::UNREADS_ONLY_MENTIONS)
+            })
+            .unwrap_or(if self.level(place) == Level::All { UnreadSetting::All } else { UnreadSetting::OnlyMentions })
+    }
+
+    /// A message in a channel that `counts_mention` doesn't count still does,
+    /// at low importance, when the account asks for `mentionOnAllMessages` and
+    /// the channel notifies for all messages (218461): not in a call's chat, and
+    /// not in a channel muted itself (its category or server don't count here).
+    pub fn low_importance_mention(&self, place: &Place, vocal: bool, now_unix: i64) -> bool {
+        self.mention_on_all_messages()
+            && !vocal
+            && !self.mute_state(place.guild, Some(place.channel), now_unix).on
+            && self.level(place) == Level::All
+    }
+
+    /// [`low_importance_mention`](Self::low_importance_mention) for a thread,
+    /// which asks the thread's own level (`parent` is its channel's place).
+    pub fn low_importance_thread_mention(&self, thread: &Channel, parent: &Place, now_unix: i64) -> bool {
+        self.mention_on_all_messages() && self.thread_level(thread, parent, now_unix) == Level::All
+    }
+
     /// The server has opt-in channels on (`isOptInEnabled`, 543465).
     pub fn opt_in_enabled(&self, guild: Snowflake) -> bool {
         self.by_guild.get(&Some(guild)).is_some_and(|s| s.flags & guild_flags::OPT_IN_CHANNELS_ON != 0)
@@ -533,9 +579,25 @@ pub mod forum_flags {
     pub const OPT_IN_ENABLED: u64 = 1 << 12;
 }
 
-/// A server entry's flags (355097's `OPT_IN_CHANNELS_ON`).
+/// A server entry's flags (355097's `OPT_IN_CHANNELS_ON`, `UNREADS_*`).
 pub mod guild_flags {
     pub const OPT_IN_CHANNELS_ON: u64 = 1 << 14;
+    pub const UNREADS_ONLY_MENTIONS: u64 = 1 << 12;
+    pub const UNREADS_ALL_MESSAGES: u64 = 1 << 11;
+}
+
+/// What a channel override's flags say of its unreads (355097's `vv`).
+mod unread_flags {
+    pub const ONLY_MENTIONS: u64 = 1 << 9;
+    pub const ALL_MESSAGES: u64 = 1 << 10;
+}
+
+/// Whether a channel's unread messages count, besides its mentions
+/// (`resolveUnreadSetting`, 543465).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnreadSetting {
+    All,
+    OnlyMentions,
 }
 
 /// A channel with no message in this long drops out of an opt-in server's
@@ -893,5 +955,69 @@ mod tests {
         assert!(!s.mentions_me(&message("1", json!({"mention_everyone": true})), me, &roles), "suppressed");
         assert!(s.mentions_me(&message("1", json!({"mention_roles": ["40"]})), me, &roles));
         assert!(!s.mentions_me(&message("1", json!({"mention_roles": ["41"]})), me, &roles));
+    }
+
+    /// The account's flags with `useNewNotifications` (bit 4) and
+    /// `mentionOnAllMessages` (bit 5) as asked.
+    fn with_flags(mut s: NotificationSettings, new_levels: bool, all_messages: bool) -> NotificationSettings {
+        s.set_flags(u64::from(new_levels) << 4 | u64::from(all_messages) << 5);
+        s
+    }
+
+    #[test]
+    fn a_channel_that_notifies_for_all_mentions_at_low_importance_when_asked() {
+        let at = |s: &NotificationSettings, p: &Place, vocal| s.low_importance_mention(p, vocal, NOW);
+        let all = place(Some(1), 10, None);
+        assert!(!at(&settings(), &all, false), "not without the flag");
+        let s = with_flags(settings(), false, true);
+        assert!(at(&s, &all, false));
+        assert!(!at(&s, &all, true), "not in a call's chat");
+        assert!(!at(&s, &place(Some(1), 12, None), false), "level mentions");
+        assert!(!at(&s, &place(Some(1), 11, None), false), "a muted channel");
+        // Only the channel's own mute counts, not its server's or its category's.
+        assert!(at(&s, &place(Some(2), 10, None), false), "server 2 is muted, with no level of its own");
+        let in_muted_category = place(Some(1), 10, Some(11));
+        assert!(at(&s, &in_muted_category, false), "a muted category isn't asked");
+    }
+
+    #[test]
+    fn a_thread_that_notifies_for_all_mentions_at_low_importance_when_asked() {
+        let thread = |flags: u64| -> Channel {
+            let member = json!({"flags": flags, "muted": false, "join_timestamp": "2026-10-28T00:00:00Z"});
+            serde_json::from_value(json!({"id": "30", "type": 11, "parent_id": "10", "member": member})).unwrap()
+        };
+        let parent = place(Some(1), 10, None);
+        let on = with_flags(settings(), false, true);
+        assert!(on.low_importance_thread_mention(&thread(0), &parent, NOW), "its parent's level is all");
+        assert!(on.low_importance_thread_mention(&thread(1 << 1), &place(Some(1), 12, None), NOW), "we chose all");
+        assert!(!on.low_importance_thread_mention(&thread(1 << 2), &parent, NOW), "we chose mentions");
+        assert!(!settings().low_importance_thread_mention(&thread(1 << 1), &parent, NOW), "not without the flag");
+    }
+
+    #[test]
+    fn unread_settings_resolve_from_the_channel_up_and_only_with_new_notifications() {
+        let s = NotificationSettings::from_ready(&json!([
+            {"guild_id": "1", "message_notifications": 1, "flags": 1 << 11, "channel_overrides": [
+                {"channel_id": "10", "message_notifications": 3, "flags": 1 << 9},
+                {"channel_id": "50", "message_notifications": 3, "flags": 1 << 10}]},
+            {"guild_id": "2", "message_notifications": 1, "flags": 1 << 12, "channel_overrides": []},
+            {"guild_id": "3", "message_notifications": 0, "channel_overrides": []},
+            {"guild_id": "4", "message_notifications": 1, "channel_overrides": []},
+        ]));
+        let setting =
+            |s: &NotificationSettings, guild, channel, parent| s.unread_setting(&place(Some(guild), channel, parent));
+        let old = with_flags(s.clone(), false, false);
+        assert_eq!(setting(&old, 4, 5, None), UnreadSetting::All, "without the flag everything counts");
+        assert_eq!(setting(&old, 1, 10, None), UnreadSetting::All);
+
+        let s = with_flags(s, true, false);
+        assert_eq!(setting(&s, 1, 10, None), UnreadSetting::OnlyMentions, "the channel's own");
+        assert_eq!(setting(&s, 1, 11, Some(10)), UnreadSetting::OnlyMentions, "its category's");
+        assert_eq!(setting(&s, 1, 50, Some(10)), UnreadSetting::All, "the channel before the category");
+        assert_eq!(setting(&s, 1, 12, None), UnreadSetting::All, "the server's, though its level is mentions");
+        assert_eq!(setting(&s, 2, 12, None), UnreadSetting::OnlyMentions, "the server's");
+        assert_eq!(setting(&s, 3, 12, None), UnreadSetting::All, "no setting: the level is all messages");
+        assert_eq!(setting(&s, 4, 12, None), UnreadSetting::OnlyMentions, "no setting: the level is mentions");
+        assert_eq!(s.unread_setting(&place(None, 12, None)), UnreadSetting::All, "a DM");
     }
 }
