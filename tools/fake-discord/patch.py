@@ -135,6 +135,8 @@ impl App {
                     self.view_poll_votes(&message, answer);
                 }
             }
+            // The emoji picker, from the message box's button.
+            Some("emoji-picker") => self.emoji_button.emit_clicked(),
             // Click the nth quick reaction on the bar of the first row that has them.
             Some("hover-react") => {
                 let n: i32 = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
@@ -180,6 +182,7 @@ impl App {
                     Some("composer") => Some(self.composer.clone().upcast()),
                     Some("composer_box") => Some(self.composer_box.clone().upcast()),
                     Some("gif_button") => Some(self.gif_button.clone().upcast()),
+                    Some("emoji_button") => Some(self.emoji_button.clone().upcast()),
                     Some("attach_button") => Some(self.drafts.attach.clone().upcast()),
                     Some("pins_button") => Some(self.pins_button.clone().upcast()),
                     Some("inbox_button") => Some(self.inbox_button.clone().upcast()),

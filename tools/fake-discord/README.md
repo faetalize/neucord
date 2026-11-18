@@ -129,6 +129,9 @@ what arrived, IDENTIFY's key order and properties first.
   `thread-previews` (with `FAKE_THREADS=1`, two active threads of #general
   synced with THREAD_LIST_SYNC, one with its newest message) opens the thread
   browser, whose rows show that message or "No recent messages";
+  `top-emoji` (with `FAKE_TOP_EMOJI=1`, two custom emoji and the top-emojis
+  route) opens the emoji picker (`emoji-picker`; `shot-popover emoji_button`)
+  and shows "Top Emoji in Test Server" first;
   `heartbeat` waits for five op 40s, the interval's among them;
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).
