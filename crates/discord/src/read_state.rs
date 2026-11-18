@@ -98,6 +98,12 @@ impl ReadStates {
         entry.mentions = mentions;
     }
 
+    /// The channel is gone: so is what we kept of its reading (`clear` on
+    /// `CHANNEL_DELETE`, 218461).
+    pub fn remove(&mut self, channel: Snowflake) {
+        self.channels.remove(&channel);
+    }
+
     /// Everything up to `message` is read (we opened the channel, sent a
     /// message, or another client of ours acked it). Never moves backwards.
     pub fn ack(&mut self, channel: Snowflake, message: Snowflake) {
@@ -143,6 +149,14 @@ mod tests {
         assert!(!s.is_unread(Snowflake(3), Some(Snowflake(5))), "no entry counts as read");
         assert!(!s.is_unread(Snowflake(1), None));
         assert_eq!(s.mentions(Snowflake(1)), 2);
+    }
+
+    #[test]
+    fn a_removed_channel_keeps_no_reading() {
+        let mut s = states();
+        s.remove(Snowflake(1));
+        assert_eq!((s.acked(Snowflake(1)), s.mentions(Snowflake(1))), (None, 0));
+        assert!(s.acked(Snowflake(2)).is_none() && s.is_unread(Snowflake(2), Some(Snowflake(5))), "the other stays");
     }
 
     #[test]

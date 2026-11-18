@@ -679,6 +679,16 @@ impl Guild {
         self.channel(id).or_else(|| self.thread(id))
     }
 
+    /// A channel or category was deleted, and with it the threads under it
+    /// (`CHANNEL_DELETE` in the client's thread stores, 970278 and 802958).
+    /// Gives the ids of the threads that went.
+    pub fn remove_channel(&mut self, id: Snowflake) -> Vec<Snowflake> {
+        self.channels.retain(|c| c.id != id);
+        let gone = self.threads.iter().filter(|t| t.parent_id == Some(id)).map(|t| t.id).collect();
+        self.threads.retain(|t| t.parent_id != Some(id));
+        gone
+    }
+
     /// A thread was created or changed. An update leaves out our membership,
     /// and may know of no newer message than we do.
     pub fn set_thread(&mut self, mut thread: Channel) {
@@ -2017,6 +2027,18 @@ mod tests {
         assert_eq!(t.last_message_id, Some(Snowflake(30)), "and may not know of newer messages");
         g.set_thread_member(Snowflake(20), None);
         assert!(g.thread(Snowflake(20)).unwrap().member.is_none(), "we left");
+    }
+
+    #[test]
+    fn a_deleted_channel_takes_its_threads() {
+        let mut g: Guild = serde_json::from_str(
+            r#"{"id":"1","name":"G","channels":[{"id":"9","type":0},{"id":"10","type":0}],"threads":[
+                {"id":"20","type":11,"parent_id":"9"},{"id":"21","type":11,"parent_id":"10"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(g.remove_channel(Snowflake(9)), [Snowflake(20)]);
+        assert!(g.channel(Snowflake(9)).is_none() && g.thread(Snowflake(20)).is_none());
+        assert!(g.channel(Snowflake(10)).is_some() && g.thread(Snowflake(21)).is_some(), "the others stay");
     }
 
     #[test]

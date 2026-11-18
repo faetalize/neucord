@@ -209,6 +209,7 @@ impl App {
                 }
                 Event::PrivateChannelDelete(id) => self.on_private_channel_delete(id),
                 Event::GuildChannelUpdate { guild_id, channel } => self.on_guild_channel(guild_id, channel),
+                Event::GuildChannelDelete { guild_id, id } => self.on_guild_channel_delete(guild_id, id),
                 Event::ThreadUpdate { guild_id, thread } => {
                     self.on_threads(guild_id, |g| g.set_thread(thread.clone()));
                     self.forum_thread_updated(&thread);
@@ -770,6 +771,37 @@ impl App {
         };
         if guild_open {
             self.rebuild_sidebar();
+        }
+        self.permissions_changed(Some(guild_id));
+    }
+
+    /// A server's channel or category was deleted, with the threads under it.
+    /// If it (or one of them) was open, the server opens again, on a channel
+    /// we can see.
+    fn on_guild_channel_delete(self: &Rc<Self>, guild_id: Snowflake, id: Snowflake) {
+        let (guild_open, was_open, forum) = {
+            let mut state = self.account.state.borrow_mut();
+            let state = &mut *state;
+            let Some(guild) = state.guilds.iter_mut().find(|g| g.id == guild_id) else { return };
+            let forum = guild.channel(id).is_some_and(|c| c.kind.is_forum_like());
+            let gone: Vec<Snowflake> = guild.remove_channel(id).into_iter().chain([id]).collect();
+            let mut timelines = self.account.timelines.borrow_mut();
+            for channel in &gone {
+                state.read.remove(*channel);
+                timelines.remove(*channel);
+            }
+            (state.guild == Some(guild_id), state.channel.is_some_and(|c| gone.contains(&c)), forum)
+        };
+        if forum {
+            self.refresh_threads_view();
+        }
+        if was_open {
+            return self.select_guild(guild_id);
+        }
+        if guild_open {
+            self.rebuild_sidebar();
+            self.refresh_thread_boxes();
+            self.sync_threads_button();
         }
         self.permissions_changed(Some(guild_id));
     }
