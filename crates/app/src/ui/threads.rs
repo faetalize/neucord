@@ -42,6 +42,39 @@ pub(super) const LEAVE_THREAD: Entry<ThreadTarget> = Entry::Item(Item {
     kind: Kind::Action(|app, target| app.leave_thread(target.0)),
 });
 
+/// Whether the person in `target` may be removed from the open thread by us
+/// (`qi` in 406704): the thread's owner for a private one, or anyone who
+/// may manage threads there. Not ourselves, nor from a media thread.
+fn may_remove(app: &App, target: &super::profile::UserTarget) -> Option<(Snowflake, bool)> {
+    let thread = target.channel?;
+    let state = app.account.state.borrow();
+    let (Some(guild), channel) = state.find_channel(thread)? else { return None };
+    let me = state.account.as_ref()?;
+    let managers =
+        permissions::in_channel(guild, channel, me, now_unix()).contains(permissions::Permissions::MANAGE_THREADS);
+    let allowed = (channel.kind == ChannelKind::PrivateThread && channel.owner_id == Some(me.id)) || managers;
+    let possible = channel.kind.is_thread() && channel.kind != ChannelKind::MediaThread && target.user.id != me.id;
+    let forum = channel.parent_id.and_then(|p| guild.channel(p)).is_some_and(|p| p.kind.is_forum_like());
+    (allowed && possible).then_some((thread, forum))
+}
+
+/// Remove from Thread, in the menu of a person in a thread's member list (the
+/// thread's user menu, 202643). The client's label names the person.
+pub(super) const REMOVE_FROM_THREAD: Entry<super::profile::UserTarget> = Entry::Item(Item {
+    name: "remove-from-thread",
+    label: "Remove from _Thread",
+    shows: |app, target| may_remove(app, target).is_some_and(|(_, forum)| !forum),
+    kind: Kind::Action(|app, target| app.remove_from_thread(target)),
+});
+
+/// ... and from a forum post, where it says Post.
+pub(super) const REMOVE_FROM_POST: Entry<super::profile::UserTarget> = Entry::Item(Item {
+    name: "remove-from-post",
+    label: "Remove from _Post",
+    shows: |app, target| may_remove(app, target).is_some_and(|(_, forum)| forum),
+    kind: Kind::Action(|app, target| app.remove_from_thread(target)),
+});
+
 /// Copy Link on a thread or a forum post (886393).
 pub(super) const COPY_THREAD_LINK: Entry<ThreadTarget> = Entry::Item(Item {
     name: "copy-thread-link",
@@ -779,6 +812,19 @@ impl App {
     /// Join `thread`, as its menu does. What joined comes back as events.
     fn join_thread(self: &Rc<Self>, thread: Snowflake) {
         self.change_membership(thread, true);
+    }
+
+    /// Take the person out of the thread (`removeMember` in 7909); the
+    /// thread's members change as the gateway says.
+    fn remove_from_thread(self: &Rc<Self>, target: &super::profile::UserTarget) {
+        let (Some(thread), Some(rest)) = (target.channel, self.account.state.borrow().rest.clone()) else { return };
+        let user = target.user.id;
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            if let Err(e) = rest.remove_thread_member(thread, user, MENU_LOCATION).await {
+                this.show_composer_error(&format!("Could not remove them from the thread: {e}"));
+            }
+        });
     }
 
     fn leave_thread(self: &Rc<Self>, thread: Snowflake) {

@@ -165,6 +165,13 @@ what arrived, IDENTIFY's key order and properties first.
   (`friends add`, `friend-entry`, `friend-note`, `friend-send`,
   `friend-state`) and checks the POST carries the trimmed `note` and that the
   field keeps to 120 UTF-16 units;
+  `thread-members` (with `FAKE_THREADS=1 FAKE_THREAD_MEMBERS=1 FAKE_OWNER=1`:
+  op 37's `thread_member_lists` is answered with THREAD_MEMBER_LIST_UPDATE, and
+  the Mods role lists its members apart) opens the thread "lunch plans"
+  (`channel 7201`), whose pane lists who is in it, opens a person's menu
+  (`member-menu <id>`, `shot-popover members_pane <png>`) and chooses
+  Remove from Thread (`member-menu-item remove-from-thread`), which sends the
+  DELETE and loses them from the list;
   `heartbeat` waits for five op 40s, the interval's among them;
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).

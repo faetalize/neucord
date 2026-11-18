@@ -231,6 +231,22 @@ pub enum Event {
         thread: Snowflake,
         member: Option<ThreadMember>,
     },
+    /// A thread's whole member list, which we asked for with
+    /// `thread_member_lists` (THREAD_MEMBER_LIST_UPDATE). The members' own
+    /// details come as [`Event::Members`] and [`Event::PresenceUpdate`] just before.
+    ThreadMemberList {
+        guild_id: Snowflake,
+        thread: Snowflake,
+        members: Vec<Snowflake>,
+    },
+    /// Who joined and left a thread (THREAD_MEMBERS_UPDATE), whatever the
+    /// list we hold of it, which they change.
+    ThreadMembers {
+        guild_id: Snowflake,
+        thread: Snowflake,
+        added: Vec<Snowflake>,
+        removed: Vec<Snowflake>,
+    },
     /// Our own member in a server changed: roles, a timeout, screening passed.
     MemberUpdate {
         guild_id: Snowflake,
@@ -663,6 +679,34 @@ impl Parser {
 
     fn push(&self, event: Event) {
         self.events.borrow_mut().push_back(event);
+    }
+
+    /// What a thread's member list or its joins carry of the members
+    /// (`member` and `presence`, which the client's member, user and
+    /// presence stores each take): their member in the server, and where
+    /// they are on now.
+    fn thread_members<'a>(&self, guild_id: Snowflake, members: impl IntoIterator<Item = &'a Value>) {
+        let mut known = Vec::new();
+        let mut users = Vec::new();
+        for entry in members {
+            let id = parse_id(&entry["user_id"]).or_else(|| parse_id(&entry["member"]["user"]["id"]));
+            if let (Some(id), true) = (id, entry["member"].is_object()) {
+                if let Ok(user) = User::deserialize(&entry["member"]["user"]) {
+                    users.push(user);
+                }
+                known.push((id, Known::from_value(&entry["member"])));
+            }
+            if let (Some(user_id), true) = (id, entry["presence"].is_object()) {
+                self.push(Event::PresenceUpdate {
+                    user_id,
+                    guild_id: Some(guild_id),
+                    presence: Presence::from_value(&entry["presence"]),
+                });
+            }
+        }
+        if !known.is_empty() {
+            self.push(Event::Members { guild_id, members: known, not_found: Vec::new(), users });
+        }
     }
 }
 
@@ -1611,18 +1655,33 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
             else {
                 return;
             };
-            let removed =
-                data["removed_member_ids"].as_array().into_iter().flatten().any(|id| parse_id(id) == Some(me));
-            let added = data["added_members"]
-                .as_array()
-                .into_iter()
-                .flatten()
+            let removed: Vec<Snowflake> =
+                data["removed_member_ids"].as_array().into_iter().flatten().filter_map(parse_id).collect();
+            let added_members = || data["added_members"].as_array().into_iter().flatten();
+            parser.thread_members(guild_id, added_members());
+            let added: Vec<Snowflake> = added_members().filter_map(|m| parse_id(&m["user_id"])).collect();
+            let ours = added_members()
                 .find(|m| parse_id(&m["user_id"]) == Some(me))
                 .and_then(|m| ThreadMember::deserialize(m).ok());
-            match added {
+            let left = removed.contains(&me);
+            parser.push(Event::ThreadMembers { guild_id, thread, added, removed });
+            match ours {
                 Some(member) => Event::ThreadMember { guild_id, thread, member: Some(member) },
-                None if removed => Event::ThreadMember { guild_id, thread, member: None },
+                None if left => Event::ThreadMember { guild_id, thread, member: None },
                 None => return,
+            }
+        }
+        // The member list of a thread we asked for (`thread_member_lists` of op 37).
+        "THREAD_MEMBER_LIST_UPDATE" => {
+            let (Some(guild_id), Some(thread)) = (parse_id(&data["guild_id"]), parse_id(&data["thread_id"])) else {
+                return;
+            };
+            let members = data["members"].as_array().map(Vec::as_slice).unwrap_or_default();
+            parser.thread_members(guild_id, members);
+            Event::ThreadMemberList {
+                guild_id,
+                thread,
+                members: members.iter().filter_map(|m| parse_id(&m["user_id"])).collect(),
             }
         }
         "CHANNEL_DELETE" => {
@@ -2602,6 +2661,8 @@ mod tests {
         dispatch(&state, "THREAD_MEMBER_UPDATE", json!({"id": "20", "guild_id": "1", "user_id": "6", "flags": 0}));
         assert!(state.try_recv().is_err(), "someone else's");
 
+        // Every change of who is in a thread is told, and ours as the one that
+        // follows when we are among them.
         let members = |added: &str, removed: &str| {
             dispatch(
                 &state,
@@ -2610,11 +2671,43 @@ mod tests {
                        "added_members": [{"id": "20", "user_id": added, "flags": 0, "join_timestamp": "2026-10-28T00:00:00Z"}],
                        "removed_member_ids": [removed]}),
             );
-            state.try_recv().ok()
+            let Ok(Event::ThreadMembers { added, removed, .. }) = state.try_recv() else {
+                panic!("who joined and left")
+            };
+            (added, removed, state.try_recv().ok())
         };
-        assert!(matches!(members("5", "7"), Some(Event::ThreadMember { member: Some(_), .. })), "we joined");
-        assert!(matches!(members("6", "5"), Some(Event::ThreadMember { member: None, .. })), "we left");
-        assert!(members("6", "7").is_none(), "neither");
+        let (added, removed, ours) = members("5", "7");
+        assert_eq!((added, removed), (vec![Snowflake(5)], vec![Snowflake(7)]));
+        assert!(matches!(ours, Some(Event::ThreadMember { member: Some(_), .. })), "we joined");
+        assert!(matches!(members("6", "5").2, Some(Event::ThreadMember { member: None, .. })), "we left");
+        assert!(members("6", "7").2.is_none(), "neither");
+    }
+
+    #[test]
+    fn a_threads_member_list_comes_with_its_members_and_where_they_are() {
+        let state = fresh_state();
+        dispatch(
+            &state,
+            "THREAD_MEMBER_LIST_UPDATE",
+            json!({"guild_id": "1", "thread_id": "20", "members": [
+                {"user_id": "6", "join_timestamp": "2026-10-28T00:00:00Z", "flags": 0,
+                 "member": {"user": {"id": "6", "username": "six"}, "roles": ["40"], "nick": "Sixth"},
+                 "presence": {"user": {"id": "6"}, "status": "idle", "client_status": {"desktop": "idle"}, "activities": []}},
+                {"user_id": "7", "join_timestamp": "2026-10-28T00:00:00Z", "flags": 0},
+            ]}),
+        );
+        // Their members, where they are, and then the list.
+        let Ok(Event::PresenceUpdate { user_id, guild_id, .. }) = state.try_recv() else { panic!("presence") };
+        assert_eq!((user_id, guild_id), (Snowflake(6), Some(Snowflake(1))));
+        let Ok(Event::Members { guild_id, members, users, .. }) = state.try_recv() else { panic!("members") };
+        assert_eq!((guild_id, members.len(), users.len()), (Snowflake(1), 1, 1));
+        assert_eq!(members[0].0, Snowflake(6));
+        let Ok(Event::ThreadMemberList { guild_id, thread, members }) = state.try_recv() else { panic!("the list") };
+        assert_eq!((guild_id, thread, members), (Snowflake(1), Snowflake(20), vec![Snowflake(6), Snowflake(7)]));
+        assert!(state.try_recv().is_err());
+        // Without its thread or server it is nothing.
+        dispatch(&state, "THREAD_MEMBER_LIST_UPDATE", json!({"guild_id": "1", "members": []}));
+        assert!(state.try_recv().is_err());
     }
 
     #[test]

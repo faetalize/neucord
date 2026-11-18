@@ -92,6 +92,7 @@ pub mod subscriptions;
 pub mod switcher;
 pub mod system;
 pub mod thread_creation;
+pub mod thread_members;
 pub mod threads;
 pub mod typing;
 pub mod uploads;
