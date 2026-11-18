@@ -183,16 +183,17 @@ impl App {
                     .content_fit(gtk::ContentFit::Cover)
                     .overflow(gtk::Overflow::Hidden)
                     .build();
+                let ask = super::widgets::asked(48, Some(&self.images));
                 if discord::cdn::is_animated(hash) {
                     self.images.set_moving(
                         &picture,
-                        &discord::cdn::guild_icon_still_url(guild.id.0, hash, 64),
-                        &discord::cdn::guild_icon_url(guild.id.0, hash, 64),
+                        &discord::cdn::guild_icon_still_url(guild.id.0, hash, ask),
+                        &discord::cdn::guild_icon_url(guild.id.0, hash, ask),
                         Subject::ServerIcon,
                         Row::None,
                     );
                 } else {
-                    self.images.set(&picture, &discord::cdn::guild_icon_url(guild.id.0, hash, 64));
+                    self.images.set(&picture, &discord::cdn::guild_icon_url(guild.id.0, hash, ask));
                 }
                 button.set_child(Some(&picture));
             }
@@ -320,7 +321,10 @@ pub(super) fn folder_preview(guilds: &[&Guild], images: &Images) -> gtk::Widget 
                     .css_classes(["mini-icon"])
                     .build();
                 // Static frame only: four animations in one button is noise.
-                images.set(&picture, &discord::cdn::guild_icon_still_url(guild.id.0, hash, 32));
+                images.set(
+                    &picture,
+                    &discord::cdn::guild_icon_still_url(guild.id.0, hash, super::widgets::asked(MINI, Some(images))),
+                );
                 picture.upcast()
             }
             None => gtk::Label::builder()
