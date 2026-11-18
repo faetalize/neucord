@@ -272,6 +272,39 @@ macro_rules! read_items {
 read_items!(MARK_CHANNEL_READ, MARK_CHANNEL_UNREAD, ChannelTarget);
 read_items!(MARK_THREAD_READ, MARK_THREAD_UNREAD, ThreadTarget);
 
+/// Collapse Category, ticked while it is folded (914907).
+pub(super) const COLLAPSE_CATEGORY: Entry<ChannelTarget> = Entry::Item(Item {
+    name: "collapse-category",
+    label: "Collapse _Category",
+    shows: |app, target| kind_of(app, target.0) == Some(ChannelKind::Category),
+    kind: Kind::Check {
+        checked: |app, target| app.account.state.borrow().collapsed.contains(target.0),
+        set: |app, target, on| app.fold_category(target.0, on),
+    },
+});
+
+/// Collapse All Categories, until there is nothing left to collapse (914907).
+pub(super) const COLLAPSE_ALL_CATEGORIES: Entry<ChannelTarget> = Entry::Item(Item {
+    name: "collapse-all-categories",
+    label: "Collapse All Categories",
+    shows: |app, target| {
+        let state = app.account.state.borrow();
+        state.find_channel(target.0).is_some_and(|(guild, c)| {
+            c.kind == ChannelKind::Category && guild.is_some_and(|g| state.offers_collapse_all(g))
+        })
+    },
+    kind: Kind::Action(|app, target| {
+        let categories = {
+            let state = app.account.state.borrow();
+            let Some((Some(guild), _)) = state.find_channel(target.0) else { return };
+            state.listed_categories(guild)
+        };
+        for category in categories {
+            app.fold_category(category, true);
+        }
+    }),
+});
+
 macro_rules! mute_items {
     ($mute:ident, $unmute:ident, $name:literal, $mute_label:literal, $unmute_label:literal, $kinds:expr) => {
         pub(super) const $mute: Entry<ChannelTarget> = Entry::Item(Item {

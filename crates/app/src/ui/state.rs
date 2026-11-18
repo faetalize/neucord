@@ -705,6 +705,20 @@ impl State {
         sections
     }
 
+    /// Whether Collapse All Categories shows in a category's menu: not for a
+    /// server with no category, nor when every one is folded already (914907,
+    /// which looks at all the server's categories, listed or not).
+    pub(super) fn offers_collapse_all(&self, guild: &Guild) -> bool {
+        let mut categories = guild.channels.iter().filter(|c| c.kind == ChannelKind::Category).peekable();
+        categories.peek().is_some() && !categories.all(|c| self.collapsed.contains(c.id))
+    }
+
+    /// What Collapse All Categories folds: the categories the sidebar lists
+    /// (`getChannels(guild)[GUILD_CATEGORY]`, 924985).
+    pub(super) fn listed_categories(&self, guild: &Guild) -> Vec<Snowflake> {
+        self.channels_by_category(guild).into_iter().filter_map(|(category, _)| Some(category?.id)).collect()
+    }
+
     fn list_facts(&self, guild: &Guild, channel: &Channel, now: i64) -> Facts {
         let open_thread = self.channel.and_then(|id| guild.thread(id)).is_some_and(|t| t.parent_id == Some(channel.id));
         Facts {
@@ -1381,6 +1395,19 @@ mod tests {
         assert!(state.read_item(Snowflake(22)).is_none(), "not a channel");
         state.guilds[0].channels.iter_mut().find(|c| c.id == Snowflake(20)).unwrap().last_message_id = None;
         assert_eq!(enabled(&state, 20), Some(false), "nothing to mark unread from");
+    }
+
+    #[test]
+    fn collapse_all_categories_shows_while_a_category_is_open() {
+        let mut state = categorised(json!({}));
+        let guild = state.guilds[0].clone();
+        assert!(state.offers_collapse_all(&guild));
+        assert_eq!(state.listed_categories(&guild), [Snowflake(8)]);
+        state.collapsed.set(Snowflake(8), true);
+        assert!(!state.offers_collapse_all(&guild), "all of them are folded");
+        state.collapsed.set(Snowflake(8), false);
+        let bare = open_server(None, json!({}));
+        assert!(!bare.offers_collapse_all(&bare.guilds[0]), "no category");
     }
 
     #[test]

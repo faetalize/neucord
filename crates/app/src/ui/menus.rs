@@ -249,12 +249,13 @@ pub(super) const CHANNEL: Table<sidebar::ChannelTarget> = &[
     &[sidebar::COPY_CHANNEL_ID],
 ];
 
-/// A category's menu, from its heading in the sidebar: Mark As Read, Mute
-/// Category and Notification Settings, as the client has them among items
-/// Neucord has no use for yet (editing). Muting folds the category, and
-/// clicking its heading does too.
+/// A category's menu, from its heading in the sidebar: Mark As Read, the
+/// two collapse items, Mute Category and Notification Settings, as the client
+/// has them among items Neucord has no use for yet (editing). Muting folds the
+/// category, and clicking its heading does too.
 pub(super) const CATEGORY: Table<sidebar::ChannelTarget> = &[
     &[notify_menus::MARK_CHANNEL_READ],
+    &[notify_menus::COLLAPSE_CATEGORY, notify_menus::COLLAPSE_ALL_CATEGORIES],
     &[notify_menus::MUTE_CATEGORY, notify_menus::UNMUTE_CATEGORY, notify_menus::CHANNEL_NOTIFICATIONS],
 ];
 
@@ -784,6 +785,14 @@ mod tests {
         // The three groups move and nothing else does.
         let n = names(message(false)).len();
         assert_eq!(names(message(true))[..n - 3], names(message(false))[..n - 3]);
+    }
+
+    #[test]
+    fn a_categorys_menu_collapses_between_reading_and_muting() {
+        let names = names(CATEGORY);
+        assert_eq!(names[0], ["mark-channel-read"]);
+        assert_eq!(names[1], ["collapse-category", "collapse-all-categories"]);
+        assert!(names[2].contains(&"mute-category"));
     }
 
     #[test]
