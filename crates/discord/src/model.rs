@@ -396,6 +396,18 @@ pub struct ThreadMember {
 }
 
 impl ThreadMember {
+    /// What the client holds of our membership of a forum post the moment we
+    /// join it, before Discord answers (`THREAD_MEMBER_LOCAL_UPDATE`, 152007):
+    /// no flags, muted with no end, joined now.
+    pub fn joined_locally(now_ms: i64) -> ThreadMember {
+        ThreadMember {
+            flags: 0,
+            muted: true,
+            mute_config: Some(crate::notifications::MuteConfig::default()),
+            join_timestamp: Some(now_ms),
+        }
+    }
+
     /// Muted, and the mute hasn't run out.
     pub fn is_muted(&self, now_unix: i64) -> bool {
         crate::notifications::mute_active(self.muted, self.mute_config.as_ref(), now_unix)
@@ -718,6 +730,13 @@ impl Guild {
             }
             None => self.threads.push(thread),
         }
+    }
+
+    /// We joined or left the forum post `thread` and Discord hasn't said so
+    /// yet: its membership is what [`ThreadMember::joined_locally`] holds, or
+    /// none (`THREAD_MEMBER_LOCAL_UPDATE`).
+    pub fn set_local_membership(&mut self, thread: Snowflake, joining: bool, now_ms: i64) {
+        self.set_thread_member(thread, joining.then(|| ThreadMember::joined_locally(now_ms)));
     }
 
     /// We joined (`Some`) or left a thread.
@@ -2090,6 +2109,23 @@ mod tests {
         assert_eq!(t.last_message_id, Some(Snowflake(30)), "and may not know of newer messages");
         g.set_thread_member(Snowflake(20), None);
         assert!(g.thread(Snowflake(20)).unwrap().member.is_none(), "we left");
+    }
+
+    #[test]
+    fn joining_a_post_locally_holds_a_muted_membership_until_discord_answers() {
+        let mut g: Guild = serde_json::from_str(
+            r#"{"id":"1","name":"G","channels":[{"id":"9","type":15}],"threads":[
+                {"id":"20","type":11,"parent_id":"9"}]}"#,
+        )
+        .unwrap();
+        g.set_local_membership(Snowflake(20), true, 1_000);
+        let member = g.thread(Snowflake(20)).unwrap().member.as_ref().unwrap();
+        assert_eq!((member.flags, member.muted, member.join_timestamp), (0, true, Some(1_000)));
+        assert!(member.is_muted(2), "muted, with no end");
+        g.set_local_membership(Snowflake(20), false, 2_000);
+        assert!(g.thread(Snowflake(20)).unwrap().member.is_none());
+        g.set_local_membership(Snowflake(99), true, 3_000);
+        assert!(g.thread(Snowflake(99)).is_none(), "a thread we don't hold stays unknown");
     }
 
     #[test]
