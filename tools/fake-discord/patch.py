@@ -819,7 +819,9 @@ edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''           
 
 # Voice messages need a microphone, which the scratch session has none of: `voice-draft <seconds>` puts a made-up
 # recording in the open channel as the recorder would have left it, `voice-play` clicks the player's button,
-# `voice-scrub <0..1>` presses the waveform there and lets go, `voice-state` prints the player, `voice-finishing`
+# `voice-recording <s>` begins a recording s seconds ago (`-elsewhere`: in #general, whichever channel is open), `voice-record` starts one as Record Voice Message does,
+# `voice-blink <s>` logs the clock's colour, `voice-scrub <0..1>` presses the waveform there and lets go,
+# `voice-state` prints the player, `voice-finishing`
 # makes the draft one whose last packets are still coming.
 edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(v) if v.starts_with("voice") => self.e2e_voice(v, parts.next()),
             Some("quit") => {''')
@@ -854,6 +856,43 @@ impl App {
                 }
                 self.voice_event(id, Event::Ended);
                 self.voice_ended(id);
+            }
+            // A recording that began `number` seconds ago in the open channel, with nothing behind it.
+            "voice-recording" | "voice-recording-elsewhere" => {
+                let Some(open) = self.account.state.borrow().channel else { return };
+                let channel = if command == "voice-recording" { open } else { Snowflake(600) };
+                let id = self.voice.ids.get() + 1;
+                self.voice.ids.set(id);
+                self.voice.levels.borrow_mut().clear();
+                self.voice.draft.replace(Some(Draft {
+                    id,
+                    channel,
+                    phase: Phase::Recording,
+                    recorder: None,
+                    capture: Some(Capture::new(0)),
+                    started: glib::monotonic_time() - (number * 1e6) as i64,
+                    millis: 0,
+                    recording: None,
+                    send_when_done: false,
+                    attempts: Rc::default(),
+                }));
+                self.voice_started(id);
+            }
+            // Start a recording as Record Voice Message does.
+            "voice-record" => self.record_voice_message(),
+            // The clock's warning colour, every 100 ms for `number` seconds.
+            "voice-blink" => {
+                let (this, n) = (Rc::downgrade(self), std::cell::Cell::new(0));
+                glib::timeout_add_local(Duration::from_millis(100), move || {
+                    let Some(this) = this.upgrade() else { return glib::ControlFlow::Break };
+                    n.set(n.get() + 1);
+                    let (elapsed, error) = (
+                        this.voice.draft.borrow().as_ref().map(|d| (glib::monotonic_time() - d.started) / 1000),
+                        this.voice.time.has_css_class("error"),
+                    );
+                    eprintln!("e2e: blink {:>3} elapsed={elapsed:?} error={error}", n.get());
+                    if f64::from(n.get()) / 10.0 >= number { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+                });
             }
             // As if it had just been stopped and its last packets were on their way.
             "voice-finishing" => {
