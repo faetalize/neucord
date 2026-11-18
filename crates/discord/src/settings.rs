@@ -208,6 +208,9 @@ pub struct Notifications {
     /// People we know start streaming in small servers.
     pub go_live: bool,
     pub upcoming_event: bool,
+    /// Quiet mode (Focus Mode), which silences desktop notifications as Do
+    /// Not Disturb does (`quietMode`).
+    pub quiet_mode: bool,
 }
 
 impl Default for Notifications {
@@ -219,6 +222,7 @@ impl Default for Notifications {
             profile_updates: true,
             go_live: true,
             upcoming_event: true,
+            quiet_mode: false,
         }
     }
 }
@@ -231,6 +235,7 @@ pub struct NotificationsPatch {
     pub profile_updates: Option<bool>,
     pub go_live: Option<bool>,
     pub upcoming_event: Option<bool>,
+    pub quiet_mode: Option<bool>,
 }
 
 impl Notifications {
@@ -241,6 +246,7 @@ impl Notifications {
         self.profile_updates = patch.profile_updates.unwrap_or(self.profile_updates);
         self.go_live = patch.go_live.unwrap_or(self.go_live);
         self.upcoming_event = patch.upcoming_event.unwrap_or(self.upcoming_event);
+        self.quiet_mode = patch.quiet_mode.unwrap_or(self.quiet_mode);
     }
 }
 
@@ -871,6 +877,13 @@ impl Settings {
     pub fn do_not_disturb(&self) -> bool {
         self.status.status == UserStatus::DoNotDisturb
     }
+
+    /// Whether desktop notifications and rings are held back: Do Not Disturb
+    /// or quiet mode (`eA` in 534765, `K` in 411238 and `i1` in 526227 ask
+    /// for both).
+    pub fn silenced(&self) -> bool {
+        self.do_not_disturb() || self.notifications.quiet_mode
+    }
 }
 
 /// What the rail shows, top to bottom.
@@ -1164,6 +1177,17 @@ mod tests {
         assert_eq!(patch.message_display_compact, Some(false));
         assert_eq!(patch.media.gif_auto_play, Some(false));
         assert!(SettingsPatch::from_json(&json!({"theme": "dark"})).is_empty());
+    }
+
+    #[test]
+    fn quiet_mode_silences_like_do_not_disturb() {
+        let mut settings = Settings::default();
+        assert!(!settings.silenced());
+        settings.notifications.quiet_mode = true;
+        assert!(settings.silenced() && !settings.do_not_disturb(), "quiet mode isn't a status");
+        settings.notifications.quiet_mode = false;
+        settings.status.status = UserStatus::DoNotDisturb;
+        assert!(settings.silenced());
     }
 
     #[test]
