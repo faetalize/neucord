@@ -47,6 +47,7 @@ const ANIMATE_EMOJI: u32 = 14;
 const ANIMATE_STICKERS: u32 = 15;
 const ENABLE_TTS_COMMAND: u32 = 16;
 const MESSAGE_DISPLAY_COMPACT: u32 = 17;
+const CONVERT_EMOTICONS: u32 = 21;
 const VIEW_NSFW_COMMANDS: u32 = 23;
 
 // NotificationSettings.
@@ -122,6 +123,7 @@ impl SettingsPatch {
                 gif_auto_play: flag(GIF_AUTO_PLAY),
                 render_reactions: flag(RENDER_REACTIONS),
                 animate_emoji: flag(ANIMATE_EMOJI),
+                convert_emoticons: flag(CONVERT_EMOTICONS),
                 animate_stickers: text
                     .as_ref()
                     .and_then(|t| t.int_value(ANIMATE_STICKERS))
@@ -506,12 +508,14 @@ mod tests {
         let text = [
             bool_wrapper(GIF_AUTO_PLAY, false),
             bool_wrapper(RENDER_REACTIONS, true),
+            bool_wrapper(CONVERT_EMOTICONS, false),
             bool_wrapper(MESSAGE_DISPLAY_COMPACT, true),
         ]
         .concat();
         let patch = patch(&bytes_field(TEXT_AND_IMAGES, &text));
         assert_eq!(patch.media.gif_auto_play, Some(false), "a wrapper holding false is set, not absent");
         assert_eq!(patch.media.render_reactions, Some(true));
+        assert_eq!(patch.media.convert_emoticons, Some(false));
         assert_eq!(patch.media.render_embeds, None, "never changed, so not sent");
         assert_eq!(patch.message_display_compact, Some(true));
         assert_eq!(patch.developer_mode, None);
@@ -735,6 +739,7 @@ mod tests {
                     render_reactions: false,
                     animate_emoji: false,
                     animate_stickers: StickerAnimation::Never,
+                    convert_emoticons: true,
                 },
                 developer_mode: true,
                 message_display_compact: true,
