@@ -1207,13 +1207,15 @@ fn vote_body(answers: &[u32]) -> Value {
 }
 
 /// Whether the message box holds nothing a message could carry: no text
-/// but spaces, no file and no sticker (`j` in 290153, which greys the send
-/// button; Enter sends nothing then either).
+/// but spaces or a bare `@silent` (which is a flag, not text), no file and no
+/// sticker (`j` in 290153, which greys the send button; Enter sends nothing
+/// then either).
 pub fn nothing_to_send(text: &str, files: usize, sticker: bool) -> bool {
-    crate::message_text::trim(text).is_empty() && files == 0 && !sticker
+    scheduled::split_silent(crate::message_text::trim(text), 0).0.is_empty() && files == 0 && !sticker
 }
 
-/// What sending a message sends, as `_sendMessage` in 138399 builds it.
+/// What sending a message sends, as `_sendMessage` in 138399 builds it. A
+/// leading `@silent` is dropped from the text and sets the flag there.
 #[expect(clippy::too_many_arguments, reason = "the parts of one message")]
 fn message_body(
     channel: Snowflake,
@@ -1225,6 +1227,7 @@ fn message_body(
     sticker: Option<Snowflake>,
     tts: bool,
 ) -> Value {
+    let (content, flags) = scheduled::split_silent(content, flags);
     let mut body = json!({
         "content": content,
         "nonce": nonce,
@@ -1558,6 +1561,17 @@ mod tests {
     fn a_message_is_read_aloud_only_when_asked() {
         assert_eq!(message_body(Snowflake(9), "hi", "1", 0, None, &[], None, false)["tts"], false);
         assert_eq!(message_body(Snowflake(9), "hi", "1", 0, None, &[], None, true)["tts"], true);
+    }
+
+    #[test]
+    fn a_leading_silent_is_the_flag_and_not_the_word() {
+        let body = message_body(Snowflake(9), "@silent hi", "1", 0, None, &[], None, false);
+        assert_eq!((body["content"].as_str(), body["flags"].as_u64()), (Some("hi"), Some(1 << 12)));
+        let body = message_body(Snowflake(9), "@silent hi", "1", Message::IS_VOICE_MESSAGE, None, &[], None, false);
+        assert_eq!(body["flags"], (1 << 12) | Message::IS_VOICE_MESSAGE);
+        assert_eq!(message_body(Snowflake(9), "@silently", "1", 0, None, &[], None, false)["content"], "@silently");
+        assert!(nothing_to_send("@silent", 0, false), "nothing is left to send");
+        assert!(!nothing_to_send("@silent", 1, false));
     }
 
     #[test]
