@@ -825,6 +825,15 @@ fn filling(text: &str, cursor: usize, tokens: &[Token]) -> Option<(usize, Filter
     }
 }
 
+/// What of a person's name is typed after `from:` or `mentions:` at `cursor`,
+/// which the client asks the server's members for (`SEARCH_AUTOCOMPLETE_QUERY_UPDATE`,
+/// 692986): the token's full match, trimmed, if there is any.
+pub fn member_query(text: &str, cursor: usize, tokens: &[Token]) -> Option<String> {
+    let (_, filter, typed) = filling(text, cursor, tokens)?;
+    let typed = typed.trim();
+    (matches!(filter, Filter::From | Filter::Mentions) && !typed.is_empty()).then(|| typed.to_owned())
+}
+
 /// The suggestions for `text` with the cursor at `cursor` (in characters).
 pub fn suggest(text: &str, cursor: usize, tokens: &[Token], context: Context, known: &Known) -> Vec<Suggestion> {
     let starts = || {
@@ -1139,6 +1148,17 @@ mod tests {
         // `in:` in a DM isn't a filter.
         let tokens = parse(DM, "in:");
         assert!(suggest("in:", 3, &tokens, DM, &known).iter().all(|s| matches!(s, Suggestion::Filter(_))));
+    }
+
+    #[test]
+    fn what_is_typed_after_from_or_mentions_is_a_member_search() {
+        let query = |text: &str| member_query(text, text.chars().count(), &parse(GUILD, text));
+        assert_eq!(query("from:al").as_deref(), Some("al"));
+        assert_eq!(query("hello mentions: bo ").as_deref(), None, "past the first word");
+        assert_eq!(query("mentions:bo").as_deref(), Some("bo"));
+        assert_eq!(query("from:"), None, "nothing typed");
+        assert_eq!(query("in:gen"), None, "not a person's filter");
+        assert_eq!(query("hello"), None);
     }
 
     #[test]

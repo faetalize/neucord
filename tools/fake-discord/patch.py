@@ -432,6 +432,25 @@ impl App {
                 glib::spawn_future_local(async move { this.dropped(channel, vec![file], instant).await });
             }
             Some("drop-overlay") => self.show_drop_overlay(true),
+            // The member pane closed, as its toggle does, so a channel opened after it subscribes to no list.
+            Some("members-closed") => {
+                self.account.state.borrow_mut().members_closed = true;
+                self.sync_members();
+            }
+            // The search box: `search-open` opens it, `search-type <text>` puts text in it.
+            Some("search-open") => self.toggle_search(),
+            Some("search-type") => {
+                let view = self.search_view.borrow().clone();
+                if let Some(view) = view {
+                    // As typed at the end of the box, so the cursor is past it when the change is read.
+                    view.entry.set_text("");
+                    let mut at = 0;
+                    view.entry.insert_text(rest, &mut at);
+                    // Programmatic inserts leave the cursor behind: read the box again with it at the end.
+                    view.entry.set_position(-1);
+                    view.suggest(self);
+                }
+            }
             Some("send") => {
                 let button = &self.send_button;
                 if !button.is_visible() || !button.is_sensitive() {
