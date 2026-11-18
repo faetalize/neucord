@@ -1188,7 +1188,7 @@ impl App {
 }
 
 /// A list's header, after its icon if it has one.
-fn header_row(header: &Header, icon: Option<&str>) -> gtk::Widget {
+pub(super) fn header_row(header: &Header, icon: Option<&str>) -> gtk::Widget {
     let label = header_label(header);
     let Some(icon) = icon else { return label.upcast() };
     label.set_margin_start(0);

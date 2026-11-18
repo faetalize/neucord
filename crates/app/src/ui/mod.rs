@@ -65,6 +65,7 @@ mod spelling;
 mod state;
 mod stickers;
 mod switcher;
+mod thread_completion;
 mod thread_line;
 mod thread_settings;
 mod threads;
