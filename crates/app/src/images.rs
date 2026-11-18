@@ -131,18 +131,30 @@ impl Images {
     /// Fetch an image and hand it to `done` as a still: at once if it is
     /// decoded already, else once it has loaded, and never if it fails to.
     pub fn load(&self, url: &str, done: impl FnOnce(gdk::Paintable) + 'static) {
+        self.load_or(url, done, || {});
+    }
+
+    /// [`load`](Self::load), telling `failed` when the image can't be
+    /// fetched or decoded, for what shows a spinner until it has the picture.
+    pub fn load_or(&self, url: &str, done: impl FnOnce(gdk::Paintable) + 'static, failed: impl FnOnce() + 'static) {
         if let Some(texture) = self.0.textures.borrow_mut().get(url) {
             return done(texture.upcast());
         }
         let url = url.to_owned();
         let this = self.clone();
         glib::spawn_future_local(async move {
-            let Some(bytes) = this.load_bytes(&url).await else { return };
+            let Some(bytes) = this.load_bytes(&url).await else {
+                eprintln!("images: could not fetch {url}");
+                return failed();
+            };
             // Another picture may have decoded it while we waited.
             let cached = this.0.textures.borrow_mut().get(&url);
             let texture = match cached.map_or_else(|| gdk::Texture::from_bytes(&bytes), Ok) {
                 Ok(texture) => texture,
-                Err(_) => return eprintln!("images: could not decode {url}"),
+                Err(_) => {
+                    eprintln!("images: could not decode {url}");
+                    return failed();
+                }
             };
             let size = texture.width() as u64 * texture.height() as u64 * 4;
             this.0.textures.borrow_mut().insert(&url, texture.clone(), size);
@@ -155,8 +167,20 @@ impl Images {
     /// keeps its frames advancing for as long as it is held, and one that
     /// doesn't decode arrives as its still.
     pub fn load_playing(&self, url: &str, animated: bool, done: impl FnOnce(gdk::Paintable, Option<Lease>) + 'static) {
+        self.load_playing_or(url, animated, done, || {});
+    }
+
+    /// [`load_playing`](Self::load_playing), telling `failed` when not even
+    /// the still can be had.
+    pub fn load_playing_or(
+        &self,
+        url: &str,
+        animated: bool,
+        done: impl FnOnce(gdk::Paintable, Option<Lease>) + 'static,
+        failed: impl FnOnce() + 'static,
+    ) {
         if !animated {
-            return self.load(url, |paintable| done(paintable, None));
+            return self.load_or(url, |paintable| done(paintable, None), failed);
         }
         let (this, url) = (self.clone(), url.to_owned());
         glib::spawn_future_local(async move {
@@ -165,7 +189,7 @@ impl Images {
                     let lease = animated::play(&paintable);
                     done(paintable, lease);
                 }
-                None => this.load(&url, |paintable| done(paintable, None)),
+                None => this.load_or(&url, |paintable| done(paintable, None), failed),
             }
         });
     }
