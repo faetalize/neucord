@@ -172,6 +172,7 @@ impl App {
             UserStatus::Invisible => "offline",
         };
         self.me_dot.set_css_classes(&["presence", class]);
+        self.refresh_group_member_rows();
 
         while let Some(child) = self.me_status.first_child() {
             self.me_status.remove(&child);
