@@ -278,6 +278,14 @@ def guild():
 GUILD_CHANNELS = {c["id"] for c in guild()["channels"]}
 
 
+def friend_requests():
+    """FAKE_FRIEND_NOTES=1: Bob's request to us, with the message he wrote."""
+    if not os.environ.get("FAKE_FRIEND_NOTES"):
+        return []
+    return [{"id": "302", "type": 3, "user_id": "302", "since": "2026-02-01T00:00:00.000000+00:00",
+             "nickname": None, "note": "Hi, we met at the meetup!"}]
+
+
 def ready():
     return {
         "v": 9, "user": ME, "users": [ME, ALICE, BOB, DICEY], "session_id": "sess-1",
@@ -289,7 +297,7 @@ def ready():
             {"id": "203", "type": 1, "last_message_id": None, "recipient_ids": ["901"], "flags": 0},
         ],
         "relationships": [{"id": "301", "type": 1, "user_id": "301", "since": "2026-01-01T00:00:00.000000+00:00",
-                           "nickname": None}],
+                           "nickname": None}] + friend_requests(),
         "read_state": {"entries": [
             {"id": "201", "last_message_id": snowflake(4000, 3), "mention_count": 0},
             {"id": "500", "read_state_type": 3, "last_message_id": "0", "mention_count": 7},
@@ -641,6 +649,16 @@ def emoji_packs(body):
         {"id": "9020", "name": "Retired", "description": "No longer on offer", "available": False,
          "representative_emoji_id": "8203", "emojis": [emoji("8203", "pack_old")]},
     ]
+
+
+# A friend request, which the fake takes whatever it says; a message over 120 characters is refused the way
+# Discord does, as `{"note": [...]}`.
+@route("POST", r"/users/@me/relationships")
+def send_friend_request(body):
+    note = body.get("note")
+    if note is not None and len(note) > 120:
+        return 400, {"note": ["Notes must be 120 characters or fewer"]}
+    return 204, None
 
 
 @route("GET", r"/channels/(\d+)/messages/pins")

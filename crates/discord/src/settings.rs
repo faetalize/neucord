@@ -394,6 +394,9 @@ pub struct Privacy {
     /// Messages from people we may not know go to requests.
     pub message_requests_restricted: Option<bool>,
     pub message_request_restricted_servers: Vec<Snowflake>,
+    /// `hide_friend_request_notes`: none until set, when
+    /// [`Self::friend_request_notes_hidden`] follows the account's age.
+    pub hide_friend_request_notes: Option<bool>,
     pub profile_visibility: ProfileVisibility,
     /// `default_guilds_activity_restricted_v2`; none until set.
     pub activity_default: Option<ActivityDefault>,
@@ -453,6 +456,7 @@ impl Default for Privacy {
             restricted_servers: Vec::new(),
             message_requests_restricted: None,
             message_request_restricted_servers: Vec::new(),
+            hide_friend_request_notes: None,
             profile_visibility: ProfileVisibility::default(),
             activity_default: None,
             activity_restricted_servers: Vec::new(),
@@ -568,6 +572,7 @@ pub struct PrivacyPatch {
     pub restricted_servers: Option<Vec<Snowflake>>,
     pub message_requests_restricted: Option<bool>,
     pub message_request_restricted_servers: Option<Vec<Snowflake>>,
+    pub hide_friend_request_notes: Option<bool>,
     pub profile_visibility: Option<ProfileVisibility>,
     /// Inside, none is `UNSET`.
     pub activity_default: Option<Option<ActivityDefault>>,
@@ -576,6 +581,13 @@ pub struct PrivacyPatch {
 }
 
 impl Privacy {
+    /// Whether friend requests' messages are hidden: the setting, and until
+    /// it is set, for an account that may not see age-restricted content
+    /// (`q` in 420825).
+    pub fn friend_request_notes_hidden(&self, nsfw_allowed: bool) -> bool {
+        self.hide_friend_request_notes.unwrap_or(!nsfw_allowed)
+    }
+
     fn apply(&mut self, patch: PrivacyPatch) {
         self.friends_join_game = patch.friends_join_game.unwrap_or(self.friends_join_game);
         self.voice_participants_join_game =
@@ -590,6 +602,7 @@ impl Privacy {
         if let Some(servers) = patch.message_request_restricted_servers {
             self.message_request_restricted_servers = servers;
         }
+        self.hide_friend_request_notes = patch.hide_friend_request_notes.or(self.hide_friend_request_notes);
         self.profile_visibility = patch.profile_visibility.unwrap_or(self.profile_visibility);
         if let Some(default) = patch.activity_default {
             self.activity_default = default;
@@ -916,6 +929,17 @@ pub fn rail_layout(folders: &[GuildFolder], guilds: &[Snowflake]) -> Vec<RailEnt
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn friend_request_messages_are_hidden_by_the_setting_or_by_the_age_until_it_is_set() {
+        let mut privacy = Privacy::default();
+        assert!(privacy.friend_request_notes_hidden(false), "no setting, no age-restricted content: hidden");
+        assert!(!privacy.friend_request_notes_hidden(true), "no setting, an adult: shown");
+        privacy.hide_friend_request_notes = Some(false);
+        assert!(!privacy.friend_request_notes_hidden(false), "the setting beats the age");
+        privacy.hide_friend_request_notes = Some(true);
+        assert!(privacy.friend_request_notes_hidden(true));
+    }
+
     use super::*;
     use serde_json::json;
 

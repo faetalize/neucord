@@ -17,6 +17,9 @@ edit("crates/discord/src/identity.rs",
 edit("crates/discord/src/cdn.rs", 'host == "media.discordapp.net" ||', 'host == "127.0.0.1:8099" || host == "media.discordapp.net" ||')
 edit("crates/discord/src/cdn.rs", 'let host = url.strip_prefix("https://").and_then(|rest| rest.split([\'/\', \'?\']).next()).unwrap_or_default();', 'let host = url.strip_prefix("http://").and_then(|rest| rest.split([\'/\', \'?\']).next()).unwrap_or_default();')
 edit("crates/app/src/ui/uploads.rs", "    attach: gtk::Button,", "    pub(super) attach: gtk::Button,")
+for field in ("stack: adw::ViewStack", "entry: gtk::Entry", "note: gtk::Entry", "note_left: gtk::Label", "note_hint: gtk::Label",
+              "send: gtk::Button", "add_status: gtk::Label"):
+    edit("crates/app/src/ui/friends.rs", f"\n    {field},", f"\n    pub(super) {field},")
 edit("crates/app/src/ui/mod.rs", "mod emoji;", "mod e2e;\nmod emoji;")
 # What a right-click does to the message box's menu before GTK opens it, for `composer-menu`.
 edit("crates/app/src/ui/menus.rs", "    view.add_controller(press);\n    on_keys(view, move |_| {",
@@ -155,6 +158,32 @@ impl App {
             }
             // The emoji picker, from the message box's button.
             Some("emoji-picker") => self.emoji_button.emit_clicked(),
+            // The friends page: `friends <tab>` shows it on a tab (online, all, pending, blocked, add),
+            // `friend-entry <text>` and `friend-note <text>` fill the Add Friend form, `friend-send` sends it,
+            // `view-request` presses the first View Request, `friend-state` prints what the form says.
+            Some("friends") => {
+                self.show_friends();
+                if let Some(tab) = parts.next() {
+                    self.friends.stack.set_visible_child_name(tab);
+                }
+            }
+            Some("friend-entry") => self.friends.entry.set_text(rest),
+            Some("friend-note") => self.friends.note.set_text(rest),
+            Some("friend-send") => self.friends.send.emit_clicked(),
+            Some("view-request") => {
+                match buttons_below(self.friends.root.upcast_ref(), |b| b.child().and_downcast::<adw::ButtonContent>().is_some_and(|c| c.label() == "View Request")).into_iter().next() {
+                    Some(button) => button.emit_clicked(),
+                    None => eprintln!("e2e: no View Request"),
+                }
+            }
+            Some("friend-state") => {
+                let page = &self.friends;
+                eprintln!(
+                    "e2e: friend-state status={:?} shown={} hint={} left={:?} note={:?}",
+                    page.add_status.label(), page.add_status.is_visible(), page.note_hint.is_visible(),
+                    page.note_left.label(), page.note.text()
+                );
+            }
             // The emoji packs page, as the open picker's button opens it (the packs must be fetched),
             // `packs-pin <n>` clicks the Pin or Unpin button of its nth pack, `packs-shot <png>` shoots it and
             // `packs-close` closes it.

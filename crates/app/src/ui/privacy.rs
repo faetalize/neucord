@@ -150,6 +150,33 @@ impl App {
             form,
         );
 
+        // Whether a request's message shows (`Zd` in 253932, set the other way round).
+        let notes = adw::SwitchRow::builder()
+            .title("Show personalized messages")
+            .subtitle(
+                "Show personalized messages on incoming friend requests. If you accept, the message will still appear in your DMs.",
+            )
+            .build();
+        notes.connect_active_notify({
+            let (app, updating) = (Rc::downgrade(self), form.updating.clone());
+            move |row| {
+                if let (false, Some(app)) = (updating.get(), app.upgrade()) {
+                    app.change_setting(Setting::HideFriendRequestNotes(!row.is_active()));
+                }
+            }
+        });
+        friends.add(&notes);
+        form.shows.push(Box::new({
+            let app = Rc::downgrade(self);
+            move |_| {
+                let Some(app) = app.upgrade() else { return };
+                let on = !app.friend_request_notes_hidden();
+                if notes.is_active() != on {
+                    notes.set_active(on);
+                }
+            }
+        }));
+
         let profile = group("Profile Privacy", "");
         let row = adw::ComboRow::builder()
             .title("Share my full profile with")

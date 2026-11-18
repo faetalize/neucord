@@ -979,9 +979,10 @@ impl Rest {
         Ok(())
     }
 
-    /// Send a friend request by username.
-    pub async fn send_friend_request(&self, username: &str) -> Result<(), Error> {
-        let body = json!({ "username": username, "discriminator": null });
+    /// Send a friend request to `tag` (a username, or `name#1234`), with a
+    /// message if there is one ([`crate::relationships::request_note`]'s).
+    pub async fn send_friend_request(&self, tag: &str, note: Option<&str>) -> Result<(), Error> {
+        let body = crate::relationships::request_body(tag, note);
         self.request(call!(SEND_FRIEND_REQUEST), Some(body)).await
     }
 
