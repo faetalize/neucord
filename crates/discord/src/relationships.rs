@@ -339,6 +339,10 @@ impl Relationships {
         self.presences.get(id)
     }
 
+    pub fn is_friend(&self, id: Snowflake) -> bool {
+        self.by_user.get(&id).is_some_and(|r| r.kind == Kind::Friend)
+    }
+
     pub fn is_blocked(&self, id: Snowflake) -> bool {
         self.by_user.get(&id).is_some_and(|r| r.kind == Kind::Blocked)
     }
@@ -408,6 +412,16 @@ mod tests {
 
     fn names(list: Vec<&Relationship>) -> Vec<&str> {
         list.into_iter().map(Relationship::name).collect()
+    }
+
+    #[test]
+    fn only_a_friend_is_a_friend() {
+        let r = ready();
+        let id = Snowflake;
+        assert!(r.is_friend(id(1)) && r.is_friend(id(2)));
+        for other in [3, 4, 5, 6, 7, 99] {
+            assert!(!r.is_friend(id(other)), "{other}");
+        }
     }
 
     #[test]

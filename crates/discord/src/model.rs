@@ -1015,6 +1015,10 @@ pub struct Attachment {
     pub height: Option<u32>,
     #[serde(default)]
     pub flags: u64,
+    /// The version of Discord's scan for sensitive media that last looked at
+    /// it; -1 if it never will.
+    #[serde(default)]
+    pub content_scan_version: Option<i64>,
     /// In bytes.
     #[serde(default)]
     pub size: Option<u64>,
@@ -1029,6 +1033,11 @@ pub struct Attachment {
 impl Attachment {
     const IS_THUMBNAIL: u64 = 1 << 1;
     const IS_SPOILER: u64 = 1 << 3;
+
+    /// What Discord's scan says of it, for the sensitive media filter.
+    pub fn scan(&self) -> crate::sensitive::Scan {
+        crate::sensitive::Scan { flags: self.flags, version: self.content_scan_version }
+    }
 
     /// Thumbnails of other attachments, which the official client hides.
     pub fn is_hidden(&self) -> bool {
@@ -2439,6 +2448,18 @@ mod tests {
                 .unwrap();
         assert_eq!(voice.waveform_bars(2), [0.5, 0.3]);
         assert_eq!(voice.waveform_bars(5), [0.0, 1.0, 0.2, 0.4, 0.0]);
+    }
+
+    #[test]
+    fn an_attachments_scan() {
+        let attachment = |extra: &str| -> Attachment {
+            serde_json::from_str(&format!(r#"{{"id":"1","filename":"a.png","url":"u"{extra}}}"#)).unwrap()
+        };
+        assert_eq!(attachment("").scan(), crate::sensitive::Scan { flags: 0, version: None });
+        assert_eq!(
+            attachment(r#","flags":16,"content_scan_version":-1"#).scan(),
+            crate::sensitive::Scan { flags: 16, version: Some(-1) }
+        );
     }
 
     #[test]

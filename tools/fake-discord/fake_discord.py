@@ -399,7 +399,28 @@ def messages(channel):
             out.append(poll_message(60))
         if os.environ.get("FAKE_VOICE"):
             out.append(voice_message(61))
+        if os.environ.get("FAKE_SENSITIVE"):
+            out += sensitive_messages()
     return list(reversed(out + POSTED.get(channel, [])))
+
+
+# FAKE_SENSITIVE: pictures Discord's scan has flagged as explicit, ones it has not looked at yet, ones it found
+# clean, and an embed with a flagged picture. An account that is not an adult's (FAKE_NSFW=allowed=0) has them
+# covered in #general.
+def sensitive_messages():
+    def picture(n, **scan):
+        return {**attachment(n), "filename": "scan%d.png" % n, **scan}
+    out = [message(62, ALICE, "scanned, flagged explicit", (picture(62, flags=16, content_scan_version=4),)),
+           message(63, ALICE, "not scanned yet", (picture(63),)),
+           message(64, ALICE, "scanned, clean", (picture(64, content_scan_version=4),)),
+           message(65, ALICE, "an embed with a flagged picture")]
+    pic = f"http://127.0.0.1:{PORT}/attachments/1/900/embed.gif?ex=ffffffff&is=1&hm=2&"
+    out[3]["embeds"] = [{"type": "rich", "title": "A made-up card", "description": "Its text stays.", "flags": 16,
+                         "content_scan_version": 4,
+                         "image": {"url": pic, "proxy_url": pic, "width": 300, "height": 200}}]
+    for i, msg in enumerate(out):
+        msg["timestamp"] = "2026-01-01T11:%02d:00.000000+00:00" % i
+    return out
 
 
 # FAKE_POLL: a poll that is over, so its counts show. Its first answer has 130 voters (more than a page of 100),

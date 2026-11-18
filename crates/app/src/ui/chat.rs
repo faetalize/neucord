@@ -11,6 +11,7 @@ use discord::interaction::Target;
 use discord::notifications;
 use discord::read_state::{Mention, starts_unread};
 use discord::rest::Page;
+use discord::sensitive::{Harms, Place, Rules};
 use discord::system::{self, Kind};
 use discord::threads::{Anchor, Viewed};
 use discord::{Channel, ChannelKind, Message, MessageEdit, Referenced, Snowflake, User};
@@ -33,6 +34,8 @@ use crate::render::{Context, Names, Spoilers};
 use crate::rich_text::RichText;
 use crate::{render, timelines};
 
+/// The experiment that makes scans newer than 4 count (705833).
+const SELF_HARM_SCANS: &str = "2025-09-sensitive-content-self-harm";
 /// How long a message we jumped to stays highlighted.
 const FLASH: std::time::Duration = std::time::Duration::from_secs(2);
 /// Space between the last message and the composer, as around the composer.
@@ -2303,7 +2306,7 @@ impl App {
             }
             self.append_reactions(content, message);
         } else {
-            self.message_content(content, shown, &self.message_names(shown), true);
+            self.message_content(content, shown, &self.message_names(shown), true, None);
             self.append_reactions(content, message);
         }
         // Empty, it would still take the body's spacing.
@@ -2432,9 +2435,36 @@ impl App {
         discord::embed::hides_profile_links(&state.experiments, state.me())
     }
 
+    /// The sensitive media filter for `message`: its rules, and the harms they
+    /// cover where it is. A forward's is the forwarding message's place with
+    /// no author, which the client takes from the original if it has it
+    /// (282108's `nx`), and Neucord has no such lookup.
+    fn sensitivity(&self, message: &Message, forwarded_in: Option<&Message>) -> (Rules, Harms) {
+        let state = self.account.state.borrow();
+        let (Some(me), Some(account)) = (state.me(), state.account.as_ref()) else { return Default::default() };
+        let scans = state.experiments.apex_user(me, SELF_HARM_SCANS).is_some_and(|a| a.variant == 1);
+        let rules = Rules::new(state.settings.sensitive, &state.gates, account, scans);
+        let outer = forwarded_in.unwrap_or(message);
+        let author = forwarded_in.is_none().then_some(message.author.id);
+        let channel = state.find_channel(outer.channel_id);
+        let private = channel.is_some_and(|(_, c)| c.kind.is_private());
+        let friend = author.is_some_and(|a| state.relationships.is_friend(a));
+        let place = Place::of(channel.is_some(), private, author, me, friend);
+        (rules, rules.harms(place))
+    }
+
     /// What a message says, and shows: its text, attachments and embeds. Its
-    /// buttons and menus work if `live`: not in a forward.
-    fn message_content(self: &Rc<Self>, body: &gtk::Box, message: &Message, names: &Names, live: bool) {
+    /// buttons and menus work if `live`: not in a forward, whose place
+    /// `forwarded_in` is.
+    fn message_content(
+        self: &Rc<Self>,
+        body: &gtk::Box,
+        message: &Message,
+        names: &Names,
+        live: bool,
+        forwarded_in: Option<&Message>,
+    ) {
+        let (rules, harms) = self.sensitivity(message, forwarded_in);
         let media = self.account.state.borrow().settings.media;
         let edited = message.edited_timestamp.is_some();
         let embeds = discord::embed::visible(message, &media, self.hides_profile_links());
@@ -2478,7 +2508,8 @@ impl App {
         let shown = message.poll.is_none() && !message.is_components_v2();
         let attached = message.attachments.iter().filter(|a| !a.is_hidden() && shown);
         for attachment in attached {
-            body.append(&attachments::attachment(attachment, voice, &self.images, &media, &stars, &view));
+            let cover = rules.cover(harms, attachment.scan(), true);
+            body.append(&attachments::attachment(attachment, voice, &self.images, &media, &stars, &view, cover));
         }
         for sticker in &message.sticker_items {
             body.append(&attachments::sticker(sticker, &self.images));
@@ -2486,13 +2517,15 @@ impl App {
         // A link in a spoiler covers all the message's embeds, as in Discord.
         let spoilered = discord::embed::has_spoilered_link(&message.content);
         for (n, embed) in embeds.into_iter().enumerate() {
+            // A bot's embeds are never covered for want of a scan.
+            let cover = rules.cover(harms, embed.scan(), !message.author.bot && embed.may_await_scan());
             if spoilered {
                 let (names, images, stars, view) = (names.clone(), self.images.clone(), stars.clone(), view.clone());
                 body.append(&behind_spoiler(move || {
-                    embed_widget(&embed, n, &names, Some(&images), &media, &stars, &view)
+                    embed_widget(&embed, n, &names, Some(&images), &media, &stars, &view, cover)
                 }));
             } else {
-                body.append(&embed_widget(&embed, n, names, Some(&self.images), &media, &stars, &view));
+                body.append(&embed_widget(&embed, n, names, Some(&self.images), &media, &stars, &view, cover));
             }
         }
         if !message.components.is_empty() {
@@ -2562,7 +2595,7 @@ impl App {
         header.append(&gtk::Image::from_icon_name("mail-forward-symbolic"));
         header.append(&gtk::Label::new(Some("Forwarded")));
         bar.append(&header);
-        self.message_content(&bar, original, names, false);
+        self.message_content(&bar, original, names, false, Some(message));
 
         // Where it came from, as the official client names it: the channel
         // if it is in this server, else the server.

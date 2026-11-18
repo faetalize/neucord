@@ -57,6 +57,7 @@ mod reactors;
 mod requests;
 mod scheduling;
 mod search;
+mod sensitive;
 mod server_privacy;
 mod settings;
 mod sidebar;

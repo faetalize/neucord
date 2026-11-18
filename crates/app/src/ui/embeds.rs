@@ -6,12 +6,14 @@ use std::rc::Rc;
 
 use discord::animation::Subject;
 use discord::embed::{Display, Embed, Large, Media, field_rows};
+use discord::sensitive::Cover;
 use discord::settings::MediaSettings;
 use gtk::prelude::*;
 use gtk::{glib, pango};
 
 use super::favorites::Stars;
 use super::media_frame::MediaFrame;
+use super::sensitive::covered;
 use super::video::{Options, Player, media_file};
 use super::viewer::MediaCx;
 use crate::images::{Images, Row, Update};
@@ -29,7 +31,9 @@ const DEFAULT_COLOUR: u32 = 0x1E1F22;
 
 /// The embed at place `n` among the message's. `images` is `None` where
 /// nothing may load. With the viewer's `inline_embed_media` off, author and
-/// footer icons still show, as in the official client.
+/// footer icons still show, as in the official client. Its media is behind
+/// `cover` if there is one; its text never is.
+#[expect(clippy::too_many_arguments, reason = "what the media of the embed's place needs, the star's and the viewer's")]
 pub(super) fn embed_widget(
     embed: &Embed,
     n: usize,
@@ -38,14 +42,39 @@ pub(super) fn embed_widget(
     settings: &MediaSettings,
     stars: &Stars,
     view: &MediaCx,
+    cover: Option<Cover>,
 ) -> gtk::Widget {
     let show_media = settings.inline_embed_media && images.is_some();
     match (embed.display(show_media), images) {
-        (Display::Bare(media), Some(images)) => large(&media, embed, n, images, stars, view),
-        (Display::Card { media, thumbnail }, images) => card(embed, n, names, images, media, thumbnail, stars, view),
+        (Display::Bare(media), Some(images)) => large_behind(cover, &media, embed, n, images, stars, view),
+        (Display::Card { media, thumbnail }, images) => {
+            card(embed, n, names, images, media, thumbnail, stars, view, cover)
+        }
         // `display` only offers media when told it may show it.
-        (Display::Bare(_), None) => card(embed, n, names, None, None, None, stars, view),
+        (Display::Bare(_), None) => card(embed, n, names, None, None, None, stars, view, cover),
     }
+}
+
+/// [`large`], behind `cover` if there is one: the cover is as big as the
+/// media, and the media isn't built until it is revealed.
+fn large_behind(
+    cover: Option<Cover>,
+    media: &Large,
+    embed: &Embed,
+    n: usize,
+    images: &Images,
+    stars: &Stars,
+    view: &MediaCx,
+) -> gtk::Widget {
+    let Some(cover) = cover else { return large(media, embed, n, images, stars, view) };
+    let sized = match media {
+        Large::Image(m) | Large::Video { still: m, .. } | Large::Gifv { still: m, .. } => Some(m),
+        Large::Gallery(_) => None,
+    };
+    let size = sized.map(|m| fitted_size(Some(m.width), Some(m.height), MAX_W, MAX_H));
+    let (media, embed, images, stars, view) =
+        (media.clone(), embed.clone(), images.clone(), stars.clone(), view.clone());
+    covered(cover, size, move || large(&media, &embed, n, &images, &stars, &view))
 }
 
 /// Large media, bare or inside a card, of the embed at place `n`. A GIF that
@@ -84,7 +113,8 @@ pub(super) struct Fitted {
     pub(super) size: (i32, i32),
 }
 
-pub(super) fn fitted_picture(width: Option<u32>, height: Option<u32>, max_w: f64, max_h: f64) -> Fitted {
+/// The box media of that size is fitted into.
+pub(super) fn fitted_size(width: Option<u32>, height: Option<u32>, max_w: f64, max_h: f64) -> (i32, i32) {
     let (mut w, mut h) = match (width, height) {
         (Some(w), Some(h)) if w > 0 && h > 0 => (w as f64, h as f64),
         _ => (max_w, max_h),
@@ -92,7 +122,11 @@ pub(super) fn fitted_picture(width: Option<u32>, height: Option<u32>, max_w: f64
     let scale = (max_w / w).min(max_h / h).min(1.0);
     w *= scale;
     h *= scale;
-    let size = ((w as i32).max(1), (h as i32).max(1));
+    ((w as i32).max(1), (h as i32).max(1))
+}
+
+pub(super) fn fitted_picture(width: Option<u32>, height: Option<u32>, max_w: f64, max_h: f64) -> Fitted {
+    let size = fitted_size(width, height, max_w, max_h);
     let picture = shrinking_picture();
     Fitted { frame: MediaFrame::new(size, &picture), picture, size }
 }
@@ -270,6 +304,7 @@ fn card(
     thumbnail: Option<Media>,
     stars: &Stars,
     view: &MediaCx,
+    cover: Option<Cover>,
 ) -> gtk::Widget {
     let card =
         gtk::Box::builder().halign(gtk::Align::Start).overflow(gtk::Overflow::Hidden).css_classes(["embed"]).build();
@@ -307,14 +342,23 @@ fn card(
     }
     top.append(&text);
     if let (Some(images), Some(thumbnail)) = (images, thumbnail) {
-        let frame = image(&thumbnail, images, THUMBNAIL, THUMBNAIL);
-        view.link(&frame, view.thumbnail(n));
-        top.append(&stars.over(&frame, thumbnail.star.as_ref()));
+        let build = {
+            let (images, stars, view) = (images.clone(), stars.clone(), view.clone());
+            move || {
+                let frame = image(&thumbnail, &images, THUMBNAIL, THUMBNAIL);
+                view.link(&frame, view.thumbnail(n));
+                stars.over(&frame, thumbnail.star.as_ref())
+            }
+        };
+        top.append(&match cover {
+            Some(cover) => covered(cover, Some((THUMBNAIL as i32, THUMBNAIL as i32)), build),
+            None => build(),
+        });
     }
     body.append(&top);
 
     if let (Some(media), Some(images)) = (media, images) {
-        body.append(&large(&media, embed, n, images, stars, view));
+        body.append(&large_behind(cover, &media, embed, n, images, stars, view));
     }
 
     let footer_text = embed.footer.as_ref().map(|f| f.text.as_str()).filter(|t| !t.is_empty());

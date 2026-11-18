@@ -82,6 +82,7 @@ pub mod restricted;
 pub mod scheduled;
 pub mod scrollback;
 pub mod search;
+pub mod sensitive;
 pub mod session;
 pub mod settings;
 mod settings_proto;

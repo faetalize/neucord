@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use discord::animation::Subject;
 use discord::gifs::Starred;
+use discord::sensitive::Cover;
 use discord::settings::MediaSettings;
 use discord::voice::VoicePlayer;
 use discord::{Attachment, Snowflake, Sticker};
@@ -15,9 +16,10 @@ use gtk::{gio, glib};
 
 use super::App;
 use super::chat::MessageTarget;
-use super::embeds::{behind_spoiler, fitted_picture};
+use super::embeds::{behind_spoiler, fitted_picture, fitted_size};
 use super::favorites::Stars;
 use super::menus::{Entry, Item, Kind};
+use super::sensitive::covered;
 use super::video::{Options, Player, media_file};
 use super::viewer::MediaCx;
 use crate::images::{Images, Row};
@@ -41,6 +43,7 @@ enum Shown {
 }
 
 /// One attachment of a message, `voice` if the message is a voice message.
+/// A picture or video behind `cover` isn't built until revealed.
 pub(super) fn attachment(
     attachment: &Attachment,
     voice: bool,
@@ -48,6 +51,7 @@ pub(super) fn attachment(
     media: &MediaSettings,
     stars: &Stars,
     view: &MediaCx,
+    cover: Option<Cover>,
 ) -> gtk::Widget {
     let inline = media.inline_attachment_media;
     let shown = if voice && attachment.is_audio() {
@@ -69,7 +73,13 @@ pub(super) fn attachment(
         Shown::Image => image(attachment, images, view, &stars),
         Shown::Video => video(attachment, images, view),
     };
-    if attachment.is_spoiler() {
+    // Over a spoiler's: the filter's reason is the one the client gives.
+    let sized = matches!(shown, Shown::Image | Shown::Video);
+    if let Some(cover) = cover.filter(|_| sized) {
+        let size = fitted_size(attachment.width, attachment.height, MAX_W, MAX_H);
+        let (attachment, images, view) = (attachment.clone(), images.clone(), view.clone());
+        covered(cover, Some(size), move || build(&attachment, &images, &view))
+    } else if attachment.is_spoiler() {
         let (attachment, images, view) = (attachment.clone(), images.clone(), view.clone());
         behind_spoiler(move || build(&attachment, &images, &view))
     } else {

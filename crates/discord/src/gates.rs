@@ -1,5 +1,6 @@
 //! What READY says holds privacy settings back for the account: a parent
-//! linked through Family Center, and the age rules of the account's region.
+//! linked through Family Center, and the age rules of the account's region;
+//! and what the sensitive media filter reads of it.
 //! The settings window offers the same switches as the client does, and
 //! leaves alone those the client disables or refuses.
 
@@ -18,6 +19,9 @@ fn is_adult(status: u64) -> bool {
 /// `MESSAGE_REQUEST_RESTRICTIONS` among the settings a region sets for teens
 /// by default (923457).
 const TEEN_MESSAGE_REQUESTS: u64 = 4;
+/// `SENSITIVE_CONTENT` among them: sensitive media is covered until the
+/// account chooses (923457; asked of the region, not the account's age).
+const TEEN_SENSITIVE_CONTENT: u64 = 1;
 /// `GUILD_ACTIVITY_STATUS` among them: activity is shared in large servers
 /// until the account chooses (923457). The client asks only the region, not
 /// the account's age (`isSettingTeenByDefault`, 454409).
@@ -60,6 +64,11 @@ pub struct Gates {
     /// The account's age group isn't known (`b8` in 36149 is false for
     /// `UNVERIFIED`): its age gate asks to confirm it, not to update it.
     pub age_unverified: bool,
+    /// Sensitive media is covered by default (see [`crate::sensitive`]).
+    pub sensitive_by_default: bool,
+    /// `explicit_content_scan_version`: the newest scan Discord runs, if it
+    /// says.
+    pub explicit_content_scan_version: Option<i64>,
 }
 
 impl Gates {
@@ -79,6 +88,8 @@ impl Gates {
             nsfw_commands_age_gated: age == UNVERIFIED && age_gated & AGE_GATED_COMMANDS != 0,
             spaces_age_gated: !is_adult(age) && age_gated & AGE_GATED_SPACES != 0,
             age_unverified: age == UNVERIFIED,
+            sensitive_by_default: teen_defaults & TEEN_SENSITIVE_CONTENT != 0,
+            explicit_content_scan_version: ready["explicit_content_scan_version"].as_i64(),
         }
     }
 }
@@ -104,6 +115,20 @@ mod tests {
         assert!(Gates::from_ready(&ready(3, 8)).activity_status_by_default, "an adult too");
         assert!(Gates::from_ready(&ready(2, 12)).activity_status_by_default);
         assert!(!Gates::from_ready(&ready(2, 4)).activity_status_by_default);
+    }
+
+    #[test]
+    fn sensitive_media_is_covered_by_default_where_the_region_says_whatever_the_age() {
+        let ready = |age, teen| {
+            json!({"user": {"age_verification_status": age},
+                   "regional_feature_config": {"teen_by_default_settings": teen},
+                   "explicit_content_scan_version": 4})
+        };
+        assert!(Gates::from_ready(&ready(3, 1)).sensitive_by_default, "an adult too");
+        assert!(Gates::from_ready(&ready(2, 9)).sensitive_by_default);
+        assert!(!Gates::from_ready(&ready(2, 12)).sensitive_by_default);
+        assert_eq!(Gates::from_ready(&ready(2, 1)).explicit_content_scan_version, Some(4));
+        assert_eq!(Gates::from_ready(&json!({})).explicit_content_scan_version, None);
     }
 
     #[test]

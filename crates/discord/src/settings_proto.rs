@@ -13,6 +13,7 @@ use std::time::Duration;
 use crate::Snowflake;
 use crate::emoji::Tone;
 use crate::protobuf::{Message, Value, bool_value, string_value, uint_value, uint64_value};
+use crate::sensitive::{DmFilter, Preferences, Redaction, Redactions};
 use crate::settings::{
     ActivityDefault, CustomStatus, FriendSources, GuildFolder, MediaPatch, NotificationsPatch, PrivacyPatch,
     ProfileVisibility, ReactionNotifications, SettingsPatch, StatusSettings, StickerAnimation, UserStatus,
@@ -49,6 +50,14 @@ const ENABLE_TTS_COMMAND: u32 = 16;
 const MESSAGE_DISPLAY_COMPACT: u32 = 17;
 const CONVERT_EMOTICONS: u32 = 21;
 const VIEW_NSFW_COMMANDS: u32 = 23;
+const EXPLICIT_CONTENT_FILTER: u32 = 19;
+const EXPLICIT_CONTENT_SETTINGS: u32 = 29;
+const GORE_CONTENT_SETTINGS: u32 = 32;
+
+// ExplicitContentSettings and GoreContentSettings.
+const IN_GUILDS: u32 = 1;
+const IN_FRIEND_DMS: u32 = 2;
+const IN_NON_FRIEND_DMS: u32 = 3;
 
 // NotificationSettings.
 const REACTION_NOTIFICATIONS: u32 = 7;
@@ -191,7 +200,24 @@ impl SettingsPatch {
             nsfw_commands_in_dms: flag(VIEW_NSFW_COMMANDS),
             enable_tts_command: flag(ENABLE_TTS_COMMAND),
             show_command_suggestions: flag(SHOW_COMMAND_SUGGESTIONS),
+            sensitive: text.as_ref().map(|t| preferences(t)),
         })
+    }
+}
+
+/// How `text_and_images` covers sensitive media. The redactions are plain
+/// enums, so one left out is unset; the old filter is a wrapper, absent
+/// until chosen.
+fn preferences(text: &Message) -> Preferences {
+    let redactions = |number| {
+        let message = text.message(number);
+        let at = |field| Redaction::from_raw(message.as_ref().and_then(|m| m.varint(field)).unwrap_or(0));
+        Redactions { guilds: at(IN_GUILDS), friend_dm: at(IN_FRIEND_DMS), non_friend_dm: at(IN_NON_FRIEND_DMS) }
+    };
+    Preferences {
+        explicit: redactions(EXPLICIT_CONTENT_SETTINGS),
+        gore: redactions(GORE_CONTENT_SETTINGS),
+        dm_filter: text.int_value(EXPLICIT_CONTENT_FILTER).map_or_else(DmFilter::default, DmFilter::from_raw),
     }
 }
 
@@ -581,6 +607,37 @@ mod tests {
         assert!(!settings.nsfw_commands_in_dms, "absent is off");
         let json = SettingsPatch::from_json(&serde_json::json!({"view_nsfw_commands": true}));
         assert_eq!(json.nsfw_commands_in_dms, None);
+    }
+
+    /// Redactions are plain enums, so one left out is unset; the old DM filter
+    /// is a `UInt32Value`, non-friends (253932's default) until chosen.
+    #[test]
+    fn reads_which_sensitive_media_is_covered_where() {
+        use crate::sensitive::{DmFilter, Redaction::*, Redactions};
+        let redactions = |guilds, friend, non_friend| {
+            [varint_field(1, guilds), varint_field(2, friend), varint_field(3, non_friend)].concat()
+        };
+        let text = [
+            bytes_field(EXPLICIT_CONTENT_SETTINGS, &redactions(1, 2, 3)),
+            bytes_field(GORE_CONTENT_SETTINGS, &redactions(0, 3, 2)),
+            bytes_field(EXPLICIT_CONTENT_FILTER, &varint_field(1, 2)),
+        ]
+        .concat();
+        let sensitive = patch(&bytes_field(TEXT_AND_IMAGES, &text)).sensitive.expect("text_and_images is there");
+        assert_eq!(sensitive.explicit, Redactions { guilds: Show, friend_dm: Blur, non_friend_dm: Block });
+        assert_eq!(sensitive.gore, Redactions { guilds: Unset, friend_dm: Block, non_friend_dm: Blur });
+        assert_eq!(sensitive.dm_filter, DmFilter::FriendsAndNonFriends);
+        let bare = patch(&bytes_field(TEXT_AND_IMAGES, &[])).sensitive.expect("text_and_images is there");
+        assert_eq!(bare.explicit, Redactions::default());
+        assert_eq!(bare.dm_filter, DmFilter::NonFriends);
+        let disabled = bytes_field(EXPLICIT_CONTENT_FILTER, &[]);
+        let sensitive = patch(&bytes_field(TEXT_AND_IMAGES, &disabled)).sensitive.expect("text_and_images is there");
+        assert_eq!(sensitive.dm_filter, DmFilter::Disabled, "a wrapper holding 0 is chosen");
+        assert_eq!(patch(&bytes_field(PRIVACY, &[])).sensitive, None);
+        let mut settings = crate::settings::Settings::default();
+        settings.replace(self::patch(&bytes_field(TEXT_AND_IMAGES, &text)));
+        settings.replace(self::patch(&bytes_field(TEXT_AND_IMAGES, &[])));
+        assert_eq!(settings.sensitive.explicit, Redactions::default(), "what a replacing proto leaves out is unset");
     }
 
     /// A `BoolValue` that most protos leave out, which means on (253932's

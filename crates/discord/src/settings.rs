@@ -15,6 +15,7 @@ use serde_json::Value;
 use crate::Snowflake;
 use crate::emoji::Tone;
 use crate::gates::Gates;
+use crate::sensitive::Preferences;
 
 /// One entry of `guild_folders`. Entries with no `id` are not real folders:
 /// they only place a single server in the order.
@@ -833,6 +834,8 @@ pub struct Settings {
     /// `status.show_current_game`, as the account set it; see
     /// [`Self::shares_activity`].
     pub show_current_game: Option<bool>,
+    /// Which media is covered where, as the account set it.
+    pub sensitive: Preferences,
 }
 
 /// The settings a payload mentions; the rest are `None`.
@@ -854,6 +857,8 @@ pub struct SettingsPatch {
     pub enable_tts_command: Option<bool>,
     pub show_command_suggestions: Option<bool>,
     pub show_current_game: Option<bool>,
+    /// What `text_and_images` says of sensitive media: it is saved whole.
+    pub sensitive: Option<Preferences>,
 }
 
 impl SettingsPatch {
@@ -902,6 +907,9 @@ impl Settings {
         }
         if patch.show_current_game.is_some() {
             self.show_current_game = patch.show_current_game;
+        }
+        if let Some(sensitive) = patch.sensitive {
+            self.sensitive = sensitive;
         }
     }
 

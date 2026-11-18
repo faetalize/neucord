@@ -167,4 +167,5 @@ button.pulse > * { animation: neucord-pulse 600ms ease; }
 .embed-play { min-width: 48px; min-height: 48px; }
 /* The media viewer dims the window and reads light on it, in either theme. */
 .media-viewer { background-color: alpha(black, 0.85); color: white; }
+.sensitive-cover { padding: 24px 40px; border-radius: 8px; }
 .spoiler-cover { margin-top: 4px; padding: 24px 40px; border-radius: 8px; font-weight: bold; }
