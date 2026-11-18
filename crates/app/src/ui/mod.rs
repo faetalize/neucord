@@ -58,6 +58,7 @@ mod requests;
 mod scheduling;
 mod search;
 mod sensitive;
+mod sensitive_report;
 mod server_privacy;
 mod settings;
 mod sidebar;

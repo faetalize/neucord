@@ -21,8 +21,8 @@ use crate::render::{self, Context, Names};
 
 /// Largest box embed media is scaled into, and its thumbnails (the official
 /// client's sizes).
-const MAX_W: f64 = 400.0;
-const MAX_H: f64 = 300.0;
+pub(super) const MAX_W: f64 = 400.0;
+pub(super) const MAX_H: f64 = 300.0;
 const THUMBNAIL: f64 = 80.0;
 /// Fields sit on a 12-column grid, split evenly between a row's fields.
 const FIELD_COLUMNS: i32 = 12;

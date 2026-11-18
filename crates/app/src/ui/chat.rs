@@ -11,7 +11,7 @@ use discord::interaction::Target;
 use discord::notifications;
 use discord::read_state::{Mention, starts_unread};
 use discord::rest::Page;
-use discord::sensitive::{Harms, Place, Rules};
+use discord::sensitive::{Harms, Place, Report, Rules};
 use discord::system::{self, Kind};
 use discord::threads::{Anchor, Viewed};
 use discord::{Channel, ChannelKind, Message, MessageEdit, Referenced, Snowflake, User};
@@ -2451,6 +2451,15 @@ impl App {
         let friend = author.is_some_and(|a| state.relationships.is_friend(a));
         let place = Place::of(channel.is_some(), private, author, me, friend);
         (rules, rules.harms(place))
+    }
+
+    /// What Mark As Not Sensitive would report for `item` of `message`, if
+    /// the filter covers it (see [`Report::of`]).
+    pub(super) fn sensitive_report(&self, message: &Message, item: &discord::media::Item) -> Option<Report> {
+        let (_, harms) = self.sensitivity(message, None);
+        let media = self.account.state.borrow().settings.media;
+        let visible = discord::embed::visible(message, &media, self.hides_profile_links());
+        Report::of(message, &visible, harms, item)
     }
 
     /// What a message says, and shows: its text, attachments and embeds. Its

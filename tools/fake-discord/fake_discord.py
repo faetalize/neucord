@@ -404,16 +404,20 @@ def messages(channel):
     return list(reversed(out + POSTED.get(channel, [])))
 
 
-# FAKE_SENSITIVE: pictures Discord's scan has flagged as explicit, ones it has not looked at yet, ones it found
+# FAKE_SENSITIVE=1 (or embed): pictures Discord's scan has flagged as explicit, ones it has not looked at yet, ones it found
 # clean, and an embed with a flagged picture. An account that is not an adult's (FAKE_NSFW=allowed=0) has them
 # covered in #general.
 def sensitive_messages():
+    # The menu scenario's row (`embed-probe`): the first message's picture, or with FAKE_SENSITIVE=embed the card's.
+    def probe(n):
+        return " embed-probe" if n == (3 if os.environ["FAKE_SENSITIVE"] == "embed" else 0) else ""
+
     def picture(n, **scan):
         return {**attachment(n), "filename": "scan%d.png" % n, **scan}
-    out = [message(62, ALICE, "scanned, flagged explicit", (picture(62, flags=16, content_scan_version=4),)),
+    out = [message(62, ALICE, "scanned, flagged explicit" + probe(0), (picture(62, flags=16, content_scan_version=4),)),
            message(63, ALICE, "not scanned yet", (picture(63),)),
            message(64, ALICE, "scanned, clean", (picture(64, content_scan_version=4),)),
-           message(65, ALICE, "an embed with a flagged picture")]
+           message(65, ALICE, "an embed with a flagged picture" + probe(3))]
     pic = f"http://127.0.0.1:{PORT}/attachments/1/900/embed.gif?ex=ffffffff&is=1&hm=2&"
     out[3]["embeds"] = [{"type": "rich", "title": "A made-up card", "description": "Its text stays.", "flags": 16,
                          "content_scan_version": 4,
@@ -871,6 +875,11 @@ def gifs_suggest(body):
 def sticker_packs(body):
     return 200, {"sticker_packs": [{"id": "720", "name": "Pals", "stickers": [
         {"id": "721", "name": "hello", "format_type": 1, "pack_id": "720", "type": 1, "tags": "wave"}]}]}
+
+
+@route("POST", r"/attachments/report-false-positive")
+def report_false_positive(body):
+    return 204, None
 
 
 @route("POST", r"/gifs/select")
