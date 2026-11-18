@@ -194,11 +194,11 @@ pub(super) fn message(regulated: bool) -> Table<MessageTarget> {
 }
 
 /// What a search result's menu offers of the official client's (847342), in
-/// its order. Copy and Search with Google (a selection), Pin Message and Mark
-/// Unread aren't here: a result's text can't be selected, and Neucord has
-/// neither of the others yet. There is no reply, reaction or edit.
+/// its order. Copy and Search with Google (a selection) and Pin Message
+/// aren't here: a result's text can't be selected, and Neucord has no pins
+/// yet. There is no reply, reaction or edit.
 pub(super) const SEARCH_RESULT: Table<MessageTarget> = &[
-    &[chat::COPY_MESSAGE_LINK, edits::DELETE],
+    &[notify_menus::MARK_UNREAD, chat::COPY_MESSAGE_LINK, edits::DELETE],
     &[chat::COPY_LINK, chat::OPEN_LINK],
     &[chat::COPY_MESSAGE_ID, chat::COPY_AUTHOR_ID],
 ];
@@ -784,6 +784,12 @@ mod tests {
         // The three groups move and nothing else does.
         let n = names(message(false)).len();
         assert_eq!(names(message(true))[..n - 3], names(message(false))[..n - 3]);
+    }
+
+    #[test]
+    fn a_search_result_offers_mark_unread_before_its_link_as_the_message_menu_does() {
+        let names = names(SEARCH_RESULT);
+        assert_eq!(names[0][..2], ["mark-unread", "copy-message-link"]);
     }
 
     #[test]
