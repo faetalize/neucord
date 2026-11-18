@@ -691,6 +691,11 @@ changed for unrelated reasons only needs a note in the issue.
   (`renderEmbeds`). The type sets are in 581619, and the type enum in
   508602. Which links count as Conjure projects (`is_conjure_project_link`)
   is the matcher in 729160 (anchor `[0-9]{17,20}`).
+- **Article embeds the client leaves out** (`is_shop_or_profile_article`,
+  `is_inventory_card`). The link regexes are 659674's (anchor `game-shops`);
+  the profile one only applies under the experiment
+  `2026-08-profile-embed-rendering` (168543), and the inventory entry kinds
+  that have a card are the ones `renderEmbeds` in 190854 lists.
 - **Embed media without a size is dropped, and embeds sharing a URL merge**
   (`EmbedMedia::sized`, `merge` in `embed.rs`). Client: 659674 (anchor
   `uniqueId("embed_")`).

@@ -2163,7 +2163,7 @@ impl App {
         let settings = self.account.state.borrow().settings.media;
         let media = media.and_then(|n| {
             let shown = message.thread_starter().unwrap_or(&message);
-            discord::media::items(shown, &settings).into_iter().nth(n)
+            discord::media::items(shown, &settings, self.hides_profile_links()).into_iter().nth(n)
         });
         // On media, its link is the one the menu offers, as the client's does
         // for what it passes its menu.
@@ -2213,12 +2213,18 @@ impl App {
         Rc::new(move |url| this.upgrade().is_some_and(|this| this.follow_dice_link(url)))
     }
 
+    /// Whether the embeds of user-profile links are left out for this account.
+    fn hides_profile_links(&self) -> bool {
+        let state = self.account.state.borrow();
+        discord::embed::hides_profile_links(&state.experiments, state.me())
+    }
+
     /// What a message says, and shows: its text, attachments and embeds. Its
     /// buttons and menus work if `live`: not in a forward.
     fn message_content(self: &Rc<Self>, body: &gtk::Box, message: &Message, names: &Names, live: bool) {
         let media = self.account.state.borrow().settings.media;
         let edited = message.edited_timestamp.is_some();
-        let embeds = discord::embed::visible(message, &media);
+        let embeds = discord::embed::visible(message, &media, self.hides_profile_links());
         let spans = message.markup();
         let cx = Context {
             spoilers: Some(self.spoilers(message.id)),
@@ -2244,7 +2250,7 @@ impl App {
         let stars = Stars::new(self, media.gif_auto_play);
         // What opens in the viewer. A forward's media opens nothing.
         let view = match live {
-            true => MediaCx::new(self, message, discord::media::items(message, &media)),
+            true => MediaCx::new(self, message, discord::media::items(message, &media, self.hides_profile_links())),
             false => MediaCx::none(),
         };
         // A poll's attachments are its answers' images, which the official

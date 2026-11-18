@@ -522,7 +522,7 @@ impl App {
             .child(&avatar_widget_in(user, 32, Some(&self.images), server, Row::Parent))
             .valign(gtk::Align::Center)
             .build();
-        avatar.add_overlay(&presence_dot(status));
+        avatar.add_overlay(&presence_dot(presence));
         row.append(&avatar);
 
         let text = gtk::Box::builder()

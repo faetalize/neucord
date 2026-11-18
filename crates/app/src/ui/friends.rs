@@ -6,7 +6,7 @@ use std::future::Future;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use discord::relationships::{Kind, List, Relationship, Status};
+use discord::relationships::{Kind, List, Presence, Relationship, Status};
 use discord::{ChannelKind, Rest, Snowflake};
 use gtk::glib;
 
@@ -266,17 +266,14 @@ impl App {
             );
         }
         for relationship in people {
-            rows.append(&self.friend_row(relationship, state.relationships.presence(relationship.user.id).status));
+            rows.append(&self.friend_row(relationship, &state.relationships.presence(relationship.user.id)));
         }
     }
 
-    fn friend_row(self: &Rc<Self>, relationship: &Relationship, status: Status) -> gtk::Widget {
+    fn friend_row(self: &Rc<Self>, relationship: &Relationship, presence: &Presence) -> gtk::Widget {
         let user = &relationship.user;
         let detail = match (relationship.kind, relationship.spam) {
-            (Kind::Friend, _) => {
-                let presence = self.account.state.borrow().relationships.presence(user.id);
-                presence.text.unwrap_or_else(|| status.label().to_owned())
-            }
+            (Kind::Friend, _) => presence.text.clone().unwrap_or_else(|| presence.status.label().to_owned()),
             (Kind::Incoming, false) => "Incoming friend request".to_owned(),
             (Kind::Incoming, true) => "Incoming friend request, likely spam".to_owned(),
             (Kind::Outgoing, _) => "Outgoing friend request".to_owned(),
@@ -296,7 +293,7 @@ impl App {
             .valign(gtk::Align::Center)
             .build();
         if relationship.kind == Kind::Friend {
-            avatar.add_overlay(&presence_dot(status));
+            avatar.add_overlay(&presence_dot(presence));
         }
         row.add_prefix(&avatar);
 
@@ -481,8 +478,10 @@ pub(super) fn confirm(heading: &str, body: &str, verb: &str, appearance: adw::Re
     dialog
 }
 
-/// The coloured dot at the corner of an avatar.
-pub(super) fn presence_dot(status: Status) -> gtk::Widget {
+/// The coloured dot at the corner of an avatar, a phone's shape for someone
+/// online on a phone only (the client has that mask for Online alone).
+pub(super) fn presence_dot(presence: &Presence) -> gtk::Widget {
+    let status = presence.status;
     let class = match status {
         Status::Online => "online",
         Status::Idle => "idle",
@@ -495,5 +494,8 @@ pub(super) fn presence_dot(status: Status) -> gtk::Widget {
         .tooltip_text(status.label())
         .css_classes(["presence", class])
         .build();
+    if presence.mobile && status == Status::Online {
+        dot.add_css_class("mobile");
+    }
     dot.upcast()
 }

@@ -457,6 +457,22 @@ pub struct RoleColors {
 }
 
 impl Channel {
+    /// Someone joined a group DM (`addRecipient`, 95701): the client keeps
+    /// the recipients sorted by id, never lists us, and takes the user as
+    /// sent.
+    pub fn add_recipient(&mut self, user: User, me: Option<Snowflake>) {
+        if me == Some(user.id) {
+            return;
+        }
+        self.recipients.retain(|r| r.id != user.id);
+        self.recipients.push(user);
+        self.recipients.sort_by_key(|r| r.id);
+    }
+
+    pub fn remove_recipient(&mut self, id: Snowflake) {
+        self.recipients.retain(|r| r.id != id);
+    }
+
     /// A server channel Discord hides from an account that may not see it
     /// (see [`crate::obfuscation`]).
     pub fn is_obfuscated(&self) -> bool {
@@ -2039,6 +2055,24 @@ mod tests {
         assert_eq!(g.remove_channel(Snowflake(9)), [Snowflake(20)]);
         assert!(g.channel(Snowflake(9)).is_none() && g.thread(Snowflake(20)).is_none());
         assert!(g.channel(Snowflake(10)).is_some() && g.thread(Snowflake(21)).is_some(), "the others stay");
+    }
+
+    #[test]
+    fn a_group_dms_recipients_follow_who_joins_and_leaves() {
+        let user =
+            |id: u64| -> User { serde_json::from_value(json!({"id": id.to_string(), "username": "u"})).unwrap() };
+        let mut dm: Channel = serde_json::from_value(json!({"id": "50", "type": 3, "recipients":
+            [{"id": "6", "username": "a"}, {"id": "8", "username": "b"}]}))
+        .unwrap();
+        let ids = |dm: &Channel| dm.recipients.iter().map(|r| r.id.0).collect::<Vec<_>>();
+        dm.add_recipient(user(7), Some(Snowflake(5)));
+        assert_eq!(ids(&dm), [6, 7, 8], "in id order");
+        dm.add_recipient(user(7), Some(Snowflake(5)));
+        assert_eq!(ids(&dm), [6, 7, 8], "once");
+        dm.add_recipient(user(5), Some(Snowflake(5)));
+        assert_eq!(ids(&dm), [6, 7, 8], "never ourselves");
+        dm.remove_recipient(Snowflake(6));
+        assert_eq!(ids(&dm), [7, 8]);
     }
 
     #[test]
