@@ -1,18 +1,20 @@
 //! What Neucord keeps of its identity for the account that is shown (see
 //! [`discord::identity`]): the activity heartbeat that keeps the session
-//! `client_heartbeat_session_id` names, and the files that carry the session
-//! and the account's experiment assignments from one launch to the next.
+//! `client_heartbeat_session_id` names, and the files that carry the session,
+//! the account's experiment assignments and its `qos_token` from one launch
+//! to the next.
 //!
 //! The client's heartbeat (`SessionHeartbeatScheduler`, 903063) runs while
 //! the app is in use, a token and the window in focus: at once when it
 //! starts, then every fifteen minutes from the last run, and not at all while
 //! unfocused. Each run opens a session if there is none or it lapsed, and
-//! counts it as used. Neucord reports nothing with it.
+//! counts it as used. Its only report is to the gateway: a new session, and
+//! the one there at each READY, go out as op 41.
 //!
 //! The client stores one session, whoever is signed in, and drops it when its
 //! token changes; so one file holds it, tagged with its account. The
-//! assignments are kept for each account, as the client's store keeps them by
-//! user id.
+//! assignments and the `qos_token` are kept for each account, as the client's
+//! stores keep them by user id.
 
 use std::cell::{Cell, RefCell};
 use std::io::Write;
@@ -100,12 +102,14 @@ pub(super) fn end() {
     rearm();
 }
 
-/// READY named the account and its assignments. The client opens its session
-/// on `CONNECTION_OPEN` too (`q`, 903063).
-pub(super) fn ready(me: Snowflake, experiments: &Experiments) {
+/// READY named the account, its assignments and its `qos_token`. The client
+/// opens its session on `CONNECTION_OPEN` too, and tells the gateway of it
+/// (`q`, 903063).
+pub(super) fn ready(me: Snowflake, experiments: &Experiments, qos_token: Option<String>) {
     identity::signed_in_as(me);
     identity::learn_assignments(experiments.user_cache(me));
-    identity::heartbeat();
+    identity::learn_qos_token(qos_token);
+    identity::connection_open();
     save();
     rearm();
 }

@@ -514,6 +514,7 @@ impl App {
             unavailable_guilds,
             voice_states,
             auth_token,
+            qos_token,
         } = ready;
         self.learn_users(private_channels.iter().flat_map(|c| &c.recipients));
         self.learn_users(
@@ -572,7 +573,7 @@ impl App {
         self.wake_member_check();
         {
             let state = self.account.state.borrow();
-            super::identity::ready(user.id, &state.experiments);
+            super::identity::ready(user.id, &state.experiments, qos_token);
             let limits = state.limits();
             self.images.set_rules(limits.image_ladder(), limits.lazy_images());
         }

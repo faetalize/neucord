@@ -257,6 +257,8 @@ def ready():
         **({"user_settings_proto": settings_answer("1")} if NSFW["dms"] else {}),
         "auth_token": os.environ.get("FAKE_NEW_TOKEN") or None,
         "country_code": "ZZ", "analytics_token": "fake", "api_code_version": 0,
+        # A DerivedQosData of made-up claims and signature, key 1, which IDENTIFY sends back.
+        "qos_token": "Cg5tYWRlLXVwIGNsYWltcxIRbWFkZS11cCBzaWduYXR1cmUYAQ==",
     }
 
 
@@ -904,7 +906,9 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 text = data.decode()
                 message = json.loads(text)
-                if message["op"] == 1:
+                if message["op"] in (1, 40):
+                    if message["op"] == 40:
+                        log(kind="gateway", op=40, d=message.get("d"), at=time.time())
                     send(11)
                 elif message["op"] == 2:
                     IDENTIFIES[0] += 1

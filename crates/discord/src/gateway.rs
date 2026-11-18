@@ -20,11 +20,11 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::time::Duration;
 
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use soup::prelude::*;
 
 use crate::channel_list::Collapsed;
@@ -41,6 +41,7 @@ use crate::members::{Known, Members};
 use crate::model::Emoji;
 use crate::notifications::{GuildSettings, NotificationSettings};
 use crate::obfuscation;
+use crate::qos;
 use crate::reactions::{self, Kind};
 use crate::read_state::ReadStates;
 use crate::relationships::{Presence, Relationship, Relationships};
@@ -109,6 +110,8 @@ pub struct Ready {
     pub voice_states: VoiceStates,
     /// A new token for the account, which the client switches to (`UPDATE_TOKEN`).
     pub auth_token: Option<String>,
+    /// What IDENTIFY's `qos_token` sends back, see [`identity::learn_qos_token`].
+    pub qos_token: Option<String>,
 }
 
 /// How an interaction of ours ended, as the events `INTERACTION_SUCCESS`,
@@ -560,6 +563,40 @@ fn work(input: std::sync::mpsc::Receiver<Input>, output: async_channel::Sender<O
     }
 }
 
+thread_local! {
+    /// The connection made last, which what changes outside it reaches, as
+    /// the client reaches its one socket (`getSocket`, 225123).
+    static SOCKET: RefCell<Option<(glib::WeakRef<soup::WebsocketConnection>, Weak<State>)>> =
+        const { RefCell::new(None) };
+}
+
+/// The last connection, if it is open and its session established
+/// (`SESSION_ESTABLISHED`).
+fn established_socket() -> Option<(soup::WebsocketConnection, Rc<State>)> {
+    SOCKET.with_borrow(|socket| {
+        let (conn, state) = socket.as_ref()?;
+        let (conn, state) = (conn.upgrade()?, state.upgrade()?);
+        state.established.get().then_some((conn, state))
+    })
+}
+
+/// The user went active: a heartbeat says so at once, once the session is
+/// established (`handleActiveStateChange`, 868).
+pub(crate) fn active_state_changed() {
+    if let Some((conn, state)) = established_socket() {
+        heartbeat(&conn, &state);
+    }
+}
+
+/// Tell the gateway of the heartbeat session, op 41, then heartbeat, once
+/// the session is established (`handleUpdateTimeSpentSessionId`, 868).
+pub(crate) fn time_spent(session: &identity::TimeSpent) {
+    if let Some((conn, state)) = established_socket() {
+        send_text(&conn, &request_text(41, session));
+        heartbeat(&conn, &state);
+    }
+}
+
 /// A live gateway connection. Dropping it closes the connection.
 pub struct Gateway {
     conn: soup::WebsocketConnection,
@@ -669,6 +706,7 @@ impl Gateway {
             }
         });
 
+        SOCKET.set(Some((conn.downgrade(), Rc::downgrade(&state))));
         Ok((Gateway { conn, state }, rx))
     }
 
@@ -806,13 +844,20 @@ fn send_text(conn: &soup::WebsocketConnection, text: &str) {
     }
 }
 
-fn send(conn: &soup::WebsocketConnection, value: Value) {
-    send_text(conn, &value.to_string());
+/// Op 40, the client's only heartbeat (`_sendHeartbeat`, 868): the
+/// sequence number, 0 before any, and what [`qos`] says of the user. Only
+/// the interval's heartbeats wait for an ACK.
+fn heartbeat(conn: &soup::WebsocketConnection, state: &State) {
+    send_text(conn, &heartbeat_text(state.seq.get(), identity::qos_heartbeat()));
 }
 
-fn heartbeat(conn: &soup::WebsocketConnection, state: &State) {
-    state.acked.set(false);
-    send(conn, json!({ "op": 1, "d": state.seq.get() }));
+fn heartbeat_text(seq: Option<u64>, qos: Option<qos::Payload>) -> String {
+    #[derive(serde::Serialize)]
+    struct Heartbeat {
+        seq: u64,
+        qos: Option<qos::Payload>,
+    }
+    request_text(40, &Heartbeat { seq: seq.unwrap_or(0), qos })
 }
 
 fn resume_text(state: &State) -> String {
@@ -831,9 +876,7 @@ fn resume(conn: &soup::WebsocketConnection, state: &State) {
     send_text(conn, &resume_text(state));
 }
 
-/// IDENTIFY's `d`, in the order `_doIdentify` (868) builds it. The client
-/// adds `qos_token`, which tells the gateway whether the user is active; its
-/// heartbeats carry the same (op 40), which Neucord does not send.
+/// IDENTIFY's `d`, in the order `_doIdentify` (868) builds it.
 #[derive(serde::Serialize)]
 struct Identify<'a> {
     token: &'a str,
@@ -843,6 +886,8 @@ struct Identify<'a> {
     /// `usesLegacyCompression`, false for `zlib-stream`.
     compress: bool,
     client_state: ClientState,
+    /// Whether the user is active, see [`qos::token`].
+    qos_token: String,
 }
 
 /// What the client holds of its cache, which it sends only from an intact
@@ -854,14 +899,7 @@ struct ClientState {
 
 fn identify(conn: &soup::WebsocketConnection, state: &State) {
     *state.identified.borrow_mut() = state.token.clone();
-    let identify = Identify {
-        token: &state.token,
-        capabilities: obfuscation::capabilities(identity::obfuscation()),
-        properties: identity::identify_properties(),
-        presence: PresenceUpdate { status: "unknown", since: 0, activities: [], afk: false },
-        compress: false,
-        client_state: ClientState { guild_versions: Default::default() },
-    };
+    let identify = identify_payload(&state.token);
     if crate::shape::enabled() {
         // Names and the capabilities number only, as for what arrives.
         eprintln!(
@@ -871,6 +909,18 @@ fn identify(conn: &soup::WebsocketConnection, state: &State) {
         );
     }
     send_text(conn, &request_text(2, &identify));
+}
+
+fn identify_payload(token: &str) -> Identify<'_> {
+    Identify {
+        token,
+        capabilities: obfuscation::capabilities(identity::obfuscation()),
+        properties: identity::identify_properties(),
+        presence: PresenceUpdate { status: "unknown", since: 0, activities: [], afk: false },
+        compress: false,
+        client_state: ClientState { guild_versions: Default::default() },
+        qos_token: identity::qos_token(),
+    }
 }
 
 fn handle(conn: &soup::WebsocketConnection, state: &Rc<State>, parsed: Parsed) {
@@ -954,6 +1004,7 @@ fn spawn_heartbeat(conn: &soup::WebsocketConnection, state: &Rc<State>, interval
                 conn.close(CLOSE_RECONNECT, Some("heartbeat not acknowledged"));
                 break;
             }
+            state.acked.set(false);
             heartbeat(&conn, &state);
             drop(conn);
             glib::timeout_future(interval).await;
@@ -1078,6 +1129,7 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
                 unavailable_guilds: raw_guilds.iter().filter(|g| g["unavailable"] == true).count(),
                 voice_states,
                 auth_token: data["auth_token"].as_str().filter(|t| !t.is_empty()).map(str::to_owned),
+                qos_token: data["qos_token"].as_str().map(str::to_owned),
                 account,
                 nitro: Nitro::from_user(&data["user"]),
                 user,
@@ -1580,6 +1632,8 @@ fn send_event(state: &State, event: Event) {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     impl Parser {
@@ -1798,6 +1852,33 @@ mod tests {
             acked: Cell::new(true),
             events: async_channel::unbounded().0,
         }
+    }
+
+    #[test]
+    fn identify_in_the_clients_order_with_the_qos_token_last() {
+        let identify: Value = serde_json::from_str(&request_text(2, &identify_payload("t"))).unwrap();
+        let text = serde_json::to_string(&identify_payload("t")).unwrap();
+        let order = [
+            "\"token\"",
+            "\"capabilities\"",
+            "\"properties\"",
+            "\"presence\"",
+            "\"compress\"",
+            "\"client_state\"",
+            "\"qos_token\"",
+        ];
+        let at: Vec<usize> = order.iter().map(|key| text.rfind(key).unwrap()).collect();
+        assert!(at.is_sorted(), "{text}");
+        assert_eq!(identify["d"]["qos_token"], "CgA=", "nobody signed in on this thread: inactive, nothing derived");
+    }
+
+    #[test]
+    fn heartbeats_as_the_client_sends_them() {
+        assert_eq!(heartbeat_text(None, None), r#"{"op":40,"d":{"seq":0,"qos":null}}"#, "seq 0 before any");
+        assert_eq!(
+            heartbeat_text(Some(42), Some(qos::Payload::now(true, true))),
+            r#"{"op":40,"d":{"seq":42,"qos":{"active":true,"ver":31,"reasons":["foregrounded"]}}}"#
+        );
     }
 
     #[test]

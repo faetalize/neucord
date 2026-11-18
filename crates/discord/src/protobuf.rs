@@ -131,6 +131,15 @@ pub fn build(fields: &[(u32, Value)]) -> Vec<u8> {
     out
 }
 
+/// A message of `fields` as they are, in the order given.
+pub fn write(fields: &[(u32, Wire)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (number, wire) in fields {
+        push_field(&mut out, *number, *wire);
+    }
+    out
+}
+
 /// A packed repeated varint field's payload.
 pub fn packed(values: &[u64]) -> Value {
     let mut out = Vec::new();
@@ -174,6 +183,11 @@ impl<'a> Message<'a> {
             fields.push((number, wire));
         }
         Some(Message { fields })
+    }
+
+    /// Every field, in the order it was sent.
+    pub fn fields(&self) -> &[(u32, Wire<'a>)] {
+        &self.fields
     }
 
     fn last(&self, number: u32) -> Option<Wire<'a>> {

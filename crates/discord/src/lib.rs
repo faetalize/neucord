@@ -62,6 +62,7 @@ pub mod post_creation;
 pub mod presence;
 pub mod profile;
 mod protobuf;
+pub mod qos;
 pub mod reactions;
 pub mod read_state;
 pub mod regional;

@@ -71,6 +71,15 @@ each would be reconsidered.
   REST uses the new token at once, as `prepareRequest` does.
 - **IDENTIFY names the heartbeat session as a request would have**: by the
   time the client identifies it has made requests, and Neucord may not have.
+- **Heartbeats are op 40, and op 41 names the heartbeat session**, as the
+  client's are and does. Op 40's `qos` says whether the user is active: with
+  a token and the window in front it is, for `foregrounded`. The client's
+  other reason, `rtc_connected`, needs a call, which Neucord has none of.
+  Op 41 goes out with each new session and at each READY.
+- **IDENTIFY's `qos_token`** holds the same activity and the `DerivedQosData`
+  the last READY gave the account, kept for each account as the client keeps
+  it by user id. Neucord sends Discord's signed part back as it came and
+  never makes or reads one.
 
 ## Deliberately not sent
 
@@ -81,8 +90,3 @@ each would be reconsidered.
   far to go.
 - **Science and exposure events**, including the heartbeat's
   `CLIENT_HEARTBEAT`. See above.
-- **Op 40 heartbeats, op 41 and `qos_token`.** The client's only heartbeat is
-  op 40, and op 41 tells the gateway about the heartbeat session. Neucord
-  sends op 1 where the client sends op 40, and neither of the other two,
-  until #193 lands. So the session id reaches Discord in the properties but
-  not as the client's gateway does.
