@@ -202,7 +202,7 @@ impl Completion {
                     .height_request(STICKER_SIZE)
                     .content_fit(gtk::ContentFit::Contain)
                     .build();
-                let size = crate::images::request_size((STICKER_SIZE, STICKER_SIZE), images.scale(), None).0;
+                let size = discord::cdn::sticker_size(STICKER_SIZE as u32, images.scale());
                 // A Lottie sticker, which Neucord can't draw yet (#46), keeps the space.
                 if let Some(url) = entry.listed.sticker.still(size) {
                     images.set(&picture, &url);
