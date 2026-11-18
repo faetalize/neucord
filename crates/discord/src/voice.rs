@@ -350,6 +350,109 @@ impl Capture {
     }
 }
 
+/// What the player of a finished recording shows and does before it is sent
+/// (`e7` in 989161): play and pause, a waveform to drag through, and a clock
+/// that counts down once it has played.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DraftPlayer {
+    duration: f64,
+    position: f64,
+    playing: bool,
+    /// Played or dragged at least once since it was last at the start, which
+    /// turns the clock to what is left.
+    played: bool,
+    dragging: bool,
+}
+
+impl DraftPlayer {
+    pub fn new(duration: f64) -> Self {
+        DraftPlayer { duration, position: 0.0, playing: false, played: false, dragging: false }
+    }
+
+    /// The play button: starts it, or pauses it.
+    pub fn toggle(&mut self) {
+        self.played = true;
+        self.playing = !self.playing;
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.playing
+    }
+
+    /// Whether sound should come out: not while the waveform is being dragged,
+    /// though the button still shows pause.
+    pub fn audible(&self) -> bool {
+        self.playing && !self.dragging
+    }
+
+    /// Where the media is, in seconds, as it plays.
+    pub fn moved(&mut self, position: f64) {
+        self.position = position.clamp(0.0, self.duration.max(0.0));
+    }
+
+    /// The waveform was dragged or clicked to `fraction` of its width. The
+    /// media's position follows: [`Self::position`].
+    pub fn seek(&mut self, fraction: f64) {
+        self.position = fraction.clamp(0.0, 1.0) * self.duration.max(0.0);
+        self.played = true;
+    }
+
+    pub fn drag_start(&mut self) {
+        self.dragging = true;
+    }
+
+    pub fn is_dragging(&self) -> bool {
+        self.dragging
+    }
+
+    /// Letting go at the very end counts as the end of the recording.
+    pub fn drag_end(&mut self) {
+        self.dragging = false;
+        if self.position >= self.duration {
+            self.ended();
+        }
+    }
+
+    /// The media played to its end: back to the start, as if never played.
+    pub fn ended(&mut self) {
+        *self = DraftPlayer::new(self.duration);
+    }
+
+    /// The media can't be played.
+    pub fn failed(&mut self) {
+        self.playing = false;
+    }
+
+    /// What the media says its length is, once it knows: the recording's
+    /// own count is only the packets heard.
+    pub fn loaded(&mut self, duration: f64) {
+        if duration.is_finite() && duration > 0.0 {
+            self.duration = duration;
+        }
+    }
+
+    pub fn position(&self) -> f64 {
+        self.position
+    }
+
+    /// How far through it is, from 0 to 1.
+    pub fn progress(&self) -> f64 {
+        if self.duration > 0.0 { (self.position / self.duration).clamp(0.0, 1.0) } else { 0.0 }
+    }
+
+    /// Whether the waveform shows how much has played.
+    pub fn played(&self) -> bool {
+        self.played
+    }
+
+    /// The seconds on the clock: the whole length until it has played, then
+    /// what is left, always rounded up.
+    pub fn clock_secs(&self) -> u64 {
+        let seconds = if self.played { self.duration - self.position } else { self.duration };
+        seconds.max(0.0).ceil() as u64
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -628,5 +731,58 @@ mod tests {
         assert!(enabled(&experiments, me));
         experiments.apply_update(update(0));
         assert!(!enabled(&experiments, me), "a later assignment replaces the earlier one");
+    }
+
+    #[test]
+    fn the_draft_player_counts_down_once_played_and_resets_at_the_end() {
+        let mut player = DraftPlayer::new(4.2);
+        assert_eq!(player.clock_secs(), 5, "the whole length, rounded up");
+        player.toggle();
+        assert!(player.is_playing() && player.audible() && player.played());
+        player.moved(1.5);
+        assert_eq!(player.clock_secs(), 3, "4.2 - 1.5 = 2.7, rounded up");
+        assert_eq!(player.progress(), 1.5 / 4.2);
+        player.toggle();
+        assert!(!player.is_playing(), "paused where it is");
+        assert_eq!((player.clock_secs(), player.position()), (3, 1.5));
+        player.toggle();
+        player.ended();
+        assert_eq!(
+            (player.clock_secs(), player.position(), player.played(), player.is_playing()),
+            (5, 0.0, false, false)
+        );
+    }
+
+    #[test]
+    fn dragging_the_waveform_silences_it_and_the_end_resets_it() {
+        let mut player = DraftPlayer::new(10.0);
+        player.toggle();
+        player.drag_start();
+        assert!(player.is_playing() && !player.audible(), "the button says pause, nothing sounds");
+        player.seek(0.5);
+        assert_eq!(player.position(), 5.0);
+        player.drag_end();
+        assert!(player.audible(), "playing on from where it was let go");
+        player.drag_start();
+        player.seek(1.7);
+        assert_eq!(player.position(), 10.0, "held to the end");
+        player.drag_end();
+        assert_eq!((player.is_playing(), player.played(), player.position()), (false, false, 0.0));
+        player.seek(-1.0);
+        assert!(player.played() && player.position() == 0.0, "a click on the waveform marks it played");
+        assert_eq!(player.clock_secs(), 10);
+    }
+
+    #[test]
+    fn the_draft_player_takes_the_medias_length_when_it_is_sane() {
+        let mut player = DraftPlayer::new(3.0);
+        player.loaded(f64::NAN);
+        player.loaded(0.0);
+        player.loaded(f64::INFINITY);
+        assert_eq!(player.clock_secs(), 3);
+        player.loaded(3.4);
+        assert_eq!(player.clock_secs(), 4);
+        player.failed();
+        assert!(!player.is_playing());
     }
 }

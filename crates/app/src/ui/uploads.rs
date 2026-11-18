@@ -359,6 +359,45 @@ impl Details {
     }
 }
 
+/// How big the preview of a pending file is.
+const PREVIEW: i32 = 48;
+
+/// What a pending file looks like in its row: the picture itself, scaled
+/// down off the main loop, for an image, and the icon its type has for the
+/// rest, or until the picture is there (the client shows a thumbnail, a
+/// video's frame, or the file type's icon, 914905).
+fn preview(file: &File) -> gtk::Image {
+    let icon = gio::content_type_get_icon(&file.content_type);
+    let image = gtk::Image::builder().gicon(&icon).pixel_size(PREVIEW).build();
+    if file.content_type.starts_with("image/") {
+        let (data, image) = (file.data.clone(), image.downgrade());
+        glib::spawn_future_local(async move {
+            let stream: gio::InputStream = match &data {
+                discord::uploads::Data::File(file) => match file.read_future(glib::Priority::LOW).await {
+                    Ok(stream) => stream.upcast(),
+                    Err(_) => return,
+                },
+                discord::uploads::Data::Memory(bytes) => gio::MemoryInputStream::from_bytes(bytes).upcast(),
+            };
+            let scaled =
+                gtk::gdk_pixbuf::Pixbuf::from_stream_at_scale_future(&stream, PREVIEW * 2, PREVIEW * 2, true).await;
+            if let (Ok(pixbuf), Some(image)) = (scaled, image.upgrade()) {
+                let format =
+                    if pixbuf.has_alpha() { gtk::gdk::MemoryFormat::R8g8b8a8 } else { gtk::gdk::MemoryFormat::R8g8b8 };
+                let texture = gtk::gdk::MemoryTexture::new(
+                    pixbuf.width(),
+                    pixbuf.height(),
+                    format,
+                    &pixbuf.read_pixel_bytes(),
+                    pixbuf.rowstride() as usize,
+                );
+                image.set_paintable(Some(&texture));
+            }
+        });
+    }
+    image
+}
+
 /// An upload of `file` and its row, not started.
 fn upload_of(
     channel: Snowflake,
@@ -368,6 +407,7 @@ fn upload_of(
     remove: &str,
 ) -> Rc<Upload> {
     let root = gtk::Box::builder().spacing(8).margin_start(12).margin_top(4).margin_bottom(4).build();
+    root.append(&preview(&file));
     let name = gtk::Label::builder()
         .label(&file.filename)
         .xalign(0.0)
@@ -925,6 +965,15 @@ impl App {
             }
         });
         upload.task.replace(Some(task));
+    }
+
+    /// Take every file out of the channel's draft, as Escape in the message
+    /// box does (`clearAll`, 699344).
+    pub(super) fn clear_uploads(self: &Rc<Self>, channel: Snowflake) {
+        let files = self.drafts.files.borrow().get(&channel).cloned().unwrap_or_default();
+        for upload in files {
+            self.remove_upload(channel, &upload);
+        }
     }
 
     /// Take a file out of the draft: its upload stops, or is deleted.
