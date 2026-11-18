@@ -343,7 +343,14 @@ def messages(channel):
                 text, files = "the oldest picture", (attachment(0),)
             if n == 39:
                 text, files = "the newest picture, and see <#603> for the plan", (attachment(39),)
-            out.append(message(n, who, text, files))
+            msg = message(n, who, text, files)
+            if n == 37 and os.environ.get("FAKE_EMBED"):
+                # A card whose small picture (the thumbnail) is a GIF, to the fake's own image.
+                pic = f"http://127.0.0.1:{PORT}/attachments/1/900/embed.gif?ex=ffffffff&is=1&hm=2&"
+                msg["content"] = "a card with a thumbnail embed-probe"
+                msg["embeds"] = [{"type": "rich", "title": "A made-up card", "description": "With a small picture beside it.",
+                                  "thumbnail": {"url": pic, "proxy_url": pic, "width": 64, "height": 64}}]
+            out.append(msg)
         if os.environ.get("FAKE_ANSWERS"):
             out += answers(out)
         if os.environ.get("FAKE_POLL"):

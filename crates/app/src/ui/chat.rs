@@ -2073,7 +2073,7 @@ pub(super) fn emoji_at(row: &gtk::Widget, x: f64, y: f64) -> Option<ClickedEmoji
 
 /// The place among a message's media of the picture or video at `(x, y)` in
 /// `row`, named by [`viewer::MediaCx`].
-fn media_at(row: &gtk::Widget, x: f64, y: f64) -> Option<usize> {
+pub(super) fn media_at(row: &gtk::Widget, x: f64, y: f64) -> Option<usize> {
     let mut widget = row.pick(x, y, gtk::PickFlags::DEFAULT);
     while let Some(w) = widget.filter(|w| w != row) {
         if let Some(index) = viewer::media_index(&w) {

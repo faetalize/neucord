@@ -1062,6 +1062,11 @@ impl MediaCx {
         found.nth(n)
     }
 
+    /// The place of the thumbnail of the card of the embed at `embed`.
+    pub(super) fn thumbnail(&self, embed: usize) -> Option<usize> {
+        (0..self.items.len()).find(|&i| self.items[i].source == Source::Thumbnail(embed))
+    }
+
     /// How many open together with the item at `index`.
     pub(super) fn together(&self, index: usize) -> usize {
         media::gallery(&self.items, index).0.len()

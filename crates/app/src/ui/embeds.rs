@@ -307,7 +307,9 @@ fn card(
     }
     top.append(&text);
     if let (Some(images), Some(thumbnail)) = (images, thumbnail) {
-        top.append(&image(&thumbnail, images, THUMBNAIL, THUMBNAIL));
+        let frame = image(&thumbnail, images, THUMBNAIL, THUMBNAIL);
+        view.link(&frame, view.thumbnail(n));
+        top.append(&stars.over(&frame, thumbnail.star.as_ref()));
     }
     body.append(&top);
 
