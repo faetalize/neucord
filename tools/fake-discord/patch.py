@@ -1124,3 +1124,22 @@ edit("crates/app/src/ui/voice.rs", "    fn start_playback(self: &Rc<Self>, id: u
 # `FAKE_HOVER=1` shows every row's hover bar, which a pointer would only show on the row it is over.
 if os.environ.get("FAKE_HOVER"):
     edit("crates/app/src/style.css", ".message .message-action { opacity: 0;", ".message .message-action { opacity: 1;")
+
+# A friend's profile popout, as the pointer opens it: `profile-press <user id>` is the pointer going down on their
+# name, `profile-click <user id>` the click that opens the popout.
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(p) if p == "profile-press" || p == "profile-click" => self.e2e_profile(p, parts.next()),
+            Some("quit") => {''')
+open(f"{root}/crates/app/src/ui/profile.rs", "a").write(r"""
+impl App {
+    pub(super) fn e2e_profile(self: &Rc<Self>, command: &str, arg: Option<&str>) {
+        let id = Snowflake(arg.and_then(|a| a.parse().ok()).unwrap_or(0));
+        let user = self.account.state.borrow().relationships.get(id).map(|r| r.user.clone());
+        let Some(user) = user else { return eprintln!("e2e: no friend {id:?}") };
+        let target = UserTarget { user, guild: None, channel: None, presence: None, anchor: self.window.clone().upcast() };
+        match command {
+            "profile-press" => self.prefetch_profile(&target),
+            _ => self.show_profile(&target, false),
+        }
+    }
+}
+""")
