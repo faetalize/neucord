@@ -417,7 +417,7 @@ changed for unrelated reasons only needs a note in the issue.
   `:name:` is the `emoji` rule in 451909 (anchor `validNonShortcutEmojis`),
   and only a `PREMIUM_LOCKED` emoji in it gets the sender told.
   A subscription role's emoji (`Guild::emoji_subscription`) are locked by `JN`
-  in 492494 (anchor `ROLE_SUBSCRIPTION_LOCKED`), and a restricted server by the
+  in 492494 (anchor `getUserSubscriptionRoles`), and a restricted server by the
   `CREATOR_MONETIZABLE_RESTRICTED` feature, which its `tE` reads.
   Typed emoticons (`emoticons.rs`) are the `emoticon` rule there, with the
   table in 132565 and its order in 7584 (anchor `convertShortcutToName`).
