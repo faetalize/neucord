@@ -247,6 +247,11 @@ pub enum Event {
         id: Snowflake,
         unavailable: bool,
     },
+    /// Someone left a server (or was removed from it).
+    GuildMemberRemove {
+        guild_id: Snowflake,
+        user_id: Snowflake,
+    },
     /// A role was created or changed.
     RoleUpdate {
         guild_id: Snowflake,
@@ -1433,6 +1438,10 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
             let Some(id) = parse_id(&data["id"]) else { return };
             Event::GuildDelete { id, unavailable: data["unavailable"].as_bool() == Some(true) }
         }
+        "GUILD_MEMBER_REMOVE" => match (parse_id(&data["guild_id"]), parse_id(&data["user"]["id"])) {
+            (Some(guild_id), Some(user_id)) => Event::GuildMemberRemove { guild_id, user_id },
+            _ => return,
+        },
         "GUILD_UPDATE" => match Guild::from_value(&data) {
             Ok(guild) => Event::GuildUpdate(guild),
             Err(e) => return eprintln!("gateway: bad GUILD_UPDATE: {e}"),
@@ -2238,6 +2247,14 @@ mod tests {
             panic!("no recipient remove")
         };
         assert_eq!((channel_id, user_id), (Snowflake(9), Snowflake(7)));
+    }
+
+    #[test]
+    fn a_member_leaving_a_server_is_reported() {
+        let state = Parser::default();
+        dispatch(&state, "GUILD_MEMBER_REMOVE", json!({"guild_id": "1", "user": {"id": "7"}}));
+        let Ok(Event::GuildMemberRemove { guild_id, user_id }) = state.try_recv() else { panic!("no member remove") };
+        assert_eq!((guild_id, user_id), (Snowflake(1), Snowflake(7)));
     }
 
     #[test]
