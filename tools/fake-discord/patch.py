@@ -68,6 +68,18 @@ fn popover_on(widget: &gtk::Widget) -> Option<gtk::Popover> {
     None
 }
 
+/// The popover open on `widget` or on what holds it (the attach menu is parented to the box around its button).
+fn popover_above(widget: &gtk::Widget) -> Option<gtk::Popover> {
+    let mut at = Some(widget.clone());
+    while let Some(w) = at {
+        if let Some(popover) = popover_on(&w) {
+            return Some(popover);
+        }
+        at = w.parent();
+    }
+    None
+}
+
 fn buttons(widget: &gtk::Widget, found: &mut Vec<gtk::Button>) {
     let mut child = widget.first_child();
     while let Some(c) = child {
@@ -168,11 +180,12 @@ impl App {
                     Some("composer") => Some(self.composer.clone().upcast()),
                     Some("composer_box") => Some(self.composer_box.clone().upcast()),
                     Some("gif_button") => Some(self.gif_button.clone().upcast()),
+                    Some("attach_button") => Some(self.drafts.attach.clone().upcast()),
                     Some("pins_button") => Some(self.pins_button.clone().upcast()),
                     Some("inbox_button") => Some(self.inbox_button.clone().upcast()),
                     other => return eprintln!("e2e: no widget {other:?}"),
                 };
-                match anchor.and_then(|w| popover_on(&w)) {
+                match anchor.and_then(|w| popover_above(&w)) {
                     Some(popover) => shot(&popover, parts.next().unwrap_or("popover.png")),
                     None => eprintln!("e2e: no popover"),
                 }
@@ -316,6 +329,34 @@ impl App {
                             Err(e) => eprintln!("e2e: password refused: {e}"),
                         }
                     });
+                }
+            }
+            // A row of the attach menu's popover by its label, as clicked: `attach-click Apps`.
+            Some("attach-click") => {
+                let attach: gtk::Widget = self.drafts.attach.clone().upcast();
+                let mut found = Vec::new();
+                if let Some(popover) = popover_above(&attach) {
+                    buttons(popover.upcast_ref(), &mut found);
+                }
+                let wanted = rest.trim();
+                let row = found.into_iter().find(|b| {
+                    let mut label = String::new();
+                    fn text(w: &gtk::Widget, out: &mut String) {
+                        if let Ok(l) = w.clone().downcast::<gtk::Label>() {
+                            out.push_str(&l.text());
+                        }
+                        let mut child = w.first_child();
+                        while let Some(c) = child {
+                            text(&c, out);
+                            child = c.next_sibling();
+                        }
+                    }
+                    text(b.upcast_ref(), &mut label);
+                    label.contains(wanted)
+                });
+                match row {
+                    Some(row) => row.emit_clicked(),
+                    None => eprintln!("e2e: no row {wanted}"),
                 }
             }
             // The pinned messages popover, as its header button opens it: shoot it with `shot-popover pins_button`.
