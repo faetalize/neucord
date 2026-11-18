@@ -373,6 +373,14 @@ impl Rest {
         Ok(Picker::parse_suggestions(&answer))
     }
 
+    /// Tell Discord media it flagged is not sensitive, `body` being
+    /// [`crate::sensitive::Report::body`]'s: the client reads no answer
+    /// (`XR` in 135598).
+    pub async fn report_false_positive(&self, body: Value) -> Result<(), Error> {
+        let _: Value = self.request(call!(EXPLICIT_MEDIA_REPORT_FALSE_POSITIVE), Some(body)).await?;
+        Ok(())
+    }
+
     /// Report a pick of the picker's results, `body` being
     /// [`Picker::selection`]'s: the client sends it as the pick is handled
     /// (`g4`, 497685) and reads no answer.

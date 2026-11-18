@@ -1347,7 +1347,33 @@ pub(super) fn e2e_voice_message(what: &str, arg: Option<&str>) {
     }
 }
 """)
-edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("vmsg") => super::attachments::e2e_voice_message(parts.next().unwrap_or_default(), parts.next()),
+# `reveal-covers` clicks every sensitive cover; `mark-sensitive` asks Mark As Not Sensitive of the first media in the
+# row with `embed-probe` that the filter covers, as its menu item does (the confirmation is `confirm`).
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("reveal-covers") => {
+                for button in buttons_below(self.window.upcast_ref(), |b| b.has_css_class("sensitive-cover")) {
+                    button.emit_clicked();
+                }
+            }
+            Some("mark-sensitive") => {
+                let rows: Vec<MessageRow> = self.rows.borrow().iter().filter_map(|r| r.upgrade()).collect();
+                for row in rows {
+                    let Some(item) = row.parts().item.upgrade() else { continue };
+                    let Some(message) = item.item().and_downcast::<glib::BoxedAnyObject>() else { continue };
+                    let message = message.borrow::<discord::Message>().clone();
+                    if !message.content.contains("embed-probe") {
+                        continue;
+                    }
+                    let media = self.account.state.borrow().settings.media;
+                    let items = discord::media::items(&message, &media, false);
+                    match items.iter().find_map(|i| self.sensitive_report(&message, i)) {
+                        Some(report) => self.confirm_not_sensitive(&message, report),
+                        None => eprintln!("e2e: nothing to mark"),
+                    }
+                    return;
+                }
+                eprintln!("e2e: no row with embed-probe");
+            }
+            Some("vmsg") => super::attachments::e2e_voice_message(parts.next().unwrap_or_default(), parts.next()),
             Some("quit") => {''')
 # The keyboard's menu on a sidebar row or a rail button: `menu-key row <n> [png]` and `menu-key rail <n> [png]` give
 # the nth one the focus and run its Menu / Shift+F10 shortcut (the keys themselves can't be sent here), then say

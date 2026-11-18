@@ -10,9 +10,13 @@
 //! Not copied: media of message components, and the client's developer
 //! switches.
 
-use crate::Snowflake;
+use serde_json::{Value, json};
+
+use crate::embed::Embed;
 use crate::gates::Gates;
+use crate::media::{Item, Source};
 use crate::verification::Account;
+use crate::{Message, Snowflake};
 
 /// A kind of harm Discord flags media for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -301,6 +305,54 @@ impl Rules {
     }
 }
 
+/// What Mark As Not Sensitive reports (`544135`): the message's media the
+/// filter covers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Report {
+    pub attachments: Vec<Snowflake>,
+    /// The embeds' ids as the client's scan names them (`M` in 282108): by
+    /// place among the message's embeds.
+    pub embeds: Vec<String>,
+}
+
+impl Report {
+    /// What the menu on `item` reports: the attachment with its address (the
+    /// client matches `url` or `id`), and, as the client's menu passes no
+    /// embed, every embed of the message flagged for a covered harm. `None`
+    /// where the client has no such item: the item isn't flagged for a harm
+    /// covered where the message is. `visible` are the embeds the message
+    /// shows, which an embed's item is a place among.
+    pub fn of(message: &Message, visible: &[Embed], harms: Harms, item: &Item) -> Option<Report> {
+        let flagged = |scan: Scan| harms.flagged(scan.flags).is_some();
+        let covered = match item.source {
+            Source::Attachment(id) => {
+                message.attachments.iter().find(|a| a.id == id).is_some_and(|a| flagged(a.scan()))
+            }
+            Source::Embed(n) | Source::Thumbnail(n) => visible.get(n).is_some_and(|e| flagged(e.scan())),
+        };
+        covered.then(|| Report {
+            attachments: message.attachments.iter().filter(|a| a.url == item.url).map(|a| a.id).collect(),
+            embeds: message
+                .embeds
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| flagged(e.scan()))
+                .map(|(n, _)| format!("embed_{n}"))
+                .collect(),
+        })
+    }
+
+    /// The request's body.
+    pub fn body(&self, message: &Message) -> Value {
+        json!({
+            "channel_id": message.channel_id.to_string(),
+            "message_id": message.id.to_string(),
+            "attachment_ids": self.attachments.iter().map(Snowflake::to_string).collect::<Vec<_>>(),
+            "embed_ids": self.embeds,
+        })
+    }
+}
+
 /// What Discord says of a media item's scan.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Scan {
@@ -536,6 +588,81 @@ mod tests {
         let harms = rules.harms(Some(Place::NonFriendDm));
         let scan = Scan { flags: GORE, version: None };
         assert_eq!(rules.cover(harms, scan, true), Some(Cover::Flagged(Harm::Gore)));
+    }
+
+    fn message(attachments: Value, embeds: Value) -> Message {
+        serde_json::from_value(json!({"id": "30", "channel_id": "20", "author": {"id": "2", "username": "a"},
+            "content": "", "timestamp": "2026-01-01T00:00:00.000000+00:00", "type": 0,
+            "attachments": attachments, "embeds": embeds}))
+        .unwrap()
+    }
+
+    fn attachment_item(message: &Message, n: usize) -> Item {
+        let a = &message.attachments[n];
+        Item {
+            kind: crate::media::Kind::Image,
+            source: Source::Attachment(a.id),
+            url: a.url.clone(),
+            proxy_url: None,
+            size: None,
+            animated: false,
+            content_type: None,
+            filename: None,
+            bytes: None,
+            alt: None,
+        }
+    }
+
+    fn explicit_harms() -> Harms {
+        rules().harms(Some(Place::NonFriendDm))
+    }
+
+    #[test]
+    fn mark_as_not_sensitive_reports_the_flagged_attachment_and_the_flagged_embeds() {
+        let message = message(
+            json!([{"id": "11", "filename": "a.png", "url": "https://cdn/a.png", "flags": 16, "content_scan_version": 4},
+                   {"id": "12", "filename": "b.png", "url": "https://cdn/b.png", "flags": 16, "content_scan_version": 4}]),
+            json!([{"type": "rich", "flags": 64}, {"type": "rich"}, {"type": "image", "flags": 16}]),
+        );
+        let report = Report::of(&message, &message.embeds, explicit_harms(), &attachment_item(&message, 1)).unwrap();
+        assert_eq!(report.attachments, [Snowflake(12)], "only the one the menu is on");
+        assert_eq!(report.embeds, ["embed_0", "embed_2"], "every flagged embed, by place");
+        assert_eq!(
+            report.body(&message),
+            json!({"channel_id": "20", "message_id": "30", "attachment_ids": ["12"], "embed_ids": ["embed_0", "embed_2"]})
+        );
+    }
+
+    #[test]
+    fn an_embeds_item_reports_no_attachment() {
+        let message = message(
+            json!([{"id": "11", "filename": "a.png", "url": "https://cdn/a.png", "flags": 16}]),
+            json!([{"type": "image", "flags": 16}]),
+        );
+        let mut item = attachment_item(&message, 0);
+        (item.source, item.url) = (Source::Embed(0), "https://site/pic.png".into());
+        let report = Report::of(&message, &message.embeds, explicit_harms(), &item).unwrap();
+        assert_eq!((report.attachments, report.embeds), (vec![], vec!["embed_0".to_owned()]));
+    }
+
+    #[test]
+    fn mark_as_not_sensitive_is_offered_only_on_media_flagged_for_a_covered_harm() {
+        let message = message(
+            json!([{"id": "11", "filename": "a.png", "url": "u1", "flags": 16}, {"id": "12", "filename": "b.png", "url": "u2"},
+                   {"id": "13", "filename": "c.png", "url": "u3", "flags": 128}]),
+            json!([{"type": "image"}, {"type": "image", "flags": 16}]),
+        );
+        let offered = |harms, item: &Item| Report::of(&message, &message.embeds, harms, item).is_some();
+        let (flagged, clean, self_harm) =
+            (attachment_item(&message, 0), attachment_item(&message, 1), attachment_item(&message, 2));
+        assert!(offered(explicit_harms(), &flagged));
+        assert!(!offered(explicit_harms(), &clean));
+        assert!(!offered(explicit_harms(), &self_harm), "self-harm is covered nowhere");
+        assert!(!offered(rules().harms(Some(Place::Guild)), &flagged), "shown there, so nothing to mark");
+        assert!(!offered(rules().harms(None), &flagged), "our own");
+        let embed = |n| Item { source: Source::Embed(n), ..flagged.clone() };
+        assert!(!offered(explicit_harms(), &embed(0)) && offered(explicit_harms(), &embed(1)));
+        assert!(!offered(explicit_harms(), &embed(5)), "no such embed");
     }
 
     #[test]

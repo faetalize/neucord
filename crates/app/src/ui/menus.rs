@@ -18,8 +18,8 @@ use super::App;
 use super::chat::{self, MessageTarget};
 use super::{
     accounts, attachments, composer, create_thread, edits, emoji, forum, forward, gifs, launcher, notify_menus, picker,
-    pins, poll_composer, polls, profile, reactions, reactors, scheduling, server_privacy, sidebar, slash, spelling,
-    stickers, thread_settings, threads, uploads, viewer, voice,
+    pins, poll_composer, polls, profile, reactions, reactors, scheduling, sensitive_report, server_privacy, sidebar,
+    slash, spelling, stickers, thread_settings, threads, uploads, viewer, voice,
 };
 
 /// An item that copies or opens a link, shown when the link `$link` finds in
@@ -152,7 +152,7 @@ const MESSAGE: Table<MessageTarget> = &[
         polls::END_POLL,
     ],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
-    &[chat::COPY_IMAGE, chat::SAVE_IMAGE, attachments::SAVE_FILE],
+    &[chat::COPY_IMAGE, chat::SAVE_IMAGE, sensitive_report::MARK_NOT_SENSITIVE, attachments::SAVE_FILE],
     &LINKS,
     &[chat::COPY_MESSAGE_ID, stickers::MESSAGE_DETAILS],
 ];
@@ -175,7 +175,7 @@ const MESSAGE_REGULATED: Table<MessageTarget> = &[
     ],
     &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
     &[chat::COPY_MESSAGE_ID, stickers::MESSAGE_DETAILS],
-    &[chat::COPY_IMAGE, chat::SAVE_IMAGE, attachments::SAVE_FILE],
+    &[chat::COPY_IMAGE, chat::SAVE_IMAGE, sensitive_report::MARK_NOT_SENSITIVE, attachments::SAVE_FILE],
     &LINKS,
 ];
 
@@ -965,7 +965,8 @@ mod tests {
             names[names.len() - 3..].to_vec()
         };
         let id = || vec!["copy-message-id", "message-details"];
-        let media = || vec!["copy-image", "save-image", "save-file"];
+        // Mark As Not Sensitive follows Save Image in the media group (761304).
+        let media = || vec!["copy-image", "save-image", "mark-not-sensitive", "save-file"];
         let links = || {
             ["copy-link", "copy-image-link", "copy-media-link", "open-link", "open-image-link", "open-media-link"]
                 .to_vec()
