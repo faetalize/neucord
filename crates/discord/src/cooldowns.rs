@@ -11,8 +11,8 @@ use crate::permissions::{self, Permissions};
 use crate::verification::Account;
 use crate::{Channel, Guild, Snowflake};
 
-/// Added to every cooldown, as the official client does, so the wait ends
-/// after Discord's rather than just before it.
+/// Added to every cooldown, and again each second it runs, as the official
+/// client does, so the wait ends after Discord's rather than just before it.
 const MARGIN_MS: i64 = 100;
 
 /// Whether we skip slowmode in `channel`, one of `guild`'s: the client asks
@@ -21,33 +21,59 @@ pub fn bypasses_slowmode(guild: &Guild, channel: &Channel, me: &Account, now_uni
     permissions::in_channel(guild, channel, me, now_unix).contains(Permissions::BYPASS_SLOWMODE)
 }
 
-/// When each channel's cooldown ends (ms since 1970), and the channel's
-/// slowmode when it started.
+/// One running cooldown: the client's store sets what is left again every
+/// second, 100 ms more than it was (`SLOWMODE_SET_COOLDOWN` in 101392), so
+/// what it holds after `k` seconds is `initial - 900 k`, and it ends at the
+/// first whole second where nothing is left to set.
+#[derive(Debug, Clone, Copy)]
+struct Wait {
+    started_ms: i64,
+    /// What it was set to, margin included.
+    initial_ms: i64,
+    /// The channel's slowmode when it started.
+    rate: u32,
+}
+
+impl Wait {
+    fn remaining_ms(&self, now_ms: i64) -> i64 {
+        let seconds = (now_ms - self.started_ms).max(0) / 1000;
+        if 900 * seconds >= self.initial_ms - MARGIN_MS { 0 } else { self.initial_ms - 900 * seconds }
+    }
+}
+
+/// When each channel's cooldown started.
 #[derive(Debug, Default)]
-struct Waits(HashMap<Snowflake, (i64, u32)>);
+struct Waits(HashMap<Snowflake, Wait>);
 
 impl Waits {
+    /// Set the cooldown to `left_ms`, replacing the one running.
+    fn set(&mut self, channel: &Channel, left_ms: i64, now_ms: i64) {
+        self.0.remove(&channel.id);
+        if left_ms > 0 {
+            let wait = Wait { started_ms: now_ms, initial_ms: left_ms, rate: channel.rate_limit_per_user };
+            self.0.insert(channel.id, wait);
+        }
+    }
+
     fn start(&mut self, channel: &Channel, bypass: bool, now_ms: i64) {
         let rate = channel.rate_limit_per_user;
         if rate > 0 && !bypass {
-            self.0.insert(channel.id, (now_ms + i64::from(rate) * 1000 + MARGIN_MS, rate));
+            self.set(channel, i64::from(rate) * 1000 + MARGIN_MS, now_ms);
         }
     }
 
     fn refused(&mut self, channel: &Channel, retry_after: f64, now_ms: i64) {
         if retry_after > 0.0 {
-            let end = now_ms + (retry_after * 1000.0).ceil() as i64 + MARGIN_MS;
-            self.0.insert(channel.id, (end, channel.rate_limit_per_user));
+            self.set(channel, (retry_after * 1000.0).ceil() as i64 + MARGIN_MS, now_ms);
         }
     }
 
     fn update(&mut self, channel: &Channel, now_ms: i64) {
         let rate = channel.rate_limit_per_user;
-        if let Some((end, was)) = self.0.get_mut(&channel.id)
-            && *was != rate
+        if let Some(wait) = self.0.get(&channel.id).copied()
+            && wait.rate != rate
         {
-            *end = (*end).min(now_ms + i64::from(rate) * 1000 + MARGIN_MS);
-            *was = rate;
+            self.set(channel, wait.remaining_ms(now_ms).min(i64::from(rate) * 1000), now_ms);
         }
     }
 
@@ -55,7 +81,7 @@ impl Waits {
         if channel.rate_limit_per_user == 0 {
             return 0;
         }
-        self.0.get(&channel.id).map_or(0, |(end, _)| (end - now_ms).max(0))
+        self.0.get(&channel.id).map_or(0, |wait| wait.remaining_ms(now_ms))
     }
 }
 
@@ -101,7 +127,7 @@ impl Slowmode {
         }
         self.messages.0.remove(&channel.id);
         if !bypass {
-            self.messages.0.insert(channel.id, (now_ms + cooldown_ms + MARGIN_MS, channel.rate_limit_per_user));
+            self.messages.set(channel, cooldown_ms + MARGIN_MS, now_ms);
         }
     }
 
@@ -171,7 +197,8 @@ mod tests {
         assert_eq!(slowmode.remaining_ms(&general, 0), 10_100, "from the first message, before any refusal");
         slowmode.sent(&general, false, 300);
         assert_eq!(slowmode.remaining_ms(&general, 300), 10_100, "restarted when it went through");
-        assert_eq!(slowmode.remaining_ms(&general, 10_400), 0);
+        assert_eq!(slowmode.remaining_ms(&general, 12_299), 200, "it ends at the first tick that finds it up");
+        assert_eq!(slowmode.remaining_ms(&general, 12_300), 0);
         assert_eq!(slowmode.remaining_ms(&channel(2, 10), 0), 0, "only in that channel");
 
         slowmode.sent(&channel(3, 0), false, 0);
@@ -188,6 +215,25 @@ mod tests {
     }
 
     #[test]
+    fn the_store_adds_a_margin_every_second() {
+        // Each second the client sets what is left again, plus 100 ms, so a
+        // wait of 10.1 s is shown as 10.1, 9.2, 8.3 … and ends at a whole
+        // second: the 12th.
+        let mut slowmode = Slowmode::default();
+        let general = channel(1, 10);
+        slowmode.sent(&general, false, 5_000);
+        let left = |at: i64| slowmode.remaining_ms(&general, 5_000 + at);
+        assert_eq!([left(0), left(999), left(1_000), left(2_500)], [10_100, 10_100, 9_200, 8_300]);
+        assert_eq!([left(10_999), left(11_000), left(11_999), left(12_000)], [1_100, 200, 200, 0]);
+        // The unit of the margin is the second of the slowmode.
+        let short = channel(2, 1);
+        slowmode.sent(&short, false, 0);
+        assert_eq!(slowmode.remaining_ms(&short, 0), 1_100);
+        assert_eq!(slowmode.remaining_ms(&short, 1_000), 200, "the margin pushed the end past the first tick");
+        assert_eq!(slowmode.remaining_ms(&short, 2_000), 0);
+    }
+
+    #[test]
     fn threads_wait_apart_from_messages() {
         let mut slowmode = Slowmode::default();
         let general = channel(1, 10);
@@ -196,7 +242,7 @@ mod tests {
         assert_eq!(slowmode.remaining_ms(&general, 0), 0, "a message doesn't");
 
         slowmode.sent(&general, false, 1_000);
-        assert_eq!(slowmode.thread_remaining_ms(&general, 1_000), 9_100, "nor does a message restart the thread's");
+        assert_eq!(slowmode.thread_remaining_ms(&general, 1_000), 9_200, "nor does a message restart the thread's");
         assert_eq!(slowmode.remaining_ms(&general, 1_000), 10_100);
 
         slowmode.thread_refused(&channel(2, 10), 4.2, 0);
@@ -206,8 +252,8 @@ mod tests {
         assert_eq!(slowmode.thread_remaining_ms(&channel(3, 10), 0), 0, "bypassed");
 
         slowmode.update(&channel(1, 5), 2_000);
-        assert_eq!(slowmode.thread_remaining_ms(&channel(1, 5), 2_000), 5_100, "a new slowmode shortens both");
-        assert_eq!(slowmode.remaining_ms(&channel(1, 5), 2_000), 5_100);
+        assert_eq!(slowmode.thread_remaining_ms(&channel(1, 5), 2_000), 5_000, "a new slowmode shortens both");
+        assert_eq!(slowmode.remaining_ms(&channel(1, 5), 2_000), 5_000);
     }
 
     #[test]
@@ -226,7 +272,7 @@ mod tests {
         assert_eq!(slowmode.remaining_ms(&general, 5_000), 0, "only a wait above zero is set; the 1.1 s were up");
         slowmode.sent(&general, false, 10_000);
         slowmode.told(&general, 0, false, 10_500);
-        assert_eq!(slowmode.remaining_ms(&general, 10_500), 9_600, "and zero leaves one running alone");
+        assert_eq!(slowmode.remaining_ms(&general, 10_500), 10_100, "and zero leaves one running alone");
 
         slowmode.told(&general, 5_000, true, 11_000);
         assert_eq!(slowmode.remaining_ms(&general, 11_000), 0, "a moderator waits for nothing");
@@ -257,16 +303,12 @@ mod tests {
         slowmode.refused(&channel(1, 60), 50.0, 0);
 
         slowmode.update(&channel(1, 60), 1_000);
-        assert_eq!(slowmode.remaining_ms(&channel(1, 60), 1_000), 49_100, "same slowmode, same wait");
+        assert_eq!(slowmode.remaining_ms(&channel(1, 60), 1_000), 49_200, "same slowmode, same wait");
 
         slowmode.update(&channel(1, 5), 1_000);
-        assert_eq!(
-            slowmode.remaining_ms(&channel(1, 5), 1_000),
-            5_100,
-            "shortened to the new slowmode, and the margin"
-        );
+        assert_eq!(slowmode.remaining_ms(&channel(1, 5), 1_000), 5_000, "shortened to the new slowmode");
         slowmode.update(&channel(1, 120), 1_000);
-        assert_eq!(slowmode.remaining_ms(&channel(1, 120), 1_000), 5_100, "never lengthened");
+        assert_eq!(slowmode.remaining_ms(&channel(1, 120), 1_000), 5_000, "never lengthened");
         assert_eq!(slowmode.remaining_ms(&channel(1, 0), 1_000), 0, "off ends it");
     }
 

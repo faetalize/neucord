@@ -705,6 +705,20 @@ impl State {
         sections
     }
 
+    /// Whether Collapse All Categories shows in a category's menu: not for a
+    /// server with no category, nor when every one is folded already (914907,
+    /// which looks at all the server's categories, listed or not).
+    pub(super) fn offers_collapse_all(&self, guild: &Guild) -> bool {
+        let mut categories = guild.channels.iter().filter(|c| c.kind == ChannelKind::Category).peekable();
+        categories.peek().is_some() && !categories.all(|c| self.collapsed.contains(c.id))
+    }
+
+    /// What Collapse All Categories folds: the categories the sidebar lists
+    /// (`getChannels(guild)[GUILD_CATEGORY]`, 924985).
+    pub(super) fn listed_categories(&self, guild: &Guild) -> Vec<Snowflake> {
+        self.channels_by_category(guild).into_iter().filter_map(|(category, _)| Some(category?.id)).collect()
+    }
+
     fn list_facts(&self, guild: &Guild, channel: &Channel, now: i64) -> Facts {
         let open_thread = self.channel.and_then(|id| guild.thread(id)).is_some_and(|t| t.parent_id == Some(channel.id));
         Facts {
@@ -1114,6 +1128,21 @@ impl State {
         self.dms().map(|c| self.mentions(c.id)).sum::<u32>() + self.relationships.incoming()
     }
 
+    /// `GUILD_DELETE`: we left the server, or lost it. An unavailable one
+    /// stays as it is, as in the client's guild store (71393); a removed one
+    /// goes, with its voice states. Gives the ids of its channels and threads,
+    /// which are no one's now, and whether it was the open server.
+    pub(super) fn guild_deleted(&mut self, id: Snowflake, unavailable: bool) -> Option<(Vec<Snowflake>, bool)> {
+        if unavailable {
+            return None;
+        }
+        let at = self.guilds.iter().position(|g| g.id == id)?;
+        let guild = self.guilds.remove(at);
+        self.voice.replace_guild(id, Vec::new());
+        let was_open = self.guild == Some(id);
+        Some((guild.channels.iter().chain(&guild.threads).map(|c| c.id).collect(), was_open))
+    }
+
     /// Record a new newest message for a channel wherever it lives.
     pub(super) fn bump_last_message(&mut self, channel: Snowflake, message: Snowflake) {
         let slot = self
@@ -1450,6 +1479,19 @@ mod tests {
     }
 
     #[test]
+    fn collapse_all_categories_shows_while_a_category_is_open() {
+        let mut state = categorised(json!({}));
+        let guild = state.guilds[0].clone();
+        assert!(state.offers_collapse_all(&guild));
+        assert_eq!(state.listed_categories(&guild), [Snowflake(8)]);
+        state.collapsed.set(Snowflake(8), true);
+        assert!(!state.offers_collapse_all(&guild), "all of them are folded");
+        state.collapsed.set(Snowflake(8), false);
+        let bare = open_server(None, json!({}));
+        assert!(!bare.offers_collapse_all(&bare.guilds[0]), "no category");
+    }
+
+    #[test]
     fn a_servers_mark_as_read_leaves_out_threads_under_voice_channels() {
         let mut state = categorised(json!({}));
         let thread = |id: &str, parent: &str| -> Channel {
@@ -1657,6 +1699,16 @@ mod tests {
         let before = state.sidebar_signature();
         state.guilds[0].name = "Renamed".into();
         assert_ne!(state.sidebar_signature(), before);
+    }
+
+    #[test]
+    fn a_server_we_left_goes_and_one_in_an_outage_stays() {
+        let mut state = open_server(None, json!({}));
+        assert_eq!(state.guild_deleted(Snowflake(1), true), None);
+        assert_eq!(state.guilds.len(), 1, "an outage leaves what we know of it");
+        assert_eq!(state.guild_deleted(Snowflake(1), false), Some((vec![Snowflake(9)], true)));
+        assert!(state.guilds.is_empty());
+        assert_eq!(state.guild_deleted(Snowflake(1), false), None, "twice");
     }
 
     #[test]
