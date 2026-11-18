@@ -15,6 +15,7 @@ pub(crate) const SEARCH_CHANNEL_MESSAGES: Endpoint = Endpoint::get("/channels/{c
 pub(crate) const SEND_MESSAGE: Endpoint = Endpoint::post("/channels/{channel}/messages");
 pub(crate) const EDIT_MESSAGE: Endpoint = Endpoint::patch("/channels/{channel}/messages/{message}");
 pub(crate) const DELETE_MESSAGE: Endpoint = Endpoint::delete("/channels/{channel}/messages/{message}");
+pub(crate) const PINS: Endpoint = Endpoint::get("/channels/{channel}/messages/pins");
 pub(crate) const PIN_MESSAGE: Endpoint = Endpoint::put("/channels/{channel}/pins/{message}");
 pub(crate) const UNPIN_MESSAGE: Endpoint = Endpoint::delete("/channels/{channel}/pins/{message}");
 // Kept on one line for discord-watch, past what rustfmt would.

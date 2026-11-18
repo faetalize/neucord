@@ -138,6 +138,12 @@ changed for unrelated reasons only needs a note in the issue.
   and `USER_MESSAGE` in 448761) and the menu entries in 979766 (anchor
   `confirmUnpin`); Shift skips the questions, whose words are in 145530
   (anchor `confirmPin`). The search-result menu (847342) has them too.
+  The pins list (`ui/pin_list.rs`, `discord::pins::Pins`): the request and
+  when it is made are watched (`fetchPins`: `PINS`, `limit` then `before`,
+  and its rule on `LOADED_HAS_MORE`); how `ChannelPinsStore` (966833, anchor
+  `LOAD_PINNED_MESSAGES`) keeps the list on events, and the popout in 945830
+  (anchor `Channel Pins`: Jump, Unpin, the next page within 250 px of the
+  end), aren't.
 - **Voting on polls** (`Poll::view`, `Poll::set_my_votes`, `permissions::vote_held_back`,
   `polls::END_POLL`). The requests, and what tapping, submitting and ending
   do, are watched (`handlePollAnswerTapped`, `handlePollSubmitVote`,

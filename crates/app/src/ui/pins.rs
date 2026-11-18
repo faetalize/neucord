@@ -53,7 +53,7 @@ impl App {
         });
     }
 
-    fn confirm_unpin(self: &Rc<Self>, message: &Message) {
+    pub(super) fn confirm_unpin(self: &Rc<Self>, message: &Message) {
         let (heading, body, verb, hint) = pins::UNPIN_QUESTION;
         let dialog = confirm(heading, &format!("{body}\n\n{hint}"), verb, adw::ResponseAppearance::Destructive);
         let (this, message) = (self.clone(), message.clone());
@@ -87,7 +87,7 @@ impl App {
     }
 
     /// Unpin `message`; a failure offers to try again.
-    fn unpin_message(self: &Rc<Self>, message: &Message) {
+    pub(super) fn unpin_message(self: &Rc<Self>, message: &Message) {
         let Some(rest) = self.account.state.borrow().rest.clone() else { return };
         let (channel, id) = (message.channel_id, message.id);
         let this = self.clone();
