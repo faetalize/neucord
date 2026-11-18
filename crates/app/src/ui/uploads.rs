@@ -539,7 +539,14 @@ impl App {
                         bounds.width() as i32,
                         bounds.height() as i32,
                     );
-                    super::menus::popup(&this, super::menus::ATTACH, (), &parent, super::menus::At::Below(rect));
+                    super::menus::popup_with_icons(
+                        &this,
+                        super::menus::ATTACH,
+                        (),
+                        &parent,
+                        super::menus::At::Below(rect),
+                        super::menus::ATTACH_ICONS,
+                    );
                 }
             });
         }
