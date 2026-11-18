@@ -523,7 +523,7 @@ impl View {
             avatar.set_measure_overlay(&frame, false);
         }
         if let Some(status) = &status {
-            avatar.add_overlay(&presence_dot(status.status));
+            avatar.add_overlay(&presence_dot(status));
         }
         header.append(&avatar);
         let names = gtk::Box::builder()

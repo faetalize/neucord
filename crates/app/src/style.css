@@ -141,6 +141,8 @@ button.pulse > * { animation: neucord-pulse 600ms ease; }
 .presence.idle    { background-color: var(--neucord-idle); }
 .presence.dnd     { background-color: var(--neucord-dnd); }
 .presence.offline { background-color: var(--neucord-offline); }
+/* Someone online on a phone only, as the client's phone-shaped status. */
+.presence.mobile  { min-width: 8px; min-height: 13px; border-radius: 3px; }
 
 /* The phone reads the code best dark on white, whatever the theme. */
 .qr { background-color: white; border-radius: 12px; padding: 12px; }
