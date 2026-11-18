@@ -56,6 +56,8 @@ pub struct Item {
     pub filename: Option<String>,
     /// In bytes.
     pub bytes: Option<u64>,
+    /// The alt text.
+    pub alt: Option<String>,
 }
 
 const IMAGE_EXTENSIONS: [&str; 10] = ["png", "jpg", "jpeg", "jfif", "webp", "gif", "heic", "heif", "dng", "avif"];
@@ -90,6 +92,7 @@ impl Item {
             content_type: attachment.content_type.clone(),
             filename: Some(attachment.filename.clone()),
             bytes: attachment.size,
+            alt: attachment.description.clone().filter(|alt| !alt.is_empty()),
         })
     }
 
@@ -108,6 +111,7 @@ impl Item {
             content_type: None,
             filename: None,
             bytes: None,
+            alt: None,
         }
     }
 
@@ -160,10 +164,40 @@ impl Item {
         link_allowed(&self.url)
     }
 
+    /// The rows of the viewer's View Details submenu (`media-viewer-details`
+    /// in 2323), which only an attachment has: its filename, its size, and its
+    /// alt text, each shown when it is known.
+    pub fn details(&self) -> Option<Details> {
+        let Source::Attachment(_) = self.source else { return None };
+        let size = match (self.size, self.bytes) {
+            (Some((w, h)), Some(bytes)) => Some(format!("{w}x{h} ({})", detail_size(bytes))),
+            (Some((w, h)), None) => Some(format!("{w}x{h}")),
+            (None, Some(bytes)) => Some(detail_size(bytes)),
+            (None, None) => None,
+        };
+        Some(Details { name: self.filename.clone(), size, alt: self.alt.clone() })
+    }
+
     /// A name for the file Save writes.
     pub fn save_name(&self) -> String {
         save_name(&self.download_url().unwrap_or_else(|| self.url.clone()), self.content_type.as_deref())
     }
+}
+
+/// See [`Item::details`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Details {
+    pub name: Option<String>,
+    pub size: Option<String>,
+    pub alt: Option<String>,
+}
+
+/// A size as the client's details write it (`Xq` in 255438, given kilobytes):
+/// whole megabytes, rounded up (a small file is 1 MB), then gigabytes to a
+/// decimal from a thousand of them.
+fn detail_size(bytes: u64) -> String {
+    let mb = bytes.div_ceil(1_000_000);
+    if mb < 1000 { format!("{mb} MB") } else { format!("{} GB", (mb as f64 / 100.0).round() / 10.0) }
 }
 
 /// All the media of `message` the viewer opens: its attachments (except the
@@ -410,6 +444,38 @@ mod tests {
         // The link is the page's; the file, the proxy's.
         assert_eq!(items[3].link(), "https://e.test/a.png");
         assert!(items[3].file_url().starts_with("https://images-ext-1.discordapp.net/"));
+    }
+
+    #[test]
+    fn only_an_attachment_has_details_and_each_row_needs_its_value() {
+        let message = message(serde_json::json!({
+            "attachments": [
+                attachment("10", "a.png", serde_json::json!({"size": 1_500_000, "description": "a cat"})),
+                attachment("11", "b.png", serde_json::json!({"size": 40, "description": ""})),
+                attachment("12", "c.png", serde_json::json!({"width": null, "height": null})),
+            ],
+            "embeds": [{"type": "image", "url": "https://e.test/a.png",
+                "thumbnail": {"url": "https://e.test/a.png", "proxy_url": "https://images-ext-1.discordapp.net/external/x/https/e.test/a.png", "width": 8, "height": 8}}],
+        }));
+        let items = items(&message, &MediaSettings::default(), false);
+        let details = |n: usize| items[n].details();
+        let first = details(0).unwrap();
+        assert_eq!(first.name.as_deref(), Some("a.png"));
+        // The client rounds up to whole megabytes.
+        assert_eq!(first.size.as_deref(), Some("800x600 (2 MB)"));
+        assert_eq!(first.alt.as_deref(), Some("a cat"));
+        let second = details(1).unwrap();
+        assert_eq!(second.size.as_deref(), Some("800x600 (1 MB)"));
+        assert_eq!(second.alt, None, "an empty description is none");
+        assert_eq!(details(2).unwrap().size, None, "without a size or dimensions there is no row");
+        assert_eq!(details(3), None, "an embed's image has no details");
+    }
+
+    #[test]
+    fn details_write_sizes_in_megabytes_then_gigabytes() {
+        assert_eq!(detail_size(1), "1 MB");
+        assert_eq!(detail_size(999_000_000), "999 MB");
+        assert_eq!(detail_size(1_540_000_000), "1.5 GB");
     }
 
     #[test]

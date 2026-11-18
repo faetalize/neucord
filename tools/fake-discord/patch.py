@@ -1492,6 +1492,39 @@ impl App {
 edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(c) if c == "thread-settings" || c == "thread-settings-save" => self.e2e_thread_settings(c, rest),
             Some("quit") => {''')
 
+# The viewer's video (#255): `viewer-stats <on|off>` turns Stats for Nerds on for the video shown, and
+# `viewer-shot <png>` shoots the viewer, `viewer-more <png>` opens the More menu on View Details's page and shoots it.
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("viewer-stats") => self.viewer.e2e_stats(parts.next() == Some("on")),
+            Some("viewer-shot") => self.viewer.e2e_shot(parts.next().unwrap_or_default()),
+            Some("viewer-more") => self.viewer.e2e_more(parts.next().unwrap_or_default().to_owned()),
+            Some("quit") => {''')
+open(f"{root}/crates/app/src/ui/viewer.rs", "a").write(r"""
+impl Viewer {
+    pub(super) fn e2e_stats(&self, on: bool) {
+        let url = self.item().map(|item| item.url).unwrap_or_default();
+        self.set_stats(&url, on);
+    }
+
+    pub(super) fn e2e_shot(&self, path: &str) {
+        eprintln!("e2e: viewer visible={} size={}x{} mapped={} opacity={}", self.0.root.is_visible(), self.0.root.width(), self.0.root.height(), self.0.root.is_mapped(), self.0.root.opacity());
+        // A first shot of the layer comes out empty unless the media in it was shot just before.
+        super::e2e::shot(&self.0.holder, &format!("{path}.holder.png"));
+        super::e2e::shot(&self.0.root, path);
+    }
+
+    pub(super) fn e2e_more(&self, path: String) {
+        self.0.more.popup();
+        let more = self.0.more.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(500), move || {
+            if let Some(popover) = more.popover().and_downcast::<gtk::PopoverMenu>() {
+                popover.set_visible_submenu(Some("View Details"));
+                glib::timeout_add_local_once(std::time::Duration::from_millis(500), move || super::e2e::shot(&popover, &path));
+            }
+        });
+    }
+}
+""")
+
 # Forward: the picker, driven as hands would. `forward-menu <text> <png>` opens the menu of the message with <text>
 # and shoots it; `forward-open <text>` opens the picker on it (`forward-open <text> @<attachment id>` for one file);
 # `forward-viewer <text>` opens the media viewer on its first picture and `forward-viewer-click` presses its Forward;

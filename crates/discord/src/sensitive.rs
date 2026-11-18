@@ -609,6 +609,7 @@ mod tests {
             content_type: None,
             filename: None,
             bytes: None,
+            alt: None,
         }
     }
 

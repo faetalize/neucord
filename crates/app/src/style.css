@@ -168,4 +168,6 @@ button.pulse > * { animation: neucord-pulse 600ms ease; }
 /* The media viewer dims the window and reads light on it, in either theme. */
 .media-viewer { background-color: alpha(black, 0.85); color: white; }
 .sensitive-cover { padding: 24px 40px; border-radius: 8px; }
+/* Over a video's frames, so it needs a backdrop dark enough to read on any of them. */
+.video-stats { background-color: alpha(black, 0.8); color: white; border-radius: 12px; padding: 8px 12px; }
 .spoiler-cover { margin-top: 4px; padding: 24px 40px; border-radius: 8px; font-weight: bold; }

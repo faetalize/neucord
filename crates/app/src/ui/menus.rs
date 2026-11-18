@@ -191,9 +191,10 @@ const LINKS: [Entry<MessageTarget>; 6] = [
 ];
 
 /// The picture or video in the media viewer (`image-context`, 177079):
-/// Copy Image and Save Image, then the link of what is shown.
+/// Copy Image and Save Image, and a video's Stats for Nerds, then the link of
+/// what is shown.
 pub(super) const VIEWER_MEDIA: Table<viewer::Target> = &[
-    &[viewer::COPY_IMAGE, viewer::SAVE_IMAGE],
+    &[viewer::COPY_IMAGE, viewer::SAVE_IMAGE, viewer::STATS_FOR_NERDS],
     &[
         viewer::COPY_LINK,
         viewer::COPY_IMAGE_LINK,

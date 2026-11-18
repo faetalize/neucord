@@ -30,6 +30,7 @@ sourceview = { package = "sourceview5", version = "0.11" }
 libspelling = "0.5"
 gst = { package = "gstreamer", version = "0.25" }
 gst-app = { package = "gstreamer-app", version = "0.25" }
+gst-pbutils = { package = "gstreamer-pbutils", version = "0.25" }
 
 # Keep target/ small: line tables are enough for readable backtraces.
 [profile.dev]

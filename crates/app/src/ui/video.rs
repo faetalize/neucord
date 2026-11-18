@@ -13,6 +13,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use discord::media::{Playback, clock};
+use discord::video_stats::Moment;
 use gtk::glib;
 use gtk::prelude::*;
 
@@ -321,6 +322,21 @@ impl Player {
 
     pub(super) fn control(&self) -> Control {
         self.control.clone()
+    }
+
+    /// What the player is doing now, for a panel that must not keep the
+    /// player (and its sound) alive: `None` once it is gone.
+    pub(super) fn watcher(&self) -> impl Fn() -> Option<Moment> + 'static {
+        let (stream, root) = (self.control.stream.downgrade(), self.root.downgrade());
+        move || {
+            let (stream, root) = (stream.upgrade()?, root.upgrade()?);
+            Some(Moment {
+                viewport: (root.width().max(0) as u32, root.height().max(0) as u32),
+                position_secs: stream.timestamp() as f64 / 1e6,
+                duration_secs: stream.duration().max(0) as f64 / 1e6,
+                error: stream.error().map(|e| e.message().to_owned()),
+            })
+        }
     }
 }
 
