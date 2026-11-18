@@ -58,6 +58,42 @@ pub const SPELLCHECK: Key = Key { group: "Chat", name: "spellcheck", default: tr
 /// blurred (`--neucord-bar-opacity` and `--neucord-blur` in `style.css`).
 pub const TRANSLUCENT: Key = Key { group: "Appearance", name: "translucent", default: true };
 
+/// Which colours the window uses: what the desktop prefers (`System`, as the
+/// client's "Sync with computer"), or Light or Dark whatever it prefers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ColorScheme {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ColorScheme {
+    pub const ALL: [ColorScheme; 3] = [ColorScheme::System, ColorScheme::Light, ColorScheme::Dark];
+
+    /// What the options file calls it.
+    pub fn name(self) -> &'static str {
+        match self {
+            ColorScheme::System => "system",
+            ColorScheme::Light => "light",
+            ColorScheme::Dark => "dark",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ColorScheme::System => "System",
+            ColorScheme::Light => "Light",
+            ColorScheme::Dark => "Dark",
+        }
+    }
+
+    /// A name that isn't one of ours is the default, as a missing one is.
+    pub fn from_name(name: &str) -> ColorScheme {
+        Self::ALL.into_iter().find(|scheme| scheme.name() == name).unwrap_or_default()
+    }
+}
+
 /// Closing the window leaves Neucord running behind its tray icon, as the
 /// client's "Minimize Discord to System Tray" does (on, like there).
 pub const MINIMIZE_TO_TRAY: Key = Key { group: "Background", name: "minimize-to-tray", default: true };
@@ -163,6 +199,21 @@ impl Store {
         self.save()
     }
 
+    /// The colour scheme chosen, [`ColorScheme::System`] if none was.
+    pub fn color_scheme(&self) -> ColorScheme {
+        self.file
+            .string("Appearance", "color-scheme")
+            .map_or_else(|_| ColorScheme::default(), |name| ColorScheme::from_name(&name))
+    }
+
+    pub fn set_color_scheme(&self, scheme: ColorScheme) -> Result<(), glib::Error> {
+        if self.color_scheme() == scheme && self.file.has_key("Appearance", "color-scheme").unwrap_or(false) {
+            return Ok(());
+        }
+        self.file.set_string("Appearance", "color-scheme", scheme.name());
+        self.save()
+    }
+
     fn save(&self) -> Result<(), glib::Error> {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| glib::Error::new(glib::FileError::Failed, &e.to_string()))?;
@@ -224,6 +275,21 @@ mod tests {
         let mut stored = Store::open(dir.file()).numbers("Viewed");
         stored.sort();
         assert_eq!(stored, [("2".to_owned(), 20), ("3".to_owned(), 30)]);
+    }
+
+    #[test]
+    fn the_colour_scheme_follows_the_system_until_chosen() {
+        let dir = Dir::new("scheme");
+        let store = Store::open(dir.file());
+        assert_eq!(store.color_scheme(), ColorScheme::System);
+        store.set_color_scheme(ColorScheme::Dark).unwrap();
+        assert_eq!(Store::open(dir.file()).color_scheme(), ColorScheme::Dark);
+        store.set_color_scheme(ColorScheme::System).unwrap();
+        assert_eq!(Store::open(dir.file()).color_scheme(), ColorScheme::System);
+        assert_eq!(ColorScheme::from_name("sepia"), ColorScheme::System, "an unknown name is the default");
+        for scheme in ColorScheme::ALL {
+            assert_eq!(ColorScheme::from_name(scheme.name()), scheme);
+        }
     }
 
     #[test]

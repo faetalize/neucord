@@ -58,7 +58,18 @@ impl Theme {
         gtk::style_context_add_provider_for_display(&display, &translucency, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
         let theme = Theme { translucency, _watch: watch_user_stylesheet(&display, config::stylesheet_path()) };
         theme.set_translucent(config.get(&config::TRANSLUCENT));
+        Theme::set_color_scheme(config.color_scheme());
         theme
+    }
+
+    /// Light or Dark whatever the desktop prefers, or the desktop's own:
+    /// what libadwaita's colours, and ours defaulting to them, follow.
+    pub fn set_color_scheme(scheme: config::ColorScheme) {
+        adw::StyleManager::default().set_color_scheme(match scheme {
+            config::ColorScheme::System => adw::ColorScheme::Default,
+            config::ColorScheme::Light => adw::ColorScheme::ForceLight,
+            config::ColorScheme::Dark => adw::ColorScheme::ForceDark,
+        });
     }
 
     pub fn set_translucent(&self, on: bool) {
