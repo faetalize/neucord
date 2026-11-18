@@ -183,6 +183,10 @@ pub struct App {
     typing_line: gtk::Label,
     /// Redraws the typing line when the first entry lapses.
     typing_tick: RefCell<Option<glib::SourceId>>,
+    /// The width the typing line was last fitted to, and whether a tick
+    /// callback is watching it change.
+    typing_width: Cell<i32>,
+    typing_watching: Cell<bool>,
     /// The message box's text is being set by us, not typed.
     composer_programmatic: Cell<bool>,
     length: composer::LengthIndicator,
@@ -455,6 +459,8 @@ impl App {
                 .ellipsize(pango::EllipsizeMode::End)
                 .build(),
             typing_tick: RefCell::default(),
+            typing_width: Cell::default(),
+            typing_watching: Cell::default(),
             composer_programmatic: Cell::default(),
             length: composer::LengthIndicator::new(),
             notice_bar: gtk::Box::builder()
