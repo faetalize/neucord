@@ -429,7 +429,7 @@ impl Launcher {
         let avatar = adw::Avatar::builder().size(px).text(&app.name).show_initials(false).build();
         avatar.set_icon_name(Some("application-x-addon-symbolic"));
         let Some(shell) = self.app.upgrade() else { return avatar };
-        let size = cdn::asset_size(ask * shell.images.scale().max(1) as u32);
+        let size = cdn::asset_size(cdn::device_px(ask, shell.images.scale()));
         // `X2` in 735991 passes the app alone: no bot picture first.
         let url =
             (!app.built_in).then(|| cdn::application_icon(app.id.0, app.icon.as_deref(), None, None, false, size));

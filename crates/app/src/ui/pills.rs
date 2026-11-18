@@ -614,7 +614,7 @@ impl App {
             let guild = state.find_channel(active.channel).and_then(|(guild, _)| guild.map(|g| g.id));
             let app = &active.app;
             let member = guild.zip(app.bot).and_then(|(g, bot)| Some((g.0, state.members.avatar(g, bot)?.to_owned())));
-            let size = discord::cdn::asset_size(24 * self.images.scale().max(1) as u32);
+            let size = discord::cdn::asset_size(discord::cdn::device_px(24, self.images.scale()));
             let bot = app.bot.map(|bot| discord::cdn::IconBot {
                 id: bot.0,
                 avatar: app.bot_avatar.as_deref(),
