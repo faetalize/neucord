@@ -727,6 +727,25 @@ def close_channel(channel, body):
     return 200, {"id": channel}
 
 
+# The thread browser's name search (`GET /channels/{id}/threads/search?name=…`): two made-up threads of #600,
+# those whose name has the query. They are the server's threads from then on.
+FOUND_THREADS = {"7001": "planning ideas", "7002": "weekend plans"}
+
+
+@route("GET", r"/channels/(\d+)/threads/search")
+def search_threads(channel, body):
+    name = QUERY.get("name", [""])[0].lower()
+    now = time.strftime("%Y-%m-%dT%H:%M:%S.000000+00:00", time.gmtime())
+    threads = [{"id": tid, "type": 11, "guild_id": "500", "parent_id": channel, "name": tname, "owner_id": ME["id"],
+                "last_message_id": None, "message_count": 1, "member_count": 1, "rate_limit_per_user": 0, "flags": 0,
+                "thread_metadata": {"archived": False, "locked": False, "archive_timestamp": now,
+                                    "auto_archive_duration": 4320, "create_timestamp": now}}
+               for tid, tname in FOUND_THREADS.items() if name in tname]
+    for thread in threads:
+        GUILD_CHANNELS.add(thread["id"])
+    return 200, {"threads": threads, "members": [], "has_more": False, "first_messages": []}
+
+
 # /thread's thread: a channel of the server from then on, pushed as THREAD_CREATE.
 @route("POST", r"/channels/(\d+)/threads")
 def create_thread(channel, body):

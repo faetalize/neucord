@@ -615,6 +615,14 @@ impl Rest {
         ArchivedPage::from_value(&answer).ok_or_else(|| Error::Protocol("archived threads without threads".into()))
     }
 
+    /// The threads of `channel` whose name has `name`, as the thread
+    /// browser's search asks for them when Enter is pressed (`searchThreads`
+    /// in 7909): no tag, tags matched by some.
+    pub async fn search_thread_names(&self, channel: Snowflake, name: &str) -> Result<ArchivedPage, Error> {
+        let answer: Value = self.request(thread_name_search_call(channel, name), None).await?;
+        ArchivedPage::from_value(&answer).ok_or_else(|| Error::Protocol("thread search without threads".into()))
+    }
+
     /// A thread we don't know, by id (`loadThread` in 353202), with the
     /// server it is in. The client asks only for what it has no record of.
     pub async fn thread(&self, id: Snowflake) -> Result<(Snowflake, Channel), Error> {
@@ -1219,6 +1227,13 @@ fn archived_threads_call(search: &Search) -> Call {
     call!(SEARCH_THREADS, channel = search.channel).query(&search.query())
 }
 
+/// The request of the thread browser's name search (`searchThreads` in
+/// 7909): `name` and `tag_setting`, in that order, the value escaped.
+fn thread_name_search_call(channel: Snowflake, name: &str) -> Call {
+    let name = glib::uri_escape_string(name, None::<&str>, false);
+    call!(SEARCH_THREADS, channel = channel).query(&format!("name={name}&tag_setting=match_some"))
+}
+
 /// The request that starts a post: a thread's endpoint, with the query the
 /// client adds (`createForumPost` in 971389).
 fn create_post_call(forum: Snowflake) -> Call {
@@ -1412,7 +1427,8 @@ mod tests {
     use super::{
         Captcha, Page, Reply, ReplyPing, add_reaction_call, archived_threads_call, base_headers, create_post_call,
         edit_body, edit_scheduled_body, is_md5, join_thread_call, leave_thread_call, message_body, nothing_to_send,
-        poll_body, rate_limit_wait, reactors_call, remove_reaction_call, save_answer, schedule_body, vote_body,
+        poll_body, rate_limit_wait, reactors_call, remove_reaction_call, save_answer, schedule_body,
+        thread_name_search_call, vote_body,
     };
     use crate::endpoints::call;
     use crate::model::Emoji;
@@ -1522,6 +1538,8 @@ mod tests {
             "/channels/7/threads/search?archived=true&sort_by=last_message_time&sort_order=desc&limit=25\
              &tag_setting=match_some&offset=25"
         );
+        let found = thread_name_search_call(thread, "a b&c");
+        assert_eq!(found.path(), "/channels/7/threads/search?name=a%20b%26c&tag_setting=match_some");
         assert_eq!(call!(GET_CHANNEL, channel = thread).path(), "/channels/7");
         // A post is the thread request with the query `createForumPost` adds; a plain thread has none.
         let post = create_post_call(thread);

@@ -137,7 +137,13 @@ pub(super) struct View {
     channel: Snowflake,
     list: gtk::ListBox,
     /// The thread each row of `list` opens, `None` for a heading.
-    rows: RefCell<Vec<Option<Snowflake>>>,
+    pub(super) rows: RefCell<Vec<Option<Snowflake>>>,
+    /// The name search, which asks when Enter is pressed.
+    pub(super) search: gtk::SearchEntry,
+    /// What the last search found, shown in place of the browser's lists.
+    found: RefCell<Option<Vec<Snowflake>>>,
+    /// A search is on its way.
+    searching: std::cell::Cell<bool>,
 }
 
 /// A row of the list as it is drawn.
@@ -160,11 +166,48 @@ impl View {
         let scroller =
             gtk::ScrolledWindow::builder().child(&list).hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).build();
         let toolbar = adw::ToolbarView::new();
-        toolbar.add_top_bar(&adw::HeaderBar::new());
+        let search = gtk::SearchEntry::builder()
+            .placeholder_text("Search for Thread Name")
+            .tooltip_text("Search for Thread Name")
+            .hexpand(true)
+            .build();
+        let header = adw::HeaderBar::new();
+        // Searching needs the channel's history, as the client's browser does.
+        if app.account.state.borrow().can_read_history(channel) {
+            header.set_title_widget(Some(&search));
+        }
+        toolbar.add_top_bar(&header);
         toolbar.set_content(Some(&scroller));
         let dialog =
             adw::Dialog::builder().title("Threads").content_width(480).content_height(560).child(&toolbar).build();
-        let view = Rc::new(View { dialog, channel, list, rows: RefCell::default() });
+        let view = Rc::new(View {
+            dialog,
+            channel,
+            list,
+            rows: RefCell::default(),
+            search,
+            found: RefCell::default(),
+            searching: std::cell::Cell::new(false),
+        });
+        // Enter asks, with no delay while typing; emptying the box goes back
+        // to the lists (`submit` and `setQuery` in 628707).
+        view.search.connect_activate({
+            let (app, view) = (Rc::downgrade(app), Rc::downgrade(&view));
+            move |_| {
+                if let (Some(app), Some(view)) = (app.upgrade(), view.upgrade()) {
+                    view.submit(&app);
+                }
+            }
+        });
+        view.search.connect_search_changed({
+            let (app, view) = (Rc::downgrade(app), Rc::downgrade(&view));
+            move |entry| {
+                let (Some(app), Some(view)) = (app.upgrade(), view.upgrade()) else { return };
+                if entry.text().is_empty() && view.found.take().is_some() {
+                    view.refresh(&app);
+                }
+            }
+        });
 
         view.list.connect_row_activated({
             let (app, view) = (Rc::downgrade(app), Rc::downgrade(&view));
@@ -190,10 +233,60 @@ impl View {
         view
     }
 
+    /// Ask for the threads the box names, if it names any and no search is
+    /// out (`submit` in 628707).
+    fn submit(self: &Rc<Self>, app: &Rc<App>) {
+        let text = self.search.text().to_string();
+        if text.is_empty() || self.searching.get() {
+            return;
+        }
+        let Some(rest) = app.account.state.borrow().rest.clone() else { return };
+        self.searching.set(true);
+        self.refresh(app);
+        let (app, view) = (app.clone(), self.clone());
+        glib::spawn_future_local(async move {
+            let answer = rest.search_thread_names(view.channel, &text).await;
+            view.searching.set(false);
+            match answer {
+                Ok(page) => {
+                    let ids: Vec<Snowflake> = page.threads.iter().map(|t| t.id).collect();
+                    let guild =
+                        app.account.state.borrow().find_channel(view.channel).and_then(|(g, _)| g.map(|g| g.id));
+                    if let Some(guild) = guild {
+                        app.on_threads(guild, |g| {
+                            for thread in page.threads {
+                                g.set_thread(thread);
+                            }
+                            for (thread, member) in page.members {
+                                g.set_thread_member(thread, Some(member));
+                            }
+                        });
+                    }
+                    *view.found.borrow_mut() = Some(ids);
+                }
+                Err(e) => eprintln!("threads: the search failed: {e}"),
+            }
+            view.refresh(&app);
+        });
+    }
+
     /// What the list shows now: the threads we're in, the other active
-    /// ones, and the archived ones asked for so far.
+    /// ones, and the archived ones asked for so far, or what a search found.
     fn lines(&self, app: &App) -> Vec<Line> {
         let state = app.account.state.borrow();
+        if let Some(found) = &*self.found.borrow() {
+            let lines: Vec<Line> = found
+                .iter()
+                .filter_map(|&id| state.find_channel(id).map(|(_, t)| t))
+                .filter(|t| state.can_view(t.id))
+                .map(|t| Line::Thread {
+                    id: t.id,
+                    name: t.name.clone().unwrap_or_else(|| "unnamed".into()),
+                    detail: detail(t, &state.users),
+                })
+                .collect();
+            return if lines.is_empty() { vec![Line::Empty] } else { lines };
+        }
         let Some((Some(guild), _)) = state.find_channel(self.channel) else { return vec![Line::Empty] };
         let fallback = Archive::default();
         let archive = state.archives.get(&self.channel).unwrap_or(&fallback);
@@ -215,7 +308,7 @@ impl View {
         section(format!("{joined} joined thread{}", plural(joined)), &lists.joined);
         section(format!("{others} other active thread{}", plural(others)), &lists.others);
         section("Older threads".into(), &lists.archived);
-        let loading = archive.is_loading();
+        let loading = archive.is_loading() || self.searching.get();
         if lists.is_empty() && !loading {
             lines.push(Line::Empty);
         }

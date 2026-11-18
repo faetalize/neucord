@@ -112,6 +112,27 @@ impl App {
             Some("home") => self.select_home(),
             Some("attach") => self.drafts.attach.emit_clicked(),
             // Create Thread for the open channel, as the attach menu's entry opens it.
+            // The thread browser, its name search (as typed, then Enter) and the threads it lists.
+            Some("threads") => {
+                let channel = self.account.state.borrow().channel;
+                if let Some(channel) = channel {
+                    self.open_threads(channel);
+                }
+            }
+            Some("thread-search") => {
+                let view = self.threads_view.borrow().clone();
+                if let Some(view) = view {
+                    view.search.set_text(rest);
+                    view.search.emit_activate();
+                }
+            }
+            Some("thread-rows") => {
+                let view = self.threads_view.borrow().clone();
+                if let Some(view) = view {
+                    let rows: Vec<String> = view.rows.borrow().iter().map(|r| format!("{r:?}")).collect();
+                    eprintln!("e2e: thread rows {}", rows.join(" "));
+                }
+            }
             Some("thread-form") => {
                 if let Some(channel) = self.thread_channel() {
                     self.open_thread_form(channel, None);
