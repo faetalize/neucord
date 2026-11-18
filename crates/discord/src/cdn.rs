@@ -74,6 +74,13 @@ pub fn emoji_size(logical: u32, scale: f64) -> u16 {
     asset_size(device_px(logical, scale))
 }
 
+/// The size to ask the media proxy for a sticker shown `logical` pixels
+/// wide: the ratio counts up to 2 only, then the size the CDN list holds
+/// (`zg` in 378058: `kr(size * min(2, devicePixelRatio))`).
+pub fn sticker_size(logical: u32, scale: f64) -> u32 {
+    u32::from(asset_size(device_px(logical, scale.min(2.0))))
+}
+
 pub fn badge_icon_url(icon: &str) -> String {
     format!("{CDN}/badge-icons/{icon}.png")
 }
@@ -580,6 +587,12 @@ pub fn links_expired(message: &crate::Message, now_ms: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stickers_count_the_pixel_ratio_up_to_two() {
+        assert_eq!([sticker_size(160, 1.0), sticker_size(160, 1.5), sticker_size(160, 2.0)], [160, 240, 320]);
+        assert_eq!([sticker_size(160, 3.0), sticker_size(80, 1.25), sticker_size(40, 1.0)], [320, 100, 40]);
+    }
 
     #[test]
     fn sizes_follow_the_screens_real_pixel_ratio() {

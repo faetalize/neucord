@@ -79,7 +79,7 @@ pub(super) fn attachment(
 /// A sticker, or for one we can't draw, its name.
 pub(super) fn sticker(sticker: &Sticker, images: &Images) -> gtk::Widget {
     let size = Sticker::SIZE;
-    let request = crate::images::request_size((size as i32, size as i32), images.scale(), None).0;
+    let request = discord::cdn::sticker_size(size, images.scale());
     let Some((url, animated)) = sticker.image(request) else {
         return gtk::Label::builder()
             .label(format!("Sticker: {}", sticker.name))
