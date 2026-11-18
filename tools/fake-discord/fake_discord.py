@@ -309,7 +309,30 @@ def messages(channel):
             out.append(message(n, who, text, files))
         if os.environ.get("FAKE_ANSWERS"):
             out += answers(out)
+        if os.environ.get("FAKE_POLL"):
+            out.append(poll_message(60))
     return list(reversed(out + POSTED.get(channel, [])))
+
+
+# FAKE_POLL: a poll that is over, so its counts show. Its first answer has 130 voters (more than a page of 100),
+# the second one, the third none.
+POLL_VOTERS = {1: 130, 2: 1, 3: 0}
+
+
+def poll_message(n):
+    poll = {"question": {"text": "Best snack?"}, "allow_multiselect": False, "layout_type": 1,
+            "expiry": "2026-01-02T00:00:00.000000+00:00",
+            "answers": [{"answer_id": 1, "poll_media": {"text": "Crisps"}},
+                        {"answer_id": 2, "poll_media": {"text": "Fruit"}},
+                        {"answer_id": 3, "poll_media": {"text": "Nothing"}}],
+            "results": {"is_finalized": True,
+                        "answer_counts": [{"id": k, "count": c, "me_voted": False} for k, c in POLL_VOTERS.items()]}}
+    return {**message(n, ALICE, ""), "poll": poll}
+
+
+def voter(i):
+    return {"id": str(4000 + i), "username": "voter_%03d" % i, "global_name": "Voter %03d" % i, "avatar": None,
+            "discriminator": "0"}
 
 
 def answers(lines):
@@ -512,6 +535,16 @@ def history(channel, body):
 
 # The pins of #600 are lines 5, 7 and 9, pinned in that order (newest pin first), two to a page.
 PINNED = ["5", "7", "9"]
+
+
+@route("GET", r"/channels/(\d+)/polls/(\d+)/answers/(\d+)")
+def poll_answer_voters(channel, message_id, answer, body):
+    """A page of the answer's voters, by id, `limit` of them after `after`."""
+    limit = int(QUERY.get("limit", ["25"])[0])
+    after = int(QUERY.get("after", ["0"])[0] or 0)
+    everyone = [voter(i) for i in range(POLL_VOTERS.get(int(answer), 0))]
+    page = [u for u in everyone if int(u["id"]) > after][:limit]
+    return 200, {"users": page}
 
 
 @route("GET", r"/channels/(\d+)/messages/pins")

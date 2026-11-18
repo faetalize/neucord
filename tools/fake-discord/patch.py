@@ -112,6 +112,15 @@ impl App {
             Some("home") => self.select_home(),
             Some("attach") => self.drafts.attach.emit_clicked(),
             // Create Thread for the open channel, as the attach menu's entry opens it.
+            // The list of who voted on a poll: its message and the answer to open at.
+            Some("poll-votes") => {
+                let message = id(parts.next());
+                let answer = parts.next().and_then(|a| a.parse().ok()).unwrap_or(1);
+                let channel = self.account.state.borrow().channel;
+                if let Some(message) = channel.and_then(|c| self.message_in(c, message)) {
+                    self.view_poll_votes(&message, answer);
+                }
+            }
             // The thread browser, its name search (as typed, then Enter) and the threads it lists.
             Some("threads") => {
                 let channel = self.account.state.borrow().channel;

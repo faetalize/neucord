@@ -577,6 +577,25 @@ impl Rest {
         Self::answer(status, &response)
     }
 
+    /// Up to `limit` of the people who voted for `answer`, after `after`
+    /// (`ao` in 649963 with the vote type, which lists `users` where the
+    /// reactions' list is a bare array). Not retried on a 429, as the client
+    /// doesn't.
+    pub async fn poll_voters(
+        &self,
+        channel: Snowflake,
+        message: Snowflake,
+        answer: u32,
+        limit: u32,
+        after: Option<Snowflake>,
+    ) -> Result<Vec<crate::User>, Error> {
+        let sending = Sending { retry_rate_limit: false, ..Sending::default() };
+        let call = poll_voters_call(channel, message, answer, limit, after);
+        let (status, response) = self.send_with(call, None, sending).await?;
+        let answer: Value = Self::answer(status, &response)?;
+        serde_json::from_value(answer["users"].clone()).map_err(|_| Error::Protocol("poll voters without users".into()))
+    }
+
     async fn reaction_request(&self, call: Call) -> Result<(), Refusal> {
         let sending = Sending { retry_rate_limit: false, ..Sending::default() };
         let result = match self.send_full(call, None, sending).await {
@@ -1264,6 +1283,13 @@ fn reactors_call(channel: Snowflake, message: Snowflake, emoji: &Emoji, limit: u
     call!(REACTORS, channel, message, emoji).query(&format!("limit={limit}{after}&type=0"))
 }
 
+/// The request for who voted for an answer: `limit`, `after` when paging and
+/// `type` 2 (a vote), in the order `ao` writes them.
+fn poll_voters_call(channel: Snowflake, message: Snowflake, answer: u32, limit: u32, after: Option<Snowflake>) -> Call {
+    let after = after.map(|a| format!("&after={a}")).unwrap_or_default();
+    call!(POLL_VOTERS, channel, message, answer).query(&format!("limit={limit}{after}&type=2"))
+}
+
 /// What a vote sends: the picked answers' ids, as strings in the order picked.
 fn vote_body(answers: &[u32]) -> Value {
     json!({ "answer_ids": answers.iter().map(u32::to_string).collect::<Vec<_>>() })
@@ -1443,7 +1469,7 @@ mod tests {
     use super::{
         Captcha, Page, Reply, ReplyPing, add_reaction_call, archived_threads_call, base_headers, create_post_call,
         edit_body, edit_scheduled_body, is_md5, join_thread_call, leave_thread_call, message_body, nothing_to_send,
-        poll_body, rate_limit_wait, reactors_call, remove_reaction_call, save_answer, schedule_body,
+        poll_body, poll_voters_call, rate_limit_wait, reactors_call, remove_reaction_call, save_answer, schedule_body,
         thread_name_search_call, vote_body,
     };
     use crate::endpoints::call;
@@ -1556,6 +1582,14 @@ mod tests {
         );
         let found = thread_name_search_call(thread, "a b&c");
         assert_eq!(found.path(), "/channels/7/threads/search?name=a%20b%26c&tag_setting=match_some");
+        assert_eq!(
+            poll_voters_call(Snowflake(1), Snowflake(2), 3, 100, None).path(),
+            "/channels/1/polls/2/answers/3?limit=100&type=2"
+        );
+        assert_eq!(
+            poll_voters_call(Snowflake(1), Snowflake(2), 3, 100, Some(Snowflake(9))).path(),
+            "/channels/1/polls/2/answers/3?limit=100&after=9&type=2"
+        );
         assert_eq!(call!(GET_CHANNEL, channel = thread).path(), "/channels/7");
         // A post is the thread request with the query `createForumPost` adds; a plain thread has none.
         let post = create_post_call(thread);
