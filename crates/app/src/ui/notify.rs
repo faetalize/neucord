@@ -4,6 +4,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use discord::notifications::Place;
+use discord::restricted::RestrictedSchedule;
 use discord::{Message, Snowflake};
 use gtk::glib;
 use gtk::prelude::*;
@@ -142,11 +143,14 @@ impl App {
 
     /// Whether anything may notify us. Not while our status is Do Not
     /// Disturb or quiet mode is on (`eA` in 534765, and `K` in 411238 for
-    /// messages), which also keeps their sound. Not while Discord requires a step: the official
+    /// messages), which also keeps their sound, nor during restricted hours
+    /// (`eA` and the message handler's sound check). Not while Discord requires a step: the official
     /// client stays quiet then too, and a notification would lead nowhere.
     fn notifications_allowed(&self) -> bool {
         let state = self.account.state.borrow();
-        state.required_action.is_none() && !state.settings.silenced(now_ms() as u64)
+        state.required_action.is_none()
+            && !state.settings.silenced(now_ms() as u64)
+            && !state.restricted_schedule.as_ref().is_some_and(in_restricted_hours)
     }
 
     pub(super) fn withdraw_friend_request(self: &Rc<Self>, user: Snowflake) {
@@ -281,6 +285,14 @@ impl App {
 const CHANNEL_PREFIX: &str = "channel-";
 
 /// One notification per channel: a newer message replaces the older one.
+/// Whether it's restricted hours now, by the local clock (`isInRestrictedHours`
+/// reads the local weekday, hour and minute); GLib's weekday is 1 Monday to 7
+/// Sunday as the rules' are.
+fn in_restricted_hours(schedule: &RestrictedSchedule) -> bool {
+    glib::DateTime::now_local()
+        .is_ok_and(|now| schedule.is_active(now.day_of_week() as u8, (now.hour() * 60 + now.minute()) as u32))
+}
+
 pub(super) fn notification_id(channel: Snowflake) -> String {
     format!("{CHANNEL_PREFIX}{channel}")
 }
