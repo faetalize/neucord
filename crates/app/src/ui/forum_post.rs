@@ -28,6 +28,9 @@ pub(super) struct PostForm {
     tags: RefCell<Vec<Snowflake>>,
     tag_error: gtk::Label,
     message: gtk::TextView,
+    /// What the message started as: the forum's post template, which doesn't
+    /// count as something typed.
+    template: String,
     message_error: gtk::Label,
     /// The files' rows, which `uploads.rs` fills.
     files: gtk::Box,
@@ -99,10 +102,12 @@ impl App {
     }
 
     fn build_post_form(self: &Rc<Self>, forum: Snowflake) -> PostForm {
-        let (media, tags, attach) = {
+        let (media, tags, attach, template) = {
             let state = self.account.state.borrow();
-            let media = state.find_channel(forum).is_some_and(|(_, c)| c.kind == ChannelKind::Media);
-            (media, state.post_tags(forum), state.can_attach_to_post(forum))
+            let channel = state.find_channel(forum).map(|(_, c)| c);
+            let media = channel.is_some_and(|c| c.kind == ChannelKind::Media);
+            let template = channel.map(|c| c.post_template().to_owned()).unwrap_or_default();
+            (media, state.post_tags(forum), state.can_attach_to_post(forum), template)
         };
         let name = gtk::Entry::builder().placeholder_text("Title").max_length(0).activates_default(false).build();
         // The limit is in UTF-16 units, and a title is a single line.
@@ -152,6 +157,7 @@ impl App {
             .left_margin(8)
             .right_margin(8)
             .build();
+        message.buffer().set_text(&template);
         let scroller = gtk::ScrolledWindow::builder()
             .child(&message)
             .min_content_height(120)
@@ -228,6 +234,7 @@ impl App {
             tags: RefCell::default(),
             tag_error,
             message,
+            template,
             message_error,
             files,
             attach: add,
@@ -424,7 +431,7 @@ impl App {
             move || {
                 let (Some(this), Some(form)) = (this.upgrade(), form.upgrade()) else { return };
                 let empty = form.name.text().is_empty()
-                    && form.text().is_empty()
+                    && (form.text().is_empty() || form.text() == form.template)
                     && form.tags.borrow().is_empty()
                     && this.drafts.of(form.forum).is_empty();
                 form.dialog.set_can_close(empty && !form.submitting.get());
