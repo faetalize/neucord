@@ -12,6 +12,7 @@ use gtk::prelude::*;
 use super::App;
 use super::menus;
 use super::notify_menus::{FolderTarget, GuildTarget};
+use super::state::State;
 use super::widgets::{initials, set_badge};
 use crate::images::{Images, Row};
 
@@ -232,18 +233,7 @@ impl App {
         let first_channel = {
             let mut state = self.account.state.borrow_mut();
             state.guild = Some(id);
-            state.guilds.iter().find(|g| g.id == id).and_then(|g| {
-                // A channel with messages first, rather than a forum. Never a
-                // call's chat: the client's default channel (`getDefaultChannel`
-                // in 808728) takes the first selectable one.
-                let channels: Vec<_> = state
-                    .channels_by_category(g)
-                    .into_iter()
-                    .flat_map(|(_, c)| c)
-                    .filter(|c| !c.kind.is_vocal())
-                    .collect();
-                channels.iter().find(|c| !c.kind.is_forum_like()).or(channels.first()).map(|c| c.id)
-            })
+            state.default_channel(id)
         };
         self.rebuild_rail();
         match first_channel {
@@ -341,4 +331,17 @@ pub(super) fn folder_preview(guilds: &[&Guild], images: &Images) -> gtk::Widget 
         grid.attach(&mini, (i % 2) as i32, (i / 2) as i32, 1, 1);
     }
     grid.upcast()
+}
+
+impl State {
+    /// Where a server opens (`getDefaultChannel` in 808728): a channel with
+    /// messages first, rather than a forum. Never a call's chat: it takes
+    /// the first selectable one.
+    pub(super) fn default_channel(&self, id: Snowflake) -> Option<Snowflake> {
+        self.guilds.iter().find(|g| g.id == id).and_then(|g| {
+            let channels: Vec<_> =
+                self.channels_by_category(g).into_iter().flat_map(|(_, c)| c).filter(|c| !c.kind.is_vocal()).collect();
+            channels.iter().find(|c| !c.kind.is_forum_like()).or(channels.first()).map(|c| c.id)
+        })
+    }
 }

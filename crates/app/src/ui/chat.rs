@@ -989,6 +989,17 @@ impl App {
         if self.editing.borrow().as_ref().is_some_and(|e| e.message.channel_id != id) {
             self.end_edit();
         }
+        // An age-restricted channel waits for us to go in: the gate shows
+        // where the channel would, and nothing loads.
+        if let Some((guild, screen)) = self.age_gate_for(id) {
+            self.account.state.borrow_mut().unread = None;
+            self.show_age_gate(id, guild, &screen, &title);
+            self.set_content_title(&title);
+            self.rebuild_sidebar();
+            self.update_notice_bar();
+            self.sync_members();
+            return;
+        }
         // A forum or media channel is made of posts, and never takes a
         // message: nothing to load, and no message box.
         if forum {

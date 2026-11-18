@@ -641,7 +641,7 @@ mod tests {
     const ME: Snowflake = Snowflake(100_000_000_000_000_001);
 
     fn me() -> Account {
-        Account { id: ME, verified: true, email: true, phone: false, mfa: false, nsfw_allowed: false }
+        Account { id: ME, verified: true, email: true, phone: false, mfa: false, nsfw_allowed: false, nsfw_set: false }
     }
 
     /// A server whose `@everyone` has `everyone`, with a text channel whose

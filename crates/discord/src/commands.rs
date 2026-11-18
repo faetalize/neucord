@@ -2932,7 +2932,7 @@ mod tests {
     }
 
     fn account() -> Account {
-        Account { id: ME, verified: true, email: true, phone: false, mfa: false, nsfw_allowed: false }
+        Account { id: ME, verified: true, email: true, phone: false, mfa: false, nsfw_allowed: false, nsfw_set: false }
     }
 
     #[test]

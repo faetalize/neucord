@@ -4,6 +4,7 @@
 mod account;
 mod accounts;
 mod activity_privacy;
+mod age_gate;
 mod attachments;
 mod background;
 mod builtins;
@@ -128,6 +129,7 @@ pub struct App {
     content: gtk::Stack,
     friends: friends::FriendsPage,
     requests: requests::RequestsPage,
+    age_gate: age_gate::GatePage,
     /// The list's model; its inner store is the open channel's timeline.
     selection: gtk::NoSelection,
     /// Shown when no channel is open.
@@ -378,6 +380,7 @@ impl App {
             content: gtk::Stack::new(),
             friends: friends::FriendsPage::new(),
             requests: requests::RequestsPage::new(),
+            age_gate: age_gate::GatePage::new(),
             list: gtk::ListView::new(Some(selection.clone()), None::<gtk::ListItemFactory>),
             selection,
             blank,
@@ -860,6 +863,7 @@ impl App {
         self.content.add_named(&self.build_friends(), Some("friends"));
         self.content.add_named(&self.build_requests(), Some("requests"));
         self.content.add_named(&self.build_forum(), Some("forum"));
+        self.content.add_named(&self.build_age_gate(), Some("age-gate"));
         self.right.set_sidebar(Some(&self.build_members()));
         self.right.set_content(Some(&self.content));
         self.split.set_content(Some(&self.right));
@@ -967,7 +971,9 @@ impl App {
 
     /// Whether the open channel's messages are on screen.
     pub(super) fn chat_visible(&self) -> bool {
-        self.window.is_active() && !(self.split.is_collapsed() && self.split.shows_sidebar())
+        self.window.is_active()
+            && !(self.split.is_collapsed() && self.split.shows_sidebar())
+            && self.content.visible_child_name().as_deref() != Some("age-gate")
     }
 
     /// Title the window after what the content shows.

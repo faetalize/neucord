@@ -1507,3 +1507,33 @@ edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''           
             }
             Some("quit") => {''')
 edit("crates/app/src/ui/own_status.rs", "    fn set_focus_mode(self: &Rc<Self>", "    pub(super) fn set_focus_mode_for_e2e(self: &Rc<Self>, on: bool, duration_ms: Option<u64>) {\n        self.set_focus_mode(on, duration_ms);\n    }\n\n    fn set_focus_mode(self: &Rc<Self>")
+
+# The age gate: `gate-press <label>` presses the button with that label on the gate page, `gate-state` says which
+# page is showing and what its buttons are.
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(c) if c.starts_with("gate-") => self.e2e_gate(c, &parts.collect::<Vec<_>>().join(" ")),
+            Some("quit") => {''')
+edit("crates/app/src/ui/age_gate.rs", "        column.append(&buttons);", "        column.append(&buttons);\n        E2E_BUTTONS.with(|b| *b.borrow_mut() = std::iter::successors(buttons.first_child(), |w| w.next_sibling()).filter_map(|w| w.downcast::<gtk::Button>().ok()).collect());")
+open(f"{root}/crates/app/src/ui/age_gate.rs", "a").write(r"""
+thread_local! {
+    static E2E_BUTTONS: std::cell::RefCell<Vec<gtk::Button>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+impl App {
+    pub(super) fn e2e_gate(self: &Rc<Self>, command: &str, rest: &str) {
+        let buttons = E2E_BUTTONS.with(|b| b.borrow().clone());
+        match command {
+            "gate-state" => eprintln!(
+                "e2e: gate page={:?} buttons={:?} channel={:?}",
+                self.content.visible_child_name(),
+                buttons.iter().filter_map(|b| b.label()).collect::<Vec<_>>(),
+                self.account.state.borrow().channel,
+            ),
+            _ => match buttons.iter().find(|b| b.label().as_deref() == Some(rest)) {
+                Some(button) => button.emit_clicked(),
+                None => eprintln!("e2e: no gate button {rest}"),
+            },
+        }
+    }
+}
+""")
+

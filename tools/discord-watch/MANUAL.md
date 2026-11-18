@@ -120,6 +120,14 @@ changed for unrelated reasons only needs a note in the issue.
   left out unless picked, fifteen of them) and what greys a place out, `pE` in
   969223 (age-restricted origin, attachments, embeds, voice messages); the
   viewer's button, `eF` in 2323 (`onlyAttachmentIds` or `onlyEmbedIndices`).
+- **The age gate** (`age_gate.rs`, `ui/age_gate.rs`). Not watched: when it
+  shows, `P` and `M` in 323073 (anchor `GuildNSFWAgreeStore`: the channel or its
+  server is age-restricted, and we haven't agreed, or are underage, or the
+  region age-gates `AGE_GATED_SPACES` for an account that isn't an adult, `r`
+  in 597306); its words, `k$` in 323073 (anchors `NSFW_CHANNEL_UNDERAGE`,
+  `NSFW_CHANNEL_VERIFIED`) and the strings under it; the screen, 522556; what
+  Continue keeps, `GUILD_NSFW_AGREE` (517019, per server, forgotten for
+  an account the region gates), and Go Back, `nsfwReturnToSafety` in 778858.
 - **Starting a post** (`post_creation.rs`, `ui/forum_post.rs`). `REQUIRE_TAG`
   and the error codes are watched, and `POST CHANNEL_THREADS` is, but the
   snapshot holds only a plain thread's fields: the client builds a post's
