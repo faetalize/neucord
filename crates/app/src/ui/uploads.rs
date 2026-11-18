@@ -679,17 +679,87 @@ impl App {
             // Not while a command is in the box, whose own boxes take files (738876).
             move |_, _| this.upgrade().is_some_and(|this| this.attach_channel().is_some() && !this.slash.is_active())
         });
+        // What the drag says it will do, as the client's overlay does (738876): "Upload to ..." and that
+        // comments can be added first; with Shift held, "Insta Upload Mode!".
+        for show in [true, false] {
+            let this = Rc::downgrade(self);
+            let update = move |_: &gtk::DropTarget| {
+                if let Some(this) = this.upgrade() {
+                    this.show_drop_overlay(show);
+                }
+            };
+            if show {
+                target.connect_enter({
+                    let update = update.clone();
+                    move |target, _, _| {
+                        update(target);
+                        gdk::DragAction::COPY
+                    }
+                });
+                target.connect_motion(move |target, _, _| {
+                    update(target);
+                    gdk::DragAction::COPY
+                });
+            } else {
+                target.connect_leave(update);
+            }
+        }
         target.connect_drop({
             let this = Rc::downgrade(self);
             move |_, value, _, _| {
                 let (Some(this), Ok(list)) = (this.upgrade(), value.get::<gdk::FileList>()) else { return false };
+                this.show_drop_overlay(false);
                 let Some(channel) = this.attach_channel() else { return false };
-                let files = list.files();
-                glib::spawn_future_local(async move { this.add_paths(channel, files).await });
+                let (files, instant) = (list.files(), this.shift_held());
+                glib::spawn_future_local(async move { this.dropped(channel, files, instant).await });
                 true
             }
         });
         target
+    }
+
+    /// Show what dropping now would do, or hide it.
+    pub(super) fn show_drop_overlay(&self, show: bool) {
+        self.drop_overlay.set_visible(show);
+        if !show {
+            return;
+        }
+        let destination = {
+            let state = self.account.state.borrow();
+            state.channel.and_then(|id| state.find_channel(id)).map_or_else(String::new, |(guild, channel)| {
+                if guild.is_some() && !channel.kind.is_thread() {
+                    format!("#{}", channel.title())
+                } else {
+                    channel.title()
+                }
+            })
+        };
+        let instant = self.shift_held();
+        self.drop_title.set_label(&if instant {
+            "Insta Upload Mode!".to_owned()
+        } else {
+            format!("Upload to {destination}")
+        });
+    }
+
+    /// Files were dropped on the chat. They join the draft, to be sent with
+    /// what is typed; with Shift held they are sent at once instead, on a
+    /// message of their own with no text and no reply (`R` in 518960: with
+    /// `requireConfirm` off it calls `sendMessage` with empty content).
+    pub(super) async fn dropped(self: &Rc<Self>, channel: Snowflake, files: Vec<gio::File>, instant: bool) {
+        let before = self.drafts.of(channel).len();
+        self.add_paths(channel, files).await;
+        if !instant {
+            return;
+        }
+        let added = self.drafts.of(channel).split_off(before);
+        let Some(rest) = self.account.state.borrow().rest.clone().filter(|_| !added.is_empty()) else { return };
+        self.record_slowmode(channel, |slowmode, c, bypass| slowmode.sent(c, bypass, super::state::now_ms()));
+        let message = Outgoing { text: "", reply: None, sticker: None, at: None, tts: false };
+        match self.send_with_uploads(&rest, channel, &message, added).await {
+            Ok(()) => self.message_sent(channel),
+            Err(stopped) => self.message_stopped(channel, &stopped),
+        }
     }
 
     /// Ask for files to attach. The client's picker takes several unless the

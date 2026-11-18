@@ -117,7 +117,7 @@ pub fn connections_role(
     member: &[Snowflake],
     channel: Option<&Channel>,
 ) -> Option<Snowflake> {
-    let mut theirs: Vec<&Role> = roles.iter().filter(|r| r.linked && member.contains(&r.id)).collect();
+    let mut theirs: Vec<&Role> = roles.iter().filter(|r| r.linked() && member.contains(&r.id)).collect();
     // `@everyone` last, then the highest position, then the oldest.
     theirs.sort_by_key(|r| (r.id == guild, std::cmp::Reverse(r.position), r.id));
     let overwrites: &[Overwrite] =
@@ -131,7 +131,7 @@ pub fn connections_role(
 /// otherwise the highest first.
 pub fn listed_roles<'a>(roles: &'a [Role], guild: Snowflake, member: &[Snowflake]) -> Vec<&'a Role> {
     let mut theirs: Vec<&Role> = roles.iter().filter(|r| member.contains(&r.id)).collect();
-    theirs.sort_by_key(|r| (r.linked, r.id == guild, std::cmp::Reverse(r.position), r.id));
+    theirs.sort_by_key(|r| (r.linked(), r.id == guild, std::cmp::Reverse(r.position), r.id));
     theirs
 }
 

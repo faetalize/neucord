@@ -294,7 +294,22 @@ impl App {
         // The client counts whole seconds up while recording.
         voice.time.set_label(&clock(if phase == Phase::Recording { seconds.floor() } else { seconds }));
         voice.wave.queue_draw();
+        self.refresh_blink();
         self.refresh_playback();
+    }
+
+    /// The clock in its warning colour while it blinks near the limit.
+    fn refresh_blink(&self) {
+        let started = {
+            let draft = self.voice.draft.borrow();
+            draft.as_ref().filter(|d| d.phase == Phase::Recording).map(|d| d.started)
+        };
+        let reduced = gtk::Settings::default().is_some_and(|settings| !settings.is_gtk_enable_animations());
+        let elapsed = started.map_or(0, |started| ((glib::monotonic_time() - started) / 1000).max(0) as u64);
+        match voice::clock_blinks(elapsed, reduced) {
+            true => self.voice.time.add_css_class("error"),
+            false => self.voice.time.remove_css_class("error"),
+        }
     }
 
     /// What the draft's player shows: its button, and the clock counting down
@@ -452,9 +467,19 @@ impl App {
         if finishing(self.voice_phase()) {
             return;
         }
-        let other = self.voice.draft.borrow().as_ref().map(|d| d.channel);
-        if let Some(other) = other {
-            return self.ask_to_discard_voice(other);
+        let elsewhere = self.voice.draft.borrow().as_ref().map(|d| (d.channel, d.phase));
+        match elsewhere {
+            // One still going elsewhere is stopped and nothing else happens,
+            // with a toast saying so (`ed` in 841817); a draft, though, asks.
+            Some((_, phase @ (Phase::Requesting | Phase::Recording))) => {
+                match phase {
+                    Phase::Recording => self.stop_voice(),
+                    _ => self.discard_voice(),
+                }
+                return self.toast("Voice message recording stopped.");
+            }
+            Some((other, _)) => return self.ask_to_discard_voice(other),
+            None => {}
         }
         let recorder = match Recorder::start() {
             Ok(recorder) => recorder,
@@ -595,6 +620,19 @@ impl App {
                 _ => glib::ControlFlow::Break,
             }
         });
+        // The clock blinks at a pace of its own: the one above is too slow for it.
+        glib::timeout_add_local_once(Duration::from_millis(voice::BLINK_FROM_MS), {
+            let this = this.clone();
+            move || {
+                glib::timeout_add_local(Duration::from_millis(50), move || match this.upgrade() {
+                    Some(this) if this.voice_is(id, Phase::Recording) => {
+                        this.refresh_blink();
+                        glib::ControlFlow::Continue
+                    }
+                    _ => glib::ControlFlow::Break,
+                });
+            }
+        });
         glib::timeout_add_local_once(Duration::from_millis(voice::MAX_MS), move || {
             if let Some(this) = this.upgrade()
                 && this.voice_is(id, Phase::Recording)
@@ -675,7 +713,10 @@ impl App {
     /// The open channel was left. A recording that is still going stops and
     /// stays a draft; one that hadn't started is dropped (`yx` and `eT`).
     pub(super) fn voice_left(self: &Rc<Self>, left: Snowflake) {
-        match self.voice.draft.borrow().as_ref().filter(|d| d.channel == left).map(|d| d.phase) {
+        // Read first: the match would keep the draft borrowed through the arms,
+        // which change it.
+        let phase = self.voice.draft.borrow().as_ref().filter(|d| d.channel == left).map(|d| d.phase);
+        match phase {
             Some(Phase::Requesting) => self.discard_voice(),
             Some(Phase::Recording) => self.stop_voice(),
             _ => {}
