@@ -101,6 +101,8 @@ what arrived, IDENTIFY's key order and properties first.
   `FAKE_OWNER=1`, `@everyone` and `@here`) lists the message box's `@`;
   `paste` pastes a short text, a text over the message length (which
   becomes message.txt) and images, one from a page named after its `<img>`;
+  `name-stickers` types `:wave` in a server channel (emoji, then the stickers
+  that match, under their headers) and picks a sticker, which is sent alone;
   `heartbeat` waits for five op 40s, the interval's among them;
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).
