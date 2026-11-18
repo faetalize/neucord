@@ -97,7 +97,7 @@ impl Timelines {
 
     pub fn clear(&mut self) {
         self.channels.clear();
-        self.held = Held::default();
+        self.held.reset();
     }
 
     /// A page of `channel` arrived for a request that `started`. Says whether
@@ -296,6 +296,31 @@ mod tests {
             "content": content, "timestamp": "2026-10-26T00:00:00+00:00"
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn a_page_asked_for_before_the_account_was_left_lands_stale_in_the_next_session() {
+        // A fatal close leaves the account, and the next login's READY would
+        // otherwise count the same as the one the request saw.
+        let mut timelines = Timelines::default();
+        timelines.held.opened();
+        let started = timelines.held.started();
+        timelines.clear();
+        timelines.held.opened();
+        assert!(timelines.landed(Snowflake(1), started));
+    }
+
+    #[test]
+    fn leaving_an_account_forgets_every_channel() {
+        let mut timelines = Timelines::default();
+        timelines.held.opened();
+        timelines.open(Snowflake(1));
+        let started = timelines.held.started();
+        timelines.landed(Snowflake(1), started);
+        timelines.clear();
+        assert!(timelines.get(Snowflake(1)).is_none());
+        let opening = discord::held::Opening { private: true, ..Default::default() };
+        assert!(timelines.held.fetch_on_open(Snowflake(1), opening));
     }
 
     #[test]
