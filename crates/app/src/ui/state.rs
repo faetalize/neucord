@@ -834,12 +834,15 @@ impl State {
     /// What "Mark As Read" on a server, or on a folder (all its servers), acks
     /// (567035, filtered by `BULK_ACK` in 218461): every forum and media
     /// channel we can see, with the moment, and the channels and calls and the
-    /// threads we joined in them that have something unread or a mention, each
-    /// with its newest message.
+    /// threads we joined in the channels (not in the calls) that have something
+    /// unread or a mention, each with its newest message.
     pub(super) fn guild_acks(&self, guild: &Guild) -> Vec<BulkAck> {
         let channels: Vec<&Channel> =
             self.visible(guild, |k| k.is_text() || k.is_vocal() || k.is_forum_like()).collect();
-        let threads = threads::joined_active(guild).filter(|t| channels.iter().any(|c| Some(c.id) == t.parent_id));
+        // Only the selectable channels' threads, not a call's (567035 takes
+        // `getSelectableChannelIds`' and leaves `getVocalChannelIds`' out).
+        let parents = |t: &Channel| channels.iter().any(|c| !c.kind.is_vocal() && Some(c.id) == t.parent_id);
+        let threads = threads::joined_active(guild).filter(|t| parents(t));
         channels
             .iter()
             .copied()
@@ -1374,6 +1377,28 @@ mod tests {
         assert!(state.read_item(Snowflake(22)).is_none(), "not a channel");
         state.guilds[0].channels.iter_mut().find(|c| c.id == Snowflake(20)).unwrap().last_message_id = None;
         assert_eq!(enabled(&state, 20), Some(false), "nothing to mark unread from");
+    }
+
+    #[test]
+    fn a_servers_mark_as_read_leaves_out_threads_under_voice_channels() {
+        let mut state = categorised(json!({}));
+        let thread = |id: &str, parent: &str| -> Channel {
+            serde_json::from_value(json!({"id": id, "type": 11, "parent_id": parent,
+                "last_message_id": "1570000000000000000",
+                "thread_metadata": {"archived": false, "auto_archive_duration": 60},
+                "member": {"flags": 0, "join_timestamp": "2026-10-28T00:00:00Z"}}))
+            .unwrap()
+        };
+        // 40 is under the text channel 20, 41 under the call 22.
+        state.guilds[0].threads = vec![thread("40", "20"), thread("41", "22")];
+        state.read = ReadStates::from_ready(&json!([
+            {"id": "20", "last_message_id": "300", "mention_count": 0},
+            {"id": "21", "last_message_id": "300", "mention_count": 0},
+            {"id": "40", "last_message_id": "1", "mention_count": 0},
+            {"id": "41", "last_message_id": "1", "mention_count": 0},
+        ]));
+        let acked: Vec<u64> = state.guild_acks(&state.guilds[0]).iter().map(|a| a.channel.0).collect();
+        assert_eq!(acked, [40], "the client collects threads of selectable channels, not of calls (567035)");
     }
 
     /// A server with a category of two channels and one outside it, which everyone sees.
