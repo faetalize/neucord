@@ -294,6 +294,7 @@ impl App {
                     }
                     self.permissions_changed(Some(guild_id));
                 }
+                Event::UserUpdate(user) => self.on_user_update(*user),
                 Event::AccountUpdate(account, nitro) => {
                     {
                         let mut state = self.account.state.borrow_mut();
@@ -700,6 +701,22 @@ impl App {
             state.guild.is_none()
         };
         self.refresh_home(home, false);
+    }
+
+    /// We changed our name or avatar (`CURRENT_USER_UPDATE`): the account
+    /// list and the menu that shows it, the label, and the rows with our name.
+    fn on_user_update(self: &Rc<Self>, user: discord::User) {
+        self.learn_users(std::iter::once(&user));
+        self.me_label.set_label(user.display_name());
+        let before = self.roster.borrow().to_json();
+        self.roster.borrow_mut().updated(&user);
+        let changed = self.roster.borrow().to_json() != before;
+        self.account.state.borrow_mut().me = Some(user);
+        self.refresh_account_views();
+        if changed {
+            let this = self.clone();
+            glib::spawn_future_local(async move { this.save_roster().await });
+        }
     }
 
     /// Someone joined (`added`) or left (`removed`) a group DM we know, as the

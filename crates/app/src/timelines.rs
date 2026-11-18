@@ -341,6 +341,13 @@ pub fn update_starter(store: &gio::ListStore, original: Snowflake, change: impl 
     starters
 }
 
+/// Whether the message's row names one of `users`: as its author, or as the
+/// author of the message it replies to.
+pub fn shows_user(message: &Message, users: &std::collections::HashSet<Snowflake>) -> bool {
+    users.contains(&message.author.id)
+        || matches!(&message.referenced_message, Referenced::Message(original) if users.contains(&original.author.id))
+}
+
 /// Prepend an older page (oldest first).
 pub fn prepend(store: &gio::ListStore, page: Vec<Message>) {
     let objects: Vec<glib::BoxedAnyObject> = page.into_iter().map(boxed).collect();
@@ -395,6 +402,23 @@ mod tests {
         assert!(timelines.get(Snowflake(1)).is_none());
         let opening = discord::held::Opening { private: true, ..Default::default() };
         assert!(timelines.held.fetch_on_open(Snowflake(1), opening));
+    }
+
+    #[test]
+    fn a_row_shows_its_author_and_the_author_it_replies_to() {
+        let renamed: std::collections::HashSet<Snowflake> = [Snowflake(7)].into();
+        let by = |id: u64| {
+            let mut message = msg(1, "");
+            message.author.id = Snowflake(id);
+            message
+        };
+        assert!(shows_user(&by(7), &renamed));
+        assert!(!shows_user(&by(8), &renamed));
+        let mut reply = by(8);
+        reply.referenced_message = Referenced::Message(Box::new(by(7)));
+        assert!(shows_user(&reply, &renamed), "the name over the quoted message");
+        reply.referenced_message = Referenced::Deleted;
+        assert!(!shows_user(&reply, &renamed));
     }
 
     #[test]

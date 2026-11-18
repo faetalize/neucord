@@ -1541,20 +1541,36 @@ impl App {
     }
 
     /// Record display names for later mention resolution.
-    pub(super) fn learn_users<'a>(&self, users: impl Iterator<Item = &'a User>) {
-        let mut renamed = false;
+    pub(super) fn learn_users<'a>(self: &Rc<Self>, users: impl Iterator<Item = &'a User>) {
+        let mut renamed = std::collections::HashSet::new();
         {
             let mut state = self.account.state.borrow_mut();
             for user in users {
                 let name = user.display_name().to_string();
-                renamed |= state.users.insert(user.id.0, name.clone()).is_some_and(|old| old != name);
+                if state.users.insert(user.id.0, name.clone()).is_some_and(|old| old != name) {
+                    renamed.insert(user.id);
+                }
                 state.whole_users.insert(user.id.0, user.clone());
             }
         }
-        // Rows on screen keep the old name until they're filled in again, as
-        // they always have, but content made with it mustn't come back.
-        if renamed {
+        // Content made with the old name mustn't come back, and the rows that
+        // show it are filled in again: only those, as filling in every row
+        // on each event costs too much.
+        if !renamed.is_empty() {
             self.drawn_from_changed();
+            self.rebind_users(&renamed);
+        }
+    }
+
+    /// Fill in again the rows on screen that show one of `users`.
+    fn rebind_users(self: &Rc<Self>, users: &std::collections::HashSet<Snowflake>) {
+        let store = self.messages();
+        let rows: Vec<MessageRow> = self.rows.borrow().iter().filter_map(|row| row.upgrade()).collect();
+        for row in rows {
+            let Some(item) = row.parts().item.upgrade() else { continue };
+            if timelines::message_at(&store, item.position()).is_some_and(|m| timelines::shows_user(&m, users)) {
+                self.bind_row(&item);
+            }
         }
     }
 
