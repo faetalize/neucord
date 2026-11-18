@@ -259,6 +259,9 @@ pub enum Event {
     /// Our account changed, for instance its email was verified, 2FA
     /// turned on or Nitro ran out.
     AccountUpdate(Account, Nitro),
+    /// Our own name, avatar or the like changed (`CURRENT_USER_UPDATE`). It
+    /// comes before the [`AccountUpdate`](Self::AccountUpdate) of the same event.
+    UserUpdate(Box<User>),
     MessageCreate(Box<Message>),
     /// An edit, or link previews arriving for a message.
     MessageUpdate(MessageEdit),
@@ -1364,6 +1367,10 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
         },
         "USER_UPDATE" => match Account::from_user(&data) {
             Some(account) if Some(account.id) == parser.me.get() => {
+                // A payload without a name is no user to show.
+                if let Ok(user) = User::deserialize(&data) {
+                    parser.push(Event::UserUpdate(Box::new(user)));
+                }
                 Event::AccountUpdate(account, Nitro::from_user(&data))
             }
             _ => return,
@@ -2090,6 +2097,11 @@ mod tests {
         let Ok(Event::AccountUpdate(account, nitro)) = state.try_recv() else { panic!("no account update") };
         assert!(account.verified && account.email && !account.phone && account.mfa && account.nsfw_allowed);
         assert_eq!(nitro.premium_type, Some(crate::limits::PremiumType::Tier2));
+
+        dispatch(&state, "USER_UPDATE", json!({"id": "5", "username": "renamed", "global_name": "New Name"}));
+        let Ok(Event::UserUpdate(user)) = state.try_recv() else { panic!("no user update") };
+        assert_eq!((user.id, user.display_name()), (Snowflake(5), "New Name"));
+        assert!(matches!(state.try_recv(), Ok(Event::AccountUpdate(..))));
 
         dispatch(&state, "CHANNEL_UPDATE", json!({"id": "9", "type": 0, "guild_id": "1", "rate_limit_per_user": 30}));
         let Ok(Event::GuildChannelUpdate { guild_id, channel }) = state.try_recv() else { panic!("no channel update") };

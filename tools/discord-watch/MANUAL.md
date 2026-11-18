@@ -394,6 +394,8 @@ changed for unrelated reasons only needs a note in the issue.
   characters at least, only emoji we may send. What a message says for a
   `:name:` is the `emoji` rule in 451909 (anchor `validNonShortcutEmojis`),
   and only a `PREMIUM_LOCKED` emoji in it gets the sender told.
+  Typed emoticons (`emoticons.rs`) are the `emoticon` rule there, with the
+  table in 132565 and its order in 7584 (anchor `convertShortcutToName`).
 - **Which stickers we offer, send, and when** (`stickers.rs`, `limits::sticker`,
   `ui/stickers.rs`). What a sticker needs is `W$` in 361670 (anchor
   `SENDABLE_WITH_BOOSTED_GUILD`, whose enum is watched). The picker's

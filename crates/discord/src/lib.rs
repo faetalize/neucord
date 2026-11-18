@@ -25,6 +25,7 @@ pub mod dice;
 pub mod edits;
 pub mod embed;
 pub mod emoji;
+pub mod emoticons;
 mod endpoints;
 pub mod experiments;
 pub mod forum;
@@ -160,6 +161,18 @@ impl std::fmt::Display for Error {
 }
 
 impl Error {
+    /// What a log may say of this error. A parse failure's own text quotes
+    /// the value it choked on, which can be a message, so only its kind and
+    /// place are kept.
+    pub fn for_log(&self) -> String {
+        match self {
+            Error::Decode(e) => {
+                format!("unexpected data from Discord ({:?} at line {} column {})", e.classify(), e.line(), e.column())
+            }
+            other => other.to_string(),
+        }
+    }
+
     /// Discord's JSON error code (`{"code": 80004, ...}`), if it sent one.
     pub fn code(&self) -> Option<u64> {
         match self {
@@ -208,6 +221,17 @@ mod tests {
         let cut = Error::Http { status: 400, body: r#"{"message": "trunc"#.into() };
         assert_eq!(cut.code(), None, "a truncated body has no code");
         assert!(cut.to_string().ends_with(r#"{"message": "trunc"#));
+    }
+
+    #[test]
+    fn a_log_line_never_quotes_what_failed_to_parse() {
+        let parse = serde_json::from_str::<Vec<u64>>(r#"["private words"]"#).unwrap_err();
+        assert!(parse.to_string().contains("private words"), "the premise: serde quotes the value");
+        let line = Error::from(parse).for_log();
+        assert!(!line.contains("private words"), "{line}");
+        assert!(line.starts_with("unexpected data from Discord"), "{line}");
+        let http = Error::Http { status: 404, body: r#"{"message": "Unknown Channel"}"#.into() };
+        assert_eq!(http.for_log(), http.to_string(), "other errors say what they say");
     }
 
     #[test]

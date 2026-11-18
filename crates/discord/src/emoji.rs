@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 
 use serde_json::Value;
 
+use crate::emoticons;
 use crate::limits::{Limits, Unavailable};
 use crate::model::{Guild, Snowflake};
 
@@ -410,6 +411,9 @@ pub struct Translated {
 pub struct Library {
     pub servers: Vec<Server>,
     pub place: Place,
+    /// Typed emoticons like `:)` become their emoji on [`translate`](Self::translate)
+    /// (the account's "convert emoticons" setting).
+    pub emoticons: bool,
 }
 
 impl Library {
@@ -436,7 +440,7 @@ impl Library {
                 Server { id: guild.id, name: guild.name.clone(), emoji }
             })
             .collect();
-        Library { servers, place: *place }
+        Library { servers, place: *place, emoticons: false }
     }
 
     /// The key the client files an emoji under in the favourites and the
@@ -577,10 +581,15 @@ impl Library {
                 i += skip;
                 continue;
             }
-            if rest[0] == ':'
-                && let Some(len) = shortcode_len(rest)
-            {
-                let name: String = rest[1..len - 1].iter().collect();
+            // An emoticon is written as the `:name:` it stands for.
+            let emoticon =
+                self.emoticons.then(|| emoticons::at(rest, i == 0 || chars[i - 1].is_whitespace())).flatten();
+            let shortcode = match emoticon {
+                Some((name, len)) => Some((name.to_owned(), len)),
+                None if rest[0] == ':' => shortcode_len(rest).map(|len| (rest[1..len - 1].iter().collect(), len)),
+                None => None,
+            };
+            if let Some((name, len)) = shortcode {
                 match by_name.get(name.as_str()) {
                     Some(n) => {
                         note(n, &mut locked, &mut used);
@@ -910,12 +919,23 @@ mod tests {
         let toned = thumbs.toned(Some(Tone::Dark));
         assert_eq!(Library::key(&Item::Unicode(toned)), "thumbsup");
         assert_eq!(Library::key(&Item::Unicode(thumbs)), "thumbsup");
-        let library = Library { servers: vec![], place: Place { guild: None, external: true } };
+        let library = Library { servers: vec![], place: Place { guild: None, external: true }, emoticons: false };
         assert!(matches!(library.item("thumbsup"), Some(Item::Unicode(e)) if e.glyph == "👍"));
         assert!(library.item("no_such_emoji_at_all").is_none());
         assert!(library.item("12345").is_none(), "an id nobody has");
         // A name that is all digits is still a name.
         assert!(matches!(library.item("100"), Some(Item::Unicode(e)) if e.glyph == "💯"));
+    }
+
+    #[test]
+    fn emoticons_become_emoji_only_where_the_client_converts_them() {
+        let off = Library { servers: vec![], place: Place { guild: None, external: true }, emoticons: false };
+        let on = Library { servers: vec![], place: off.place, emoticons: true };
+        let said = |library: &Library, text: &str| library.translate(text).text;
+        assert_eq!(said(&off, ":) hi"), ":) hi", "the setting is off");
+        assert_eq!(said(&on, ":) hi <3\nx ;-)"), "🙂 hi ❤️\nx 😉");
+        assert_eq!(said(&on, "hi:) :)x a:) `:)` <:)>"), "hi:) :)x a:) `:)` <:)>", "it stands alone, after a space");
+        assert_eq!(said(&on, ":smile: :)"), "😄 🙂", "beside a shortcode");
     }
 
     #[test]

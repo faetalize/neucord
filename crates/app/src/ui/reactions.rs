@@ -113,7 +113,49 @@ enum Settled {
     Undo(Option<Notice>),
 }
 
+/// Whether `key` with `state` held is the key that opens the reaction picker
+/// on a focused message: `+` (`TOGGLE_REACTION_POPOUT` in the message's key
+/// handler, 812266), with no modifier but Shift.
+fn opens_reaction_picker(key: gtk::gdk::Key, state: gtk::gdk::ModifierType) -> bool {
+    use gtk::gdk::{Key, ModifierType};
+    let others =
+        ModifierType::CONTROL_MASK | ModifierType::ALT_MASK | ModifierType::SUPER_MASK | ModifierType::META_MASK;
+    matches!(key, Key::plus | Key::KP_Add) && !state.intersects(others)
+}
+
 impl App {
+    /// A key pressed in the message list: `+` on a message that has the
+    /// focus itself, not something inside it (the client's handler does
+    /// nothing for keys from within), opens the reaction picker over it.
+    pub(super) fn message_key(
+        self: &Rc<Self>,
+        list: &gtk::Widget,
+        key: gtk::gdk::Key,
+        state: gtk::gdk::ModifierType,
+    ) -> glib::Propagation {
+        let focused = list.focus_child();
+        let Some(item) = focused.as_ref().filter(|item| list.root().and_then(|r| r.focus()).as_ref() == Some(item))
+        else {
+            return glib::Propagation::Proceed;
+        };
+        let cell = item.first_child().and_downcast::<super::message_row::MessageRow>();
+        let message = cell
+            .as_ref()
+            .and_then(|cell| cell.parts().item.upgrade())
+            .and_then(|item| item.item().and_downcast::<glib::BoxedAnyObject>())
+            .map(|object| object.borrow::<Message>().clone());
+        let (Some(cell), Some(message)) = (cell, message) else { return glib::Propagation::Proceed };
+        // A thread's first message stands for one in the parent, which isn't this row's to react to.
+        if !opens_reaction_picker(key, state)
+            || message.thread_starter().is_some()
+            || !self.offers_add_reaction(&message)
+        {
+            return glib::Propagation::Proceed;
+        }
+        self.pick_reaction(&message, cell.parts().row.upcast_ref());
+        glib::Propagation::Stop
+    }
+
     /// Whether Add Reaction shows for `message`.
     pub(super) fn offers_add_reaction(&self, message: &Message) -> bool {
         let state = self.account.state.borrow();
@@ -532,5 +574,23 @@ impl App {
             Some(emoji) => m.remove_reactions_for_emoji(emoji),
             None => m.reactions.clear(),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gtk::gdk::{Key, ModifierType};
+
+    use super::opens_reaction_picker;
+
+    #[test]
+    fn plus_opens_the_picker_with_nothing_but_shift_held() {
+        let none = ModifierType::empty();
+        assert!(opens_reaction_picker(Key::plus, none));
+        assert!(opens_reaction_picker(Key::plus, ModifierType::SHIFT_MASK), "+ is Shift+= on many layouts");
+        assert!(opens_reaction_picker(Key::KP_Add, ModifierType::LOCK_MASK), "Caps Lock doesn't count");
+        assert!(!opens_reaction_picker(Key::plus, ModifierType::CONTROL_MASK));
+        assert!(!opens_reaction_picker(Key::plus, ModifierType::ALT_MASK | ModifierType::SHIFT_MASK));
+        assert!(!opens_reaction_picker(Key::equal, none));
     }
 }

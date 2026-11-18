@@ -93,6 +93,8 @@ pub struct MediaSettings {
     /// Animated custom emoji move.
     pub animate_emoji: bool,
     pub animate_stickers: StickerAnimation,
+    /// Typed emoticons like `:)` become emoji when a message is sent.
+    pub convert_emoticons: bool,
 }
 
 impl Default for MediaSettings {
@@ -105,6 +107,7 @@ impl Default for MediaSettings {
             render_reactions: true,
             animate_emoji: true,
             animate_stickers: StickerAnimation::Always,
+            convert_emoticons: true,
         }
     }
 }
@@ -120,6 +123,7 @@ pub struct MediaPatch {
     pub render_reactions: Option<bool>,
     pub animate_emoji: Option<bool>,
     pub animate_stickers: Option<StickerAnimation>,
+    pub convert_emoticons: Option<bool>,
 }
 
 impl MediaPatch {
@@ -133,6 +137,7 @@ impl MediaPatch {
             render_reactions: flag("render_reactions"),
             animate_emoji: flag("animate_emoji"),
             animate_stickers: settings["animate_stickers"].as_u64().and_then(StickerAnimation::from_raw),
+            convert_emoticons: flag("convert_emoticons"),
         }
     }
 
@@ -150,6 +155,7 @@ impl MediaSettings {
         set(&mut self.gif_auto_play, patch.gif_auto_play);
         set(&mut self.render_reactions, patch.render_reactions);
         set(&mut self.animate_emoji, patch.animate_emoji);
+        set(&mut self.convert_emoticons, patch.convert_emoticons);
         self.animate_stickers = patch.animate_stickers.unwrap_or(self.animate_stickers);
     }
 

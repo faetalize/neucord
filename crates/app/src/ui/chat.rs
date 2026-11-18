@@ -252,6 +252,15 @@ impl App {
             let cell = list.focus_child().and_then(|item| item.first_child());
             cell.is_some_and(|cell| cell.activate_action("message.menu", None).is_ok())
         });
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed({
+            let this = Rc::downgrade(self);
+            move |keys, key, _, state| match (this.upgrade(), keys.widget()) {
+                (Some(this), Some(list)) => this.message_key(&list, key, state),
+                _ => glib::Propagation::Proceed,
+            }
+        });
+        self.list.add_controller(keys);
         self.scroller.set_child(Some(&self.list));
         self.scroller.add_css_class("messages");
 
@@ -322,7 +331,17 @@ impl App {
         page.add_top_bar(&header);
         page.add_top_bar(&self.present_bar);
         page.add_top_bar(&self.unread_bar);
+        page.add_top_bar(&self.failed_bar);
         page.add_top_bar(&self.paused_bar);
+        self.failed_bar.connect_button_clicked({
+            let this = Rc::downgrade(self);
+            move |_| {
+                let Some(this) = this.upgrade() else { return };
+                if let Some(channel) = this.account.state.borrow().channel {
+                    this.load_newest(channel);
+                }
+            }
+        });
         self.unread_bar.connect_button_clicked({
             let this = Rc::downgrade(self);
             move |_| {
@@ -943,6 +962,7 @@ impl App {
             (store, loading, detached, fetch)
         };
         self.scroll_loader.borrow_mut().reset();
+        self.failed_bar.set_revealed(false);
         self.selection.set_model(Some(&store));
         self.update_present_bar();
         self.update_unread_bar();
@@ -1003,6 +1023,7 @@ impl App {
             timeline.loading = true;
             (timeline.store.clone(), timeline.detached)
         };
+        self.failed_bar.set_revealed(false);
         let limit = self.viewport().first_page();
         let started = self.account.timelines.borrow().held.started();
         let this = self.clone();
@@ -1045,8 +1066,10 @@ impl App {
                     this.refetch_if_stale(id, stale);
                 }
                 Err(e) => {
+                    // The error names the failure (a status, or what didn't parse), never message text.
+                    eprintln!("messages of {id}: {}", e.for_log());
                     if this.account.state.borrow().channel == Some(id) {
-                        this.show_composer_error(&format!("Could not load messages: {e}"));
+                        this.failed_bar.set_revealed(true);
                     }
                 }
             }
@@ -1576,20 +1599,36 @@ impl App {
     }
 
     /// Record display names for later mention resolution.
-    pub(super) fn learn_users<'a>(&self, users: impl Iterator<Item = &'a User>) {
-        let mut renamed = false;
+    pub(super) fn learn_users<'a>(self: &Rc<Self>, users: impl Iterator<Item = &'a User>) {
+        let mut renamed = std::collections::HashSet::new();
         {
             let mut state = self.account.state.borrow_mut();
             for user in users {
                 let name = user.display_name().to_string();
-                renamed |= state.users.insert(user.id.0, name.clone()).is_some_and(|old| old != name);
+                if state.users.insert(user.id.0, name.clone()).is_some_and(|old| old != name) {
+                    renamed.insert(user.id);
+                }
                 state.whole_users.insert(user.id.0, user.clone());
             }
         }
-        // Rows on screen keep the old name until they're filled in again, as
-        // they always have, but content made with it mustn't come back.
-        if renamed {
+        // Content made with the old name mustn't come back, and the rows that
+        // show it are filled in again: only those, as filling in every row
+        // on each event costs too much.
+        if !renamed.is_empty() {
             self.drawn_from_changed();
+            self.rebind_users(&renamed);
+        }
+    }
+
+    /// Fill in again the rows on screen that show one of `users`.
+    fn rebind_users(self: &Rc<Self>, users: &std::collections::HashSet<Snowflake>) {
+        let store = self.messages();
+        let rows: Vec<MessageRow> = self.rows.borrow().iter().filter_map(|row| row.upgrade()).collect();
+        for row in rows {
+            let Some(item) = row.parts().item.upgrade() else { continue };
+            if timelines::message_at(&store, item.position()).is_some_and(|m| timelines::shows_user(&m, users)) {
+                self.bind_row(&item);
+            }
         }
     }
 
