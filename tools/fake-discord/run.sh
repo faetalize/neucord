@@ -6,7 +6,7 @@
 #   tools/fake-discord/run.sh <scenario> [run-name]
 #
 # Environment: FAKE_VARIANTS, FAKE_REIDENTIFY, FAKE_NEW_TOKEN,
-# FAKE_INTERACTION, FAKE_MODAL_SUBMIT, FAKE_NSFW, FAKE_UPLOAD_FAIL, FAKE_LEFT, FAKE_SLOWMODE, FAKE_IMAGE_FAIL (see fake_discord.py), ACCOUNT (a name;
+# FAKE_INTERACTION, FAKE_MODAL_SUBMIT, FAKE_NSFW, FAKE_UPLOAD_FAIL, FAKE_LEFT, FAKE_SLOWMODE, FAKE_IMAGE_FAIL, FAKE_VOICE (see fake_discord.py), ACCOUNT (a name;
 # runs that share it share the app's data dirs, as a relaunch does), E2E_TOKEN.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)

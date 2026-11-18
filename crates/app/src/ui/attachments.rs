@@ -2,12 +2,13 @@
 //! links to other files. Media is fetched once it is asked for, so a long
 //! history of videos costs nothing until one plays.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use discord::animation::Subject;
 use discord::gifs::Starred;
 use discord::settings::MediaSettings;
+use discord::voice::VoicePlayer;
 use discord::{Attachment, Snowflake, Sticker};
 use gtk::prelude::*;
 use gtk::{gio, glib};
@@ -208,8 +209,8 @@ fn audio(attachment: &Attachment, images: &Images) -> gtk::Widget {
     row.upcast()
 }
 
-/// A voice message: play and pause, its waveform filling in as it plays,
-/// and its length.
+/// A voice message: play and pause, its waveform, which fills in as it plays
+/// and can be pressed or dragged to move through it, and the time left.
 fn voice_message(attachment: &Attachment, images: &Images) -> gtk::Widget {
     let duration = attachment.duration_secs.unwrap_or(0.0).max(0.0);
     let bars = discord::model::voice_bars(duration);
@@ -221,17 +222,32 @@ fn voice_message(attachment: &Attachment, images: &Images) -> gtk::Widget {
         .content_height(WAVE_HEIGHT)
         .valign(gtk::Align::Center)
         .build();
-    let time = gtk::Label::builder().label(clock(duration)).css_classes(["caption", "numeric"]).build();
+    let player = VoicePlayer::new(duration);
+    let time =
+        gtk::Label::builder().label(clock(player.clock_secs() as f64)).css_classes(["caption", "numeric"]).build();
     row.append(&play);
     row.append(&wave);
     row.append(&time);
 
-    let stream: Rc<RefCell<Option<gtk::MediaFile>>> = Rc::default();
+    // What the handlers share; the widgets own it, and it holds them weakly.
+    let voice = Rc::new(VoiceMessage {
+        url: attachment.url.clone(),
+        images: images.clone(),
+        player: RefCell::new(player),
+        stream: RefCell::default(),
+        loading: Cell::new(false),
+        seek_to: Cell::new(None),
+        play: play.downgrade(),
+        wave: wave.downgrade(),
+        time: time.downgrade(),
+    });
     wave.set_draw_func({
-        let stream = stream.clone();
+        let voice = voice.clone();
         move |area, cr, _, height| {
-            let played = stream.borrow().as_ref().map_or(0.0, |s| s.timestamp() as f64 / 1e6);
-            let progress = if duration > 0.0 { played / duration } else { 0.0 };
+            let progress = {
+                let player = voice.player.borrow();
+                if player.played() { player.progress() } else { 0.0 }
+            };
             let colour = area.color();
             for (n, level) in levels.iter().enumerate() {
                 // Played bars full, the rest faint.
@@ -244,47 +260,171 @@ fn voice_message(attachment: &Attachment, images: &Images) -> gtk::Widget {
         }
     });
     play.connect_clicked({
-        let (wave, time) = (wave.downgrade(), time.downgrade());
-        let (images, url) = (images.clone(), attachment.url.clone());
-        move |button| {
-            if let Some(stream) = stream.borrow().as_ref() {
-                return if stream.is_playing() { stream.pause() } else { stream.play() };
-            }
-            button.set_sensitive(false);
-            let (stream, button, wave, time) = (stream.clone(), button.downgrade(), wave.clone(), time.clone());
-            let (images, url) = (images.clone(), url.clone());
-            glib::spawn_future_local(async move {
-                let path = images.file(&url).await;
-                let Some(button) = button.upgrade() else { return };
-                button.set_sensitive(true);
-                let Some(path) = path else { return };
-                let file = media_file(&path);
-                // Only weak references here: the widgets own the stream.
-                file.connect_timestamp_notify(move |file| {
-                    let (Some(wave), Some(time)) = (wave.upgrade(), time.upgrade()) else { return };
-                    wave.queue_draw();
-                    let left = duration - file.timestamp() as f64 / 1e6;
-                    time.set_label(&clock(if file.is_ended() { duration } else { left }));
-                });
-                file.connect_playing_notify({
-                    let button = button.downgrade();
-                    move |file| {
-                        if let Some(button) = button.upgrade() {
-                            let (icon, tip) = match file.is_playing() {
-                                true => ("media-playback-pause-symbolic", "Pause"),
-                                false => ("media-playback-start-symbolic", "Play voice message"),
-                            };
-                            button.set_icon_name(icon);
-                            button.set_tooltip_text(Some(tip));
-                        }
-                    }
-                });
-                file.play();
-                *stream.borrow_mut() = Some(file);
-            });
-        }
+        let voice = voice.clone();
+        move |_| voice.toggle()
     });
+    // Press jumps to the pointer; dragging keeps seeking, off the waveform too.
+    let drag = gtk::GestureDrag::new();
+    drag.connect_drag_begin({
+        let voice = voice.clone();
+        move |_, x, _| voice.scrub(x, Scrub::Begin)
+    });
+    for step in [Scrub::Move, Scrub::End] {
+        let voice = voice.clone();
+        let follow = move |drag: &gtk::GestureDrag, offset: f64| {
+            let from = drag.start_point().map_or(0.0, |(x, _)| x);
+            voice.scrub(from + offset, step);
+        };
+        match step {
+            Scrub::Move => drag.connect_drag_update(move |drag, x, _| follow(drag, x)),
+            _ => drag.connect_drag_end(move |drag, x, _| follow(drag, x)),
+        };
+    }
+    wave.add_controller(drag);
     row.upcast()
+}
+
+/// How a press on a voice message's waveform goes: pressed, dragged, let go.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scrub {
+    Begin,
+    Move,
+    End,
+}
+
+/// A voice message being listened to, which the audio is fetched for on the
+/// first press or play.
+struct VoiceMessage {
+    url: String,
+    images: Images,
+    player: RefCell<VoicePlayer>,
+    stream: RefCell<Option<gtk::MediaFile>>,
+    loading: Cell<bool>,
+    /// A position asked for that the stream, once it exists, goes to.
+    seek_to: Cell<Option<f64>>,
+    play: glib::WeakRef<gtk::Button>,
+    wave: glib::WeakRef<gtk::DrawingArea>,
+    time: glib::WeakRef<gtk::Label>,
+}
+
+impl VoiceMessage {
+    /// The play button.
+    fn toggle(self: &Rc<Self>) {
+        self.player.borrow_mut().toggle();
+        self.settle();
+    }
+
+    /// The waveform was pressed or dragged at `x`, or let go.
+    fn scrub(self: &Rc<Self>, x: f64, step: Scrub) {
+        let width = self.wave.upgrade().map_or(0.0, |wave| f64::from(wave.width()));
+        let position = {
+            let mut player = self.player.borrow_mut();
+            if step == Scrub::Begin {
+                player.drag_start();
+            }
+            if player.is_dragging() && width > 0.0 {
+                player.seek(x / width);
+            }
+            if step == Scrub::End {
+                player.drag_end();
+            }
+            player.position()
+        };
+        self.seek_to.set(Some(position));
+        self.settle();
+    }
+
+    /// Make the stream do what the player says: fetch it if it has to, go to
+    /// the position asked for, play or pause.
+    fn settle(self: &Rc<Self>) {
+        self.show();
+        let stream = self.stream.borrow().clone();
+        let Some(stream) = stream else { return self.load() };
+        if let Some(position) = self.seek_to.take() {
+            stream.seek((position * 1e6) as i64);
+        }
+        let audible = self.player.borrow().audible();
+        match (audible, stream.is_playing()) {
+            (true, false) => stream.play(),
+            (false, true) => stream.pause(),
+            _ => {}
+        }
+    }
+
+    /// Fetch the audio, then carry on where [`Self::settle`] was.
+    fn load(self: &Rc<Self>) {
+        if self.loading.replace(true) {
+            return;
+        }
+        if let Some(button) = self.play.upgrade() {
+            button.set_sensitive(false);
+        }
+        let voice = self.clone();
+        glib::spawn_future_local(async move {
+            let path = voice.images.file(&voice.url).await;
+            voice.loading.set(false);
+            if let Some(button) = voice.play.upgrade() {
+                button.set_sensitive(true);
+            }
+            // The row may be gone, and the voice message with it.
+            let Some(path) = path.filter(|_| voice.play.upgrade().is_some()) else {
+                voice.player.borrow_mut().failed();
+                return voice.show();
+            };
+            let stream = media_file(&path);
+            // Only weak references: the widgets own the voice message, which owns the stream.
+            stream.connect_timestamp_notify({
+                let voice = Rc::downgrade(&voice);
+                move |stream| {
+                    let Some(voice) = voice.upgrade() else { return };
+                    let mut player = voice.player.borrow_mut();
+                    if !player.is_dragging() {
+                        player.moved(stream.timestamp() as f64 / 1e6);
+                    }
+                    drop(player);
+                    voice.show();
+                }
+            });
+            stream.connect_duration_notify({
+                let voice = Rc::downgrade(&voice);
+                move |stream| {
+                    let Some(voice) = voice.upgrade() else { return };
+                    voice.player.borrow_mut().loaded(stream.duration() as f64 / 1e6);
+                    voice.show();
+                }
+            });
+            stream.connect_ended_notify({
+                let voice = Rc::downgrade(&voice);
+                move |stream| {
+                    let Some(voice) = voice.upgrade().filter(|_| stream.is_ended()) else { return };
+                    voice.player.borrow_mut().ended();
+                    stream.seek(0);
+                    voice.show();
+                }
+            });
+            *voice.stream.borrow_mut() = Some(stream);
+            voice.settle();
+        });
+    }
+
+    /// What the button, the waveform and the clock show.
+    fn show(&self) {
+        let player = self.player.borrow();
+        if let Some(button) = self.play.upgrade() {
+            let (icon, tip) = match player.is_playing() {
+                true => ("media-playback-pause-symbolic", "Pause"),
+                false => ("media-playback-start-symbolic", "Play voice message"),
+            };
+            button.set_icon_name(icon);
+            button.set_tooltip_text(Some(tip));
+        }
+        if let Some(wave) = self.wave.upgrade() {
+            wave.queue_draw();
+        }
+        if let Some(time) = self.time.upgrade() {
+            time.set_label(&clock(player.clock_secs() as f64));
+        }
+    }
 }
 
 /// Save File, on a voice message (761304, where the client hands the audio's

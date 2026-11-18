@@ -14,7 +14,7 @@ use std::time::Duration;
 use adw::prelude::*;
 use discord::rest::Reply;
 use discord::uploads::{self, Data, Sent, Voice as Meta};
-use discord::voice::{self, Capture, DraftPlayer, Recording};
+use discord::voice::{self, Capture, Recording, VoicePlayer};
 use discord::{Rest, Snowflake};
 use gtk::glib;
 
@@ -80,7 +80,7 @@ struct Draft {
 /// The finished draft being listened to.
 struct Playback {
     id: u64,
-    player: DraftPlayer,
+    player: VoicePlayer,
     stream: gtk::MediaFile,
 }
 
@@ -365,7 +365,7 @@ impl App {
                 this.refresh_playback();
             }
         });
-        self.voice.playback.replace(Some(Playback { id, player: DraftPlayer::new(recording.duration_secs), stream }));
+        self.voice.playback.replace(Some(Playback { id, player: VoicePlayer::new(recording.duration_secs), stream }));
     }
 
     /// The play button.

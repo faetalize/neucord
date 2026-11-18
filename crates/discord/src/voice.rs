@@ -350,11 +350,12 @@ impl Capture {
     }
 }
 
-/// What the player of a finished recording shows and does before it is sent
-/// (`e7` in 989161): play and pause, a waveform to drag through, and a clock
-/// that counts down once it has played.
+/// What the player of a voice message shows and does, a posted one (383055)
+/// and a draft before it is sent (`e7` in 989161) alike: play and pause, a
+/// waveform to press or drag through, and a clock that counts down once it
+/// has played.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DraftPlayer {
+pub struct VoicePlayer {
     duration: f64,
     position: f64,
     playing: bool,
@@ -364,9 +365,9 @@ pub struct DraftPlayer {
     dragging: bool,
 }
 
-impl DraftPlayer {
+impl VoicePlayer {
     pub fn new(duration: f64) -> Self {
-        DraftPlayer { duration, position: 0.0, playing: false, played: false, dragging: false }
+        VoicePlayer { duration, position: 0.0, playing: false, played: false, dragging: false }
     }
 
     /// The play button: starts it, or pauses it.
@@ -415,7 +416,7 @@ impl DraftPlayer {
 
     /// The media played to its end: back to the start, as if never played.
     pub fn ended(&mut self) {
-        *self = DraftPlayer::new(self.duration);
+        *self = VoicePlayer::new(self.duration);
     }
 
     /// The media can't be played.
@@ -734,8 +735,8 @@ mod tests {
     }
 
     #[test]
-    fn the_draft_player_counts_down_once_played_and_resets_at_the_end() {
-        let mut player = DraftPlayer::new(4.2);
+    fn the_voice_player_counts_down_once_played_and_resets_at_the_end() {
+        let mut player = VoicePlayer::new(4.2);
         assert_eq!(player.clock_secs(), 5, "the whole length, rounded up");
         player.toggle();
         assert!(player.is_playing() && player.audible() && player.played());
@@ -755,7 +756,7 @@ mod tests {
 
     #[test]
     fn dragging_the_waveform_silences_it_and_the_end_resets_it() {
-        let mut player = DraftPlayer::new(10.0);
+        let mut player = VoicePlayer::new(10.0);
         player.toggle();
         player.drag_start();
         assert!(player.is_playing() && !player.audible(), "the button says pause, nothing sounds");
@@ -774,8 +775,8 @@ mod tests {
     }
 
     #[test]
-    fn the_draft_player_takes_the_medias_length_when_it_is_sane() {
-        let mut player = DraftPlayer::new(3.0);
+    fn the_voice_player_takes_the_medias_length_when_it_is_sane() {
+        let mut player = VoicePlayer::new(3.0);
         player.loaded(f64::NAN);
         player.loaded(0.0);
         player.loaded(f64::INFINITY);
