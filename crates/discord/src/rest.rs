@@ -1214,8 +1214,11 @@ pub fn nothing_to_send(text: &str, files: usize, sticker: bool) -> bool {
     scheduled::split_silent(crate::message_text::trim(text), 0).0.is_empty() && files == 0 && !sticker
 }
 
-/// What sending a message sends, as `_sendMessage` in 138399 builds it. A
-/// leading `@silent` is dropped from the text and sets the flag there.
+/// What sending a message sends, as `_sendMessage` in 138399 builds it and
+/// the send queue (`handleSend`, 870801) completes it with
+/// `mobile_network_type`: `navigator.connection.type`, which a desktop
+/// browser has no value for (544180 then says "unknown"). A leading `@silent`
+/// is dropped from the text and sets the flag there.
 #[expect(clippy::too_many_arguments, reason = "the parts of one message")]
 fn message_body(
     channel: Snowflake,
@@ -1229,6 +1232,7 @@ fn message_body(
 ) -> Value {
     let (content, flags) = scheduled::split_silent(content, flags);
     let mut body = json!({
+        "mobile_network_type": "unknown",
         "content": content,
         "nonce": nonce,
         "tts": tts,
@@ -1558,6 +1562,15 @@ mod tests {
     }
 
     #[test]
+    fn what_the_send_queue_adds_goes_with_every_message_but_a_scheduled_one() {
+        // `handleSend` (870801) puts `mobile_network_type` ahead of the message's own fields.
+        assert_eq!(message_body(Snowflake(9), "hi", "1", 0, None, &[], None, false)["mobile_network_type"], "unknown");
+        assert_eq!(poll_body(Snowflake(9), "1", json!({}))["mobile_network_type"], "unknown", "a poll is sent so too");
+        let scheduled = schedule_body(Snowflake(9), "2030-01-01T00:00:00Z", "hi", None, &[], None, None);
+        assert!(scheduled.get("mobile_network_type").is_none(), "`pr` (151282) builds its own body");
+    }
+
+    #[test]
     fn a_message_is_read_aloud_only_when_asked() {
         assert_eq!(message_body(Snowflake(9), "hi", "1", 0, None, &[], None, false)["tts"], false);
         assert_eq!(message_body(Snowflake(9), "hi", "1", 0, None, &[], None, true)["tts"], true);
@@ -1590,7 +1603,7 @@ mod tests {
         let poll = json!({ "question": { "text": "Q?" }, "answers": [], "duration": 24 });
         assert_eq!(
             poll_body(Snowflake(9), "1", poll.clone()),
-            json!({ "content": "", "nonce": "1", "tts": false, "flags": 0, "poll": poll }),
+            json!({ "mobile_network_type": "unknown", "content": "", "nonce": "1", "tts": false, "flags": 0, "poll": poll }),
         );
     }
 

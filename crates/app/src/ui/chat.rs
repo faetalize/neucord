@@ -12,6 +12,7 @@ use discord::notifications;
 use discord::read_state::starts_unread;
 use discord::rest::Page;
 use discord::system::{self, Kind};
+use discord::threads::{Anchor, Viewed};
 use discord::{Channel, ChannelKind, Message, MessageEdit, Referenced, Snowflake, User};
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib, graphene};
@@ -970,12 +971,46 @@ impl App {
         if let Some(message) = target.filter(|_| rest.is_some()) {
             self.jump_to(id, message);
         } else if rest.is_some() && fetch {
-            self.load_newest(id);
+            match self.thread_anchor(id, store.n_items() > 0) {
+                Anchor::Start => {
+                    self.load_around(id, id, false, |this, _| this.list.scroll_to(0, gtk::ListScrollFlags::NONE, None))
+                }
+                Anchor::Unread(_) => self.jump_to_unread(),
+                Anchor::Newest => self.load_newest(id),
+            }
         } else if !loading && !detached && self.chat_visible() {
             // What we hold is shown as it is, and reading it is all a page
             // arriving would have done.
             self.mark_read(id);
         }
+    }
+
+    /// Where opening `id` starts reading: a thread goes to its start the
+    /// first time, or to where we left off if it has unread messages, as the
+    /// client's (`P` in 123363). Anything else, the newest page. The threads
+    /// we opened are kept for 90 days in what Neucord remembers.
+    fn thread_anchor(&self, id: Snowflake, loaded: bool) -> Anchor {
+        const GROUP: &str = "ViewedThreads";
+        let (active, persisted, unread) = {
+            let state = self.account.state.borrow();
+            let Some((_, thread)) = state.find_channel(id).filter(|(_, c)| c.kind.is_thread()) else {
+                return Anchor::Newest;
+            };
+            let unread = state.unread.as_ref().filter(|u| u.channel == id).map(|u| u.acked);
+            (thread.is_active_thread(), state.read.persisted(id), unread)
+        };
+        let stored = self.remembered.numbers(GROUP);
+        let mut viewed = Viewed::new(stored.iter().filter_map(|(id, at)| Some((Snowflake(id.parse().ok()?), *at))));
+        let before = viewed.clone();
+        let anchor =
+            viewed.anchor(id, persisted, unread.filter(|_| active), loaded, u64::try_from(now_ms()).unwrap_or(0));
+        if viewed != before {
+            let entries: Vec<(String, u64)> = viewed.entries().map(|(id, at)| (id.0.to_string(), at)).collect();
+            if let Err(e) = self.remembered.set_numbers(GROUP, &entries) {
+                eprintln!("could not save the threads we opened: {e}");
+            }
+        }
+        anchor
     }
 
     /// Fetch the newest page and merge it into the channel's store. This is
