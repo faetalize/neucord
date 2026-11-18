@@ -106,9 +106,13 @@ impl Images {
             written: Cell::new(0),
             pending: RefCell::new(HashMap::new()),
         }));
-        // What an earlier run left may already be over budget.
-        let dir = images.0.cache_dir.clone();
-        drop(gio::spawn_blocking(move || prune(&dir, IMAGE_DISK_BUDGET)));
+        // What an earlier run left may already be over budget, or half written.
+        let (dir, videos) = (images.0.cache_dir.clone(), images.0.video_dir.clone());
+        drop(gio::spawn_blocking(move || {
+            sweep_partial(&dir);
+            sweep_partial(&videos);
+            prune(&dir, IMAGE_DISK_BUDGET);
+        }));
         images
     }
 
@@ -489,12 +493,34 @@ impl Images {
             let _ = file.set_modified(std::time::SystemTime::now());
             return Some(path);
         }
-        let bytes = self.download(url).await?;
+        // A video can be hundreds of megabytes: it goes to disk as it comes,
+        // never whole in memory, and the rename and the directory walk after
+        // it stay off the main loop.
+        let message = soup::Message::new("GET", url).ok()?;
+        let input = self.0.session.send_future(&message, glib::Priority::DEFAULT).await.ok()?;
+        if !(200..=299).contains(&message.status_code()) {
+            return None;
+        }
+        let partial = partial_path(&path);
+        let output = gio::File::for_path(&partial)
+            .create_future(gio::FileCreateFlags::NONE, glib::Priority::DEFAULT)
+            .await
+            .ok()?;
+        let copied = output
+            .splice_future(
+                &input,
+                gio::OutputStreamSpliceFlags::CLOSE_SOURCE | gio::OutputStreamSpliceFlags::CLOSE_TARGET,
+                glib::Priority::DEFAULT,
+            )
+            .await;
         let dir = self.0.video_dir.clone();
-        // A video can be hundreds of megabytes: writing it, and the directory
-        // walk after it, stay off the main loop.
         gio::spawn_blocking(move || {
-            write_atomic(&path, &bytes).ok()?;
+            // An empty answer is no video, as it isn't for an image.
+            let whole = copied.is_ok_and(|bytes| bytes > 0) && std::fs::rename(&partial, &path).is_ok();
+            if !whole {
+                let _ = std::fs::remove_file(&partial);
+                return None;
+            }
             prune(&dir, VIDEO_BUDGET);
             Some(path)
         })
@@ -549,6 +575,25 @@ fn prune(dir: &Path, budget: u64) {
         .collect();
     for path in lru::over_budget(files, budget) {
         let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Where `path` is written before it is whole: a name of its own, so two
+/// downloads of the same video don't write into one file.
+fn partial_path(path: &Path) -> PathBuf {
+    let mut partial = path.as_os_str().to_owned();
+    partial.push(format!(".{:08x}.part", glib::random_int()));
+    PathBuf::from(partial)
+}
+
+/// Remove what an earlier run left half written, at startup, when nothing
+/// is being written.
+fn sweep_partial(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().ends_with(".part") {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -611,7 +656,23 @@ fn animated_paintable(bytes: &glib::Bytes) -> Option<gdk::Paintable> {
 
 #[cfg(test)]
 mod tests {
-    use super::{prune, request_size, touched_read, write_atomic};
+    use super::{partial_path, prune, request_size, sweep_partial, touched_read, write_atomic};
+
+    #[test]
+    fn what_a_crash_left_half_written_is_swept_and_the_rest_stays() {
+        let dir = std::env::temp_dir().join(format!("neucord-sweep-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let whole = dir.join("video");
+        std::fs::write(&whole, b"whole").unwrap();
+        let (partial, other) = (partial_path(&whole), partial_path(&whole));
+        assert_ne!(partial, other, "two downloads of one video don't share a file");
+        std::fs::write(&partial, b"half").unwrap();
+        std::fs::write(dir.join("image.part"), b"half").unwrap();
+        sweep_partial(&dir);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        assert!(whole.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_written_file_is_whole_and_leaves_nothing_behind() {
