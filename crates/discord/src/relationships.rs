@@ -126,11 +126,15 @@ pub struct Presence {
     /// What the friends list shows under the name: the custom status, else
     /// the first activity ("Playing …").
     pub text: Option<String>,
+    /// Online on a phone and nowhere else (`isMobileOnline`, 290863): the
+    /// client draws such a status as a phone.
+    pub mobile: bool,
 }
 
 impl Presence {
     /// From a presence object (READY's `presences`, PRESENCE_UPDATE).
     pub fn from_value(value: &Value) -> Self {
+        let client_status = &value["client_status"];
         let activities = value["activities"].as_array().map(Vec::as_slice).unwrap_or_default();
         let custom = activities.iter().find(|a| a["type"].as_u64() == Some(4)).and_then(|a| {
             let emoji = a["emoji"]["name"].as_str().map(|name| match a["emoji"]["id"].as_str() {
@@ -157,7 +161,13 @@ impl Presence {
                 Some(format!("{verb} {name}"))
             })
         };
-        Presence { status: Status::parse(value["status"].as_str().unwrap_or_default()), text: custom.or_else(activity) }
+        Presence {
+            status: Status::parse(value["status"].as_str().unwrap_or_default()),
+            text: custom.or_else(activity),
+            mobile: client_status["mobile"] == "online"
+                && client_status["desktop"] != "online"
+                && client_status["vr"] != "online",
+        }
     }
 }
 
@@ -352,8 +362,11 @@ mod tests {
         r.update(Snowflake(4), Some("Newt".into()), false);
         assert_eq!(r.get(Snowflake(4)).unwrap().name(), "Newt");
 
-        assert!(r.set_presence(Snowflake(4), Presence { status: Status::Online, text: None }));
-        assert!(!r.set_presence(Snowflake(4), Presence { status: Status::Online, text: None }), "unchanged");
+        assert!(r.set_presence(Snowflake(4), Presence { status: Status::Online, text: None, mobile: false }));
+        assert!(
+            !r.set_presence(Snowflake(4), Presence { status: Status::Online, text: None, mobile: false }),
+            "unchanged"
+        );
         assert_eq!(names(r.list(List::Online)), ["bea", "Newt"]);
         assert!(r.set_presence(Snowflake(4), Presence::default()), "went offline");
         assert_eq!(names(r.list(List::Online)), ["bea"]);
@@ -410,6 +423,20 @@ mod tests {
         assert_eq!(Status::own(UserStatus::Idle), Status::Idle);
         assert_eq!(Status::own(UserStatus::DoNotDisturb), Status::DoNotDisturb);
         assert_eq!(Status::own(UserStatus::Invisible), Status::Offline, "invisible looks offline in a list");
+    }
+
+    #[test]
+    fn only_a_phone_online_is_mobile() {
+        let mobile = |client_status: Value| {
+            Presence::from_value(&json!({"status": "online", "activities": [], "client_status": client_status})).mobile
+        };
+        assert!(mobile(json!({"mobile": "online"})));
+        assert!(mobile(json!({"mobile": "online", "web": "online"})), "the web doesn't count");
+        assert!(!mobile(json!({"mobile": "online", "desktop": "online"})), "a desktop beats it");
+        assert!(!mobile(json!({"mobile": "online", "vr": "online"})), "so does VR");
+        assert!(!mobile(json!({"mobile": "idle"})), "only online counts");
+        assert!(!mobile(json!({"desktop": "online"})));
+        assert!(!mobile(json!({})) && !mobile(Value::Null));
     }
 
     #[test]

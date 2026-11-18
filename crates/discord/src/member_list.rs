@@ -594,7 +594,7 @@ mod tests {
     #[test]
     fn presence_changes_a_row() {
         let mut list = synced();
-        let online = Presence { status: crate::relationships::Status::Online, text: None };
+        let online = Presence { status: crate::relationships::Status::Online, text: None, mobile: false };
         assert_eq!(list.set_presence(Snowflake(11), &online), change(2, 1, 1));
         assert_eq!(list.set_presence(Snowflake(11), &online), None, "nothing new");
         assert_eq!(list.set_presence(Snowflake(99), &online), None, "not in the list");
