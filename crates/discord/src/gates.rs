@@ -26,6 +26,8 @@ const TEEN_ACTIVITY_STATUS: u64 = 8;
 const AGE_GATED_DM_PRIVACY: u64 = 4;
 /// `COMMANDS_TOGGLE` among them (687123).
 const AGE_GATED_COMMANDS: u64 = 32;
+/// `AGE_GATED_SPACES` among the features a region age-gates (687123).
+const AGE_GATED_SPACES: u64 = 1;
 /// `ageVerificationStatus` `UNVERIFIED`. The client's `CLIENT_ONLY_PENDING`
 /// (99999) is its own state during its verification flow, which Neucord has
 /// none of.
@@ -50,6 +52,14 @@ pub struct Gates {
     /// its age, where the region age-gates them (`S9` in 386171; `Q9` in
     /// 36149 lets every status but unverified through).
     pub nsfw_commands_age_gated: bool,
+    /// Age-restricted servers and channels wait for an account that isn't a
+    /// verified or inferred adult, where the region age-gates spaces: they
+    /// are asked to confirm their age, however they answered before
+    /// (`r` in 597306).
+    pub spaces_age_gated: bool,
+    /// The account's age group isn't known (`b8` in 36149 is false for
+    /// `UNVERIFIED`): its age gate asks to confirm it, not to update it.
+    pub age_unverified: bool,
 }
 
 impl Gates {
@@ -67,6 +77,8 @@ impl Gates {
             message_requests_age_gated: !is_adult(age) && age_gated & AGE_GATED_DM_PRIVACY != 0,
             activity_status_by_default: teen_defaults & TEEN_ACTIVITY_STATUS != 0,
             nsfw_commands_age_gated: age == UNVERIFIED && age_gated & AGE_GATED_COMMANDS != 0,
+            spaces_age_gated: !is_adult(age) && age_gated & AGE_GATED_SPACES != 0,
+            age_unverified: age == UNVERIFIED,
         }
     }
 }
@@ -118,6 +130,21 @@ mod tests {
         assert!(!Gates::from_ready(&ready(3, 0, 4)).message_requests_age_gated, "a verified adult");
         assert!(!Gates::from_ready(&ready(4, 0, 4)).message_requests_age_gated, "an inferred adult");
         assert!(!Gates::from_ready(&ready(1, 0, 3)).message_requests_age_gated, "not a gated feature");
+    }
+
+    #[test]
+    fn spaces_wait_for_an_adult_where_the_region_says() {
+        let ready = |age: Option<u64>, gated| json!({"user": {"age_verification_status": age}, "regional_feature_config": {"age_gated_features": gated}});
+        let gated = |age, features| Gates::from_ready(&ready(age, features)).spaces_age_gated;
+        assert!(gated(Some(1), 1), "unverified");
+        assert!(gated(Some(2), 3), "a teen");
+        assert!(gated(None, 1), "no status is not an adult's");
+        assert!(!gated(Some(3), 1), "a verified adult");
+        assert!(!gated(Some(4), 1), "an inferred adult");
+        assert!(!gated(Some(1), 4), "not a gated feature");
+        assert!(Gates::from_ready(&ready(Some(1), 0)).age_unverified);
+        assert!(!Gates::from_ready(&ready(Some(2), 0)).age_unverified);
+        assert!(!Gates::from_ready(&ready(None, 0)).age_unverified, "no status passes `b8`");
     }
 
     #[test]

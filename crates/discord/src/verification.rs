@@ -100,6 +100,9 @@ pub struct Account {
     /// `nsfw_allowed`: Discord counts the account as an adult's (read as
     /// `?? false` in 240591).
     pub nsfw_allowed: bool,
+    /// `nsfw_allowed` is a boolean (false, not null): Discord says the
+    /// account is not an adult's (`nsfwAllowed === !1`).
+    pub nsfw_set: bool,
 }
 
 impl Account {
@@ -112,6 +115,7 @@ impl Account {
             phone: user["phone"].is_string(),
             mfa: user["mfa_enabled"] == true,
             nsfw_allowed: user["nsfw_allowed"] == true,
+            nsfw_set: user["nsfw_allowed"].is_boolean(),
         })
     }
 }
@@ -245,7 +249,7 @@ mod tests {
     }
 
     fn account() -> Account {
-        Account { id: ME, verified: true, email: true, phone: false, mfa: false, nsfw_allowed: false }
+        Account { id: ME, verified: true, email: true, phone: false, mfa: false, nsfw_allowed: false, nsfw_set: false }
     }
 
     fn guild(level: u64) -> Guild {
@@ -366,7 +370,8 @@ mod tests {
                 email: true,
                 phone: false,
                 mfa: true,
-                nsfw_allowed: false
+                nsfw_allowed: false,
+                nsfw_set: false,
             })
         );
         for (nsfw_allowed, adult) in [(json!(true), true), (json!(false), false), (Value::Null, false)] {
@@ -374,6 +379,12 @@ mod tests {
             assert_eq!(Account::from_user(&user).unwrap().nsfw_allowed, adult, "{nsfw_allowed}");
         }
         assert!(!Account::from_user(&json!({"id": "5"})).unwrap().nsfw_allowed, "missing");
+        // Only a false says we're not an adult; null and missing say nothing.
+        for (nsfw_allowed, set) in [(json!(true), true), (json!(false), true), (Value::Null, false)] {
+            let user = json!({"id": "5", "nsfw_allowed": nsfw_allowed});
+            assert_eq!(Account::from_user(&user).unwrap().nsfw_set, set, "{nsfw_allowed}");
+        }
+        assert!(!Account::from_user(&json!({"id": "5"})).unwrap().nsfw_set, "missing");
         let member = Member::from_value(&json!({"joined_at": "2022-12-02T00:00:00.250000+00:00", "flags": 4}));
         assert_eq!((member.joined_at, member.pending, member.flags), (Some(ONBOARDING_CUTOFF + 1), false, 4));
     }

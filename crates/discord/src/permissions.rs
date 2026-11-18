@@ -837,7 +837,7 @@ mod tests {
     const HISTORY: Permissions = Permissions::READ_MESSAGE_HISTORY;
 
     fn me() -> Account {
-        Account { id: ME, verified: true, email: true, phone: false, mfa: false, nsfw_allowed: false }
+        Account { id: ME, verified: true, email: true, phone: false, mfa: false, nsfw_allowed: false, nsfw_set: false }
     }
 
     /// `@everyone` may view, send and read; Mod adds Manage Messages and

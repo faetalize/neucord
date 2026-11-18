@@ -4,10 +4,11 @@
 //! destination is greyed out (`getDestinationIsUnavailable`, 969223) and
 //! `sendForward` (92961).
 //!
-//! Not copied: a forward from a channel behind an age gate (Neucord has no
-//! gates yet), external stickers and the checkpoint card, which Neucord
-//! doesn't read, and the experiment that bars age-restricted destinations
-//! (off unless the account is in it).
+//! Not copied: a forward from a channel gated behind a role subscription
+//! (`isChannelOrThreadParentGated`, which Neucord has no notion of),
+//! external stickers and the checkpoint card, which Neucord doesn't read, and
+//! the experiment that bars age-restricted destinations (off unless the
+//! account is in it).
 
 use serde_json::{Value, json};
 
@@ -350,7 +351,15 @@ mod tests {
     }
 
     fn me() -> Account {
-        Account { id: Snowflake(1), verified: true, email: true, phone: false, mfa: false, nsfw_allowed: false }
+        Account {
+            id: Snowflake(1),
+            verified: true,
+            email: true,
+            phone: false,
+            mfa: false,
+            nsfw_allowed: false,
+            nsfw_set: false,
+        }
     }
 
     fn guild(extra: Value) -> Guild {

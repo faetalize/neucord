@@ -114,6 +114,11 @@ what arrived, IDENTIFY's key order and properties first.
   on from the message box's menu; `member-check` (with `FAKE_LEFT=302`)
   lists Bob in a pill, whose check then drops him; `mentions` (and with
   `FAKE_OWNER=1`, `@everyone` and `@here`) lists the message box's `@`;
+  `age-gate` opens the age-restricted #after-dark: a page asks before the
+  channel loads (Continue, then Go Back where we were; with
+  `FAKE_NSFW=allowed=0` only Go Back; with `allowed=1,status=1,gated=1` the
+  region's Confirm Age, which Neucord can't do), with `gate-state` and
+  `gate-press <label>`;
   `paste` pastes a short text, a text over the message length (which
   becomes message.txt) and images, one from a page named after its `<img>`;
   `name-stickers` types `:wave` in a server channel (emoji, then the stickers
