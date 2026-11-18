@@ -203,14 +203,6 @@ def apex():
     return {"assignments": {"1": {"100": {"assignments": entries, "evaluation_id": "e"}}}, "installation": "fake-install"}
 
 
-def custom_emoji():
-    """FAKE_TOP_EMOJI: two custom emoji of the server, for its top list."""
-    if not os.environ.get("FAKE_TOP_EMOJI"):
-        return []
-    base = {"available": True, "managed": False, "animated": False, "roles": [], "require_colons": True}
-    return [{**base, "id": "8101", "name": "blob_wave"}, {**base, "id": "8102", "name": "blob_cry"}]
-
-
 def guild_stickers():
     """The server's stickers: one found by its name, one only by its tag (`/sticker`'s "Similar to")."""
     sticker = {"format_type": 1, "available": True, "guild_id": "500", "type": 2, "description": None}
@@ -267,7 +259,7 @@ def guild():
          "permissions": str(VIEW | SEND | HISTORY | ATTACH | REACT | CONNECT | USE_APPLICATION_COMMANDS)},
         {"id": "510", "name": "Mods", "permissions": "0", "position": 1, "color": 0, "hoist": False,
          "mentionable": True, "managed": False, "flags": 0}],
-        "channels": channels, "emojis": custom_emoji(), "stickers": guild_stickers(), "threads": threads, "member_count": 3,
+        "channels": channels, "emojis": [], "stickers": guild_stickers(), "threads": threads, "member_count": 3,
         "data_mode": "full", "joined_at": "2026-01-01T00:00:00.000000+00:00", "large": False, "lazy": True}
 
 
@@ -606,13 +598,6 @@ def poll_answer_voters(channel, message_id, answer, body):
     everyone = [voter(i) for i in range(POLL_VOTERS.get(int(answer), 0))]
     page = [u for u in everyone if int(u["id"]) > after][:limit]
     return 200, {"users": page}
-
-
-# The server's top emoji by rank: a custom one, a Unicode one named by its character, and one nobody has.
-@route("GET", r"/guilds/(\d+)/top-emojis")
-def top_emojis(guild, body):
-    return 200, {"items": [{"emoji_id": "8102", "emoji_rank": 1}, {"emoji_id": "🔥", "emoji_rank": 2},
-                           {"emoji_id": "9999", "emoji_rank": 3}, {"emoji_id": "8101", "emoji_rank": 4}]}
 
 
 @route("GET", r"/channels/(\d+)/messages/pins")

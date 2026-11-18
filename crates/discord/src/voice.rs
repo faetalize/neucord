@@ -42,6 +42,26 @@ impl Waiting {
 /// A recording stops by itself this long after it starts (`iA` in 518950).
 pub const MAX_MS: u64 = 1_199_500;
 
+/// From this long on, a recording's clock blinks, ever faster as the limit
+/// nears (`Y_` and `Uu` in 518950); with reduced motion, once a second.
+pub const BLINK_FROM_MS: u64 = 1_169_500;
+const BLINK_FAST_FROM_MS: u64 = 1_184_500;
+
+/// Whether the clock of a recording `elapsed_ms` long shows in its warning
+/// colour now (`ev` in 989161). The client judges by the whole seconds
+/// counted, flips it every half second from 19:30 and every quarter from
+/// 19:45, or every second with reduced motion, and starts off.
+pub fn clock_blinks(elapsed_ms: u64, reduced_motion: bool) -> bool {
+    let counted = elapsed_ms / 1000 * 1000;
+    let (from, period) = match counted {
+        c if c >= BLINK_FAST_FROM_MS => (BLINK_FAST_FROM_MS.next_multiple_of(1000), 250),
+        c if c >= BLINK_FROM_MS => (BLINK_FROM_MS.next_multiple_of(1000), 500),
+        _ => return false,
+    };
+    let period = if reduced_motion { 1000 } else { period };
+    (elapsed_ms.saturating_sub(from) / period) % 2 == 1
+}
+
 /// Shorter than this a recording is dropped, not sent (`ea` in 841817).
 const MIN_SECS: f64 = 0.5;
 
@@ -732,6 +752,18 @@ mod tests {
         assert!(enabled(&experiments, me));
         experiments.apply_update(update(0));
         assert!(!enabled(&experiments, me), "a later assignment replaces the earlier one");
+    }
+
+    #[test]
+    fn the_clock_blinks_faster_as_the_limit_nears() {
+        assert!(!clock_blinks(0, false) && !clock_blinks(1_169_999, false), "quiet until 19:30");
+        // From 19:30 it flips every half second, starting off.
+        assert!(!clock_blinks(1_170_400, false) && clock_blinks(1_170_500, false) && !clock_blinks(1_171_000, false));
+        // From 19:45 every quarter.
+        assert!(!clock_blinks(1_185_200, false) && clock_blinks(1_185_250, false) && !clock_blinks(1_185_500, false));
+        // Reduced motion: every second, from the same moments.
+        assert!(!clock_blinks(1_170_999, true) && clock_blinks(1_171_000, true) && !clock_blinks(1_172_000, true));
+        assert!(!clock_blinks(1_185_999, true) && clock_blinks(1_186_000, true));
     }
 
     #[test]

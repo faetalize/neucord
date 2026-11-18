@@ -258,9 +258,6 @@ pub struct App {
     threads_button: gtk::Button,
     /// Opens the message search, from the chat's header.
     search_button: gtk::Button,
-    /// Over the chat while files are dragged onto it, and its title.
-    drop_overlay: gtk::Box,
-    drop_title: gtk::Label,
     /// Opens the channel's pinned messages, from the chat's header.
     pins_button: gtk::MenuButton,
     /// Opens the inbox, from the chat's header, and its parts once made.
@@ -517,21 +514,6 @@ impl App {
             pins_view: RefCell::default(),
             inbox_button: gtk::MenuButton::builder().icon_name("mail-unread-symbolic").tooltip_text("Inbox").build(),
             inbox_view: RefCell::default(),
-            drop_overlay: gtk::Box::builder()
-                .orientation(gtk::Orientation::Vertical)
-                .spacing(6)
-                .halign(gtk::Align::Center)
-                .valign(gtk::Align::Center)
-                .css_classes(["osd"])
-                .can_target(false)
-                .visible(false)
-                .build(),
-            drop_title: gtk::Label::builder()
-                .css_classes(["title-2"])
-                .margin_top(24)
-                .margin_start(32)
-                .margin_end(32)
-                .build(),
             search_button: gtk::Button::builder()
                 .icon_name("system-search-symbolic")
                 .tooltip_text("Search")
