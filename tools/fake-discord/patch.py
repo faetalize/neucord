@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Point a scratch copy of Neucord at the loopback fake and give it a command file."""
-import re, sys
+import os, re, sys
 root = sys.argv[1]
 
 def edit(path, old, new, count=1):
@@ -68,6 +68,18 @@ fn popover_on(widget: &gtk::Widget) -> Option<gtk::Popover> {
     None
 }
 
+/// The popover open on `widget` or on what holds it (the attach menu is parented to the box around its button).
+fn popover_above(widget: &gtk::Widget) -> Option<gtk::Popover> {
+    let mut at = Some(widget.clone());
+    while let Some(w) = at {
+        if let Some(popover) = popover_on(&w) {
+            return Some(popover);
+        }
+        at = w.parent();
+    }
+    None
+}
+
 fn buttons(widget: &gtk::Widget, found: &mut Vec<gtk::Button>) {
     let mut child = widget.first_child();
     while let Some(c) = child {
@@ -125,6 +137,19 @@ impl App {
             }
             // The emoji picker, from the message box's button.
             Some("emoji-picker") => self.emoji_button.emit_clicked(),
+            // Click the nth quick reaction on the bar of the first row that has them.
+            Some("hover-react") => {
+                let n: i32 = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+                let rows: Vec<_> = self.rows.borrow().iter().filter_map(|r| r.upgrade()).collect();
+                let button = rows.iter().find_map(|row| {
+                    let quick = &row.parts().quick;
+                    quick.is_visible().then(|| quick.observe_children().item(n as u32).and_downcast::<gtk::Button>()).flatten()
+                });
+                match button {
+                    Some(button) => button.emit_clicked(),
+                    None => eprintln!("e2e: no quick reaction {n}"),
+                }
+            }
             // The thread browser, its name search (as typed, then Enter) and the threads it lists.
             Some("threads") => {
                 let channel = self.account.state.borrow().channel;
@@ -158,11 +183,12 @@ impl App {
                     Some("composer_box") => Some(self.composer_box.clone().upcast()),
                     Some("gif_button") => Some(self.gif_button.clone().upcast()),
                     Some("emoji_button") => Some(self.emoji_button.clone().upcast()),
+                    Some("attach_button") => Some(self.drafts.attach.clone().upcast()),
                     Some("pins_button") => Some(self.pins_button.clone().upcast()),
                     Some("inbox_button") => Some(self.inbox_button.clone().upcast()),
                     other => return eprintln!("e2e: no widget {other:?}"),
                 };
-                match anchor.and_then(|w| popover_on(&w)) {
+                match anchor.and_then(|w| popover_above(&w)) {
                     Some(popover) => shot(&popover, parts.next().unwrap_or("popover.png")),
                     None => eprintln!("e2e: no popover"),
                 }
@@ -306,6 +332,34 @@ impl App {
                             Err(e) => eprintln!("e2e: password refused: {e}"),
                         }
                     });
+                }
+            }
+            // A row of the attach menu's popover by its label, as clicked: `attach-click Apps`.
+            Some("attach-click") => {
+                let attach: gtk::Widget = self.drafts.attach.clone().upcast();
+                let mut found = Vec::new();
+                if let Some(popover) = popover_above(&attach) {
+                    buttons(popover.upcast_ref(), &mut found);
+                }
+                let wanted = rest.trim();
+                let row = found.into_iter().find(|b| {
+                    let mut label = String::new();
+                    fn text(w: &gtk::Widget, out: &mut String) {
+                        if let Ok(l) = w.clone().downcast::<gtk::Label>() {
+                            out.push_str(&l.text());
+                        }
+                        let mut child = w.first_child();
+                        while let Some(c) = child {
+                            text(&c, out);
+                            child = c.next_sibling();
+                        }
+                    }
+                    text(b.upcast_ref(), &mut label);
+                    label.contains(wanted)
+                });
+                match row {
+                    Some(row) => row.emit_clicked(),
+                    None => eprintln!("e2e: no row {wanted}"),
                 }
             }
             // The pinned messages popover, as its header button opens it: shoot it with `shot-popover pins_button`.
@@ -757,7 +811,8 @@ edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''           
 
 # Voice messages need a microphone, which the scratch session has none of: `voice-draft <seconds>` puts a made-up
 # recording in the open channel as the recorder would have left it, `voice-play` clicks the player's button,
-# `voice-scrub <0..1>` presses the waveform there and lets go, `voice-state` prints the player.
+# `voice-scrub <0..1>` presses the waveform there and lets go, `voice-state` prints the player, `voice-finishing`
+# makes the draft one whose last packets are still coming.
 edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(v) if v.starts_with("voice") => self.e2e_voice(v, parts.next()),
             Some("quit") => {''')
 open(f"{root}/crates/app/src/ui/voice.rs", "a").write(r"""
@@ -791,6 +846,13 @@ impl App {
                 }
                 self.voice_event(id, Event::Ended);
                 self.voice_ended(id);
+            }
+            // As if it had just been stopped and its last packets were on their way.
+            "voice-finishing" => {
+                if let Some(draft) = self.voice.draft.borrow_mut().as_mut() {
+                    draft.phase = Phase::Finishing;
+                }
+
             }
             "voice-play" => self.voice.play.emit_clicked(),
             "voice-scrub" => {
@@ -924,3 +986,10 @@ edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''           
                 });
             }
             Some("quit") => {''')
+
+# With E2E_NO_PLAYER=1 a draft gets no player: a media stream keeps a window shot from finishing in this session.
+edit("crates/app/src/ui/voice.rs", "    fn start_playback(self: &Rc<Self>, id: u64, recording: &Recording) {\n",
+     "    fn start_playback(self: &Rc<Self>, id: u64, recording: &Recording) {\n        if std::env::var_os(\"E2E_NO_PLAYER\").is_some() {\n            return;\n        }\n")
+# `FAKE_HOVER=1` shows every row's hover bar, which a pointer would only show on the row it is over.
+if os.environ.get("FAKE_HOVER"):
+    edit("crates/app/src/style.css", ".message .message-action { opacity: 0;", ".message .message-action { opacity: 1;")
