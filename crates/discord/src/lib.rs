@@ -48,6 +48,7 @@ pub mod member_check;
 pub mod member_list;
 pub mod members;
 pub mod mention_list;
+pub mod message_text;
 pub mod modal;
 pub mod model;
 pub mod notes;
