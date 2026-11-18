@@ -108,6 +108,9 @@ pub struct Embed {
     /// What Discord says of the embed (`IS_CONTENT_INVENTORY_ENTRY` is one).
     #[serde(default)]
     pub flags: u64,
+    /// See [`crate::Attachment::content_scan_version`].
+    #[serde(default)]
+    pub content_scan_version: Option<i64>,
     /// Images of later embeds with the same `url`, gathered by [`merge`].
     #[serde(skip)]
     pub gallery: Vec<EmbedMedia>,
@@ -265,6 +268,19 @@ pub enum Display {
 }
 
 impl Embed {
+    /// What Discord's scan says of it, for the sensitive media filter.
+    pub fn scan(&self) -> crate::sensitive::Scan {
+        crate::sensitive::Scan { flags: self.flags, version: self.content_scan_version }
+    }
+
+    /// Whether the filter may cover it for want of a scan (`$V` in 282108):
+    /// not while a video, thumbnail or image of it is a 0 by 0 placeholder.
+    pub fn may_await_scan(&self) -> bool {
+        let placeholder = |m: &EmbedMedia| m.width == Some(0) && m.height == Some(0);
+        ![&self.video, &self.thumbnail, &self.image].into_iter().flatten().any(placeholder)
+            && !self.gallery.iter().any(placeholder)
+    }
+
     fn shaped(&self) -> Shaped {
         let mut shaped = Shaped::default();
         // Image and article links carry their picture as a thumbnail, but
@@ -715,6 +731,20 @@ mod tests {
             height: 280,
             format,
         })
+    }
+
+    #[test]
+    fn an_embeds_scan_and_whether_it_waits_for_one() {
+        let plain = embed(serde_json::json!({"type": "image", "flags": 16, "content_scan_version": 3,
+            "image": {"url": "u", "width": 10, "height": 10}}));
+        assert_eq!(plain.scan(), crate::sensitive::Scan { flags: 16, version: Some(3) });
+        assert!(plain.may_await_scan());
+        for kind in ["video", "thumbnail", "image"] {
+            let unsized_ = embed(serde_json::json!({"type": "rich", kind: {"url": "u", "width": 0, "height": 0}}));
+            assert!(!unsized_.may_await_scan(), "{kind}");
+        }
+        assert!(embed(serde_json::json!({"type": "rich"})).may_await_scan(), "no media at all");
+        assert!(embed(serde_json::json!({"type": "image", "image": {"width": 0, "height": 5}})).may_await_scan());
     }
 
     #[test]
