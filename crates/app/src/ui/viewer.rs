@@ -873,7 +873,6 @@ impl Viewer {
     }
 }
 
-/// Mark `widget` as one a click doesn't close the viewer through.
 /// What the viewer shows in place of a picture it couldn't load.
 fn load_failed() -> gtk::Widget {
     let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).build();
@@ -882,6 +881,7 @@ fn load_failed() -> gtk::Widget {
     page.upcast()
 }
 
+/// Mark `widget` as one a click doesn't close the viewer through.
 fn keep(widget: &impl IsA<gtk::Widget>) {
     widget.add_css_class(KEEP);
 }

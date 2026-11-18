@@ -72,6 +72,11 @@ struct Inner {
     pending: RefCell<HashMap<String, Vec<async_channel::Sender<Option<glib::Bytes>>>>>,
 }
 
+/// `url` without its query, for a log: a CDN link's query is its signature.
+fn unsigned(url: &str) -> &str {
+    url.split('?').next().unwrap_or(url)
+}
+
 impl Images {
     pub fn new() -> Self {
         let session = soup::Session::new();
@@ -144,7 +149,7 @@ impl Images {
         let this = self.clone();
         glib::spawn_future_local(async move {
             let Some(bytes) = this.load_bytes(&url).await else {
-                eprintln!("images: could not fetch {url}");
+                eprintln!("images: could not fetch {}", unsigned(&url));
                 return failed();
             };
             // Another picture may have decoded it while we waited.
@@ -152,7 +157,7 @@ impl Images {
             let texture = match cached.map_or_else(|| gdk::Texture::from_bytes(&bytes), Ok) {
                 Ok(texture) => texture,
                 Err(_) => {
-                    eprintln!("images: could not decode {url}");
+                    eprintln!("images: could not decode {}", unsigned(&url));
                     return failed();
                 }
             };
