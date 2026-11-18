@@ -34,9 +34,9 @@ use crate::render::{Context, Names, Spoilers};
 use crate::rich_text::RichText;
 use crate::{render, timelines};
 
-/// How long a message we jumped to stays highlighted.
 /// The experiment that makes scans newer than 4 count (705833).
 const SELF_HARM_SCANS: &str = "2025-09-sensitive-content-self-harm";
+/// How long a message we jumped to stays highlighted.
 const FLASH: std::time::Duration = std::time::Duration::from_secs(2);
 /// Space between the last message and the composer, as around the composer.
 const COMPOSER_GAP: i32 = 12;
