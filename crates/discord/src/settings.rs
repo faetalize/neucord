@@ -219,6 +219,9 @@ pub struct Notifications {
     pub share_online: bool,
     pub share_custom_status: bool,
     pub share_go_live: bool,
+    /// When quiet mode ends, in milliseconds since 1970; 0 for never
+    /// (`focus_mode_expires_at_ms`).
+    pub focus_expires_at_ms: u64,
 }
 
 impl Default for Notifications {
@@ -234,6 +237,7 @@ impl Default for Notifications {
             share_custom_status: true,
             share_go_live: true,
             quiet_mode: false,
+            focus_expires_at_ms: 0,
         }
     }
 }
@@ -250,6 +254,7 @@ pub struct NotificationsPatch {
     pub share_online: Option<bool>,
     pub share_custom_status: Option<bool>,
     pub share_go_live: Option<bool>,
+    pub focus_expires_at_ms: Option<u64>,
 }
 
 impl Notifications {
@@ -264,6 +269,7 @@ impl Notifications {
         self.share_online = patch.share_online.unwrap_or(self.share_online);
         self.share_custom_status = patch.share_custom_status.unwrap_or(self.share_custom_status);
         self.share_go_live = patch.share_go_live.unwrap_or(self.share_go_live);
+        self.focus_expires_at_ms = patch.focus_expires_at_ms.unwrap_or(self.focus_expires_at_ms);
     }
 }
 
@@ -928,11 +934,18 @@ impl Settings {
         self.status.status == UserStatus::DoNotDisturb
     }
 
+    /// Whether Focus Mode is on: quiet mode, until its time if it has one
+    /// (`kB` in 970931).
+    pub fn focus_mode(&self, now_ms: u64) -> bool {
+        let ends = self.notifications.focus_expires_at_ms;
+        self.notifications.quiet_mode && (ends == 0 || ends > now_ms)
+    }
+
     /// Whether desktop notifications and rings are held back: Do Not Disturb
-    /// or quiet mode (`eA` in 534765, `K` in 411238 and `i1` in 526227 ask
+    /// or Focus Mode (`eA` in 534765, `K` in 411238 and `i1` in 526227 ask
     /// for both).
-    pub fn silenced(&self) -> bool {
-        self.do_not_disturb() || self.notifications.quiet_mode
+    pub fn silenced(&self, now_ms: u64) -> bool {
+        self.do_not_disturb() || self.focus_mode(now_ms)
     }
 }
 
@@ -1258,12 +1271,27 @@ mod tests {
     #[test]
     fn quiet_mode_silences_like_do_not_disturb() {
         let mut settings = Settings::default();
-        assert!(!settings.silenced());
+        assert!(!settings.silenced(0));
         settings.notifications.quiet_mode = true;
-        assert!(settings.silenced() && !settings.do_not_disturb(), "quiet mode isn't a status");
+        assert!(settings.silenced(0) && !settings.do_not_disturb(), "quiet mode isn't a status");
         settings.notifications.quiet_mode = false;
         settings.status.status = UserStatus::DoNotDisturb;
-        assert!(settings.silenced());
+        assert!(settings.silenced(0));
+    }
+
+    #[test]
+    fn focus_mode_ends_when_its_time_is_up() {
+        let mut settings = Settings::default();
+        settings.notifications.quiet_mode = true;
+        assert!(settings.silenced(5_000) && settings.focus_mode(5_000), "with no end, for good");
+        settings.notifications.focus_expires_at_ms = 10_000;
+        assert!(settings.silenced(9_999), "until its time");
+        assert!(!settings.silenced(10_000) && !settings.focus_mode(10_000), "not at it, nor after");
+        settings.status.status = UserStatus::DoNotDisturb;
+        assert!(settings.silenced(20_000), "Do Not Disturb silences on its own");
+        settings.status.status = UserStatus::Online;
+        settings.notifications.quiet_mode = false;
+        assert!(!settings.focus_mode(5_000), "a time with quiet mode off is nothing");
     }
 
     #[test]

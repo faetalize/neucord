@@ -60,6 +60,7 @@ const QUIET_MODE: u32 = 5;
 const NOTIFY_FRIENDS_COME_ONLINE: u32 = 25;
 const NOTIFY_SERVER_MEMBERS_GO_LIVE: u32 = 26;
 const NOTIFY_FRIENDS_CUSTOM_STATUS: u32 = 27;
+const FOCUS_MODE_EXPIRES_AT_MS: u32 = 6;
 
 // PrivacySettings.
 const ALLOW_ACTIVITY_PARTY_FRIENDS: u32 = 1;
@@ -149,6 +150,7 @@ impl SettingsPatch {
                 share_online: notified(NOTIFY_FRIENDS_COME_ONLINE),
                 share_custom_status: notified(NOTIFY_FRIENDS_CUSTOM_STATUS),
                 share_go_live: notified(NOTIFY_SERVER_MEMBERS_GO_LIVE),
+                focus_expires_at_ms: notifications.as_ref().map(|n| n.fixed64(FOCUS_MODE_EXPIRES_AT_MS).unwrap_or(0)),
             },
             privacy: PrivacyPatch {
                 friends_join_game: private(ALLOW_ACTIVITY_PARTY_FRIENDS),
@@ -318,6 +320,12 @@ pub enum Setting {
     /// The emoji picker's skin tone (`dK`, 554375); none is the default.
     SkinTone(Option<Tone>),
     GoLiveNotifications(bool),
+    /// Focus Mode on or off (`ES` in 970931): the quiet mode, and when it
+    /// ends, 0 for never. Off has no end.
+    FocusMode {
+        on: bool,
+        expires_at_ms: u64,
+    },
     UpcomingEventNotifications(bool),
     FriendSourceFlags(FriendSources),
     /// Direct messages from servers' members. `ServersRestricted` is the
@@ -419,6 +427,13 @@ impl Setting {
             Setting::SkinTone(tone) => {
                 one(TEXT_AND_IMAGES, DIVERSITY_SURROGATE, Some(string_value(tone.map_or("", Tone::modifier))))
             }
+            Setting::FocusMode { on, expires_at_ms } => (
+                NOTIFICATIONS,
+                vec![
+                    (QUIET_MODE, Some(bool_value(on))),
+                    (FOCUS_MODE_EXPIRES_AT_MS, (on && expires_at_ms != 0).then_some(Value::Fixed64(expires_at_ms))),
+                ],
+            ),
             Setting::GoLiveNotifications(on) => {
                 one(VOICE_AND_VIDEO, STREAM_NOTIFICATIONS_ENABLED, Some(bool_value(on)))
             }
@@ -747,6 +762,7 @@ mod tests {
             Locale("fr".into()),
             SkinTone(Some(Tone::MediumDark)),
             GoLiveNotifications(false),
+            FocusMode { on: true, expires_at_ms: 1_700_000_900_000 },
             UpcomingEventNotifications(false),
             FriendSourceFlags(FriendSources(6)),
             DefaultServersRestricted { restricted: true, apply_to: Some(vec![Snowflake(4), Snowflake(8)]) },
@@ -783,7 +799,8 @@ mod tests {
                     profile_updates: false,
                     go_live: false,
                     upcoming_event: false,
-                    quiet_mode: false,
+                    quiet_mode: true,
+                    focus_expires_at_ms: 1_700_000_900_000,
                     share_online: false,
                     share_custom_status: false,
                     share_go_live: false,
@@ -912,6 +929,27 @@ mod tests {
         );
         let defaults = crate::settings::Notifications::default();
         assert!(defaults.share_online && defaults.share_custom_status && defaults.share_go_live, "on until turned off");
+    }
+
+    #[test]
+    fn focus_mode_writes_its_flag_and_when_it_ends() {
+        let proto = bytes_field(NOTIFICATIONS, &varint_field(60, 1));
+        let (group, on) = Setting::FocusMode { on: true, expires_at_ms: 77 }.written(&proto).unwrap();
+        assert_eq!(group, NOTIFICATIONS);
+        assert_eq!(
+            on,
+            [bool_wrapper(QUIET_MODE, true), fixed64_field(FOCUS_MODE_EXPIRES_AT_MS, 77), varint_field(60, 1)].concat(),
+            "the wrapper holds its true, the end is a fixed64, the unknown field stays"
+        );
+        // Off holds its false, and no end, whatever was asked.
+        let proto = bytes_field(NOTIFICATIONS, &on);
+        let (_, off) = Setting::FocusMode { on: false, expires_at_ms: 77 }.written(&proto).unwrap();
+        assert_eq!(off, [bool_wrapper(QUIET_MODE, false), varint_field(60, 1)].concat());
+        // For ever has no end either.
+        let (_, forever) = Setting::FocusMode { on: true, expires_at_ms: 0 }.written(&proto).unwrap();
+        assert_eq!(forever, [bool_wrapper(QUIET_MODE, true), varint_field(60, 1)].concat());
+        let read = patch(&bytes_field(NOTIFICATIONS, &on)).notifications;
+        assert_eq!((read.quiet_mode, read.focus_expires_at_ms), (Some(true), Some(77)));
     }
 
     #[test]

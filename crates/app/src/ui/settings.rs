@@ -417,9 +417,14 @@ impl App {
 
     /// Settings that changed, here or elsewhere, take effect where they show.
     pub(super) fn apply_settings(self: &Rc<Self>, patch: SettingsPatch, replace: bool) {
-        let (media, folders, status) = {
+        let (media, folders, status, focus) = {
             let mut state = self.account.state.borrow_mut();
-            let before = (state.settings.media, state.settings.guild_folders.clone(), state.settings.status.clone());
+            let before = (
+                state.settings.media,
+                state.settings.guild_folders.clone(),
+                state.settings.status.clone(),
+                (state.settings.notifications.quiet_mode, state.settings.notifications.focus_expires_at_ms),
+            );
             if replace {
                 state.settings.replace(patch);
             } else {
@@ -429,6 +434,7 @@ impl App {
                 before.0 != state.settings.media,
                 before.1 != state.settings.guild_folders,
                 before.2 != state.settings.status,
+                before.3 != (state.settings.notifications.quiet_mode, state.settings.notifications.focus_expires_at_ms),
             )
         };
         if folders {
@@ -439,8 +445,11 @@ impl App {
             self.refresh_rows();
         }
         if status {
-            self.refresh_status();
             self.report_presence();
+        }
+        if status || focus {
+            // Focus Mode shows in the status menu, and ends by itself.
+            self.refresh_status();
             self.manage_expiries();
         }
         self.settings_replaced();

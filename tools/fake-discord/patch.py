@@ -1474,3 +1474,36 @@ impl App {
 edit("crates/app/src/ui/activity_privacy.rs", "    fn set_activity_default(self: &Rc<Self>", "    pub(super) fn set_activity_default(self: &Rc<Self>")
 edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(c) if c == "settings" || c == "activity-share" || c == "activity-default" => self.e2e_settings(c, rest),
             Some("quit") => {''')
+
+# Focus Mode: `focus-mode <ms>|forever|off` as a pick of its submenu, `status-menu <png>` opens the status menu and shoots
+# it, `focus-state` says whether Focus Mode is on and what it ends.
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("focus-mode") => {
+                let what = parts.next().unwrap_or("off");
+                match what {
+                    "off" => self.set_focus_mode_for_e2e(false, None),
+                    "forever" => self.set_focus_mode_for_e2e(true, None),
+                    ms => self.set_focus_mode_for_e2e(true, ms.parse().ok()),
+                }
+            }
+            Some("focus-state") => {
+                let state = self.account.state.borrow();
+                let now = glib::real_time() as u64 / 1000;
+                eprintln!("e2e: focus on={} silenced={} ends_in_ms={:?} quiet={}",
+                          state.settings.focus_mode(now), state.settings.silenced(now),
+                          state.settings.notifications.focus_expires_at_ms.checked_sub(now),
+                          state.settings.notifications.quiet_mode);
+            }
+            Some("status-menu") => {
+                let png = parts.next().unwrap_or("status.png").to_owned();
+                let button = self.status_button.borrow().clone();
+                if let Some(button) = button {
+                    button.popup();
+                    glib::timeout_add_local_once(Duration::from_millis(400), move || {
+                        if let Some(popover) = button.popover() {
+                            shot(&popover, &png);
+                        }
+                    });
+                }
+            }
+            Some("quit") => {''')
+edit("crates/app/src/ui/own_status.rs", "    fn set_focus_mode(self: &Rc<Self>", "    pub(super) fn set_focus_mode_for_e2e(self: &Rc<Self>, on: bool, duration_ms: Option<u64>) {\n        self.set_focus_mode(on, duration_ms);\n    }\n\n    fn set_focus_mode(self: &Rc<Self>")
