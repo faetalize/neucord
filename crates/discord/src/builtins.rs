@@ -554,6 +554,8 @@ pub enum Notice {
     TimeoutFailed,
     /// The DM with the user couldn't be opened.
     MsgFailed,
+    /// What Clyde says of a refusal ([`crate::clyde::send_failure`]).
+    Refused(String),
 }
 
 impl Notice {
@@ -587,6 +589,7 @@ impl Notice {
             Notice::TimeoutForbidden => forbidden("timeout"),
             Notice::TimeoutFailed => oops("timeout"),
             Notice::MsgFailed => oops("message"),
+            Notice::Refused(text) => text.clone(),
         }
     }
 
