@@ -53,6 +53,33 @@ pub struct MuteConfig {
     selected_time_window: Option<i64>,
 }
 
+impl MuteConfig {
+    /// When the mute ends, an ISO 8601 time; none for a mute that lasts until
+    /// it is turned off.
+    pub fn end_time(&self) -> Option<&str> {
+        self.end_time.as_deref()
+    }
+}
+
+/// The caption of an Unmute item (`j7h4AJ` in 145408): "Muted until 11/18,
+/// 9:30 PM", the end time in `zone` as the client writes it
+/// (`toLocaleString` with a numeric month and day, hour and two-digit
+/// minute, in English). A mute with no end time has none.
+pub fn muted_until(end_time: Option<&str>, zone: &glib::TimeZone) -> Option<String> {
+    let end = glib::DateTime::from_iso8601(end_time?, Some(&glib::TimeZone::utc())).ok()?.to_timezone(zone).ok()?;
+    Some(until_text(end.month(), end.day_of_month(), end.hour(), end.minute()))
+}
+
+fn until_text(month: i32, day: i32, hour: i32, minute: i32) -> String {
+    let (hour12, half) = match hour {
+        0 => (12, "AM"),
+        1..12 => (hour, "AM"),
+        12 => (12, "PM"),
+        _ => (hour - 12, "PM"),
+    };
+    format!("Muted until {month}/{day}, {hour12}:{minute:02} {half}")
+}
+
 /// Whether something is muted, and until when (an ISO 8601 time) if it ends.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Mute {
@@ -610,6 +637,32 @@ mod tests {
     use serde_json::json;
 
     const NOW: i64 = 1_800_000_000;
+
+    #[test]
+    fn an_unmute_caption_says_when_the_mute_ends_in_the_viewers_time() {
+        let utc = glib::TimeZone::utc();
+        let east = glib::TimeZone::from_offset(2 * 3600);
+        let at = Some("2026-11-18T21:30:00.250Z");
+        assert_eq!(muted_until(at, &utc).as_deref(), Some("Muted until 11/18, 9:30 PM"));
+        assert_eq!(muted_until(at, &east).as_deref(), Some("Muted until 11/18, 11:30 PM"));
+        // Across midnight the day moves with the zone.
+        assert_eq!(muted_until(Some("2026-11-18T23:05:00Z"), &east).as_deref(), Some("Muted until 11/19, 1:05 AM"));
+    }
+
+    #[test]
+    fn the_caption_counts_hours_on_a_twelve_hour_clock_with_two_digit_minutes() {
+        let text = |h| until_text(1, 5, h, 7);
+        assert_eq!(text(0), "Muted until 1/5, 12:07 AM");
+        assert_eq!(text(9), "Muted until 1/5, 9:07 AM");
+        assert_eq!(text(12), "Muted until 1/5, 12:07 PM");
+        assert_eq!(text(23), "Muted until 1/5, 11:07 PM");
+    }
+
+    #[test]
+    fn a_mute_with_no_end_has_no_caption() {
+        assert_eq!(muted_until(None, &glib::TimeZone::utc()), None);
+        assert_eq!(muted_until(Some("not a time"), &glib::TimeZone::utc()), None);
+    }
 
     fn settings() -> NotificationSettings {
         NotificationSettings::from_ready(&json!([

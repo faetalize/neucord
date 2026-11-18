@@ -19,13 +19,28 @@ use super::privacy::show_row;
 use super::settings::Show;
 
 /// Privacy Settings is in every server's menu, between Server Settings and
-/// Edit Per-server Profile.
+/// Edit Per-server Profile. A hub's menu calls it Hub Privacy Settings
+/// (`IlFwwR` in 871638), so the two stand in one place and one shows.
 pub(super) const PRIVACY_SETTINGS: Entry<GuildTarget> = Entry::Item(Item {
     name: "server-privacy-settings",
     label: "_Privacy Settings",
-    shows: |app, target| app.account.state.borrow().guilds.iter().any(|g| g.id == target.0),
+    shows: |app, target| is_hub(app, target.0) == Some(false),
     kind: Kind::Action(|app, target| app.show_server_privacy(target.0)),
 });
+
+pub(super) const HUB_PRIVACY_SETTINGS: Entry<GuildTarget> = Entry::Item(Item {
+    name: "hub-privacy-settings",
+    label: "Hub _Privacy Settings",
+    shows: |app, target| is_hub(app, target.0) == Some(true),
+    kind: Kind::Action(|app, target| app.show_server_privacy(target.0)),
+});
+
+/// Whether the server is a hub; none if we aren't in it.
+fn is_hub(app: &App, server: Snowflake) -> Option<bool> {
+    let state = app.account.state.borrow();
+    let guild = state.guilds.iter().find(|g| g.id == server)?;
+    Some(guild.features.iter().any(|f| f == "HUB"))
+}
 
 /// The open dialog: what shows the settings in it, and where a toast goes.
 pub(super) struct Dialog {

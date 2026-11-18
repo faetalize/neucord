@@ -1525,6 +1525,19 @@ impl Viewer {
 }
 """)
 
+# `guild-menu <id> <png>` opens a server icon's menu and shoots it (#245's Unmute caption).
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("guild-menu") => {
+                let (guild, path) = (id(parts.next()), parts.next().unwrap_or_default().to_owned());
+                let window = self.window.clone();
+                super::menus::popup(self, super::menus::GUILD, super::notify_menus::GuildTarget(guild), &window, super::menus::At::Point(80.0, 80.0));
+                let anchor = window.upcast::<gtk::Widget>();
+                glib::timeout_add_local_once(Duration::from_millis(600), move || match popover_above(&anchor) {
+                    Some(popover) => shot(&popover, &path),
+                    None => eprintln!("e2e: no popover"),
+                });
+            }
+            Some("quit") => {''')
+
 # Forward: the picker, driven as hands would. `forward-menu <text> <png>` opens the menu of the message with <text>
 # and shoots it; `forward-open <text>` opens the picker on it (`forward-open <text> @<attachment id>` for one file);
 # `forward-viewer <text>` opens the media viewer on its first picture and `forward-viewer-click` presses its Forward;

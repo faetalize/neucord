@@ -898,6 +898,12 @@ impl State {
         self.find_channel(thread).is_some_and(|(_, t)| Self::thread_muted(t))
     }
 
+    /// When our mute of the thread ends, an ISO 8601 time, if it does.
+    pub(super) fn thread_mute_end(&self, thread: Snowflake) -> Option<String> {
+        let (_, thread) = self.find_channel(thread)?;
+        thread.member.as_ref()?.mute_config.as_ref()?.end_time().map(str::to_owned)
+    }
+
     /// A thread we muted.
     pub(super) fn thread_muted(thread: &Channel) -> bool {
         thread.member.as_ref().is_some_and(|m| m.is_muted(now_unix()))

@@ -343,9 +343,24 @@ macro_rules! mute_items {
                         .mute_state(guild_of(app, target.0).flatten(), Some(target.0), now_unix())
                         .on
             },
-    kind: Kind::Action(|app, target| app.save_channel_settings(target.0, json!({"muted": false}))),
+            kind: Kind::Captioned {
+        run: |app, target| app.save_channel_settings(target.0, json!({"muted": false})),
+                caption: |app, target| {
+                    let mute = app.account.state.borrow().notifications.mute_state(
+                        guild_of(app, target.0).flatten(),
+                        Some(target.0),
+                        now_unix(),
+                    );
+                    until_caption(mute.until.as_deref())
+                },
+            },
         });
     };
+}
+
+/// Unmute's caption: when the mute ends, in our time zone.
+fn until_caption(until: Option<&str>) -> Option<String> {
+    discord::notifications::muted_until(until, &glib::TimeZone::local())
 }
 
 mute_items!(MUTE_CHANNEL, UNMUTE_CHANNEL, "channel", "Mute _Channel", "Unmute _Channel", |k| !matches!(
@@ -396,7 +411,10 @@ macro_rules! thread_mute_items {
                     && state.thread_joined(target.0) == Some(true)
                     && state.thread_is_muted(target.0)
             },
-    kind: Kind::Action(|app, target| app.save_thread_settings(target.0, json!({"muted": false}))),
+            kind: Kind::Captioned {
+        run: |app, target| app.save_thread_settings(target.0, json!({"muted": false})),
+                caption: |app, target| until_caption(app.account.state.borrow().thread_mute_end(target.0).as_deref()),
+            },
         });
         pub(super) const $off: Entry<ThreadTarget> = Entry::Item(Item {
             name: concat!("mute-", $name, "-unavailable"),
@@ -564,7 +582,13 @@ pub(super) const UNMUTE_GUILD: Entry<GuildTarget> = Entry::Item(Item {
     name: "unmute-guild",
     label: "Unmute _Server",
     shows: |app, target| app.account.state.borrow().notifications.mute_state(Some(target.0), None, now_unix()).on,
-    kind: Kind::Action(|app, target| app.save_notification_settings(Some(target.0), json!({"muted": false}))),
+    kind: Kind::Captioned {
+        run: |app, target| app.save_notification_settings(Some(target.0), json!({"muted": false})),
+        caption: |app, target| {
+            let mute = app.account.state.borrow().notifications.mute_state(Some(target.0), None, now_unix());
+            until_caption(mute.until.as_deref())
+        },
+    },
 });
 
 /// A server's level and the switches under it (`871638`).
