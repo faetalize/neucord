@@ -478,7 +478,7 @@ impl App {
         let dm = self.account.state.borrow().find_channel(channel).is_some_and(|(_, c)| c.kind == ChannelKind::Dm);
         // A post's card shows the top reaction of its first message.
         self.forum_change_first(channel, message, |m| change(m, dm));
-        let changed = self.account.timelines.borrow().change(channel, message, |m| change(m, dm));
+        let changed = self.account.timelines.borrow_mut().change(channel, message, |m| change(m, dm));
         if let Some((store, position)) = changed {
             self.rebind(&store, position, 1);
         }
