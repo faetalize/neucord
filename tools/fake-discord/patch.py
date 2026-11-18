@@ -123,6 +123,8 @@ impl App {
                     self.view_poll_votes(&message, answer);
                 }
             }
+            // The emoji picker, from the message box's button.
+            Some("emoji-picker") => self.emoji_button.emit_clicked(),
             // The thread browser, its name search (as typed, then Enter) and the threads it lists.
             Some("threads") => {
                 let channel = self.account.state.borrow().channel;
@@ -155,6 +157,7 @@ impl App {
                     Some("composer") => Some(self.composer.clone().upcast()),
                     Some("composer_box") => Some(self.composer_box.clone().upcast()),
                     Some("gif_button") => Some(self.gif_button.clone().upcast()),
+                    Some("emoji_button") => Some(self.emoji_button.clone().upcast()),
                     Some("pins_button") => Some(self.pins_button.clone().upcast()),
                     Some("inbox_button") => Some(self.inbox_button.clone().upcast()),
                     other => return eprintln!("e2e: no widget {other:?}"),

@@ -664,6 +664,12 @@ impl Rest {
         ArchivedPage::from_value(&answer).ok_or_else(|| Error::Protocol("thread search without threads".into()))
     }
 
+    /// A server's top emoji (`l2` in 451731): their ids by rank, lowest first.
+    pub async fn top_emojis(&self, guild: Snowflake) -> Result<Vec<String>, Error> {
+        let answer: Value = self.request(call!(TOP_EMOJIS, guild = guild), None).await?;
+        Ok(crate::emoji::top_emoji_ids(&answer))
+    }
+
     /// A thread we don't know, by id (`loadThread` in 353202), with the
     /// server it is in. The client asks only for what it has no record of.
     pub async fn thread(&self, id: Snowflake) -> Result<(Snowflake, Channel), Error> {

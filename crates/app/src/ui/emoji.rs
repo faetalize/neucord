@@ -146,6 +146,7 @@ impl App {
         intention: Intention,
         picked: impl Fn(&Rc<App>, &Item) + 'static,
     ) {
+        let guild = library.place.guild;
         let library = Rc::new(library);
         let tone = {
             let app = Rc::downgrade(self);
@@ -188,6 +189,16 @@ impl App {
             ..Default::default()
         };
         *handle.borrow_mut() = Some(picker::open_with(self, parent, spec, hooks, picked));
+        if let Some(guild) = guild {
+            self.fetch_top_emojis(guild, {
+                let handle = handle.clone();
+                move || {
+                    if let Some(handle) = handle.borrow().as_ref() {
+                        handle.reload();
+                    }
+                }
+            });
+        }
         // The favourites come from Discord the first time, and fill in then.
         self.load_frecency({
             let handle = handle.clone();
@@ -210,7 +221,47 @@ impl App {
             Intention::Reaction => &mut stores.reactions.history,
         };
         let frequent = history.frequently(now_ms() as u64, |key| library.item(key).is_some());
-        Shortcuts { favorites, frequent: frequent.iter().filter_map(|key| library.item(key)).collect() }
+        // The server's top emoji come first, but never for a reaction (`l` in 316884).
+        let top_guild = library.place.guild.filter(|_| intention == Intention::Chat);
+        let (top, top_for) = match top_guild {
+            Some(guild) => (
+                library.top(state.top_emojis.ids(guild)),
+                state.guilds.iter().find(|g| g.id == guild).map(|g| g.name.clone()),
+            ),
+            None => (Vec::new(), None),
+        };
+        Shortcuts { favorites, frequent: frequent.iter().filter_map(|key| library.item(key)).collect(), top, top_for }
+    }
+
+    /// Ask for the top emoji of the server the picker opens for, unless a
+    /// day's worth is held or a request is out (`V` in 17591); the picker
+    /// lists them once they come.
+    fn fetch_top_emojis(self: &Rc<Self>, guild: Snowflake, fetched: impl FnOnce() + 'static) {
+        let rest = {
+            let mut state = self.account.state.borrow_mut();
+            let now = (glib::monotonic_time() / 1000) as u64;
+            let rest = state.rest.clone().filter(|_| state.me.is_some() && state.top_emojis.wants_fetch(guild, now));
+            if rest.is_some() {
+                state.top_emojis.fetch_started(guild);
+            }
+            rest
+        };
+        let Some(rest) = rest else { return };
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            let answer = rest.top_emojis(guild).await;
+            let now = (glib::monotonic_time() / 1000) as u64;
+            match answer {
+                Ok(ids) => {
+                    this.account.state.borrow_mut().top_emojis.fetched(guild, ids, now);
+                    fetched();
+                }
+                Err(e) => {
+                    eprintln!("emoji: the top emoji weren't fetched: {e}");
+                    this.account.state.borrow_mut().top_emojis.failed(guild);
+                }
+            }
+        });
     }
 
     /// How much each emoji was used, for a search to rank by.
@@ -274,12 +325,18 @@ impl App {
 pub(super) struct Shortcuts {
     pub(super) favorites: Vec<Item>,
     pub(super) frequent: Vec<Item>,
+    /// The server's top emoji and its name, which head the list for chat.
+    pub(super) top: Vec<Item>,
+    pub(super) top_for: Option<String>,
 }
 
 fn rows(library: &Library, query: &str, tone: Option<Tone>, shortcuts: Shortcuts, scores: &Scores) -> Vec<Row<Item>> {
     let mut rows = Vec::new();
     if query.is_empty() {
         let toned = |items: Vec<Item>| items.into_iter().map(|item| toned(item, tone)).collect();
+        if let Some(server) = &shortcuts.top_for {
+            Row::section(&mut rows, COLUMNS, format!("Top Emoji in {server}"), toned(shortcuts.top.clone()));
+        }
         Row::section(&mut rows, COLUMNS, "Favorites".to_owned(), toned(shortcuts.favorites));
         Row::section(&mut rows, COLUMNS, "Frequently Used".to_owned(), toned(shortcuts.frequent));
         for server in library.picker() {

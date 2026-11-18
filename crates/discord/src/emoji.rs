@@ -406,6 +406,76 @@ pub struct Translated {
     pub used: Vec<String>,
 }
 
+/// A server's top emoji, which the picker lists first for it
+/// (`TopEmojiStore` in 354430, with the one-day life `topEmojisTTL` gives
+/// them in 121681): the emoji Discord ranks highest, in order, as the ids or
+/// characters it names them by.
+#[derive(Debug, Default)]
+pub struct TopEmojis {
+    by_guild: HashMap<Snowflake, Top>,
+}
+
+#[derive(Debug, Default)]
+struct Top {
+    ids: Vec<String>,
+    /// When what is held stops being fresh, in the clock's milliseconds.
+    until: Option<u64>,
+    fetching: bool,
+}
+
+const TOP_EMOJIS_LIFE_MS: u64 = 24 * 60 * 60 * 1000;
+
+impl TopEmojis {
+    /// Whether opening the picker for `guild` at `now_ms` asks (`V` in 17591):
+    /// not while a fetch runs, nor while what we have is a day old at most.
+    pub fn wants_fetch(&self, guild: Snowflake, now_ms: u64) -> bool {
+        match self.by_guild.get(&guild) {
+            None => true,
+            Some(top) => !top.fetching && top.until.is_none_or(|until| now_ms >= until),
+        }
+    }
+
+    pub fn fetch_started(&mut self, guild: Snowflake) {
+        self.by_guild.entry(guild).or_default().fetching = true;
+    }
+
+    /// What the request answered, best first.
+    pub fn fetched(&mut self, guild: Snowflake, ids: Vec<String>, now_ms: u64) {
+        self.by_guild.insert(guild, Top { ids, until: Some(now_ms + TOP_EMOJIS_LIFE_MS), fetching: false });
+    }
+
+    /// A fetch that failed leaves what there was, and may be asked again.
+    pub fn failed(&mut self, guild: Snowflake) {
+        if let Some(top) = self.by_guild.get_mut(&guild) {
+            top.fetching = false;
+        }
+    }
+
+    pub fn ids(&self, guild: Snowflake) -> &[String] {
+        self.by_guild.get(&guild).map_or(&[], |top| &top.ids)
+    }
+}
+
+/// The top emoji a `GET /guilds/{id}/top-emojis` answer lists, by rank
+/// (`emoji_rank`, lowest first).
+pub fn top_emoji_ids(answer: &Value) -> Vec<String> {
+    let mut items: Vec<(i64, String)> = answer["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let id = match &item["emoji_id"] {
+                Value::String(s) => s.clone(),
+                Value::Number(n) => n.to_string(),
+                _ => return None,
+            };
+            Some((item["emoji_rank"].as_i64().unwrap_or(i64::MAX), id))
+        })
+        .collect();
+    items.sort_by_key(|(rank, _)| *rank);
+    items.into_iter().map(|(_, id)| id).collect()
+}
+
 /// How many emoji the `:name` list asks for (`s` in 496533): ten where
 /// stickers may be sent too, which share its rows, else fifty.
 pub fn autocomplete_search(stickers_allowed: bool) -> usize {
@@ -487,6 +557,22 @@ impl Library {
         }
         let id = key.parse::<u64>().ok()?;
         self.custom().find(|n| n.emoji.id.0 == id).cloned().map(Item::Custom)
+    }
+
+    /// The emoji a server's top list names that the picker can show: a
+    /// custom emoji by its id, a Unicode one by the character
+    /// (`getTopEmojiWithoutFetchingLatest`, 121681), in the order given and
+    /// without those the channel rules out.
+    pub fn top(&self, ids: &[String]) -> Vec<Item> {
+        ids.iter()
+            .filter_map(|id| {
+                let custom = id.parse::<u64>().ok().and_then(|id| self.custom().find(|n| n.emoji.id.0 == id));
+                match custom {
+                    Some(n) => (n.status != Err(Unavailable::NotHere)).then(|| Item::Custom(n.clone())),
+                    None => unicode_glyph(id).map(Item::Unicode),
+                }
+            })
+            .collect()
     }
 
     fn custom(&self) -> impl Iterator<Item = &Named> {
@@ -782,6 +868,26 @@ mod tests {
 
     fn names(item: &[Item]) -> Vec<&str> {
         item.iter().map(Item::name).collect()
+    }
+
+    #[test]
+    fn a_servers_top_emoji_are_kept_for_a_day_and_named_by_id_or_character() {
+        let guild = Snowflake(5);
+        let mut top = TopEmojis::default();
+        assert!(top.wants_fetch(guild, 0), "never asked");
+        top.fetch_started(guild);
+        assert!(!top.wants_fetch(guild, 1), "while it is out");
+        top.failed(guild);
+        assert!(top.wants_fetch(guild, 2), "a failed one is asked again");
+        top.fetched(guild, vec!["7".into()], 1_000);
+        assert!(!top.wants_fetch(guild, 1_000 + 86_399_999));
+        assert!(top.wants_fetch(guild, 1_000 + 86_400_000));
+        assert_eq!((top.ids(guild), top.ids(Snowflake(6))), (&["7".to_owned()][..], &[][..]));
+
+        let answer = json!({"items": [{"emoji_id": "9", "emoji_rank": 2}, {"emoji_id": "🔥", "emoji_rank": 1},
+                                      {"emoji_id": 4, "emoji_rank": 3}, {"emoji_rank": 4}]});
+        assert_eq!(top_emoji_ids(&answer), ["🔥", "9", "4"]);
+        assert!(top_emoji_ids(&json!({})).is_empty());
     }
 
     #[test]

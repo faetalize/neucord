@@ -59,6 +59,7 @@ pub(crate) const CHANGE_NICKNAME: Endpoint = Endpoint::patch("/guilds/{guild}/me
 pub(crate) const KICK_MEMBER: Endpoint = Endpoint::delete("/guilds/{guild}/members/{user}");
 pub(crate) const EDIT_MEMBER: Endpoint = Endpoint::patch("/guilds/{guild}/members/{user}");
 pub(crate) const BAN_MEMBER: Endpoint = Endpoint::put("/guilds/{guild}/bans/{user}");
+pub(crate) const TOP_EMOJIS: Endpoint = Endpoint::get("/guilds/{guild}/top-emojis");
 pub(crate) const SEARCH_THREADS: Endpoint = Endpoint::get("/channels/{channel}/threads/search");
 pub(crate) const JOIN_THREAD: Endpoint = Endpoint::post("/channels/{channel}/thread-members/@me");
 pub(crate) const LEAVE_THREAD: Endpoint = Endpoint::delete("/channels/{channel}/thread-members/@me");
