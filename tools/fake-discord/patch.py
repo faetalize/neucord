@@ -872,6 +872,7 @@ pub(super) fn e2e_voice_message(what: &str, arg: Option<&str>) {
 }
 """)
 edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("vmsg") => super::attachments::e2e_voice_message(parts.next().unwrap_or_default(), parts.next()),
+            Some("quit") => {''')
 # The keyboard's menu on a sidebar row or a rail button: `menu-key row <n> [png]` and `menu-key rail <n> [png]` give
 # the nth one the focus and run its Menu / Shift+F10 shortcut (the keys themselves can't be sent here), then say
 # whether a menu opened on it and shoot it.
