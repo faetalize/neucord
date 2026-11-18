@@ -21,3 +21,4 @@ libspelling.workspace = true
 serde_json.workspace = true
 gst.workspace = true
 gst-app.workspace = true
+gst-pbutils.workspace = true

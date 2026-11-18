@@ -81,6 +81,8 @@ SLOWMODE = int(os.environ.get("FAKE_SLOWMODE") or 0)
 UPLOAD_FAIL = os.environ.get("FAKE_UPLOAD_FAIL") or ""
 # FAKE_IMAGE_FAIL=1: every image on the CDN answers 404.
 IMAGE_FAIL = bool(os.environ.get("FAKE_IMAGE_FAIL"))
+# FAKE_VIDEO=<path to a .webm>: channel 600 gets a message with that file as a video attachment.
+VIDEO = os.environ.get("FAKE_VIDEO")
 if UPLOAD_FAIL not in ("", "too-large"):
     sys.exit("unknown FAKE_UPLOAD_FAIL " + UPLOAD_FAIL)
 
@@ -366,6 +368,12 @@ def attachment(n):
             "proxy_url": f"http://127.0.0.1:{PORT}/attachments/1/{900 + n}/pic{n}.png?ex=ffffffff&is=1&hm=2&"}
 
 
+def video_attachment(n):
+    url = f"http://127.0.0.1:{PORT}/attachments/1/{900 + n}/clip.webm?ex=ffffffff&is=1&hm=2&"
+    return {"id": str(900 + n), "filename": "clip.webm", "size": os.path.getsize(VIDEO), "width": 320, "height": 180,
+            "content_type": "video/webm", "description": "A test card in motion", "url": url, "proxy_url": url}
+
+
 # What was posted since the fake started, by channel, oldest first.
 POSTED = {}
 
@@ -381,6 +389,8 @@ def messages(channel):
                 text, files = "the oldest picture", (attachment(0),)
             if n == 39:
                 text, files = "the newest picture, and see <#603> for the plan", (attachment(39),)
+            if n == 38 and VIDEO:
+                text, files = "a made-up clip", (video_attachment(38),)
             msg = message(n, who, text, files)
             if n == 10 and os.environ.get("FAKE_CHAIN"):
                 msg["flags"] = 1 << 5
@@ -1156,6 +1166,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/attachments/"):
             query = dict(p.split("=", 1) for p in path.split("?", 1)[-1].split("&") if "=" in p)
             log(kind="image", path=path, width=query.get("width"), height=query.get("height"), at=time.time())
+            if path.split("?")[0].endswith(".webm") and VIDEO:
+                with open(VIDEO, "rb") as clip:
+                    return self.send(200, clip.read(), "video/webm")
             if path.split("?")[0].endswith(".ogg"):
                 return self.send(200, voice_file(), "audio/ogg")
             if IMAGE_FAIL:

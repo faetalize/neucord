@@ -1022,6 +1022,9 @@ pub struct Attachment {
     /// In bytes.
     #[serde(default)]
     pub size: Option<u64>,
+    /// The alt text its author gave it.
+    #[serde(default)]
+    pub description: Option<String>,
     /// A voice message's length, in seconds.
     #[serde(default)]
     pub duration_secs: Option<f64>,

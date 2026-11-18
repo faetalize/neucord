@@ -100,6 +100,7 @@ pub mod typing;
 pub mod uploads;
 pub mod usage;
 pub mod verification;
+pub mod video_stats;
 pub mod voice;
 pub mod voice_states;
 pub mod webp;
