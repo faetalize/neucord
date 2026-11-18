@@ -72,6 +72,12 @@ pub(super) enum Kind<T: 'static, C: 'static = App> {
     /// An action the official client shows greyed out while `enabled` says no
     /// (Mark As Read with nothing to read), rather than leave out.
     Gated { enabled: fn(&C, &T) -> bool, run: fn(&Rc<C>, &T) },
+    /// An action with a dim caption under its label (the client's `subtext`,
+    /// such as Unmute's "Muted until …"), shown as long as `caption` has
+    /// one, and an ordinary item otherwise. GTK's menus have no second line,
+    /// so with a caption it is a row of our own ([`caption_row`]), placed
+    /// where its `custom` item is.
+    Captioned { run: fn(&Rc<C>, &T), caption: fn(&C, &T) -> Option<String> },
     /// A checkbox, ticked as `checked` says; `set` gets its new state.
     Check { checked: fn(&C, &T) -> bool, set: fn(&Rc<C>, &T, bool) },
     /// More sections, opened from this item. It shows only with something
@@ -305,7 +311,7 @@ pub(super) const GUILD: Table<notify_menus::GuildTarget> = &[
         notify_menus::GUILD_NOTIFICATIONS,
         notify_menus::HIDE_MUTED_CHANNELS,
     ],
-    &[server_privacy::PRIVACY_SETTINGS],
+    &[server_privacy::PRIVACY_SETTINGS, server_privacy::HUB_PRIVACY_SETTINGS],
 ];
 
 /// A server folder's menu, from its button in the rail (865815): Mark Folder
@@ -427,7 +433,13 @@ fn fill<T: 'static, C: 'static>(
             match entry {
                 Entry::Item(item) if !(item.shows)(cx, target) => {}
                 Entry::Item(item) => match &item.kind {
-                    Kind::Action(activate) | Kind::Gated { run: activate, .. } => {
+                    Kind::Action(activate)
+                    | Kind::Gated { run: activate, .. }
+                    | Kind::Captioned { run: activate, .. } => {
+                        let caption = match &item.kind {
+                            Kind::Captioned { caption, .. } => caption(cx, target),
+                            _ => None,
+                        };
                         let action = gio::SimpleAction::new(item.name, None);
                         if let Kind::Gated { enabled, .. } = &item.kind {
                             action.set_enabled(enabled(cx, target));
@@ -439,7 +451,16 @@ fn fill<T: 'static, C: 'static>(
                             }
                         });
                         actions.add_action(&action);
-                        section.append(Some(item.label), Some(&detailed(item.name)));
+                        match caption {
+                            Some(caption) => {
+                                let placeholder = gio::MenuItem::new(None, None);
+                                placeholder.set_attribute_value("custom", Some(&item.name.to_variant()));
+                                section.append_item(&placeholder);
+                                let row = caption_row(item.label, &caption, &detailed(item.name));
+                                widgets.borrow_mut().push((item.name, row.upcast()));
+                            }
+                            None => section.append(Some(item.label), Some(&detailed(item.name))),
+                        }
                     }
                     Kind::Check { checked, set } => {
                         let action = check(cx, target, item.name, checked(cx, target), *set);
@@ -657,6 +678,26 @@ fn icon_row(label: &str, icon: &str, action: Option<&str>, submenu: Option<&str>
             (None, Some(page)) => popover.set_visible_submenu(Some(page)),
             _ => {}
         }
+    });
+    button
+}
+
+/// An entry with a dim line under its label that runs `action` and closes the
+/// menu, as an ordinary item does.
+fn caption_row(label: &str, caption: &str, action: &str) -> gtk::Button {
+    let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+    // A button's label is bold in a popover menu; a menu item's isn't.
+    let weight = gtk::pango::AttrList::new();
+    weight.insert(gtk::pango::AttrInt::new_weight(gtk::pango::Weight::Normal));
+    content.append(&gtk::Label::builder().label(label).use_underline(true).xalign(0.0).attributes(&weight).build());
+    content.append(&gtk::Label::builder().label(caption).xalign(0.0).css_classes(["dim-label", "caption"]).build());
+    let button = gtk::Button::builder().child(&content).css_classes(["flat"]).build();
+    let action = action.to_owned();
+    button.connect_clicked(move |button| {
+        if let Some(popover) = button.ancestor(gtk::PopoverMenu::static_type()).and_downcast::<gtk::PopoverMenu>() {
+            popover.popdown();
+        }
+        let _ = button.activate_action(&action, None);
     });
     button
 }
@@ -1116,6 +1157,23 @@ mod tests {
         assert_eq!(section.item_link(1, "submenu").expect("a submenu").n_items(), 0);
         actions.activate_action("inner", None);
         assert_eq!(*cx.log.borrow(), ["inner m"]);
+    }
+
+    #[test]
+    fn a_captioned_item_without_a_caption_is_an_ordinary_one() {
+        const UNMUTE: Entry<Target, Cx> = Entry::Item(Item {
+            name: "unmute",
+            label: "_Unmute",
+            shows: |_, _| true,
+            kind: Kind::Captioned { run: |cx, _| log(cx, "unmuted".into()), caption: |_, _| None },
+        });
+        const TABLE: Table<Target, Cx> = &[&[UNMUTE]];
+        let cx = Rc::new(Cx::default());
+        let (menu, actions, widgets) = build(&cx, TABLE, "m");
+        assert_eq!(label(&section(menu.upcast_ref(), 0), 0).as_deref(), Some("_Unmute"));
+        assert!(widgets.borrow().is_empty(), "no row of our own");
+        actions.activate_action("unmute", None);
+        assert_eq!(*cx.log.borrow(), ["unmuted"]);
     }
 
     #[test]

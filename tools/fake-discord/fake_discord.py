@@ -79,6 +79,11 @@ if MODAL_SUBMIT not in ("ok", "fail", "silent", "429"):
 # Under FAKE_SLOWMODE=<s> #general has that slowmode, and a thread there is refused as inside its cooldown.
 SLOWMODE = int(os.environ.get("FAKE_SLOWMODE") or 0)
 UPLOAD_FAIL = os.environ.get("FAKE_UPLOAD_FAIL") or ""
+# FAKE_MUTED=1: the server is muted until a made-up time (Unmute Server's "Muted until" caption), and #general with no end.
+MUTED_ENTRIES = [
+    {"guild_id": "500", "muted": True, "mute_config": {"selected_time_window": 28800, "end_time": "2037-11-18T21:30:00.250Z"},
+     "channel_overrides": [{"channel_id": "600", "muted": True, "mute_config": {"selected_time_window": -1, "end_time": None}}]},
+] if os.environ.get("FAKE_MUTED") else []
 # FAKE_IMAGE_FAIL=1: every image on the CDN answers 404.
 IMAGE_FAIL = bool(os.environ.get("FAKE_IMAGE_FAIL"))
 # FAKE_VIDEO=<path to a .webm>: channel 600 gets a message with that file as a video attachment.
@@ -321,7 +326,7 @@ def ready():
             {"id": "201", "last_message_id": snowflake(4000, 3), "mention_count": 0},
             {"id": "500", "read_state_type": 3, "last_message_id": "0", "mention_count": 7},
         ], "partial": False, "version": 1},
-        "user_guild_settings": {"entries": [], "partial": False, "version": 1},
+        "user_guild_settings": {"entries": MUTED_ENTRIES, "partial": False, "version": 1},
         "apex_experiments": apex(), "experiments": [], "guild_experiments": [],
         "regional_feature_config": {"age_gated_features": NSFW["gated"], "teen_by_default_settings": 0},
         **({"user_settings_proto": settings_answer("1")} if NSFW["dms"] else {}),
