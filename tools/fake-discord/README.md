@@ -120,6 +120,9 @@ what arrived, IDENTIFY's key order and properties first.
   `FAKE_NSFW=allowed=0` only Go Back; with `allowed=1,status=1,gated=1` the
   region's Confirm Age, which Neucord can't do), with `gate-state` and
   `gate-press <label>`;
+  `search-sidebar` opens the search sidebar in the member list's place, searches
+  #general (`search-enter`), opens a result (`search-result <n>`, the sidebar
+  stays) and leaves it (`search-state` says what the pane shows);
   `paste` pastes a short text, a text over the message length (which
   becomes message.txt) and images, one from a page named after its `<img>`;
   `name-stickers` types `:wave` in a server channel (emoji, then the stickers

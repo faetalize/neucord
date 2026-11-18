@@ -1569,3 +1569,37 @@ impl App {
 }
 """)
 
+# The search sidebar: `search-enter` sends what is typed (as Enter does), `search-result <n>` opens the nth result,
+# `search-state` says what the pane on the right shows.
+edit("crates/app/src/ui/search.rs", "    fn enter(self: &Rc<Self>, app: &Rc<App>) {", "    pub(super) fn enter(self: &Rc<Self>, app: &Rc<App>) {")
+open(f"{root}/crates/app/src/ui/search.rs", "a").write(r"""
+impl View {
+    pub(super) fn e2e_result(&self, n: i32) {
+        match self.results.row_at_index(n) {
+            Some(row) => _ = row.activate(),
+            None => eprintln!("e2e: no result {n}"),
+        };
+    }
+}
+""")
+edit("crates/app/src/ui/e2e.rs", '            Some("search-open") => self.toggle_search(),', '''            Some("search-open") => self.toggle_search(),
+            Some("search-enter") => {
+                let view = self.search_view.borrow().clone();
+                if let Some(view) = view {
+                    view.enter(self);
+                }
+            }
+            Some("search-result") => {
+                let view = self.search_view.borrow().clone();
+                if let Some(view) = view {
+                    view.e2e_result(parts.next().and_then(|n| n.parse().ok()).unwrap_or(0));
+                }
+            }
+            Some("search-state") => eprintln!(
+                "e2e: search open={} pane={:?} shown={} channel={:?}",
+                self.search_view.borrow().is_some(),
+                self.right_stack.visible_child_name(),
+                self.right.shows_sidebar(),
+                self.account.state.borrow().channel,
+            ),
+''')

@@ -211,6 +211,11 @@ impl App {
                 let Some(this) = this.upgrade() else { return };
                 // The button has flipped; the pane follows, and the buttons
                 // follow the pane.
+                // The member list takes the pane back from a search.
+                if this.search_view.borrow().is_some() {
+                    this.close_search();
+                    return;
+                }
                 let show = !this.right.shows_sidebar();
                 if !this.right.is_collapsed() {
                     this.account.state.borrow_mut().members_closed = !show;
@@ -227,7 +232,9 @@ impl App {
 
     /// Whether the pane shows a list now, beside the chat or over it.
     fn members_visible(&self) -> bool {
-        self.right.shows_sidebar() && self.account.state.borrow().member_target().is_some()
+        self.right.shows_sidebar()
+            && self.search_view.borrow().is_none()
+            && self.account.state.borrow().member_target().is_some()
     }
 
     /// Where we are changed: what the pane shows and what we are
@@ -235,15 +242,19 @@ impl App {
     pub(super) fn sync_members(self: &Rc<Self>) {
         // Wherever we are changed, the header's threads button may change.
         self.sync_threads_button();
+        // A search belongs to where it was opened.
+        self.search_follows_place();
         let target = self.account.state.borrow().member_target();
-        let wanted = target.is_some() && {
-            // Over the chat, the pane stays as it was; docked, as it was left.
-            if self.right.is_collapsed() {
-                self.right.shows_sidebar()
-            } else {
-                !self.account.state.borrow().members_closed
-            }
-        };
+        let searching = self.search_view.borrow().is_some();
+        let wanted = searching
+            || (target.is_some() && {
+                // Over the chat, the pane stays as it was; docked, as it was left.
+                if self.right.is_collapsed() {
+                    self.right.shows_sidebar()
+                } else {
+                    !self.account.state.borrow().members_closed
+                }
+            });
         let tooltip = if matches!(target, Some(Target::Dm(_))) { "User Profile" } else { "Member List" };
         for toggle in &*self.members.toggles.borrow() {
             toggle.set_visible(target.is_some());
