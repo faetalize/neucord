@@ -2445,7 +2445,13 @@ impl App {
         let stars = Stars::new(self, media.gif_auto_play);
         // What opens in the viewer. A forward's media opens nothing.
         let view = match live {
-            true => MediaCx::new(self, message, discord::media::items(message, &media, self.hides_profile_links())),
+            true => {
+                let profile_links = self.hides_profile_links();
+                // Forward names an embed by its place, which is only the
+                // message's if none is merged or left out.
+                let held = discord::embed::visible(message, &media, profile_links).len() == message.embeds.len();
+                MediaCx::new(self, message, discord::media::items(message, &media, profile_links), held)
+            }
             false => MediaCx::none(),
         };
         // A poll's attachments are its answers' images, which the official

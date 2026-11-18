@@ -397,6 +397,15 @@ impl Rest {
         self.request(call!(SEND_MESSAGE, channel), Some(body)).await
     }
 
+    /// Forward a message to `channel`: no text, and the `message_reference`
+    /// that [`crate::forward::reference`] makes (`sendForward` in 92961).
+    /// `flags` is [`crate::forward::SILENT`] or nothing.
+    pub async fn send_forward(&self, channel: Snowflake, reference: Value, flags: u64) -> Result<Message, Error> {
+        let nonce = Snowflake::now().to_string();
+        let body = forward_body(channel, &nonce, flags, reference);
+        self.request(call!(SEND_MESSAGE, channel), Some(body)).await
+    }
+
     /// Post a recorded voice message: no text, `IS_VOICE_MESSAGE`, and the one
     /// uploaded recording (`eE` in 841817).
     pub async fn send_voice_message(
@@ -1372,6 +1381,15 @@ fn message_body(
     body
 }
 
+/// A forward: a message with no text that carries the reference. It has no
+/// `allowed_mentions` (the client's empty parse adds none), and the silent
+/// flag stays when set.
+fn forward_body(channel: Snowflake, nonce: &str, flags: u64, reference: Value) -> Value {
+    let mut body = message_body(channel, "", nonce, flags, None, &[], None, false);
+    body["message_reference"] = reference;
+    body
+}
+
 /// The fields a reply adds, as the official client sends them.
 fn add_reply(body: &mut Value, channel: Snowflake, reply: Reply) {
     body["message_reference"] = json!({ "message_id": reply.to, "channel_id": channel });
@@ -1500,9 +1518,9 @@ mod tests {
 
     use super::{
         Captcha, Page, Reply, ReplyPing, add_reaction_call, archived_threads_call, base_headers, create_post_call,
-        edit_body, edit_scheduled_body, is_md5, join_thread_call, leave_thread_call, message_body, nothing_to_send,
-        poll_body, poll_voters_call, rate_limit_wait, reactors_call, remove_reaction_call, save_answer, schedule_body,
-        thread_name_search_call, vote_body,
+        edit_body, edit_scheduled_body, forward_body, is_md5, join_thread_call, leave_thread_call, message_body,
+        nothing_to_send, poll_body, poll_voters_call, rate_limit_wait, reactors_call, remove_reaction_call,
+        save_answer, schedule_body, thread_name_search_call, vote_body,
     };
     use crate::endpoints::call;
     use crate::model::Emoji;
@@ -1630,6 +1648,16 @@ mod tests {
         let post = create_post_call(thread);
         assert_eq!((post.method(), post.path()), ("POST", "/channels/7/threads?use_nested_fields=true"));
         assert_eq!(call!(CREATE_THREAD, channel = thread).path(), "/channels/7/threads");
+    }
+
+    #[test]
+    fn a_forward_is_an_empty_message_with_the_reference() {
+        let reference = json!({ "channel_id": "3", "message_id": "4", "type": 1 });
+        let body = forward_body(Snowflake(9), "1", 0, reference.clone());
+        assert_eq!((body["content"].as_str(), body["flags"].as_u64()), (Some(""), Some(0)));
+        assert_eq!(body["message_reference"], reference);
+        assert!(body.get("allowed_mentions").is_none() && body.get("attachments").is_none());
+        assert_eq!(forward_body(Snowflake(9), "1", 1 << 12, reference)["flags"], 1 << 12, "silent");
     }
 
     #[test]

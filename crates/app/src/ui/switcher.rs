@@ -303,10 +303,11 @@ impl App {
         view.refresh(self, true);
     }
 
-    /// What the box lists for `query`, from the session as it is now.
-    fn switcher_rows(&self, query: &switcher::Query) -> Vec<Row> {
+    /// Run `f` on what the box searches, borrowed from the session as it is
+    /// now, and on the session itself; nothing before we know who we are.
+    pub(super) fn with_sources<T>(&self, f: impl FnOnce(&Sources, &State) -> T) -> Option<T> {
         let state = self.account.state.borrow();
-        let Some(me) = state.me() else { return Vec::new() };
+        let me = state.me()?;
         let now = now_unix();
         let account = state.account.as_ref();
         let can_access = |guild: &discord::Guild, channel: &Channel| {
@@ -323,14 +324,23 @@ impl App {
             can_access: &can_access,
             is_member: &is_member,
         };
-        let (mentions, unread) = unread_and_mentions(&state);
-        let speakers = speakers(self, &state);
-        let home = Home { history: &state.quick_history, mentions: &mentions, unread: &unread, speakers: &speakers };
-        switcher::search(&sources, &home, query)
+        Some(f(&sources, &state))
+    }
+
+    /// What the box lists for `query`, from the session as it is now.
+    fn switcher_rows(&self, query: &switcher::Query) -> Vec<Row> {
+        self.with_sources(|sources, state| {
+            let (mentions, unread) = unread_and_mentions(state);
+            let speakers = speakers(self, state);
+            let home =
+                Home { history: &state.quick_history, mentions: &mentions, unread: &unread, speakers: &speakers };
+            switcher::search(sources, &home, query)
+        })
+        .unwrap_or_default()
     }
 
     /// A result's row: what it is, its name, and where it is.
-    fn switcher_row(&self, hit: &Hit) -> gtk::ListBoxRow {
+    pub(super) fn switcher_row(&self, hit: &Hit) -> gtk::ListBoxRow {
         let state = self.account.state.borrow();
         let line =
             gtk::Box::builder().spacing(10).margin_top(6).margin_bottom(6).margin_start(12).margin_end(12).build();

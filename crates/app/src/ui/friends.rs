@@ -422,6 +422,14 @@ impl App {
     /// Open the DM with `user` and go to it (`openPrivateChannel` in
     /// 308528): the one we have with no request, else a new one. Its id.
     pub(super) async fn open_dm_with(self: &Rc<Self>, user: Snowflake) -> Result<Snowflake, discord::Error> {
+        let id = self.dm_with(user).await?;
+        self.open_channel(id);
+        Ok(id)
+    }
+
+    /// The DM with `user`, made if we have none, without going to it
+    /// (`getOrEnsurePrivateChannel` in 308528).
+    pub(super) async fn dm_with(self: &Rc<Self>, user: Snowflake) -> Result<Snowflake, discord::Error> {
         let existing = self
             .account
             .state
@@ -431,7 +439,6 @@ impl App {
             .find(|c| c.kind == ChannelKind::Dm && c.recipients.first().is_some_and(|u| u.id == user))
             .map(|c| c.id);
         if let Some(channel) = existing {
-            self.open_channel(channel);
             return Ok(channel);
         }
         let rest = self.account.state.borrow().rest.clone();
@@ -439,7 +446,6 @@ impl App {
         let channel = rest.open_dm(user).await?;
         let id = channel.id;
         self.on_private_channel(channel);
-        self.open_channel(id);
         Ok(id)
     }
 

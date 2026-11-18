@@ -699,6 +699,19 @@ def send_message(channel, body):
              "mentions": [USERS[u] for u in re.findall(r"<@!?(\d+)>", content) if u in USERS],
              "mention_roles": re.findall(r"<@&(\d+)>", content)}
     reference = body.get("message_reference")
+    if reference and reference.get("type") == 1:
+        # A forward: a copy of the original rides along as a snapshot, of just what `forward_only` names.
+        original = find(reference.get("channel_id"), reference.get("message_id")) or {}
+        only = reference.get("forward_only") or {}
+        files = [a for a in original.get("attachments", [])
+                 if "attachment_ids" not in only or a["id"] in only["attachment_ids"]]
+        if "embed_indices" in only:
+            files = []
+        snapshot = {"type": 0, "content": original.get("content", ""), "timestamp": original.get("timestamp"),
+                    "edited_timestamp": None, "attachments": files, "embeds": [], "flags": 0}
+        extra.update(message_reference=reference, message_snapshots=[{"message": snapshot}],
+                     flags=extra["flags"] | (1 << 14))
+        return (200, *post(channel, ME, "", **extra))
     if reference:
         replied = find(channel, reference.get("message_id"))
         extra.update(type=19, message_reference={"type": 0, **reference}, referenced_message=replied)

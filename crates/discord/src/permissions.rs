@@ -709,7 +709,7 @@ pub fn can_pin_post(guild: &Guild, post: &Channel, me: &Account, now: i64) -> bo
 
 /// A moderator report: a thread or post whose own flags, or its forum's,
 /// say so (`V` in 715757, `isModeratorReportChannel` in 95701).
-fn is_report(guild: &Guild, thread: &Channel) -> bool {
+pub(crate) fn is_report(guild: &Guild, thread: &Channel) -> bool {
     let forum = thread.parent_id.and_then(|id| guild.channel(id));
     (thread.flags | forum.map_or(0, |f| f.flags)) & IS_MODERATOR_REPORT_CHANNEL != 0
 }
