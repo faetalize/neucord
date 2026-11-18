@@ -198,6 +198,8 @@ pub enum Event {
         guild_id: Snowflake,
         threads: Vec<Channel>,
         members: Vec<(Snowflake, ThreadMember)>,
+        /// The newest message of some of the threads (`most_recent_messages`).
+        recent: Vec<crate::Message>,
         /// Every active thread of the server, rather than those of some
         /// channels (`channel_ids`).
         complete: bool,
@@ -1549,7 +1551,13 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
                 .flatten()
                 .filter_map(|m| Some((parse_id(&m["id"])?, ThreadMember::deserialize(m).ok()?)))
                 .collect();
-            Event::ThreadListSync { guild_id, threads, members, complete: data["channel_ids"].is_null() }
+            let recent = data["most_recent_messages"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|m| crate::Message::deserialize(m).ok())
+                .collect();
+            Event::ThreadListSync { guild_id, threads, members, recent, complete: data["channel_ids"].is_null() }
         }
         // The client drops an answer Discord says we may not have (225123).
         "FORUM_UNREADS" => {
@@ -2495,10 +2503,15 @@ mod tests {
             &state,
             "THREAD_LIST_SYNC",
             json!({"guild_id": "1", "threads": [{"id": "21", "type": 12, "parent_id": "9"}],
-                   "members": [{"id": "21", "user_id": "5", "flags": 0, "join_timestamp": "2026-10-28T00:00:00Z"}]}),
+                   "members": [{"id": "21", "user_id": "5", "flags": 0, "join_timestamp": "2026-10-28T00:00:00Z"}],
+                   "most_recent_messages": [{"id": "30", "channel_id": "21", "content": "hi",
+                       "author": {"id": "6", "username": "b"}, "timestamp": "2026-10-28T00:00:00+00:00"}]}),
         );
-        let Ok(Event::ThreadListSync { threads, members, complete, .. }) = state.try_recv() else { panic!("no sync") };
+        let Ok(Event::ThreadListSync { threads, members, recent, complete, .. }) = state.try_recv() else {
+            panic!("no sync")
+        };
         assert_eq!((threads.len(), members[0].0, complete), (1, Snowflake(21), true));
+        assert_eq!(recent.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), ["hi"]);
         dispatch(
             &state,
             "THREAD_LIST_SYNC",

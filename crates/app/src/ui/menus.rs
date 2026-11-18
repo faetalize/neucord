@@ -445,7 +445,7 @@ fn fill<T: 'static, C: 'static>(
                         let submenu = gio::Menu::new();
                         fill(cx, table, target, &submenu, actions, widgets);
                         if submenu.n_items() > 0 {
-                            section.append_submenu(Some(item.label), &submenu);
+                            section.append_item(&submenu_item(item.label, item.name, &submenu));
                         }
                     }
                     Kind::Live(make) => {
@@ -455,7 +455,7 @@ fn fill<T: 'static, C: 'static>(
                             target,
                             Live { menu: submenu.clone(), actions: actions.clone(), widgets: widgets.clone() },
                         );
-                        section.append_submenu(Some(item.label), &submenu);
+                        section.append_item(&submenu_item(item.label, item.name, &submenu));
                     }
                     Kind::Linked(model) => {
                         if let Some(model) = model(cx, target) {
@@ -544,6 +544,118 @@ fn check<T: 'static, C: 'static>(
     action
 }
 
+/// A submenu's item, with its name as `id`, which a popover can be told to
+/// show by (`visible-submenu`).
+fn submenu_item(label: &str, name: &str, submenu: &gio::Menu) -> gio::MenuItem {
+    let item = gio::MenuItem::new_submenu(Some(label), submenu);
+    item.set_attribute_value("id", Some(&name.to_variant()));
+    item
+}
+
+/// The icons of the attach menu's entries, by their names: themed symbolic
+/// ones that mean what the client's do (316576: file up for both uploads, a
+/// thread with a plus, a poll's bars, the apps' grid, a calendar with a plus,
+/// a microphone).
+pub(super) const ATTACH_ICONS: &[(&str, &str, &str)] = &[
+    ("upload-file", "document-send-symbolic", "icon-upload-file"),
+    ("upload-text", "document-send-symbolic", "icon-upload-text"),
+    ("create-thread", "chat-message-new-symbolic", "icon-create-thread"),
+    ("create-poll", "view-list-bullet-symbolic", "icon-create-poll"),
+    ("use-apps", "view-app-grid-symbolic", "icon-use-apps"),
+    ("app-launcher", "view-app-grid-symbolic", "icon-app-launcher"),
+    ("schedule-message", "appointment-new-symbolic", "icon-schedule-message"),
+    ("record-voice-message", "audio-input-microphone-symbolic", "icon-record-voice-message"),
+];
+
+/// GTK's popover menus draw no icon on an ordinary item, so an entry with one
+/// is a row of our own in its place (`custom`, which [`popup`] adds the widget
+/// for): an icon and the label, running its action, or opening its submenu.
+/// Returns the menu with them, the rows, and the labels of the submenu items
+/// they stand for, which [`hide_submenu_buttons`] hides once the popover is
+/// made: a submenu's page exists only while its item does.
+fn with_icons(menu: &gio::Menu, icons: &[(&'static str, &str, &'static str)]) -> (gio::Menu, Widgets, Vec<String>) {
+    let (out, rows, mut hidden) = (gio::Menu::new(), Widgets::default(), Vec::new());
+    for i in 0..menu.n_items() {
+        let Some(section) = menu.item_link(i, "section") else { continue };
+        let copy = gio::Menu::new();
+        for j in 0..section.n_items() {
+            let item = gio::MenuItem::from_model(&section, j);
+            let action = item.attribute_value("action", Some(glib::VariantTy::STRING)).and_then(|v| v.get::<String>());
+            let id = item.attribute_value("id", Some(glib::VariantTy::STRING)).and_then(|v| v.get::<String>());
+            let label = item.attribute_value("label", Some(glib::VariantTy::STRING)).and_then(|v| v.get::<String>());
+            let name = action.as_deref().and_then(|a| a.strip_prefix("menu.")).map(str::to_owned).or(id.clone());
+            let known = name.as_deref().and_then(|n| icons.iter().find(|(known, ..)| *known == n));
+            let (Some((_, icon, custom)), Some(label)) = (known, label) else {
+                copy.append_item(&item);
+                continue;
+            };
+            let row = icon_row(&label, icon, action.as_deref(), id.as_ref().map(|_| label.as_str()));
+            let placeholder = gio::MenuItem::new(None, None);
+            placeholder.set_attribute_value("custom", Some(&(*custom).to_variant()));
+            copy.append_item(&placeholder);
+            if id.is_some() {
+                copy.append_item(&item);
+                hidden.push(label.clone());
+            }
+            rows.borrow_mut().push((custom, row.upcast()));
+        }
+        out.append_section(None, &copy);
+    }
+    (out, rows, hidden)
+}
+
+/// Hide the button of each submenu item `labels` name (the first of that
+/// text: the page's own back button has it too): its page stays.
+fn hide_submenu_buttons(popover: &gtk::PopoverMenu, labels: &[String]) {
+    fn walk(widget: &gtk::Widget, labels: &mut Vec<String>) {
+        if widget.type_().name() == "GtkModelButton"
+            && let Some(text) = widget.property::<Option<String>>("text")
+            && let Some(at) = labels.iter().position(|l| l.replace('_', "") == text)
+        {
+            widget.set_visible(false);
+            labels.remove(at);
+        }
+        let mut child = widget.first_child();
+        while let Some(c) = child {
+            walk(&c, labels);
+            child = c.next_sibling();
+        }
+    }
+    walk(popover.upcast_ref(), &mut labels.to_vec());
+}
+
+/// An entry of a menu with its icon: it runs `action`, or shows the submenu
+/// page named `submenu` (GTK names it by its item's label).
+fn icon_row(label: &str, icon: &str, action: Option<&str>, submenu: Option<&str>) -> gtk::Button {
+    let content = gtk::Box::builder().spacing(9).build();
+    content.append(&gtk::Image::from_icon_name(icon));
+    // A button's label is bold in a popover menu; a menu item's isn't.
+    let weight = gtk::pango::AttrList::new();
+    weight.insert(gtk::pango::AttrInt::new_weight(gtk::pango::Weight::Normal));
+    content.append(
+        &gtk::Label::builder().label(label).use_underline(true).xalign(0.0).hexpand(true).attributes(&weight).build(),
+    );
+    if submenu.is_some() {
+        content.append(&gtk::Image::from_icon_name("go-next-symbolic"));
+    }
+    let button = gtk::Button::builder().child(&content).css_classes(["flat"]).build();
+    let (action, submenu) = (action.map(str::to_owned), submenu.map(str::to_owned));
+    button.connect_clicked(move |button| {
+        let Some(popover) = button.ancestor(gtk::PopoverMenu::static_type()).and_downcast::<gtk::PopoverMenu>() else {
+            return;
+        };
+        match (&action, &submenu) {
+            (Some(action), _) => {
+                popover.popdown();
+                let _ = button.activate_action(action, None);
+            }
+            (None, Some(page)) => popover.set_visible_submenu(Some(page)),
+            _ => {}
+        }
+    });
+    button
+}
+
 /// Where a menu opens, in its parent's coordinates.
 pub(super) enum At {
     /// Starting at a point, as GTK's own context menus do.
@@ -555,10 +667,29 @@ pub(super) enum At {
 
 /// Open `table`'s menu for `target` over `parent`.
 pub(super) fn popup<T: 'static>(app: &Rc<App>, table: Table<T>, target: T, parent: &impl IsA<gtk::Widget>, at: At) {
+    popup_with_icons(app, table, target, parent, at, &[]);
+}
+
+/// [`popup`] with `icons` on the entries they name (see [`with_icons`]).
+pub(super) fn popup_with_icons<T: 'static>(
+    app: &Rc<App>,
+    table: Table<T>,
+    target: T,
+    parent: &impl IsA<gtk::Widget>,
+    at: At,
+    icons: &[(&'static str, &str, &'static str)],
+) {
     let (menu, actions, widgets) = build(app, table, target);
     if menu.n_items() == 0 {
         return;
     }
+    let (menu, hidden) = if icons.is_empty() {
+        (menu, Vec::new())
+    } else {
+        let (menu, rows, hidden) = with_icons(&menu, icons);
+        widgets.borrow_mut().extend(rows.take());
+        (menu, hidden)
+    };
     let (rect, halign) = match at {
         At::Point(x, y) => (gdk::Rectangle::new(x as i32, y as i32, 1, 1), gtk::Align::Start),
         At::Below(rect) => (rect, gtk::Align::End),
@@ -569,6 +700,8 @@ pub(super) fn popup<T: 'static>(app: &Rc<App>, table: Table<T>, target: T, paren
     for (id, widget) in widgets.take() {
         popover.add_child(&widget, id);
     }
+    // Its buttons are made as it first shows.
+    popover.connect_map(move |popover| hide_submenu_buttons(popover, &hidden));
     popover.set_parent(parent);
     popover.connect_closed(|popover| {
         // Once the chosen item has run, which may come after closing.
@@ -908,6 +1041,21 @@ mod tests {
         let at = |name| attach.iter().position(|n| *n == name).unwrap();
         assert_eq!(Some(at(thread)), uploads.map(|u| u + 1));
         assert_eq!(at(poll), at(thread) + 1);
+    }
+
+    #[test]
+    fn every_entry_of_the_attach_menu_has_an_icon() {
+        for entry in ATTACH[0] {
+            let name = match entry {
+                Entry::Item(item) => item.name,
+                Entry::Choices(choices) => choices.name,
+            };
+            assert!(ATTACH_ICONS.iter().any(|(known, ..)| *known == name), "{name}");
+        }
+        let mut customs: Vec<_> = ATTACH_ICONS.iter().map(|(_, _, custom)| custom).collect();
+        customs.sort();
+        customs.dedup();
+        assert_eq!(customs.len(), ATTACH_ICONS.len(), "each row has an id of its own");
     }
 
     #[test]

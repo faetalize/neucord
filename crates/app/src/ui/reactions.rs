@@ -162,6 +162,78 @@ impl App {
         state.settings.media.render_reactions && state.reacting(message.channel_id).create
     }
 
+    /// The bar over a row: the reactions we use most, three, as buttons that
+    /// react or take the reaction back, and the button that adds another
+    /// (`nA` and `nc` in 812266), where reactions can be added to `message`.
+    pub(super) fn hover_reactions(self: &Rc<Self>, parts: &super::message_row::Parts, message: &Message) {
+        while let Some(child) = parts.quick.first_child() {
+            parts.quick.remove(&child);
+        }
+        let shown = self.offers_add_reaction(message) && !message.is_ephemeral();
+        parts.quick.set_visible(shown);
+        parts.react_button.set_visible(shown);
+        if !shown {
+            return;
+        }
+        let channel = message.channel_id;
+        let items = self.hover_bar_emoji(channel);
+        for item in items {
+            let emoji = Emoji::from(&item);
+            let ours = message.reactions.iter().any(|r| r.me && r.emoji.same(&emoji));
+            let name = match &item {
+                discord::emoji::Item::Unicode(e) => e.names[0].to_owned(),
+                custom => custom.name().to_owned(),
+            };
+            let (action, tooltip) = match ours {
+                true => (format!("Click to remove {name}"), "Click to remove"),
+                false => (format!("Click to react with {name}"), "Click to react"),
+            };
+            let button = gtk::Button::builder()
+                .child(&super::emoji::glyph(&item, &self.images))
+                .css_classes(["flat", "message-action"])
+                .tooltip_text(format!(":{name}:\n{tooltip}"))
+                .build();
+            button.update_property(&[gtk::accessible::Property::Label(&action)]);
+            let (this, id) = (Rc::downgrade(self), message.id);
+            button.connect_clicked(move |_| {
+                let Some(this) = this.upgrade() else { return };
+                match ours {
+                    true => this.take_back_reaction(channel, id, emoji.clone(), None, Location::HoverBar),
+                    false => this.add_reaction(channel, id, emoji.clone(), Location::HoverBar, true),
+                }
+            });
+            parts.quick.append(&button);
+        }
+    }
+
+    /// The three emoji of the bar: those used most for reactions that can be
+    /// sent here, then 💯, 😆 and 💖 for what is missing.
+    fn hover_bar_emoji(&self, channel: Snowflake) -> Vec<discord::emoji::Item> {
+        use discord::emoji::{Intention, Item as EmojiItem, Library};
+        let library = self.emoji_library(channel);
+        let tone = self.account.state.borrow().settings.skin_tone;
+        let usable = |item: &EmojiItem| match item {
+            EmojiItem::Custom(n) => n.status.is_ok(),
+            EmojiItem::Unicode(_) => true,
+        };
+        let frequent: Vec<_> =
+            self.emoji_shortcuts(&library, Intention::Reaction).frequent.into_iter().filter(usable).collect();
+        let defaults: Vec<_> = ["100", "laughing", "sparkling_heart"]
+            .into_iter()
+            .filter_map(discord::emoji::unicode)
+            .map(EmojiItem::Unicode)
+            .collect();
+        let key = |items: Vec<EmojiItem>| items.into_iter().map(|i| (Library::key(&i), i)).collect::<Vec<_>>();
+        let (frequent, defaults) = (key(frequent), key(defaults));
+        let keys = |v: &[(String, EmojiItem)]| v.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>();
+        let chosen = discord::reactions::hover_bar(&keys(&frequent), &keys(&defaults));
+        chosen
+            .iter()
+            .filter_map(|k| frequent.iter().chain(&defaults).find(|(key, _)| key == k).map(|(_, i)| i.clone()))
+            .map(|item| super::emoji::toned(item, tone))
+            .collect()
+    }
+
     /// The emoji the quick reactions offer in `channel`: the favourites then
     /// the reactions used most, each once, up to four, without those Nitro
     /// locks and without the faces the client leaves out (`getEmojiInPriorityOrder`,
