@@ -50,6 +50,11 @@ pub enum Component {
         spoiler: bool,
         components: Vec<Component>,
     },
+    /// A content inventory entry (what someone played, listened to), which
+    /// the client draws as its own card. `content_type` is its kind.
+    InventoryEntry {
+        content_type: u64,
+    },
     /// Something newer, or only for forms.
     Unknown,
 }
@@ -191,6 +196,9 @@ impl Component {
                 accent: value["accent_color"].as_u64().map(|c| c as u32),
                 spoiler: flag("spoiler"),
                 components: children("components"),
+            },
+            16 if value["content_inventory_entry"].is_object() => Component::InventoryEntry {
+                content_type: value["content_inventory_entry"]["content_type"].as_u64().unwrap_or(0),
             },
             _ => Component::Unknown,
         }

@@ -174,7 +174,7 @@ fn component_widget(component: &Component, cx: &Context, live: Option<&Live>) ->
             }
             card.upcast()
         }
-        Component::Unknown => return None,
+        Component::Unknown | Component::InventoryEntry { .. } => return None,
     })
 }
 

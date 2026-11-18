@@ -160,14 +160,14 @@ impl Item {
 
 /// All the media of `message` the viewer opens: its attachments (except the
 /// thumbnails of others), then each visible embed's large images, and its video.
-pub fn items(message: &Message, settings: &MediaSettings) -> Vec<Item> {
+pub fn items(message: &Message, settings: &MediaSettings, profile_links: bool) -> Vec<Item> {
     let mut items = Vec::new();
     // A poll's attachments are its answers' pictures, and a message of
     // components shows its own.
     if message.poll.is_none() && !message.is_components_v2() {
         items.extend(message.attachments.iter().filter(|a| !a.is_hidden()).filter_map(Item::attachment));
     }
-    for (n, embed) in embed::visible(message, settings).iter().enumerate() {
+    for (n, embed) in embed::visible(message, settings, profile_links).iter().enumerate() {
         match embed.display(settings.inline_embed_media) {
             Display::Bare(large) | Display::Card { media: Some(large), .. } => match large {
                 Large::Image(media) => items.push(Item::embedded(&media, n, Kind::Image)),
@@ -378,7 +378,7 @@ mod tests {
                  "thumbnail": {"url": "https://e.test/b.png", "proxy_url": "https://images-ext-1.discordapp.net/external/y/https/e.test/b.png", "width": 8, "height": 8}},
             ],
         }));
-        let items = items(&message, &MediaSettings::default());
+        let items = items(&message, &MediaSettings::default(), false);
         let sources: Vec<_> = items.iter().map(|i| (i.kind, i.source)).collect();
         assert_eq!(
             sources,
@@ -405,7 +405,7 @@ mod tests {
             attachment("11", "b.mp4", serde_json::json!({"proxy_url": null})),
             attachment("12", "c.mp4", serde_json::json!({})),
         ]}));
-        let ids: Vec<_> = items(&message, &MediaSettings::default()).into_iter().map(|i| i.source).collect();
+        let ids: Vec<_> = items(&message, &MediaSettings::default(), false).into_iter().map(|i| i.source).collect();
         assert_eq!(ids, [Source::Attachment(Snowflake(12))]);
     }
 
@@ -413,7 +413,7 @@ mod tests {
     fn a_polls_attachments_and_thumbnails_are_not_the_messages_media() {
         let thumbnail = attachment("11", "t.png", serde_json::json!({"flags": 2}));
         let message = message(serde_json::json!({"attachments": [thumbnail]}));
-        assert!(items(&message, &MediaSettings::default()).is_empty());
+        assert!(items(&message, &MediaSettings::default(), false).is_empty());
     }
 
     #[test]
@@ -447,7 +447,7 @@ mod tests {
             {"type": "image", "url": "https://e.test/a.png",
              "thumbnail": {"url": "https://e.test/a.png", "proxy_url": "https://images-ext-1.discordapp.net/external/x/https/e.test/a.png?width=8&height=8", "width": 8, "height": 8}},
         ]}));
-        let item = &items(&message, &MediaSettings::default())[0];
+        let item = &items(&message, &MediaSettings::default(), false)[0];
         assert_eq!(
             item.download_url().as_deref(),
             Some("https://images-ext-1.discordapp.net/external/x/https/e.test/a.png")
