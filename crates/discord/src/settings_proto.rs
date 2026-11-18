@@ -57,6 +57,9 @@ const FRIEND_ANNIVERSARY_NOTIFICATIONS: u32 = 14;
 const PROFILE_UPDATES_NOTIFICATIONS: u32 = 16;
 const UPCOMING_SERVER_EVENT_NOTIFICATIONS: u32 = 22;
 const QUIET_MODE: u32 = 5;
+const NOTIFY_FRIENDS_COME_ONLINE: u32 = 25;
+const NOTIFY_SERVER_MEMBERS_GO_LIVE: u32 = 26;
+const NOTIFY_FRIENDS_CUSTOM_STATUS: u32 = 27;
 
 // PrivacySettings.
 const ALLOW_ACTIVITY_PARTY_FRIENDS: u32 = 1;
@@ -76,6 +79,7 @@ const PROFILE_VISIBILITY: u32 = 32;
 // StatusSettings.
 const STATUS_STATUS: u32 = 1;
 const STATUS_CUSTOM: u32 = 2;
+const STATUS_SHOW_CURRENT_GAME: u32 = 3;
 const STATUS_EXPIRES_AT_MS: u32 = 4;
 const STATUS_CREATED_AT_MS: u32 = 5;
 
@@ -142,6 +146,9 @@ impl SettingsPatch {
                 go_live: voice.as_ref().and_then(|v| v.bool_value(STREAM_NOTIFICATIONS_ENABLED)),
                 upcoming_event: notified(UPCOMING_SERVER_EVENT_NOTIFICATIONS),
                 quiet_mode: notified(QUIET_MODE),
+                share_online: notified(NOTIFY_FRIENDS_COME_ONLINE),
+                share_custom_status: notified(NOTIFY_FRIENDS_CUSTOM_STATUS),
+                share_go_live: notified(NOTIFY_SERVER_MEMBERS_GO_LIVE),
             },
             privacy: PrivacyPatch {
                 friends_join_game: private(ALLOW_ACTIVITY_PARTY_FRIENDS),
@@ -172,6 +179,7 @@ impl SettingsPatch {
                     .as_ref()
                     .map(|p| servers(p, ACTIVITY_JOINING_RESTRICTED_GUILD_IDS)),
             },
+            show_current_game: settings.message(STATUS).and_then(|s| s.bool_value(STATUS_SHOW_CURRENT_GAME)),
             // A plain `bool`: `false` is not sent, so appearance without it is off.
             developer_mode: settings.message(APPEARANCE).map(|a| a.bool(DEVELOPER_MODE).unwrap_or(false)),
             message_display_compact: flag(MESSAGE_DISPLAY_COMPACT),
@@ -282,6 +290,12 @@ pub enum Setting {
     DeveloperMode(bool),
     ReactionNotifications(ReactionNotifications),
     FriendOnlineNotifications(bool),
+    /// Activity Privacy's "Share when I come online", "...update my custom
+    /// status" and "...start streaming", and "Share my activity".
+    ShareOnline(bool),
+    ShareCustomStatus(bool),
+    ShareGoLive(bool),
+    ShowCurrentGame(bool),
     FriendAnniversaryNotifications(bool),
     ProfileUpdatesNotifications(bool),
     FriendsJoinGame(bool),
@@ -369,6 +383,10 @@ impl Setting {
             Setting::FriendOnlineNotifications(on) => {
                 one(NOTIFICATIONS, FRIEND_ONLINE_NOTIFICATIONS, Some(bool_value(on)))
             }
+            Setting::ShareOnline(on) => one(NOTIFICATIONS, NOTIFY_FRIENDS_COME_ONLINE, Some(bool_value(on))),
+            Setting::ShareCustomStatus(on) => one(NOTIFICATIONS, NOTIFY_FRIENDS_CUSTOM_STATUS, Some(bool_value(on))),
+            Setting::ShareGoLive(on) => one(NOTIFICATIONS, NOTIFY_SERVER_MEMBERS_GO_LIVE, Some(bool_value(on))),
+            Setting::ShowCurrentGame(on) => one(STATUS, STATUS_SHOW_CURRENT_GAME, Some(bool_value(on))),
             Setting::FriendAnniversaryNotifications(on) => {
                 one(NOTIFICATIONS, FRIEND_ANNIVERSARY_NOTIFICATIONS, Some(bool_value(on)))
             }
@@ -709,6 +727,10 @@ mod tests {
             DeveloperMode(true),
             ReactionNotifications(self::ReactionNotifications::OnlyDms),
             FriendOnlineNotifications(false),
+            ShareOnline(false),
+            ShareCustomStatus(false),
+            ShareGoLive(false),
+            ShowCurrentGame(false),
             FriendAnniversaryNotifications(false),
             ProfileUpdatesNotifications(false),
             FriendsJoinGame(false),
@@ -762,6 +784,9 @@ mod tests {
                     go_live: false,
                     upcoming_event: false,
                     quiet_mode: false,
+                    share_online: false,
+                    share_custom_status: false,
+                    share_go_live: false,
                 },
                 privacy: Privacy {
                     friends_join_game: false,
@@ -790,6 +815,7 @@ mod tests {
                 locale: Some("fr".into()),
                 skin_tone: Some(Tone::MediumDark),
                 show_command_suggestions: Some(false),
+                show_current_game: Some(false),
                 ..Settings::default()
             }
         );
@@ -842,6 +868,50 @@ mod tests {
         assert_eq!(self::patch(&[]).status, None, "no status message, nothing said");
         let empty = bytes_field(STATUS, &bytes_field(STATUS_CUSTOM, &[]));
         assert_eq!(self::patch(&empty).status.unwrap().custom, None, "a custom status with nothing in it");
+    }
+
+    #[test]
+    fn sharing_activity_sits_in_the_status_and_leaves_it_as_it_is() {
+        let status = [string_wrapper(STATUS_STATUS, "idle"), fixed64_field(STATUS_EXPIRES_AT_MS, 5)].concat();
+        let proto = bytes_field(STATUS, &status);
+        let (group, written) = Setting::ShowCurrentGame(false).written(&proto).unwrap();
+        assert_eq!(group, STATUS);
+        let in_order = [
+            string_wrapper(STATUS_STATUS, "idle"),
+            bool_wrapper(STATUS_SHOW_CURRENT_GAME, false),
+            fixed64_field(STATUS_EXPIRES_AT_MS, 5),
+        ];
+        assert_eq!(written, in_order.concat(), "written by field number, the others as they were");
+        // And the status picker, writing the status after, leaves it.
+        let proto = bytes_field(STATUS, &written);
+        let (_, saved) =
+            Setting::Status { status: UserStatus::Online, expires_at_ms: 0, now_ms: 7 }.written(&proto).unwrap();
+        let read = patch(&bytes_field(STATUS, &saved));
+        assert_eq!(read.show_current_game, Some(false));
+        assert_eq!(patch(&bytes_field(STATUS, &status)).show_current_game, None, "unset is on");
+        assert!(crate::settings::Settings::default().shares_activity());
+    }
+
+    #[test]
+    fn the_notifications_about_us_are_fields_25_to_27() {
+        let proto = [
+            bool_wrapper(NOTIFY_FRIENDS_COME_ONLINE, false),
+            bool_wrapper(NOTIFY_SERVER_MEMBERS_GO_LIVE, false),
+            bool_wrapper(NOTIFY_FRIENDS_CUSTOM_STATUS, true),
+        ]
+        .concat();
+        let read = patch(&bytes_field(NOTIFICATIONS, &proto)).notifications;
+        assert_eq!(
+            (read.share_online, read.share_go_live, read.share_custom_status),
+            (Some(false), Some(false), Some(true))
+        );
+        assert_eq!(patch(&bytes_field(NOTIFICATIONS, &[])).notifications.share_online, None);
+        assert_eq!(
+            (NOTIFY_FRIENDS_COME_ONLINE, NOTIFY_SERVER_MEMBERS_GO_LIVE, NOTIFY_FRIENDS_CUSTOM_STATUS),
+            (25, 26, 27)
+        );
+        let defaults = crate::settings::Notifications::default();
+        assert!(defaults.share_online && defaults.share_custom_status && defaults.share_go_live, "on until turned off");
     }
 
     #[test]

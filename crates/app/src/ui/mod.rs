@@ -3,6 +3,7 @@
 
 mod account;
 mod accounts;
+mod activity_privacy;
 mod attachments;
 mod background;
 mod builtins;

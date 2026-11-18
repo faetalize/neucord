@@ -1,7 +1,7 @@
 //! What the client asks after the Profile Privacy row changes (`gS`, 365258;
-//! the dialog is 413201): the activity sharing default follows the profile
-//! visibility, and the servers that would then differ from it are offered
-//! to follow too.
+//! the dialog is 413201), or the activity sharing default does (`g8`): the
+//! default follows the profile visibility, and the servers that would then
+//! differ from it are offered to follow too.
 
 use std::collections::HashSet;
 
@@ -30,9 +30,19 @@ pub struct Server {
     pub member_count: Option<u64>,
 }
 
+/// What changed to bring the question about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cause {
+    /// The profile visibility, which the default follows.
+    ProfileVisibility,
+    /// The default itself, in Activity Privacy.
+    Default,
+}
+
 /// The question.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Change {
+    pub cause: Cause,
     /// The servers it is asked for, those joined last first.
     pub servers: Vec<Snowflake>,
     pub direction: Direction,
@@ -70,6 +80,54 @@ pub fn after_profile_privacy(
     {
         return None;
     }
+    let (servers, direction) = affected(current, default, restricted, servers)?;
+    Some(Change {
+        cause: Cause::ProfileVisibility,
+        servers,
+        direction,
+        default,
+        setting_name: match new {
+            ProfileVisibility::FriendsAndAllServers => "friends & all servers",
+            ProfileVisibility::FriendsAndSmallServers => "friends & small servers only",
+            ProfileVisibility::FriendsOnly => "friends only",
+        },
+    })
+}
+
+/// The question for the default itself changing from `old` to `new` (`g8`),
+/// which Activity Privacy asks.
+pub fn after_default(
+    old: ActivityDefault,
+    new: ActivityDefault,
+    restricted: &[Snowflake],
+    servers: &[Server],
+) -> Option<Change> {
+    if old == new {
+        return None;
+    }
+    let (servers, direction) = affected(old, new, restricted, servers)?;
+    Some(Change {
+        cause: Cause::Default,
+        servers,
+        direction,
+        default: new,
+        // In the words of the profile visibility each default stands for (`Xc`).
+        setting_name: match new {
+            ActivityDefault::Off => "friends & all servers",
+            ActivityDefault::LargeServers => "friends & small servers only",
+            ActivityDefault::On => "friends only",
+        },
+    })
+}
+
+/// The servers that differ from `new` once the default moves there from
+/// `current`, those joined last first, and which way (`g8`, 365258).
+fn affected(
+    current: ActivityDefault,
+    default: ActivityDefault,
+    restricted: &[Snowflake],
+    servers: &[Server],
+) -> Option<(Vec<Snowflake>, Direction)> {
     let direction =
         if default.restraint() < current.restraint() { Direction::Restricting } else { Direction::Expanding };
     #[derive(PartialEq)]
@@ -112,16 +170,69 @@ pub fn after_profile_privacy(
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (Some(_), None) => std::cmp::Ordering::Less,
     });
-    Some(Change {
-        servers: affected.into_iter().map(|server| server.id).collect(),
-        direction,
-        default,
-        setting_name: match new {
-            ProfileVisibility::FriendsAndAllServers => "friends & all servers",
-            ProfileVisibility::FriendsAndSmallServers => "friends & small servers only",
-            ProfileVisibility::FriendsOnly => "friends only",
-        },
-    })
+    Some((affected.into_iter().map(|server| server.id).collect(), direction))
+}
+
+/// A server in Activity Privacy's list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listed {
+    pub id: Snowflake,
+    pub name: String,
+    /// Seconds since 1970.
+    pub joined_at: Option<i64>,
+}
+
+/// How the list is ordered (`S4` in 212909).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Order {
+    #[default]
+    Server,
+    Newest,
+    SharingOn,
+    SharingOff,
+}
+
+impl Order {
+    pub const ALL: [Order; 4] = [Order::Server, Order::Newest, Order::SharingOn, Order::SharingOff];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Order::Server => "Server Order",
+            Order::Newest => "Newest",
+            Order::SharingOn => "Activity Sharing On",
+            Order::SharingOff => "Activity Sharing Off",
+        }
+    }
+}
+
+/// The servers to list: those whose name has `query` in it (any case),
+/// ordered as `order` says. `servers` is in the order of the server list, and
+/// `restricted` those without sharing. A server with no join date comes
+/// before the dated ones in Newest, as it does in the client.
+pub fn listed(servers: &[Listed], query: &str, order: Order, restricted: &[Snowflake]) -> Vec<Listed> {
+    let mut shown: Vec<Listed> = servers.to_vec();
+    let held = |server: &Listed| restricted.contains(&server.id);
+    match order {
+        Order::Server => {}
+        Order::Newest => shown.sort_by_key(|server| (server.joined_at.is_some(), std::cmp::Reverse(server.joined_at))),
+        Order::SharingOn => shown.sort_by_key(held),
+        Order::SharingOff => shown.sort_by_key(|server| !held(server)),
+    }
+    let query = query.to_lowercase();
+    shown.retain(|server| query.is_empty() || server.name.to_lowercase().contains(&query));
+    shown
+}
+
+/// "Toggle All On" when any server is without sharing, else "Toggle All Off".
+/// The list of servers without sharing it saves: none, or every one of
+/// `all`.
+pub fn toggle_all(restricted: &[Snowflake], all: &[Snowflake]) -> Vec<Snowflake> {
+    if restricted.is_empty() { all.to_vec() } else { Vec::new() }
+}
+
+/// What the button over the list says (`7lxcLO` and `zh6UEs`).
+pub fn toggle_all_label(restricted: &[Snowflake]) -> &'static str {
+    if restricted.is_empty() { "Toggle All Off" } else { "Toggle All On" }
 }
 
 impl Change {
@@ -141,30 +252,38 @@ impl Change {
         }
     }
 
-    /// The dialog's title and the question under it (`vz`).
+    /// The dialog's title and the question under it (`vz` after the profile
+    /// visibility, `ae` after the default).
     pub fn title(&self) -> &'static str {
-        match self.direction {
-            Direction::Restricting => "Stop sharing activity too?",
-            Direction::Expanding => "Share activity too?",
+        match (self.cause, self.direction) {
+            (Cause::ProfileVisibility, Direction::Restricting) => "Stop sharing activity too?",
+            (Cause::ProfileVisibility, Direction::Expanding) => "Share activity too?",
+            (Cause::Default, Direction::Restricting) => "Turn Off Activity In Your Servers?",
+            (Cause::Default, Direction::Expanding) => "Turn On Activity In Your Servers?",
         }
     }
 
     /// The question: `name` is in the text in bold.
     pub fn question(&self, name: &str) -> String {
-        match self.direction {
-            Direction::Restricting => format!(
+        match (self.cause, self.direction) {
+            (Cause::ProfileVisibility, Direction::Restricting) => format!(
                 "Your profile visibility is set to {name}. Update your activity sharing settings to {name} too? This will turn off activity in these servers"
             ),
-            Direction::Expanding => format!(
+            (Cause::ProfileVisibility, Direction::Expanding) => format!(
                 "Your profile visibility is set to {name}. Update your activity sharing setting to {name} too? This will turn on activity in these servers"
             ),
+            (Cause::Default, _) => {
+                format!("You changed your default sharing settings to {name}. Update your servers to match?")
+            }
         }
     }
 
     pub fn confirm(&self) -> &'static str {
-        match self.direction {
-            Direction::Restricting => "Stop sharing",
-            Direction::Expanding => "Share",
+        match (self.cause, self.direction) {
+            (Cause::ProfileVisibility, Direction::Restricting) => "Stop sharing",
+            (Cause::ProfileVisibility, Direction::Expanding) => "Share",
+            (Cause::Default, Direction::Restricting) => "Turn Off",
+            (Cause::Default, Direction::Expanding) => "Turn On",
         }
     }
 
@@ -197,6 +316,66 @@ mod tests {
     }
 
     use ProfileVisibility::{FriendsAndAllServers as All, FriendsAndSmallServers as Small, FriendsOnly as Only};
+
+    #[test]
+    fn the_default_changing_asks_for_the_servers_that_would_differ() {
+        let servers = [server(1, Some(10), Some(500)), server(2, Some(20), Some(50)), server(3, Some(30), None)];
+        // From sharing in all servers to sharing in none.
+        let change = after_default(ActivityDefault::Off, ActivityDefault::On, &[], &servers).unwrap();
+        assert_eq!(change.cause, Cause::Default);
+        assert_eq!((change.direction, change.servers.clone()), (Direction::Restricting, ids(&[3, 2, 1])));
+        assert_eq!(
+            (change.title(), change.confirm(), change.setting_name),
+            ("Turn Off Activity In Your Servers?", "Turn Off", "friends only")
+        );
+        assert_eq!(
+            change.question("<b>x</b>"),
+            "You changed your default sharing settings to <b>x</b>. Update your servers to match?"
+        );
+        assert_eq!(change.toast(), "Servers synced");
+        // Only the large ones, and those of unknown size, stop between "all" and "small servers".
+        let change = after_default(ActivityDefault::Off, ActivityDefault::LargeServers, &[], &servers).unwrap();
+        assert_eq!((change.direction, change.servers.clone()), (Direction::Restricting, ids(&[3, 1])));
+        let back = after_default(ActivityDefault::On, ActivityDefault::Off, &ids(&[1, 2, 3]), &servers).unwrap();
+        assert_eq!(
+            (back.direction, back.servers.clone(), back.title()),
+            (Direction::Expanding, ids(&[3, 2, 1]), "Turn On Activity In Your Servers?")
+        );
+        assert_eq!(
+            (back.confirm(), back.setting_name, back.toast()),
+            ("Turn On", "friends & all servers", "Activity turned on")
+        );
+        assert!(after_default(ActivityDefault::On, ActivityDefault::On, &[], &servers).is_none());
+        assert!(
+            after_default(ActivityDefault::Off, ActivityDefault::On, &ids(&[1, 2, 3]), &servers).is_none(),
+            "all are already without sharing"
+        );
+    }
+
+    #[test]
+    fn the_list_is_searched_and_sorted_as_the_client_does() {
+        let listed_server = |id, name: &str, joined| Listed { id: Snowflake(id), name: name.into(), joined_at: joined };
+        let all = [
+            listed_server(1, "Alpha", Some(30)),
+            listed_server(2, "beta club", None),
+            listed_server(3, "Gamma", Some(10)),
+        ];
+        let order = |o, query: &str, restricted: &[u64]| {
+            listed(&all, query, o, &restricted.iter().copied().map(Snowflake).collect::<Vec<_>>())
+                .iter()
+                .map(|s| s.id.0)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(order(Order::Server, "", &[]), [1, 2, 3]);
+        assert_eq!(order(Order::Newest, "", &[]), [2, 1, 3], "no date first, then the newest");
+        assert_eq!(order(Order::SharingOn, "", &[1]), [2, 3, 1], "those sharing first, the rest as they were");
+        assert_eq!(order(Order::SharingOff, "", &[3, 2]), [2, 3, 1]);
+        assert_eq!(order(Order::Server, "BE", &[]), [2], "any case, anywhere in the name");
+        assert!(order(Order::Server, "zzz", &[]).is_empty());
+        assert_eq!(toggle_all(&[], &ids(&[1, 2])), ids(&[1, 2]));
+        assert_eq!(toggle_all(&ids(&[2]), &ids(&[1, 2])), ids(&[]));
+        assert_eq!((toggle_all_label(&[]), toggle_all_label(&ids(&[2]))), ("Toggle All Off", "Toggle All On"));
+    }
 
     #[test]
     fn nothing_is_asked_where_the_default_already_is_what_the_visibility_maps_to() {

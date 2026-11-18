@@ -1368,3 +1368,32 @@ impl Viewer {
 }
 """)
 edit("crates/app/src/ui/viewer.rs", "    pub(super) fn open(&self, index: usize, start: f64) {", "    pub(super) fn open(&self, index: usize, start: f64) {")
+# The settings window: `settings <page>` opens it on a page by its name (`activity` is Activity Privacy),
+# `activity-share on|off` saves "Share my activity", and `activity-default <1..3>` saves the default (as a pick of its row).
+edit("crates/app/src/ui/settings.rs", "        dialog.add(&activity);\n", "        activity.set_name(Some(\"activity\"));\n        dialog.add(&activity);\n")
+open(f"{root}/crates/app/src/ui/settings.rs", "a").write(r"""
+impl App {
+    pub(super) fn e2e_settings(self: &Rc<Self>, command: &str, arg: &str) {
+        match command {
+            "settings" => {
+                self.show_settings();
+                if let Some(window) = self.settings_window.borrow().as_ref() {
+                    window.dialog.set_visible_page_name(arg);
+                }
+            }
+            "activity-share" => self.change_setting(Setting::ShowCurrentGame(arg == "on")),
+            _ => {
+                let default = match arg {
+                    "1" => discord::settings::ActivityDefault::Off,
+                    "2" => discord::settings::ActivityDefault::LargeServers,
+                    _ => discord::settings::ActivityDefault::On,
+                };
+                self.set_activity_default(default);
+            }
+        }
+    }
+}
+""")
+edit("crates/app/src/ui/activity_privacy.rs", "    fn set_activity_default(self: &Rc<Self>", "    pub(super) fn set_activity_default(self: &Rc<Self>")
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(c) if c == "settings" || c == "activity-share" || c == "activity-default" => self.e2e_settings(c, rest),
+            Some("quit") => {''')
