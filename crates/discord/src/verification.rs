@@ -116,6 +116,15 @@ impl Account {
     }
 }
 
+impl Account {
+    /// `G3` (874850): whether unreads and mentions are kept for a channel,
+    /// which an age-restricted channel (its own flag, or its server's) isn't
+    /// unless Discord lets the account see such content.
+    pub fn tracks(&self, channel_nsfw: bool, guild_age_restricted: bool) -> bool {
+        self.nsfw_allowed || !(channel_nsfw || guild_age_restricted)
+    }
+}
+
 /// Why we can't talk in a server yet, most pressing first.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Gate {
@@ -331,6 +340,18 @@ mod tests {
         assert_eq!(gate(&guild, &account(), later()), Some(Gate::Screening), "even the owner is held");
         guild.pending = false;
         assert_eq!(gate(&guild, &account(), later()), None);
+    }
+
+    #[test]
+    fn age_restricted_channels_are_tracked_only_for_an_account_that_may_see_them() {
+        let adult = Account { nsfw_allowed: true, ..Account::default() };
+        let minor = Account::default();
+        for (channel, guild, tracked_by_minor) in
+            [(false, false, true), (true, false, false), (false, true, false), (true, true, false)]
+        {
+            assert_eq!(minor.tracks(channel, guild), tracked_by_minor, "channel {channel}, server {guild}");
+            assert!(adult.tracks(channel, guild), "an account that may see it sees everything");
+        }
     }
 
     #[test]

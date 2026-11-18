@@ -89,7 +89,7 @@ impl App {
             dms.sort_by_key(|c| std::cmp::Reverse(c.activity()));
             for dm in dms {
                 let row = dm_row(dm, &self.images);
-                if let Some(badge) = badge(state.read.mentions(dm.id)) {
+                if let Some(badge) = badge(state.mentions(dm.id)) {
                     row.append(&badge);
                 }
                 let row = self.append_row(&row, Some(Target::Channel(dm.id)), state.channel == Some(dm.id));
@@ -147,7 +147,7 @@ impl App {
                 if let Some(mark) = icon.and_then(|i| i.mark) {
                     row.append(&mark_widget(mark));
                 }
-                if let Some(badge) = badge(state.read.mentions(channel.id)) {
+                if let Some(badge) = badge(state.mentions(channel.id)) {
                     row.append(&badge);
                 }
                 let row = self.append_row(&row, Some(Target::Channel(channel.id)), state.channel == Some(channel.id));
@@ -222,7 +222,7 @@ impl App {
                 .ellipsize(pango::EllipsizeMode::End)
                 .build(),
         );
-        if let Some(badge) = badge(state.read.mentions(thread.id)) {
+        if let Some(badge) = badge(state.mentions(thread.id)) {
             row.append(&badge);
         }
         self.thread_menu_on(&row, thread.id);

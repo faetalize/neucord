@@ -20,7 +20,7 @@ impl App {
             let mut state = self.account.state.borrow_mut();
             let Some((_, c)) = state.find_channel(channel) else { return };
             let Some(last) = c.last_message_id else { return };
-            let pending = state.is_unread(c) || state.read.mentions(channel) > 0;
+            let pending = state.is_unread(c) || state.mentions(channel) > 0;
             if !pending {
                 return;
             }

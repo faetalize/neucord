@@ -711,7 +711,7 @@ impl State {
             selected: self.channel == Some(channel.id),
             thread_open: open_thread,
             has_threads: !self.sidebar_threads(guild, channel).is_empty(),
-            mentions: self.read.mentions(channel.id) > 0,
+            mentions: self.mentions(channel.id) > 0,
             muted: self.notifications.channel_muted_itself(guild.id, channel.id, now),
             category_muted: channel
                 .parent_id
@@ -800,7 +800,7 @@ impl State {
 
     /// Whether `channel` has anything unread or a mention waiting.
     pub(super) fn has_news(&self, channel: &Channel) -> bool {
-        self.is_unread(channel) || self.read.mentions(channel.id) > 0
+        self.is_unread(channel) || self.mentions(channel.id) > 0
     }
 
     /// What "Mark As Read" on a channel or a category acks, each with its
@@ -863,7 +863,7 @@ impl State {
     /// icon, or on a folder, is greyed by.
     pub(super) fn guild_has_news(&self, guild: &Guild) -> bool {
         let channels = self.visible(guild, |k| k.is_text() || k.is_vocal() || k.is_forum_like());
-        let mut channels = channels.filter(|c| !c.kind.is_vocal() || self.read.mentions(c.id) > 0);
+        let mut channels = channels.filter(|c| !c.kind.is_vocal() || self.mentions(c.id) > 0);
         channels.any(|c| self.has_news(c)) || threads::joined_active(guild).any(|t| self.has_news(t))
     }
 
@@ -921,7 +921,33 @@ impl State {
         })
     }
 
+    /// Whether unreads and mentions are kept for `channel`: not in an
+    /// age-restricted one unless the account may see them (`G3`, 874850,
+    /// asked by `canTrackUnreads` in 218461). A thread is as age-restricted
+    /// as its parent.
+    pub(super) fn tracks_unreads(&self, channel: &Channel) -> bool {
+        let Some((guild, channel)) = self.find_channel(channel.id) else { return true };
+        let by_level = self.limits().servers_by_nsfw_level();
+        let nsfw = channel.nsfw
+            || channel.kind.is_thread()
+                && channel.parent_id.and_then(|p| guild?.channel(p)).is_some_and(|parent| parent.nsfw);
+        let restricted = guild.is_some_and(|g| g.age_restricted(by_level));
+        self.account.as_ref().is_some_and(|me| me.tracks(nsfw, restricted))
+    }
+
+    /// A channel's mention count, which an age-restricted channel doesn't
+    /// have for an account that may not see it.
+    pub(super) fn mentions(&self, id: Snowflake) -> u32 {
+        match self.find_channel(id) {
+            Some((_, channel)) if !self.tracks_unreads(channel) => 0,
+            _ => self.read.mentions(id),
+        }
+    }
+
     pub(super) fn is_unread(&self, channel: &Channel) -> bool {
+        if !self.tracks_unreads(channel) {
+            return false;
+        }
         if channel.kind.is_thread() {
             let guild = self.guilds.iter().find(|g| g.thread(channel.id).is_some());
             return guild.is_some_and(|g| threads::is_unread(g, channel, &self.read));
@@ -940,7 +966,7 @@ impl State {
         let opt_in = self.notifications.opt_in_enabled(guild.id) && guild.features.iter().any(|f| f == "COMMUNITY");
         // What a channel adds: its dot and mentions, trimmed by the server's opt-in channels.
         let count = |channel: &Channel, dot: bool| {
-            let (unread, mentions) = (dot && self.is_unread(channel), self.read.mentions(channel.id));
+            let (unread, mentions) = (dot && self.is_unread(channel), self.mentions(channel.id));
             if !opt_in {
                 return (unread, mentions);
             }
@@ -963,7 +989,7 @@ impl State {
         mentions += self.visible(guild, ChannelKind::is_vocal).map(|c| count(c, false).1).sum::<u32>();
         // Threads we've joined count too, unless muted, whatever their parent.
         for thread in threads::joined_active(guild) {
-            mentions += self.read.mentions(thread.id);
+            mentions += self.mentions(thread.id);
             unread = unread || (!guild_muted && !Self::thread_muted(thread) && self.is_unread(thread));
         }
         (unread, mentions)
@@ -1076,7 +1102,7 @@ impl State {
                 channel.id.0,
                 self.is_unread(channel) as u64,
                 self.notifications.channel_muted(&place, now) as u64,
-                self.read.mentions(channel.id) as u64,
+                self.mentions(channel.id) as u64,
             ]);
         }
         sig
@@ -1085,7 +1111,7 @@ impl State {
     /// Home's badge: every DM message counts as a mention, and so does a
     /// friend request.
     pub(super) fn home_badge(&self) -> u32 {
-        self.dms().map(|c| self.read.mentions(c.id)).sum::<u32>() + self.relationships.incoming()
+        self.dms().map(|c| self.mentions(c.id)).sum::<u32>() + self.relationships.incoming()
     }
 
     /// Record a new newest message for a channel wherever it lives.
@@ -1381,6 +1407,46 @@ mod tests {
         assert!(state.read_item(Snowflake(22)).is_none(), "not a channel");
         state.guilds[0].channels.iter_mut().find(|c| c.id == Snowflake(20)).unwrap().last_message_id = None;
         assert_eq!(enabled(&state, 20), Some(false), "nothing to mark unread from");
+    }
+
+    #[test]
+    fn an_age_restricted_channel_keeps_no_unreads_or_mentions_for_an_account_that_may_not_see_it() {
+        let mut state = open_server(None, json!({"last_message_id": "200", "nsfw": true}));
+        state.guilds[0].set_role(serde_json::from_value(json!({"id": "1", "permissions": "1049600"})).unwrap());
+        state.guilds[0].threads = vec![
+            serde_json::from_value(
+                json!({"id": "40", "type": 11, "parent_id": "9", "last_message_id": "1570000000000000000",
+                "thread_metadata": {"archived": false, "auto_archive_duration": 60},
+                "member": {"flags": 0, "join_timestamp": "2026-10-28T00:00:00Z"}}),
+            )
+            .unwrap(),
+        ];
+        state.read = ReadStates::from_ready(&json!([
+            {"id": "9", "last_message_id": "100", "mention_count": 3},
+            {"id": "40", "last_message_id": "1", "mention_count": 2},
+        ]));
+        let channel = state.guilds[0].channels[0].clone();
+        let thread = state.guilds[0].threads[0].clone();
+        assert!(!state.is_unread(&channel) && !state.is_unread(&thread));
+        assert_eq!(
+            (state.mentions(Snowflake(9)), state.mentions(Snowflake(40))),
+            (0, 0),
+            "a thread goes by its parent"
+        );
+        assert_eq!(state.guild_badge(&state.guilds[0]), (false, 0));
+        assert!(!state.has_news(&channel));
+
+        state.account.as_mut().unwrap().nsfw_allowed = true;
+        assert!(state.is_unread(&channel) && state.is_unread(&thread));
+        assert_eq!((state.mentions(Snowflake(9)), state.mentions(Snowflake(40))), (3, 2), "an adult's");
+        assert_eq!(state.guild_badge(&state.guilds[0]), (true, 5));
+
+        // A server that is age-restricted makes all its channels so.
+        state.account.as_mut().unwrap().nsfw_allowed = false;
+        state.guilds[0].channels[0].nsfw = false;
+        assert_eq!(state.mentions(Snowflake(9)), 3, "an ordinary channel");
+        state.guilds[0].owner_configured_content_level = 3;
+        assert_eq!(state.mentions(Snowflake(9)), 0, "in an age-restricted server");
     }
 
     #[test]

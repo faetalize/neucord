@@ -413,8 +413,17 @@ impl App {
                         }
                         _ => place.is_some_and(|p| state.notifications.should_notify(&p, pinged, now_unix())),
                     };
-                let counted =
-                    state.notifications.counts_mention(place.as_ref(), group_dm, &message, pinged, blocked, now_unix());
+                // An age-restricted channel keeps no mentions for an account that may not see it (`G3`).
+                let tracked = state.find_channel(channel).is_none_or(|(_, c)| state.tracks_unreads(c));
+                let counted = tracked
+                    && state.notifications.counts_mention(
+                        place.as_ref(),
+                        group_dm,
+                        &message,
+                        pinged,
+                        blocked,
+                        now_unix(),
+                    );
                 state.read.on_message(channel, counted);
                 place.filter(|_| notify)
             }
