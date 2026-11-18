@@ -9,6 +9,7 @@ mod kept;
 mod recorder;
 mod render;
 mod rich_text;
+mod sound;
 mod theme;
 mod timelines;
 mod tray;

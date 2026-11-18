@@ -94,9 +94,11 @@ impl ColorScheme {
     }
 }
 
-/// Notification sounds at all: the client's "Disable All Notification
-/// Sounds" (`disableAllSounds`, 803224), turned round so that on is the
-/// default. Off keeps the preferences below, which come back when it is on.
+/// Sounds at all: the client's "Disable All Notification Sounds"
+/// (`disableAllSounds`, 803224), turned round so that on is the default. Off
+/// keeps the preferences below, which come back when it is on. It alone
+/// governs the sound of a voice message recording stopped by another
+/// (`voice_message_recording_stopped`), which the client lists nowhere else.
 pub const ALL_SOUNDS: Key = Key { group: "Notifications", name: "all-sounds", default: true };
 
 /// The sound of a new message (`message1` in 212909's list of sounds, the

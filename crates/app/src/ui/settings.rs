@@ -300,7 +300,7 @@ impl App {
         );
         let sounds = group(
             "Sounds",
-            "Neucord has only the new message sound so far; the client's voice and video sounds come with voice.",
+            "Neucord has the new message sound and the one a voice message recording makes when another stops it; the client's call sounds come with voice.",
         );
         option_switch(
             self,
