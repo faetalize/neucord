@@ -103,6 +103,10 @@ what arrived, IDENTIFY's key order and properties first.
   becomes message.txt) and images, one from a page named after its `<img>`;
   `name-stickers` types `:wave` in a server channel (emoji, then the stickers
   that match, under their headers) and picks a sticker, which is sent alone;
+  `thread-search` opens the thread browser and searches its names (one request
+  with `name` and `tag_setting`, results in place of the lists, emptying the
+  box brings them back; `threads`, `thread-search <text>` and `thread-rows`
+  are its commands);
   `heartbeat` waits for five op 40s, the interval's among them;
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).
