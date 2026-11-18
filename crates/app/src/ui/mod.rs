@@ -42,6 +42,7 @@ mod pills;
 mod pin_list;
 mod pins;
 mod poll_composer;
+mod poll_votes;
 mod polls;
 mod privacy;
 mod profile;

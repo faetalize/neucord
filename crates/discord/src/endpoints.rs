@@ -21,6 +21,7 @@ pub(crate) const UNPIN_MESSAGE: Endpoint = Endpoint::delete("/channels/{channel}
 // Kept on one line for discord-watch, past what rustfmt would.
 #[rustfmt::skip]
 pub(crate) const ADD_REACTION: Endpoint = Endpoint::put("/channels/{channel}/messages/{message}/reactions/{+emoji}/@me");
+pub(crate) const POLL_VOTERS: Endpoint = Endpoint::get("/channels/{channel}/polls/{message}/answers/{answer}");
 pub(crate) const REACTORS: Endpoint = Endpoint::get("/channels/{channel}/messages/{message}/reactions/{+emoji}");
 #[rustfmt::skip]
 pub(crate) const REMOVE_REACTION: Endpoint = Endpoint::delete("/channels/{channel}/messages/{message}/reactions/{+emoji}/0/{+user}");

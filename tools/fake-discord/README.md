@@ -107,6 +107,9 @@ what arrived, IDENTIFY's key order and properties first.
   with `name` and `tag_setting`, results in place of the lists, emptying the
   box brings them back; `threads`, `thread-search <text>` and `thread-rows`
   are its commands);
+  `poll-votes` (with `FAKE_POLL=1`, a finished poll in #general whose first
+  answer has 130 voters) opens the list of who voted (`poll-votes <message>
+  <answer>`) and asks for the first page of voters (`limit=100&type=2`);
   `heartbeat` waits for five op 40s, the interval's among them;
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).
