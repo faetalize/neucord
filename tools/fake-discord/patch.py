@@ -17,6 +17,7 @@ edit("crates/discord/src/identity.rs",
 edit("crates/discord/src/cdn.rs", 'host == "media.discordapp.net" ||', 'host == "127.0.0.1:8099" || host == "media.discordapp.net" ||')
 edit("crates/discord/src/cdn.rs", 'let host = url.strip_prefix("https://").and_then(|rest| rest.split([\'/\', \'?\']).next()).unwrap_or_default();', 'let host = url.strip_prefix("http://").and_then(|rest| rest.split([\'/\', \'?\']).next()).unwrap_or_default();')
 edit("crates/app/src/ui/uploads.rs", "    attach: gtk::Button,", "    pub(super) attach: gtk::Button,")
+edit("crates/app/src/ui/create_thread.rs", "    fn pick_form_sticker(", "    pub(super) fn pick_form_sticker(")
 edit("crates/app/src/ui/create_thread.rs", "    parent: Snowflake,\n    dialog: adw::Dialog,", "    pub(super) parent: Snowflake,\n    pub(super) dialog: adw::Dialog,")
 edit("crates/app/src/ui/members.rs", "\n    scroller: gtk::ScrolledWindow,", "\n    pub(super) scroller: gtk::ScrolledWindow,")
 edit("crates/app/src/ui/mod.rs", "\n    members: members::Pane,", "\n    pub(super) members: members::Pane,")
@@ -479,10 +480,25 @@ impl App {
                     None => eprintln!("e2e: no name field"),
                 }
             }
+            // A sticker found by `query` picked in the open thread form, as its picker does.
+            Some("thread-sticker") => {
+                let form = self.thread_form.borrow().clone();
+                let Some(form) = form else { return eprintln!("e2e: no thread form") };
+                let (this, query) = (self.clone(), rest.to_owned());
+                let pick = move || {
+                    let found = this.sticker_search_library(form.parent).search(&query, &this.sticker_scores()).unlocked;
+                    match found.first() {
+                        Some(entry) => this.pick_form_sticker(&form, entry),
+                        None => eprintln!("e2e: no sticker for {query}"),
+                    }
+                };
+                self.fetch_sticker_packs(pick.clone());
+                pick();
+            }
             Some("thread-form-state") => {
                 let form = self.thread_form.borrow().clone();
                 match form {
-                    Some(form) => eprintln!("e2e: thread form files={} can-close={}", self.drafts.of(super::uploads::Draft::FirstThreadMessage(form.parent)).len(), form.dialog.can_close()),
+                    Some(form) => eprintln!("e2e: thread form files={} sticker={} can-close={}", self.drafts.of(super::uploads::Draft::FirstThreadMessage(form.parent)).len(), self.waiting.of(super::uploads::Draft::FirstThreadMessage(form.parent)).map_or("-".to_owned(), |l| l.sticker.name), form.dialog.can_close()),
                     None => eprintln!("e2e: no thread form"),
                 }
             }
