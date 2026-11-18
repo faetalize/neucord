@@ -1511,6 +1511,36 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
             Some(update) => Event::VoiceStates(vec![update]),
             None => return,
         },
+        // A server we aren't focused on: its voice states as they changed, and
+        // the members they name (`PASSIVE_UPDATE_V2` in 977997 and 607567).
+        // The channels' newest messages in it aren't read.
+        "PASSIVE_UPDATE_V2" => {
+            let Some(guild) = parse_id(&data["guild_id"]) else { return };
+            let joined = data["updated_voice_states"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(voice_states::VoiceState::parse)
+                .map(|(user, state)| voice_states::Update { guild, user, state });
+            let left = data["removed_voice_states"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(parse_id)
+                .map(|user| voice_states::Update { guild, user, state: None });
+            let updates: Vec<_> = joined.chain(left).collect();
+            let members = members_of(&serde_json::json!({"members": data["updated_members"]}), &Value::Null);
+            let mut events = Vec::new();
+            if !updates.is_empty() {
+                events.push(Event::VoiceStates(updates));
+            }
+            if !members.is_empty() {
+                events.push(Event::Members { guild_id: guild, members, not_found: Vec::new(), users: Vec::new() });
+            }
+            let Some(last) = events.pop() else { return };
+            events.into_iter().for_each(|event| parser.push(event));
+            last
+        }
         "VOICE_STATE_UPDATE_BATCH" => {
             let updates: Vec<_> =
                 data["voice_states"].as_array().into_iter().flatten().filter_map(voice_states::Update::parse).collect();
@@ -2215,6 +2245,28 @@ mod tests {
 
         dispatch(&state, "VOICE_STATE_UPDATE", json!({"guild_id": null, "user_id": "7", "channel_id": "3"}));
         assert!(state.try_recv().is_err(), "a DM call isn't a server's voice list");
+    }
+
+    #[test]
+    fn a_server_we_are_not_focused_on_sends_its_voice_states_in_passive_updates() {
+        let state = Parser::default();
+        dispatch(
+            &state,
+            "PASSIVE_UPDATE_V2",
+            json!({"guild_id": "1",
+                   "updated_voice_states": [{"user_id": "7", "channel_id": "9", "session_id": "s", "self_mute": true}],
+                   "removed_voice_states": ["8"],
+                   "updated_members": [{"user": {"id": "7", "username": "a"}, "nick": "Seven", "roles": []}],
+                   "updated_channels": [{"id": "9", "last_message_id": "30"}]}),
+        );
+        let Ok(Event::VoiceStates(updates)) = state.try_recv() else { panic!("no voice states") };
+        assert_eq!(updates.len(), 2);
+        assert!(updates[0].state.as_ref().is_some_and(|s| s.self_mute && s.channel_id == Snowflake(9)));
+        assert_eq!((updates[1].guild, updates[1].user, updates[1].state.is_none()), (Snowflake(1), Snowflake(8), true));
+        let Ok(Event::Members { guild_id, members, .. }) = state.try_recv() else { panic!("no members") };
+        assert_eq!((guild_id, members.len()), (Snowflake(1), 1));
+        dispatch(&state, "PASSIVE_UPDATE_V2", json!({"guild_id": "1", "updated_channels": []}));
+        assert!(state.try_recv().is_err(), "nothing in it");
     }
 
     #[test]
