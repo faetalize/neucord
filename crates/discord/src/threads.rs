@@ -18,6 +18,60 @@ use crate::{Channel, ChannelKind, Guild, Snowflake, ThreadMember};
 /// thread menu, 949488).
 pub const MENU_LOCATION: &str = "Context Menu";
 
+/// How long a thread we opened is remembered as opened (`M` in 123363).
+const VIEWED_FOR_MS: u64 = 90 * 24 * 60 * 60 * 1000;
+
+/// Where opening a thread starts reading (`P` in 123363, which a message to
+/// jump to, if there is one, overrides).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Anchor {
+    /// Around the thread's first message, which has the thread's id.
+    Start,
+    /// Around the last message we acknowledged, to read on from there.
+    Unread(Snowflake),
+    /// The newest page, as for any channel.
+    Newest,
+}
+
+/// The threads we opened, and when: the client's `viewedThreadIds`, kept for
+/// 90 days.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Viewed(HashMap<Snowflake, u64>);
+
+impl Viewed {
+    pub fn new(entries: impl IntoIterator<Item = (Snowflake, u64)>) -> Self {
+        Viewed(entries.into_iter().collect())
+    }
+
+    pub fn entries(&self) -> impl Iterator<Item = (Snowflake, u64)> + '_ {
+        self.0.iter().map(|(&id, &at)| (id, at))
+    }
+
+    /// Where to open `thread`. One never opened, here or on any client
+    /// (`persisted`: Discord has a read state for it), opens at its start and
+    /// is remembered as opened. Otherwise one with unread messages (`unread`
+    /// is the last message we acknowledged) opens there, if nothing of it is
+    /// shown yet (`loaded`).
+    pub fn anchor(
+        &mut self,
+        thread: Snowflake,
+        persisted: bool,
+        unread: Option<Snowflake>,
+        loaded: bool,
+        now_ms: u64,
+    ) -> Anchor {
+        if !persisted && !self.0.contains_key(&thread) {
+            self.0.insert(thread, now_ms);
+            self.0.retain(|_, &mut at| at >= now_ms.saturating_sub(VIEWED_FOR_MS));
+            return Anchor::Start;
+        }
+        match unread {
+            Some(acked) if !loaded => Anchor::Unread(acked),
+            _ => Anchor::Newest,
+        }
+    }
+}
+
 /// How many archived threads a page holds (`loadArchivedThreads` in 7909).
 pub const PAGE: u32 = 25;
 
@@ -295,6 +349,33 @@ fn window_end(thread: &Channel) -> i64 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_thread_never_opened_starts_at_its_start_once() {
+        const T: Snowflake = Snowflake(7);
+        let mut viewed = Viewed::default();
+        assert_eq!(viewed.anchor(T, false, None, false, 1_000), Anchor::Start);
+        assert_eq!(viewed.anchor(T, false, None, false, 2_000), Anchor::Newest, "opened since");
+        assert_eq!(Viewed::default().anchor(T, true, None, false, 1_000), Anchor::Newest, "opened on another client");
+    }
+
+    #[test]
+    fn a_thread_with_unread_messages_opens_where_we_left_off() {
+        const T: Snowflake = Snowflake(7);
+        let mut viewed = Viewed::new([(T, 1)]);
+        assert_eq!(viewed.anchor(T, true, Some(Snowflake(40)), false, 5), Anchor::Unread(Snowflake(40)));
+        assert_eq!(viewed.anchor(T, true, Some(Snowflake(40)), true, 5), Anchor::Newest, "already showing messages");
+        assert_eq!(viewed.anchor(T, true, None, false, 5), Anchor::Newest, "nothing unread");
+    }
+
+    #[test]
+    fn what_was_opened_long_ago_is_forgotten() {
+        let mut viewed = Viewed::new([(Snowflake(1), 0), (Snowflake(2), 100 * 24 * 60 * 60 * 1000)]);
+        viewed.anchor(Snowflake(9), false, None, false, 100 * 24 * 60 * 60 * 1000);
+        let mut kept: Vec<_> = viewed.entries().map(|(id, _)| id.0).collect();
+        kept.sort();
+        assert_eq!(kept, [2, 9], "the one from 100 days before went");
+    }
     use serde_json::json;
 
     use super::*;
