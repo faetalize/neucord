@@ -9,7 +9,7 @@ use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 
 mod imp {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     use super::*;
 
@@ -19,6 +19,8 @@ mod imp {
         pub size: Cell<(i32, i32)>,
         /// Exactly that size in both directions, for where it sits in a scroller.
         pub exact: Cell<bool>,
+        /// The missing-image mark, once the media failed to load.
+        pub missing: RefCell<Option<gtk::Image>>,
     }
 
     #[glib::object_subclass]
@@ -97,6 +99,25 @@ impl MediaFrame {
     pub fn set_exact(&self, exact: bool) {
         self.imp().exact.set(exact);
         self.queue_resize();
+    }
+
+    /// Show that the media could not be loaded: a mark in the empty box, which
+    /// keeps the media's size as the client's placeholder does (251843).
+    pub fn show_missing(&self) {
+        let mut missing = self.imp().missing.borrow_mut();
+        if missing.is_some() {
+            return;
+        }
+        let mark = gtk::Image::builder()
+            .icon_name("image-missing-symbolic")
+            .pixel_size(48)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .css_classes(["dimmed"])
+            .tooltip_text("This image could not be loaded")
+            .build();
+        mark.set_parent(self);
+        *missing = Some(mark);
     }
 
     /// Resize it, as the room for it changes.
