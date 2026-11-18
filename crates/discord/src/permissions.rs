@@ -610,6 +610,25 @@ pub fn can_delete(guild: Option<&Guild>, channel: &Channel, message: &Message, m
     message.is_deletable_by(me.id, manage) && can_change(guild, channel, me, now) && !report
 }
 
+/// Whether Pin Message and Unpin Message show on `message` (`A` in 492841):
+/// not on a system message or in the system DM, where we may pin and read
+/// the history (a DM needs neither), in a channel messages can still be
+/// changed in ([`can_change`]), and not in a voice, stage or media-thread
+/// channel. A message that failed to send has none of it in Neucord, which
+/// keeps no such message in the list.
+pub fn can_pin(guild: Option<&Guild>, channel: &Channel, message: &Message, me: &Account, now: i64) -> bool {
+    let allowed = |g| {
+        let permissions = in_channel(g, channel, me, now);
+        permissions.contains(Permissions::PIN_MESSAGES) && permissions.contains(Permissions::READ_MESSAGE_HISTORY)
+    };
+    let may = channel.kind.is_private() || guild.is_some_and(allowed);
+    message.is_user_message()
+        && !channel.is_system_dm()
+        && may
+        && can_change(guild, channel, me, now)
+        && !matches!(channel.kind, ChannelKind::Voice | ChannelKind::Stage | ChannelKind::MediaThread)
+}
+
 /// What the client offers of reactions in a channel (`A` in 707985, with
 /// what `cw` in 190854 feeds it).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1344,6 +1363,29 @@ mod tests {
         // DMs have no Manage Messages.
         let dm: Channel = serde_json::from_value(json!({"id": "9", "type": 1})).unwrap();
         assert!(can_delete(None, &dm, &ours, &me, 0) && !can_delete(None, &dm, &theirs, &me, 0));
+    }
+
+    #[test]
+    fn pinning_takes_pin_messages_and_a_message_someone_wrote() {
+        let (me, mut guild, open) = (me(), guild(), channel(&[]));
+        let theirs = message(31, 9, Snowflake(2), 0);
+        assert!(!can_pin(Some(&guild), &open, &theirs, &me, 0), "not without Pin Messages");
+        let pinner = (Permissions::PIN_MESSAGES | HISTORY).0.to_string();
+        guild.set_role(serde_json::from_value(json!({"id": "42", "name": "Pinner", "permissions": pinner})).unwrap());
+        guild.my_roles.push(Snowflake(42));
+        assert!(can_pin(Some(&guild), &open, &theirs, &me, 0));
+        assert!(!can_pin(Some(&guild), &open, &message(32, 9, Snowflake(2), 7), &me, 0), "a system message");
+        let mut voice = channel(&[]);
+        voice.kind = ChannelKind::Voice;
+        assert!(!can_pin(Some(&guild), &voice, &theirs, &me, 0), "a voice channel's chat");
+        // A DM needs neither permission, but not the system's.
+        let dm: Channel = serde_json::from_value(json!({"id": "9", "type": 1})).unwrap();
+        assert!(can_pin(None, &dm, &theirs, &me, 0));
+        let system: Channel = serde_json::from_value(
+            json!({"id": "9", "type": 1, "recipients": [{"id": "643945264868098049", "username": "Discord", "system": true}]}),
+        )
+        .unwrap();
+        assert!(!can_pin(None, &system, &theirs, &me, 0));
     }
 
     #[test]

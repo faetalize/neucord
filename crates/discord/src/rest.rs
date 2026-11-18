@@ -484,6 +484,16 @@ impl Rest {
         self.request(call!(DELETE_MESSAGE, channel, message), None).await
     }
 
+    /// Pin `message` to its channel (`pinMessage` in 687709).
+    pub async fn pin_message(&self, channel: Snowflake, message: Snowflake) -> Result<(), Error> {
+        self.request(call!(PIN_MESSAGE, channel, message), None).await
+    }
+
+    /// Unpin `message` (`unpinMessage` in 687709).
+    pub async fn unpin_message(&self, channel: Snowflake, message: Snowflake) -> Result<(), Error> {
+        self.request(call!(UNPIN_MESSAGE, channel, message), None).await
+    }
+
     /// React to `message` with `emoji`, once and without retrying a 429: what
     /// to do about a refusal is [`crate::reactions::judge`]'s (`BB` in
     /// 649963).
@@ -1794,6 +1804,10 @@ mod built_in_tests {
         let leave = leave_group_call(Snowflake(7), false);
         assert_eq!((leave.method(), leave.path()), ("DELETE", "/channels/7?silent=false"));
         assert_eq!(leave_group_call(Snowflake(7), true).path(), "/channels/7?silent=true");
+        let (channel, message) = (7, 8);
+        let (pin, unpin) = (call!(PIN_MESSAGE, channel, message), call!(UNPIN_MESSAGE, channel, message));
+        assert_eq!((pin.method(), pin.path()), ("PUT", "/channels/7/pins/8"));
+        assert_eq!((unpin.method(), unpin.path()), ("DELETE", "/channels/7/pins/8"));
         assert_eq!(Sending::default().audit_log_reason, None, "only /ban and /timeout give a reason");
     }
 }

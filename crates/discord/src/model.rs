@@ -1008,6 +1008,9 @@ pub struct Message {
     /// Set once the message has been edited.
     #[serde(default)]
     pub edited_timestamp: Option<String>,
+    /// Pinned to its channel.
+    #[serde(default)]
+    pub pinned: bool,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
     /// Users mentioned in `content`, resolved by Discord. Used to turn
@@ -1593,6 +1596,7 @@ pub struct MessageEdit {
     pub edited: bool,
     pub embeds: Option<Vec<Embed>>,
     pub flags: Option<u64>,
+    pub pinned: Option<bool>,
     /// A poll that changed, such as one ended early.
     pub poll: Option<crate::poll::Poll>,
     /// An app's response replacing the components.
@@ -1612,6 +1616,9 @@ impl MessageEdit {
         }
         if let Some(flags) = self.flags {
             message.flags = flags;
+        }
+        if let Some(pinned) = self.pinned {
+            message.pinned = pinned;
         }
         // When it ends and whether it has; the counts stay as the votes we
         // saw made them, since the client builds them from those.
