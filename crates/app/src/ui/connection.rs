@@ -515,6 +515,9 @@ impl App {
     pub(super) fn on_ready(self: &Rc<Self>, ready: Ready) {
         // A new session: what we hold for each channel may have missed events.
         self.account.timelines.borrow_mut().held.opened();
+        // The pins of an old session may have changed (`CONNECTION_OPEN`, 966833).
+        self.account.state.borrow_mut().pins.clear();
+        self.account.state.borrow_mut().mentions.clear();
         // `CONNECTION_OPEN` closes the app launcher.
         self.close_launcher();
         self.forum_new_session();
@@ -635,6 +638,9 @@ impl App {
             self.stack.set_visible_child_name("main");
         }
         self.apply_required_action();
+        if self.password_due.replace(false) {
+            self.ask_new_password();
+        }
         // A new session subscribes to nothing: say again what we look at.
         self.subscribe_session(true);
 
@@ -778,6 +784,8 @@ impl App {
             let mut state = self.account.state.borrow_mut();
             let was_request = state.private_channels.iter().any(|c| c.id == id && c.is_request());
             state.private_channels.retain(|c| c.id != id);
+            state.pins.forget(id);
+            state.mentions.remove_where(|m| m.channel_id == id);
             (state.guild.is_none(), state.channel == Some(id), was_request, !state.requests().is_empty())
         };
         if was_open && was_request && requests_left {
@@ -867,6 +875,8 @@ impl App {
             let gone: Vec<Snowflake> = guild.remove_channel(id).into_iter().chain([id]).collect();
             let mut timelines = self.account.timelines.borrow_mut();
             for channel in &gone {
+                state.pins.forget(*channel);
+                state.mentions.remove_where(|m| m.channel_id == *channel);
                 state.read.remove(*channel);
                 timelines.remove(*channel);
             }

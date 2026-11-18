@@ -378,7 +378,7 @@ impl App {
 
 /// The size to ask the media proxy for.
 fn request(app: &App) -> u32 {
-    crate::images::request_size((WAITING, WAITING), app.images.scale(), None).0
+    discord::cdn::sticker_size(WAITING as u32, app.images.scale())
 }
 
 /// The stickers the picker lists before the servers and packs.
@@ -434,7 +434,7 @@ fn rows(library: &Library, query: &str, lists: Lists, scores: &HashMap<String, f
 /// can't draw yet (#46), shows its name.
 fn cell_button(app: &Rc<App>, entry: &Entry, picked: &Rc<dyn Fn(&Entry)>) -> gtk::Widget {
     let sticker = &entry.listed.sticker;
-    let size = crate::images::request_size((SIZE, SIZE), app.images.scale(), None).0;
+    let size = discord::cdn::sticker_size(SIZE as u32, app.images.scale());
     let face: gtk::Widget = match sticker.still(size) {
         Some(url) => {
             let picture = gtk::Picture::builder()

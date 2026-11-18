@@ -296,6 +296,11 @@ pub(super) struct State {
     pub(super) voice: VoiceStates,
     /// What each message search holds, by where it looks.
     pub(super) searches: HashMap<discord::search::Context, super::search::Saved>,
+    /// The inbox's mentions, and what they include.
+    pub(super) mentions: discord::mentions::Mentions,
+    pub(super) mention_filter: discord::mentions::Filter,
+    /// The pinned messages of the channels whose list was opened.
+    pub(super) pins: discord::pins::Pins,
     /// Channels opened this session, newest first, for the quick switcher.
     pub(super) quick_history: Vec<Snowflake>,
 }
@@ -304,7 +309,15 @@ impl State {
     /// The state of a session that hasn't begun, with the options and
     /// remembered choices from disk, which outlast any account.
     pub(super) fn fresh(config: &Store, remembered: &Store) -> State {
-        let mut state = State { members_closed: remembered.get(&config::MEMBERS_CLOSED), ..State::default() };
+        let mut state = State {
+            members_closed: remembered.get(&config::MEMBERS_CLOSED),
+            mention_filter: discord::mentions::Filter {
+                everyone: remembered.get(&config::INBOX_EVERYONE),
+                roles: remembered.get(&config::INBOX_ROLES),
+                this_server: remembered.get(&config::INBOX_THIS_SERVER),
+            },
+            ..State::default()
+        };
         state.typing.set_sending(config.get(&config::SEND_TYPING));
         state
     }
@@ -570,6 +583,32 @@ impl State {
             (Some((guild, channel)), Some(me)) => permissions::can_delete(guild, channel, message, me, now_unix()),
             _ => false,
         }
+    }
+
+    /// A message arrived: whether it joins the inbox's mentions (`G` in
+    /// 849171): a mention of us by someone else, as the filter lets it, in a
+    /// channel that isn't a DM, of the open server if that is the filter,
+    /// unless its author is blocked or ignored. It is added if so.
+    pub(super) fn note_mention(&mut self, message: &Message) -> bool {
+        let Some(me) = self.me() else { return false };
+        let filter = self.mention_filter;
+        let Some((guild, channel)) = self.find_channel(message.channel_id) else { return false };
+        let counts = message.is_user_message()
+            && channel.kind != ChannelKind::Dm
+            && message.author.id != me
+            && !(filter.this_server && guild.map(|g| g.id) != self.guild)
+            && !self.relationships.is_blocked_or_ignored(message.author.id)
+            && discord::notifications::mentions(
+                message,
+                me,
+                guild.map_or(&[], |g| g.my_roles.as_slice()),
+                !filter.everyone,
+                !filter.roles,
+            );
+        if counts {
+            self.mentions.arrived(message.clone());
+        }
+        counts
     }
 
     /// Whether Pin Message or Unpin Message shows on `message` (see
@@ -1158,7 +1197,9 @@ impl State {
         let guild = self.guilds.remove(at);
         self.voice.replace_guild(id, Vec::new());
         let was_open = self.guild == Some(id);
-        Some((guild.channels.iter().chain(&guild.threads).map(|c| c.id).collect(), was_open))
+        let gone: Vec<Snowflake> = guild.channels.iter().chain(&guild.threads).map(|c| c.id).collect();
+        self.mentions.remove_where(|m| gone.contains(&m.channel_id));
+        Some((gone, was_open))
     }
 
     /// Record a new newest message for a channel wherever it lives.
@@ -1718,6 +1759,29 @@ mod tests {
         state.guilds[0].set_role(serde_json::from_value(json!({"id": "1", "permissions": "0"})).unwrap());
         assert_eq!(state.unviewable(Snowflake(1)), [Snowflake(9)]);
         assert!(state.unviewable(Snowflake(2)).is_empty(), "a server we don't know");
+    }
+
+    #[test]
+    fn a_mention_of_us_joins_the_inbox_as_the_filter_lets_it() {
+        let mut state = open_server(None, json!({}));
+        state.account = Some(Verification { id: Snowflake(5), ..Verification::default() });
+        state.me = Some(serde_json::from_value(json!({"id": "5", "username": "me"})).unwrap());
+        let message = |extra: serde_json::Value| -> Message {
+            let mut m = json!({"id": "30", "channel_id": "9", "type": 0, "content": "hi", "timestamp": "",
+                               "author": {"id": "7", "username": "them"}});
+            m.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(m).unwrap()
+        };
+        assert!(!state.note_mention(&message(json!({}))), "no mention");
+        assert!(state.note_mention(&message(json!({"mentions": [{"id": "5", "username": "me"}]}))));
+        assert!(state.mentions.list().len() == 1);
+        let everyone = message(json!({"id": "31", "mention_everyone": true}));
+        assert!(state.note_mention(&everyone));
+        state.mention_filter.everyone = false;
+        assert!(!state.note_mention(&message(json!({"id": "32", "mention_everyone": true}))), "filtered out");
+        let own = message(json!({"id": "33", "author": {"id": "5", "username": "me"}, "mention_everyone": true}));
+        state.mention_filter.everyone = true;
+        assert!(!state.note_mention(&own), "our own");
     }
 
     #[test]

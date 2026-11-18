@@ -248,7 +248,7 @@ impl App {
             }
         };
         let name = modal.app_name(nick.as_deref()).to_owned();
-        let size = discord::cdn::asset_size(128 * self.images.scale().max(1) as u32);
+        let size = discord::cdn::asset_size(discord::cdn::device_px(128, self.images.scale()));
         let icon = modal.app_icon(member.as_ref().map(|(guild, avatar)| (*guild, avatar.as_deref())), size);
 
         let avatar = adw::Avatar::builder().size(24).text(&name).show_initials(false).build();

@@ -360,9 +360,10 @@ impl App {
                 match icon {
                     Some(hash) => {
                         let picture = round_picture(32);
-                        let url = discord::cdn::guild_icon_url(hit.id.0, hash, 64);
+                        let ask = super::widgets::asked(32, Some(&self.images));
+                        let url = discord::cdn::guild_icon_url(hit.id.0, hash, ask);
                         if discord::cdn::is_animated(hash) {
-                            let still = discord::cdn::guild_icon_still_url(hit.id.0, hash, 64);
+                            let still = discord::cdn::guild_icon_still_url(hit.id.0, hash, ask);
                             self.images.set_moving(&picture, &still, &url, Subject::ServerIcon, Mover::None);
                         } else {
                             self.images.set(&picture, &url);

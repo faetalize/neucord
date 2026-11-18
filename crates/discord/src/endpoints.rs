@@ -15,6 +15,9 @@ pub(crate) const SEARCH_CHANNEL_MESSAGES: Endpoint = Endpoint::get("/channels/{c
 pub(crate) const SEND_MESSAGE: Endpoint = Endpoint::post("/channels/{channel}/messages");
 pub(crate) const EDIT_MESSAGE: Endpoint = Endpoint::patch("/channels/{channel}/messages/{message}");
 pub(crate) const DELETE_MESSAGE: Endpoint = Endpoint::delete("/channels/{channel}/messages/{message}");
+pub(crate) const MENTIONS: Endpoint = Endpoint::get("/users/@me/mentions");
+pub(crate) const DELETE_MENTION: Endpoint = Endpoint::delete("/users/@me/mentions/{message}");
+pub(crate) const PINS: Endpoint = Endpoint::get("/channels/{channel}/messages/pins");
 pub(crate) const PIN_MESSAGE: Endpoint = Endpoint::put("/channels/{channel}/pins/{message}");
 pub(crate) const UNPIN_MESSAGE: Endpoint = Endpoint::delete("/channels/{channel}/pins/{message}");
 // Kept on one line for discord-watch, past what rustfmt would.
@@ -60,6 +63,7 @@ pub(crate) const JOIN_THREAD: Endpoint = Endpoint::post("/channels/{channel}/thr
 pub(crate) const LEAVE_THREAD: Endpoint = Endpoint::delete("/channels/{channel}/thread-members/@me");
 pub(crate) const POST_DATA: Endpoint = Endpoint::post("/channels/{channel}/post-data");
 pub(crate) const ME: Endpoint = Endpoint::get("/users/@me");
+pub(crate) const EDIT_ME: Endpoint = Endpoint::patch("/users/@me");
 pub(crate) const USER: Endpoint = Endpoint::get("/users/{user}");
 pub(crate) const USER_PROFILE: Endpoint = Endpoint::get("/users/{user}/profile");
 pub(crate) const MUTUAL_FRIENDS: Endpoint = Endpoint::get("/users/{user}/relationships");

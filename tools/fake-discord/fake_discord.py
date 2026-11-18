@@ -10,7 +10,7 @@ apps' answers to commands others ran. $FAKE_NSFW sets what decides
 age-restricted commands, e.g. "allowed=1,dms=1,status=3,gated=0,level=0,owner=0"
 (those are the defaults but dms, which is 0).
 """
-import base64, json, os, re, socket, struct, sys, threading, time, zlib
+import base64, json, os, re, socket, struct, sys, threading, time, urllib.parse, zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = 8099
@@ -492,6 +492,8 @@ def dispatch(t, d):
 
 
 ROUTES = []
+# The query string of the request being answered, by name, each with its values.
+QUERY = {}
 
 
 def route(method, pattern):
@@ -506,6 +508,41 @@ def route(method, pattern):
 @route("GET", r"/channels/(\d+)/messages")
 def history(channel, body):
     return 200, messages(channel)
+
+
+# The pins of #600 are lines 5, 7 and 9, pinned in that order (newest pin first), two to a page.
+PINNED = ["5", "7", "9"]
+
+
+@route("GET", r"/channels/(\d+)/messages/pins")
+def pins(channel, body):
+    if channel != "600":
+        return 200, {"items": [], "has_more": False}
+    lines = {m["id"]: m for m in messages(channel)}
+    by_number = {str(n): snowflake(1000 + n * 100, n) for n in range(40)}
+    items = [{"pinned_at": "2026-01-02T10:%02d:00.123456+00:00" % int(n), "message": dict(lines[by_number[n]], pinned=True)}
+             for n in reversed(PINNED)]
+    before = QUERY.get("before", [None])[0]
+    if before:
+        items = [i for i in items if i["pinned_at"][:19] < before[:19]]
+    return 200, {"items": items[:2], "has_more": len(items) > 2}
+
+
+# The inbox: every line of #general mentions the account, 25 to a page, newest first. Marked done are kept here.
+MENTION_DONE = set()
+
+
+@route("GET", r"/users/@me/mentions")
+def mentions(body):
+    before = int(QUERY.get("before", ["9" * 30])[0])
+    lines = [dict(m, mentions=[ME]) for m in messages("600") if int(m["id"]) < before and m["id"] not in MENTION_DONE]
+    return 200, lines[:25]
+
+
+@route("DELETE", r"/users/@me/mentions/(\d+)")
+def mention_done(message, body):
+    MENTION_DONE.add(message)
+    return 204, None
 
 
 @route("POST", r"/channels/(\d+)/messages")
@@ -546,6 +583,15 @@ def user_index(body):
 @route("GET", r"/users/@me/settings-proto/([12])")
 def settings(kind, body):
     return 200, {"settings": settings_answer(kind)}
+
+
+@route("PATCH", r"/users/@me")
+def edit_me(body):
+    """The change of a password: the current one is "old-password", and Discord answers a new token."""
+    if body.get("password") != "old-password":
+        return 400, {"code": 50035, "message": "Invalid Form Body", "errors": {
+            "password": {"_errors": [{"code": "PASSWORD_DOES_NOT_MATCH", "message": "Password does not match."}]}}}
+    return 200, {**ME, "token": "fake-token-2"}
 
 
 @route("PATCH", r"/users/@me/settings-proto/([12])")
@@ -698,6 +744,25 @@ def close_channel(channel, body):
     return 200, {"id": channel}
 
 
+# The thread browser's name search (`GET /channels/{id}/threads/search?name=…`): two made-up threads of #600,
+# those whose name has the query. They are the server's threads from then on.
+FOUND_THREADS = {"7001": "planning ideas", "7002": "weekend plans"}
+
+
+@route("GET", r"/channels/(\d+)/threads/search")
+def search_threads(channel, body):
+    name = QUERY.get("name", [""])[0].lower()
+    now = time.strftime("%Y-%m-%dT%H:%M:%S.000000+00:00", time.gmtime())
+    threads = [{"id": tid, "type": 11, "guild_id": "500", "parent_id": channel, "name": tname, "owner_id": ME["id"],
+                "last_message_id": None, "message_count": 1, "member_count": 1, "rate_limit_per_user": 0, "flags": 0,
+                "thread_metadata": {"archived": False, "locked": False, "archive_timestamp": now,
+                                    "auto_archive_duration": 4320, "create_timestamp": now}}
+               for tid, tname in FOUND_THREADS.items() if name in tname]
+    for thread in threads:
+        GUILD_CHANNELS.add(thread["id"])
+    return 200, {"threads": threads, "members": [], "has_more": False, "first_messages": []}
+
+
 # /thread's thread: a channel of the server from then on, pushed as THREAD_CREATE.
 @route("POST", r"/channels/(\d+)/threads")
 def create_thread(channel, body):
@@ -836,6 +901,8 @@ class Handler(BaseHTTPRequestHandler):
     def answer(self):
         body = self.record()
         path = self.path.split("?")[0]
+        QUERY.clear()
+        QUERY.update(urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query))
         for method, pattern, handle in ROUTES:
             match = pattern.fullmatch(path)
             if method == self.command and match:

@@ -31,6 +31,7 @@ use crate::stickers::Pack;
 use crate::threads::ArchivedPage;
 use crate::uploads::Sent;
 use crate::{Channel, Error, Message, Snowflake, identity, notes};
+use crate::{mentions, pins};
 
 /// Error code for accepting a stranger's friend request without confirming.
 pub const STRANGER_NOT_CONFIRMED: u64 = 80013;
@@ -484,6 +485,30 @@ impl Rest {
         self.request(call!(DELETE_MESSAGE, channel, message), None).await
     }
 
+    /// A page of the messages that mention us (`fetchRecentMentions`, 378939),
+    /// newest first, as [`mentions::query`] asks.
+    pub async fn mentions(
+        &self,
+        before: Option<Snowflake>,
+        guild: Option<Snowflake>,
+        filter: mentions::Filter,
+    ) -> Result<Vec<Message>, Error> {
+        self.request(call!(MENTIONS).query(&mentions::query(before, guild, filter)), None).await
+    }
+
+    /// Take a mention off the inbox (`deleteRecentMention`).
+    pub async fn delete_mention(&self, message: Snowflake) -> Result<(), Error> {
+        self.request(call!(DELETE_MENTION, message), None).await
+    }
+
+    /// A page of `channel`'s pins, newest pinned first (`fetchPins` in
+    /// 687709): `before` is the time of the last pin we have, as
+    /// [`pins::iso_millis`] writes it.
+    pub async fn pins(&self, channel: Snowflake, before: Option<&str>) -> Result<pins::Page, Error> {
+        let call = call!(PINS, channel).query(&pins::query(pins::PAGE, before));
+        self.request(call, None).await
+    }
+
     /// Pin `message` to its channel (`pinMessage` in 687709).
     pub async fn pin_message(&self, channel: Snowflake, message: Snowflake) -> Result<(), Error> {
         self.request(call!(PIN_MESSAGE, channel, message), None).await
@@ -604,6 +629,14 @@ impl Rest {
     pub async fn archived_threads(&self, search: &Search) -> Result<ArchivedPage, Error> {
         let answer: Value = self.request(archived_threads_call(search), None).await?;
         ArchivedPage::from_value(&answer).ok_or_else(|| Error::Protocol("archived threads without threads".into()))
+    }
+
+    /// The threads of `channel` whose name has `name`, as the thread
+    /// browser's search asks for them when Enter is pressed (`searchThreads`
+    /// in 7909): no tag, tags matched by some.
+    pub async fn search_thread_names(&self, channel: Snowflake, name: &str) -> Result<ArchivedPage, Error> {
+        let answer: Value = self.request(thread_name_search_call(channel, name), None).await?;
+        ArchivedPage::from_value(&answer).ok_or_else(|| Error::Protocol("thread search without threads".into()))
     }
 
     /// A thread we don't know, by id (`loadThread` in 353202), with the
@@ -1210,6 +1243,13 @@ fn archived_threads_call(search: &Search) -> Call {
     call!(SEARCH_THREADS, channel = search.channel).query(&search.query())
 }
 
+/// The request of the thread browser's name search (`searchThreads` in
+/// 7909): `name` and `tag_setting`, in that order, the value escaped.
+fn thread_name_search_call(channel: Snowflake, name: &str) -> Call {
+    let name = glib::uri_escape_string(name, None::<&str>, false);
+    call!(SEARCH_THREADS, channel = channel).query(&format!("name={name}&tag_setting=match_some"))
+}
+
 /// The request that starts a post: a thread's endpoint, with the query the
 /// client adds (`createForumPost` in 971389).
 fn create_post_call(forum: Snowflake) -> Call {
@@ -1403,7 +1443,8 @@ mod tests {
     use super::{
         Captcha, Page, Reply, ReplyPing, add_reaction_call, archived_threads_call, base_headers, create_post_call,
         edit_body, edit_scheduled_body, is_md5, join_thread_call, leave_thread_call, message_body, nothing_to_send,
-        poll_body, rate_limit_wait, reactors_call, remove_reaction_call, save_answer, schedule_body, vote_body,
+        poll_body, rate_limit_wait, reactors_call, remove_reaction_call, save_answer, schedule_body,
+        thread_name_search_call, vote_body,
     };
     use crate::endpoints::call;
     use crate::model::Emoji;
@@ -1513,6 +1554,8 @@ mod tests {
             "/channels/7/threads/search?archived=true&sort_by=last_message_time&sort_order=desc&limit=25\
              &tag_setting=match_some&offset=25"
         );
+        let found = thread_name_search_call(thread, "a b&c");
+        assert_eq!(found.path(), "/channels/7/threads/search?name=a%20b%26c&tag_setting=match_some");
         assert_eq!(call!(GET_CHANNEL, channel = thread).path(), "/channels/7");
         // A post is the thread request with the query `createForumPost` adds; a plain thread has none.
         let post = create_post_call(thread);
@@ -1821,6 +1864,11 @@ mod built_in_tests {
         let (pin, unpin) = (call!(PIN_MESSAGE, channel, message), call!(UNPIN_MESSAGE, channel, message));
         assert_eq!((pin.method(), pin.path()), ("PUT", "/channels/7/pins/8"));
         assert_eq!((unpin.method(), unpin.path()), ("DELETE", "/channels/7/pins/8"));
+        let message = 9;
+        let done = call!(DELETE_MENTION, message);
+        assert_eq!((done.method(), done.path()), ("DELETE", "/users/@me/mentions/9"));
+        let pins = call!(PINS, channel).query(&pins::query(pins::PAGE, None));
+        assert_eq!((pins.method(), pins.path()), ("GET", "/channels/7/messages/pins?limit=25"));
         assert_eq!(Sending::default().audit_log_reason, None, "only /ban and /timeout give a reason");
     }
 }

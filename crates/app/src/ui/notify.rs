@@ -16,6 +16,10 @@ use crate::{config, desktop, render};
 /// How long a notification waits for the sender's picture before it shows without.
 const ICON_WAIT: Duration = Duration::from_secs(3);
 
+/// The size of a notification's picture, which the client asks the CDN for
+/// as any other (`getAvatarURL(undefined, 128)` in 534765).
+const NOTIFICATION_ICON: u32 = 128;
+
 impl App {
     /// The desktop's notification server, connected on first use.
     pub(super) fn desktop(self: &Rc<Self>) -> Option<&desktop::Desktop> {
@@ -61,8 +65,9 @@ impl App {
             }
             (title, body)
         };
+        let size = discord::cdn::shown_size(NOTIFICATION_ICON, self.images.scale());
         let icon =
-            message.author.avatar.as_deref().map(|hash| discord::cdn::avatar_url(message.author.id.0, hash, 128));
+            message.author.avatar.as_deref().map(|hash| discord::cdn::avatar_url(message.author.id.0, hash, size));
         let channel = place.channel;
         let this = self.clone();
         let epoch = self.account.epoch.get();
@@ -109,7 +114,8 @@ impl App {
         let this = self.clone();
         let epoch = self.account.epoch.get();
         glib::spawn_future_local(async move {
-            let icon = user.avatar.as_deref().map(|hash| discord::cdn::avatar_url(user.id.0, hash, 128));
+            let size = discord::cdn::shown_size(NOTIFICATION_ICON, this.images.scale());
+            let icon = user.avatar.as_deref().map(|hash| discord::cdn::avatar_url(user.id.0, hash, size));
             let texture = match icon {
                 Some(url) => glib::future_with_timeout(ICON_WAIT, this.images.texture(&url)).await.ok().flatten(),
                 None => None,

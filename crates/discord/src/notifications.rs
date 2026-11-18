@@ -501,16 +501,18 @@ impl NotificationSettings {
 }
 
 /// Messages the client neither counts nor notifies (218461, 411238): from
-/// a blocked author, or answering a command a blocked user ran
+/// an author `blocked` names (blocked or ignored people), answering a command
+/// one ran, or a server space's leaderboard naming one
 /// (`isBlockedOrIgnoredForMessage`), and a group DM's notice that someone
-/// left. Ignored users and a guild space's leaderboard aren't modelled.
+/// left.
 pub fn is_dropped(message: &Message, group_dm: bool, blocked: impl Fn(Snowflake) -> bool) -> bool {
     (group_dm && message.kind == RECIPIENT_REMOVE) || message.is_blocked_by(blocked)
 }
 
 const RECIPIENT_REMOVE: u8 = 2;
 
-fn mentions(message: &Message, me: Snowflake, my_roles: &[Snowflake], no_everyone: bool, no_roles: bool) -> bool {
+/// Whether `message` mentions `me` or one of `my_roles`, unless the kind is suppressed.
+pub fn mentions(message: &Message, me: Snowflake, my_roles: &[Snowflake], no_everyone: bool, no_roles: bool) -> bool {
     message.mentions.iter().any(|u| u.id == me)
         || (message.mention_everyone && !no_everyone)
         || (!no_roles && message.mention_roles.iter().any(|r| my_roles.contains(r)))

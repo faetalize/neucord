@@ -112,6 +112,27 @@ impl App {
             Some("home") => self.select_home(),
             Some("attach") => self.drafts.attach.emit_clicked(),
             // Create Thread for the open channel, as the attach menu's entry opens it.
+            // The thread browser, its name search (as typed, then Enter) and the threads it lists.
+            Some("threads") => {
+                let channel = self.account.state.borrow().channel;
+                if let Some(channel) = channel {
+                    self.open_threads(channel);
+                }
+            }
+            Some("thread-search") => {
+                let view = self.threads_view.borrow().clone();
+                if let Some(view) = view {
+                    view.search.set_text(rest);
+                    view.search.emit_activate();
+                }
+            }
+            Some("thread-rows") => {
+                let view = self.threads_view.borrow().clone();
+                if let Some(view) = view {
+                    let rows: Vec<String> = view.rows.borrow().iter().map(|r| format!("{r:?}")).collect();
+                    eprintln!("e2e: thread rows {}", rows.join(" "));
+                }
+            }
             Some("thread-form") => {
                 if let Some(channel) = self.thread_channel() {
                     self.open_thread_form(channel, None);
@@ -123,6 +144,8 @@ impl App {
                     Some("composer") => Some(self.composer.clone().upcast()),
                     Some("composer_box") => Some(self.composer_box.clone().upcast()),
                     Some("gif_button") => Some(self.gif_button.clone().upcast()),
+                    Some("pins_button") => Some(self.pins_button.clone().upcast()),
+                    Some("inbox_button") => Some(self.inbox_button.clone().upcast()),
                     other => return eprintln!("e2e: no widget {other:?}"),
                 };
                 match anchor.and_then(|w| popover_on(&w)) {
@@ -255,6 +278,34 @@ impl App {
                 match self.composer.activate_action(&format!("menu.{name}"), None) {
                     Ok(()) => eprintln!("e2e: chose {name}"),
                     Err(e) => eprintln!("e2e: {e}"),
+                }
+            }
+            // The form for a password the account has to change, over the app: shoot the window.
+            Some("ask-password") => self.ask_new_password(),
+            // What the form sends, as a login's answer would have it send: `password-send <current> <new>`.
+            Some("password-send") => {
+                let (old, new) = (parts.next().unwrap_or_default().to_owned(), parts.next().unwrap_or_default().to_owned());
+                if let Some(rest) = self.account.state.borrow().rest.clone() {
+                    glib::spawn_future_local(async move {
+                        match rest.update_password(&old, &new).await {
+                            Ok(token) => eprintln!("e2e: password changed, new token {token}"),
+                            Err(e) => eprintln!("e2e: password refused: {e}"),
+                        }
+                    });
+                }
+            }
+            // The pinned messages popover, as its header button opens it: shoot it with `shot-popover pins_button`.
+            Some("pins-open") => self.pins_button.popup(),
+            // The next page, as the button under the list or a scroll near its end asks.
+            Some("pins-more") => self.more_pins(),
+            // The inbox, as its header button opens it: shoot it with `shot-popover inbox_button`.
+            Some("inbox-open") => self.inbox_button.popup(),
+            Some("inbox-more") => self.more_mentions(),
+            // The first mention marked done, as its button does.
+            Some("inbox-done") => {
+                let first = self.account.state.borrow().mentions.list().first().map(|m| m.id);
+                if let Some(id) = first {
+                    self.mention_done(id);
                 }
             }
             Some("send") => {
@@ -749,3 +800,29 @@ impl App {
     }
 }
 """)
+# `clip-text <n>` puts n letters on the clipboard as text, `clip-page-image <src>` an image with the HTML a browser
+# copies with it (an `<img>` of that address), and `box-length` prints how long the message box's text is (#260).
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("clip-text") => {
+                let n: usize = parts.next().and_then(|n| n.parse().ok()).unwrap_or(10);
+                self.composer.clipboard().set_text(&"a".repeat(n));
+            }
+            Some("clip-page-image") => {
+                let src = parts.next().unwrap_or("https://example.com/pic.jpg");
+                let bytes = glib::Bytes::from_owned([255u8, 0, 0, 255].repeat(4));
+                let texture = gdk::MemoryTexture::new(2, 2, gdk::MemoryFormat::R8g8b8a8, &bytes, 8);
+                let texture: gdk::Texture = texture.upcast();
+                let html = format!("<meta charset='utf-8'><img src=\\"{src}\\" alt=\\"\\">");
+                let provider = gdk::ContentProvider::new_union(&[
+                    gdk::ContentProvider::for_value(&texture.to_value()),
+                    gdk::ContentProvider::for_bytes("text/html", &glib::Bytes::from_owned(html.into_bytes())),
+                ]);
+                if let Err(e) = self.composer.clipboard().set_content(Some(&provider)) {
+                    eprintln!("e2e: {e}");
+                }
+            }
+            Some("box-length") => {
+                let buffer = self.composer.buffer();
+                let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+                eprintln!("e2e: box {}", text.chars().count());
+            }
+            Some("quit") => {''')

@@ -60,6 +60,35 @@ pub fn asset_size(px: u32) -> u16 {
     SIZES.iter().copied().find(|&size| u32::from(size) >= px).unwrap_or(SIZES[SIZES.len() - 1])
 }
 
+/// The pixels an image shown `logical` pixels wide takes on a screen with
+/// `scale` device pixels to a pixel (`window.devicePixelRatio`, fractional on
+/// many desktops): rounded up, as the sizes the CDN is asked for are
+/// compared with it (`kr` in 776231).
+pub fn device_px(logical: u32, scale: f64) -> u32 {
+    (f64::from(logical) * scale).ceil() as u32
+}
+
+/// The size to ask the CDN for an emoji shown `logical` pixels wide
+/// (`getEmojiURL`, 486020: `kr(size * devicePixelRatio)`).
+pub fn emoji_size(logical: u32, scale: f64) -> u16 {
+    shown_size(logical, scale)
+}
+
+/// The size to ask the CDN for an avatar or icon shown `logical` pixels
+/// wide: `kr(size * devicePixelRatio)`, which `getUserAvatarURL` and the
+/// guild and channel icons compute from the size they are given, the one the
+/// avatar or icon is drawn at (`FT` in 778712 is that size).
+pub fn shown_size(logical: u32, scale: f64) -> u16 {
+    asset_size(device_px(logical, scale))
+}
+
+/// The size to ask the media proxy for a sticker shown `logical` pixels
+/// wide: the ratio counts up to 2 only, then the size the CDN list holds
+/// (`zg` in 378058: `kr(size * min(2, devicePixelRatio))`).
+pub fn sticker_size(logical: u32, scale: f64) -> u32 {
+    u32::from(asset_size(device_px(logical, scale.min(2.0))))
+}
+
 pub fn badge_icon_url(icon: &str) -> String {
     format!("{CDN}/badge-icons/{icon}.png")
 }
@@ -390,7 +419,7 @@ impl Ladder {
 
     /// `v7`: `target` is the size wanted, in device pixels, of an image of
     /// `source` size when it is known.
-    fn snap(&self, target: (u32, u32), source: Option<(u32, u32)>, dpr: u32) -> (u32, u32) {
+    fn snap(&self, target: (u32, u32), source: Option<(u32, u32)>, dpr: f64) -> (u32, u32) {
         let (width, height) = target;
         let longest = width.max(height);
         if longest == 0 {
@@ -400,7 +429,7 @@ impl Ladder {
         let source_fits = |size: u32| source.is_some_and(|(w, h)| w.max(h) <= size);
         // A screen sharp enough to tell takes the rung below, if the image is
         // only a little larger than it.
-        let upscale = (f64::from(dpr) >= self.min_snap_down_dpr).then_some(self.max_upscale);
+        let upscale = (dpr >= self.min_snap_down_dpr).then_some(self.max_upscale);
         let mut size = rung;
         if upscale.is_some_and(|up| up > 1.0) && !source_fits(rung) {
             let below = self.rungs.iter().copied().take_while(|&r| r <= longest).last();
@@ -431,7 +460,7 @@ pub fn requested_size(
     target: (u32, u32),
     source: Option<(u32, u32)>,
     ladder: Option<&Ladder>,
-    dpr: u32,
+    dpr: f64,
 ) -> Option<(u32, u32)> {
     let target = fit(target, (MAX_SIDE, MAX_SIDE));
     if source == Some(target) {
@@ -453,7 +482,7 @@ pub fn modal_url(
     src: &str,
     size: (u32, u32),
     fit_in: (u32, u32),
-    scale: u32,
+    scale: f64,
     animated: bool,
     ladder: Option<&Ladder>,
 ) -> String {
@@ -465,8 +494,8 @@ pub fn modal_url(
     if ratio < 1.0 {
         shown = ((f64::from(size.0) * ratio).round() as u32, (f64::from(size.1) * ratio).round() as u32);
     }
-    let scale = scale.max(1);
-    let target = (shown.0 * scale, shown.1 * scale);
+    let scale = scale.max(1.0);
+    let target = ((f64::from(shown.0) * scale).round() as u32, (f64::from(shown.1) * scale).round() as u32);
     let mut url = src.to_owned();
     // An animated WebP or AVIF is asked to stay animated.
     let path = parse(src).map(|url| url.path.to_ascii_lowercase()).unwrap_or_default();
@@ -566,6 +595,35 @@ pub fn links_expired(message: &crate::Message, now_ms: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn avatars_and_icons_are_asked_for_at_the_size_they_are_shown() {
+        // A 40 px avatar: 40 at ratio 1, then the list's 60 at 1.25, 80 at 2; a 32 px icon at 1.5 is 48.
+        assert_eq!(
+            [shown_size(40, 1.0), shown_size(40, 1.25), shown_size(40, 2.0), shown_size(32, 1.5)],
+            [40, 56, 80, 48]
+        );
+    }
+
+    #[test]
+    fn stickers_count_the_pixel_ratio_up_to_two() {
+        assert_eq!([sticker_size(160, 1.0), sticker_size(160, 1.5), sticker_size(160, 2.0)], [160, 240, 320]);
+        assert_eq!([sticker_size(160, 3.0), sticker_size(80, 1.25), sticker_size(40, 1.0)], [320, 100, 40]);
+    }
+
+    #[test]
+    fn sizes_follow_the_screens_real_pixel_ratio() {
+        assert_eq!([device_px(22, 1.0), device_px(22, 1.25), device_px(22, 1.5), device_px(22, 2.0)], [22, 28, 33, 44]);
+        // The emoji the client asks for are the sizes of its list, not powers of two.
+        assert_eq!(
+            [emoji_size(22, 1.0), emoji_size(22, 1.5), emoji_size(22, 2.0), emoji_size(48, 1.0)],
+            [22, 40, 44, 48]
+        );
+        // A ratio of 1.75 is not "at least 2": the ladder doesn't take the rung below.
+        let ladder = Ladder::from_config(r#"{"maxUpscale":1.1}"#).unwrap();
+        assert_eq!(ladder.snap((330, 200), Some((4000, 3000)), 1.75), (384, 233));
+        assert_eq!(ladder.snap((330, 200), Some((4000, 3000)), 2.0), (320, 194));
+    }
 
     #[test]
     fn previews_of_the_media_proxy_are_asked_to_animate() {
@@ -876,21 +934,21 @@ mod tests {
         let proxy = "https://media.discordapp.net/attachments/1/2/a.png?ex=1&is=2&hm=3&";
         // Shown at 1000x500 of 4000x2000 on a screen at twice the scale.
         assert_eq!(
-            modal_url(proxy, (4000, 2000), (1000, 500), 2, false, None),
+            modal_url(proxy, (4000, 2000), (1000, 500), 2.0, false, None),
             "https://media.discordapp.net/attachments/1/2/a.png?ex=1&is=2&hm=3&width=2000&height=1000"
         );
         // At its own size the proxy is not asked to resize.
-        assert_eq!(modal_url(proxy, (1000, 500), (1000, 500), 1, false, None), proxy);
+        assert_eq!(modal_url(proxy, (1000, 500), (1000, 500), 1.0, false, None), proxy);
         // Never above 4096 a side.
-        let huge = modal_url(proxy, (9000, 4500), (9000, 4500), 1, false, None);
+        let huge = modal_url(proxy, (9000, 4500), (9000, 4500), 1.0, false, None);
         assert!(huge.ends_with("width=4096&height=2048"), "{huge}");
         // The CDN's own links, and anything not a link, are loaded as they are.
         let cdn = "https://cdn.discordapp.com/attachments/1/2/a.png?ex=1";
-        assert_eq!(modal_url(cdn, (4000, 2000), (1000, 500), 2, false, None), cdn);
+        assert_eq!(modal_url(cdn, (4000, 2000), (1000, 500), 2.0, false, None), cdn);
         // An animated WebP stays animated.
         let webp = "https://media.discordapp.net/attachments/1/2/a.webp?ex=1";
-        assert_eq!(modal_url(webp, (10, 10), (10, 10), 1, true, None), format!("{webp}&animated=true"));
-        assert_eq!(modal_url(webp, (10, 10), (10, 10), 1, false, None), webp);
+        assert_eq!(modal_url(webp, (10, 10), (10, 10), 1.0, true, None), format!("{webp}&animated=true"));
+        assert_eq!(modal_url(webp, (10, 10), (10, 10), 1.0, false, None), webp);
     }
 
     /// `v7` (459830) run on these inputs gave these sizes.
@@ -899,25 +957,25 @@ mod tests {
         let ladder = Ladder::from_config("{}").unwrap();
         let snap = |target, source, dpr| ladder.snap(target, source, dpr);
         // dpr 2 can take the rung below (1.1 above it at most) ...
-        assert_eq!(snap((300, 200), Some((4000, 3000)), 2), (320, 213));
-        assert_eq!(snap((330, 200), Some((4000, 3000)), 2), (320, 194));
-        assert_eq!(snap((340, 200), Some((4000, 3000)), 2), (320, 188));
+        assert_eq!(snap((300, 200), Some((4000, 3000)), 2.0), (320, 213));
+        assert_eq!(snap((330, 200), Some((4000, 3000)), 2.0), (320, 194));
+        assert_eq!(snap((340, 200), Some((4000, 3000)), 2.0), (320, 188));
         // ... and dpr 1 never does.
-        assert_eq!(snap((330, 200), Some((4000, 3000)), 1), (384, 233));
+        assert_eq!(snap((330, 200), Some((4000, 3000)), 1.0), (384, 233));
         // An image smaller than its rung is asked for whole.
-        assert_eq!(snap((500, 500), Some((400, 300)), 2), (400, 300));
-        assert_eq!(snap((100, 60), Some((90, 50)), 2), (90, 50));
+        assert_eq!(snap((500, 500), Some((400, 300)), 2.0), (400, 300));
+        assert_eq!(snap((100, 60), Some((90, 50)), 2.0), (90, 50));
         // Unknown size: the rung below, up to the last rung.
-        assert_eq!(snap((5000, 100), None, 2), (4096, 82));
-        assert_eq!(snap((700, 350), None, 2), (640, 320));
-        assert_eq!(snap((0, 0), Some((10, 10)), 2), (0, 0));
-        assert_eq!(snap((1000, 563), Some((1920, 1080)), 2), (1024, 577));
+        assert_eq!(snap((5000, 100), None, 2.0), (4096, 82));
+        assert_eq!(snap((700, 350), None, 2.0), (640, 320));
+        assert_eq!(snap((0, 0), Some((10, 10)), 2.0), (0, 0));
+        assert_eq!(snap((1000, 563), Some((1920, 1080)), 2.0), (1024, 577));
         // A ladder of its own.
         let own = Ladder::from_config(r#"{"ladder":[2000,100,1000],"maxUpscale":1.4}"#).unwrap();
-        assert_eq!(own.snap((1000, 563), Some((1920, 1080)), 2), (1000, 563));
+        assert_eq!(own.snap((1000, 563), Some((1920, 1080)), 2.0), (1000, 563));
         let tiny = Ladder::from_config(r#"{"ladder":[32,16]}"#).unwrap();
-        assert_eq!(tiny.snap((1, 1), Some((1920, 1080)), 2), (16, 16));
-        assert_eq!(tiny.snap((5000, 5000), Some((6000, 6000)), 2), (32, 32));
+        assert_eq!(tiny.snap((1, 1), Some((1920, 1080)), 2.0), (16, 16));
+        assert_eq!(tiny.snap((5000, 5000), Some((6000, 6000)), 2.0), (32, 32));
     }
 
     #[test]
@@ -1002,18 +1060,18 @@ mod tests {
 
     #[test]
     fn no_size_is_asked_for_an_image_at_its_own() {
-        assert_eq!(requested_size((400, 300), Some((400, 300)), None, 1), None);
-        assert_eq!(requested_size((200, 150), Some((400, 300)), None, 1), Some((200, 150)));
-        assert_eq!(requested_size((200, 150), None, None, 1), Some((200, 150)));
-        assert_eq!(requested_size((9000, 4500), None, None, 1), Some((4096, 2048)));
+        assert_eq!(requested_size((400, 300), Some((400, 300)), None, 1.0), None);
+        assert_eq!(requested_size((200, 150), Some((400, 300)), None, 1.0), Some((200, 150)));
+        assert_eq!(requested_size((200, 150), None, None, 1.0), Some((200, 150)));
+        assert_eq!(requested_size((9000, 4500), None, None, 1.0), Some((4096, 2048)));
         let ladder = Ladder::from_config("{}").unwrap();
         // The ladder may land on the image's own size: nothing to ask for.
-        assert_eq!(requested_size((500, 500), Some((400, 300)), Some(&ladder), 2), None);
-        assert_eq!(requested_size((300, 200), Some((4000, 3000)), Some(&ladder), 2), Some((320, 213)));
+        assert_eq!(requested_size((500, 500), Some((400, 300)), Some(&ladder), 2.0), None);
+        assert_eq!(requested_size((300, 200), Some((4000, 3000)), Some(&ladder), 2.0), Some((320, 213)));
         // The viewer names it all the same.
         let proxy = "https://media.discordapp.net/attachments/1/2/a.png?ex=1";
         assert_eq!(
-            modal_url(proxy, (4000, 3000), (330, 248), 2, false, Some(&ladder)),
+            modal_url(proxy, (4000, 3000), (330, 248), 2.0, false, Some(&ladder)),
             format!("{proxy}&width=640&height=481")
         );
     }

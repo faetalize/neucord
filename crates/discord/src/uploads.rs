@@ -459,6 +459,83 @@ pub fn pasted(files: bool, image: bool, text: bool) -> Pasted {
     }
 }
 
+/// Whether a pasted text is too long to go in a message and becomes a
+/// `message.txt` upload instead: longer than `limit` UTF-16 units, the
+/// message length the account may send (`onPaste` in 84046, with
+/// `maxCharacterCount` for a channel's box).
+pub fn pasted_text_becomes_file(text: &str, limit: usize) -> bool {
+    crate::limits::message_length(text) > limit
+}
+
+/// The name of an image pasted from a web page: the file of the first
+/// `<img>`'s address without its extension, as `.png` (`onPaste` in 84046 and
+/// `kh` in 741394). `None` where there is no such image or address, and the
+/// pasted file keeps its own name.
+pub fn pasted_image_name(html: &str) -> Option<String> {
+    let src = first_img_src(html)?;
+    let path = url_pathname(&src)?;
+    let file = path.rsplit(['/', '\\']).next().filter(|f| !f.is_empty()).unwrap_or(&path);
+    let stem = match file.rfind('.') {
+        Some(dot) if dot > 0 => &file[..dot],
+        _ => file,
+    };
+    (!stem.is_empty()).then(|| format!("{stem}.png"))
+}
+
+/// The `src` of the first `<img>` of `html`, its entities left as written but
+/// for `&amp;`.
+fn first_img_src(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(at) = lower[from..].find("<img").map(|at| at + from) {
+        from = at + 4;
+        // `<img` and not `<imgx`.
+        if !lower[from..].starts_with(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>') {
+            continue;
+        }
+        let end = lower[from..].find('>').map_or(lower.len(), |e| e + from);
+        let tag = &html[from..end];
+        let tag_lower = &lower[from..end];
+        let mut search = 0;
+        while let Some(name) = tag_lower[search..].find("src").map(|n| n + search) {
+            search = name + 3;
+            let before = tag_lower[..name].chars().next_back();
+            if before.is_some_and(|c| !c.is_ascii_whitespace() && c != '"' && c != '\'') {
+                continue;
+            }
+            let rest = tag[search..].trim_start();
+            let Some(value) = rest.strip_prefix('=') else { continue };
+            let value = value.trim_start();
+            let value = match value.chars().next() {
+                Some(quote @ ('"' | '\'')) => value[1..].split(quote).next().unwrap_or_default(),
+                _ => value.split(|c: char| c.is_ascii_whitespace() || c == '>').next().unwrap_or_default(),
+            };
+            return Some(value.replace("&amp;", "&"));
+        }
+        return None;
+    }
+    None
+}
+
+/// `new URL(url).pathname` for an absolute address, `None` where it isn't
+/// one: after the authority of a `//` address, else after the scheme, up to
+/// a query or fragment.
+fn url_pathname(url: &str) -> Option<String> {
+    let (scheme, rest) = url.trim().split_once(':')?;
+    let mut chars = scheme.chars();
+    if !chars.next()?.is_ascii_alphabetic() || !chars.all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c)) {
+        return None;
+    }
+    let rest = rest.split(['?', '#']).next().unwrap_or_default();
+    Some(match rest.strip_prefix("//") {
+        Some(after) => match after.find('/') {
+            Some(slash) => after[slash..].to_owned(),
+            None => "/".to_owned(),
+        },
+        None => rest.to_owned(),
+    })
+}
+
 /// How long to wait between retries (158390): from half a second, growing
 /// by a random share of double itself, to ten times the first.
 pub struct Backoff {
@@ -659,6 +736,46 @@ impl Rest {
 
 #[cfg(test)]
 mod tests {
+    use super::{pasted_image_name, pasted_text_becomes_file};
+
+    #[test]
+    fn a_pasted_text_past_the_limit_becomes_a_file() {
+        assert!(!pasted_text_becomes_file(&"a".repeat(2000), 2000));
+        assert!(pasted_text_becomes_file(&"a".repeat(2001), 2000));
+        // Counted in UTF-16 units: an emoji is two.
+        assert!(pasted_text_becomes_file(&"😀".repeat(1001), 2000));
+        assert!(!pasted_text_becomes_file(&"😀".repeat(1000), 2000));
+    }
+
+    #[test]
+    fn an_image_pasted_from_a_page_is_named_after_its_file() {
+        let name = |html: &str| pasted_image_name(html);
+        assert_eq!(
+            name(r#"<meta charset="utf-8"><img src="https://e.com/a/cat.photo.jpg?x=1#y" alt="">"#).as_deref(),
+            Some("cat.photo.png")
+        );
+        assert_eq!(name("<IMG ALT='x' SRC='https://e.com/pic.gif'>").as_deref(), Some("pic.png"));
+        assert_eq!(name("<img src=https://e.com/noext>").as_deref(), Some("noext.png"));
+        assert_eq!(
+            name(r#"<img src="https://e.com/.hidden">"#).as_deref(),
+            Some(".hidden.png"),
+            "a leading dot isn't an extension"
+        );
+        assert_eq!(name(r#"<img src="https://e.com/a.jpg?a=1&amp;b=2">"#).as_deref(), Some("a.png"));
+        assert_eq!(name(r#"<a href="https://e.com/x.png">x</a>"#), None, "no image");
+        assert_eq!(name(r#"<img src="/relative/a.jpg">"#), None, "not an address");
+        assert_eq!(name(r#"<img alt="src=x">"#), None);
+        assert_eq!(
+            name(r#"<img src="https://e.com/">"#),
+            Some("/.png".to_owned()),
+            "an address ending in a slash names it by the whole path, as `r` in 741394 does"
+        );
+        assert_eq!(
+            name(r#"<imgx src="https://e.com/a.jpg"><img src="https://e.com/b.jpg">"#).as_deref(),
+            Some("b.png")
+        );
+    }
+
     use super::*;
 
     fn limits() -> Uploads {
