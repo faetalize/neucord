@@ -75,6 +75,7 @@ mod unread;
 mod uploads;
 mod usage;
 mod video;
+mod video_stats;
 mod viewer;
 mod voice;
 mod widgets;

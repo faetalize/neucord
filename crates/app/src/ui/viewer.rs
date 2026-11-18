@@ -20,6 +20,7 @@ use super::App;
 use super::media_frame::MediaFrame;
 use super::menus::{self, At, Entry};
 use super::video::{self, Control, Player};
+use super::video_stats::{self, Panel};
 use crate::images::{Images, Lease};
 
 /// How much the zoom enlarges a picture (the client's `setZoomed`).
@@ -108,6 +109,8 @@ struct Open {
     /// What holds the picture or player at the size it is shown at.
     frame: Option<MediaFrame>,
     player: Option<Player>,
+    /// Stats for Nerds over the video.
+    stats: Option<Panel>,
     tick: Option<gtk::TickCallbackId>,
     previous_focus: Option<glib::WeakRef<gtk::Widget>>,
     fullscreened: bool,
@@ -324,6 +327,7 @@ impl Viewer {
                 lease: None,
                 frame: None,
                 player: None,
+                stats: None,
                 tick: None,
                 previous_focus,
                 fullscreened: false,
@@ -472,6 +476,7 @@ impl Viewer {
             open.loaded = (0, 0);
             open.picture = None;
             open.frame = None;
+            open.stats = None;
             if let Some(player) = open.player.take() {
                 player.control().pause();
             }
@@ -665,12 +670,28 @@ impl Viewer {
             let menu = viewer.clone();
             menus::on_secondary(player.widget(), move |x, y| menu.context_menu(x, y));
             viewer.0.holder.append(&frame);
+            let stats = Panel::new(&player, &path);
+            stats.set_visible(video_stats::is_on(&item.url));
             if let Some(open) = viewer.0.state.borrow_mut().open.as_mut() {
                 open.src = item.file_url().to_owned();
                 open.player = Some(player);
+                open.stats = Some(stats);
                 open.frame = Some(frame);
             }
         });
+    }
+
+    /// Turn Stats for Nerds on or off for the video at `url`; it shows over
+    /// the video if that is the one shown.
+    fn set_stats(&self, url: &str, on: bool) {
+        video_stats::set_on(url, on);
+        let state = self.0.state.borrow();
+        if let Some(open) = state.open.as_ref()
+            && open.items[open.index].url == url
+            && let Some(stats) = &open.stats
+        {
+            stats.set_visible(on);
+        }
     }
 
     fn toggle_fullscreen(&self) {
@@ -822,24 +843,56 @@ impl Viewer {
         }
     }
 
-    /// The More menu: Copy Image, Copy Link, and the attachment's id in
+    /// The More menu: Copy Image, Copy Link, an attachment's View Details
+    /// (its filename, size and alt text, each copying itself), and its id in
     /// Developer Mode (`eZ` in 2323).
     fn refresh_menu(&self, app: &Rc<App>, item: &Item, hide: bool) {
-        let section = gio::Menu::new();
+        let menu = gio::Menu::new();
+        let copies = gio::Menu::new();
         if !hide && item.can_copy() {
-            section.append(Some("Copy Image"), Some("viewer.copy-image"));
+            copies.append(Some("Copy Image"), Some("viewer.copy-image"));
         }
         if !hide && item.can_link() {
-            section.append(Some("Copy Media Link"), Some("viewer.copy-link"));
+            copies.append(Some("Copy Media Link"), Some("viewer.copy-link"));
+        }
+        let mut any = copies.n_items() > 0;
+        menu.append_section(None, &copies);
+        // GTK's menus have no second line under an item, so each detail is a
+        // row of our own, placed where its `custom` item is.
+        let mut rows = Vec::new();
+        if let Some(details) = item.details() {
+            let list = gio::Menu::new();
+            for (id, label, value) in [
+                ("detail-name", "Filename", details.name),
+                ("detail-size", "Size", details.size),
+                ("detail-alt", "Description (Alt Text)", details.alt),
+            ] {
+                let Some(value) = value else { continue };
+                let row = gio::MenuItem::new(None, None);
+                row.set_attribute_value("custom", Some(&id.to_variant()));
+                list.append_item(&row);
+                rows.push((id, detail_row(app, label, &value, id == "detail-alt")));
+            }
+            if list.n_items() > 0 {
+                let section = gio::Menu::new();
+                section.append_submenu(Some("View Details"), &list);
+                menu.append_section(None, &section);
+                any = true;
+            }
         }
         let developer = app.account.state.borrow().settings.developer_mode;
         if developer && matches!(item.source, Source::Attachment(_)) {
+            let section = gio::Menu::new();
             section.append(Some("Copy Attachment ID"), Some("viewer.copy-attachment-id"));
+            menu.append_section(None, &section);
+            any = true;
         }
-        let menu = gio::Menu::new();
-        menu.append_section(None, &section);
-        self.0.more.set_menu_model(Some(&menu));
-        self.0.more.set_visible(section.n_items() > 0);
+        let popover = gtk::PopoverMenu::from_model(Some(&menu));
+        for (id, row) in &rows {
+            popover.add_child(row, id);
+        }
+        self.0.more.set_popover(Some(&popover));
+        self.0.more.set_visible(any);
     }
 
     /// What forwarding `item` sends, if Forward is offered on it: the message
@@ -912,6 +965,38 @@ impl Viewer {
     }
 }
 
+/// A row of View Details: its `label`, with `value` dim under it, which a
+/// click copies (as the client's do) before the menu closes.
+fn detail_row(app: &Rc<App>, label: &str, value: &str, wrap: bool) -> gtk::Button {
+    let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+    // A button's label is bold in a popover menu; a menu item's isn't.
+    let weight = gtk::pango::AttrList::new();
+    weight.insert(gtk::pango::AttrInt::new_weight(gtk::pango::Weight::Normal));
+    content.append(&gtk::Label::builder().label(label).xalign(0.0).attributes(&weight).build());
+    let caption = gtk::Label::builder()
+        .label(value)
+        .xalign(0.0)
+        .max_width_chars(40)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .lines(if wrap { 2 } else { 1 })
+        .wrap(wrap)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    content.append(&caption);
+    let button = gtk::Button::builder().child(&content).css_classes(["flat"]).build();
+    let (app, value) = (Rc::downgrade(app), value.to_owned());
+    button.connect_clicked(move |button| {
+        if let Some(popover) = button.ancestor(gtk::PopoverMenu::static_type()).and_downcast::<gtk::PopoverMenu>() {
+            popover.popdown();
+        }
+        if let Some(app) = app.upgrade() {
+            app.copy(&value);
+            app.toast("Copied to clipboard.");
+        }
+    });
+    button
+}
+
 /// What the viewer shows in place of a picture it couldn't load.
 fn load_failed() -> gtk::Widget {
     let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(8).build();
@@ -946,6 +1031,18 @@ pub(super) const SAVE_IMAGE: Entry<Target> = Entry::Item(menus::Item {
     label: "_Save Image",
     shows: |_, target| target.item.kind == Kind::Image && target.item.can_save(),
     kind: menus::Kind::Action(|app, target| save(app, &target.item)),
+});
+
+/// A video's panel of numbers, ticked while it shows (`video-stats-for-nerds`
+/// in 761304), by the video's link.
+pub(super) const STATS_FOR_NERDS: Entry<Target> = Entry::Item(menus::Item {
+    name: "stats-for-nerds",
+    label: "Stats for _Nerds",
+    shows: |_, target| target.item.kind == Kind::Video,
+    kind: menus::Kind::Check {
+        checked: |_, target| video_stats::is_on(&target.item.url),
+        set: |app, target, on| app.viewer.set_stats(&target.item.url, on),
+    },
 });
 
 /// Copy and open the link of what is shown, by the name its type gets
