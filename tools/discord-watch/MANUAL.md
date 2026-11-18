@@ -129,6 +129,13 @@ changed for unrelated reasons only needs a note in the issue.
   the box untrimmed, and what it sends drops only trailing empty lines
   (`ignoreTrailingEmptyNodes` in 84046's submit); a crossposted one asks
   first (91624).
+- **Pinning** (`permissions::can_pin`, `discord::pins`; `ui/pins.rs`). The
+  requests and their refusals are watched (`pinMessage`, `unpinMessage`,
+  with `ApiErrorCode`'s `TOO_MANY_PINS_IN_CHANNEL`). When Pin Message and
+  Unpin Message show isn't: 492841 (anchor `isSystemDM`, with `jr` in 406704
+  and `USER_MESSAGE` in 448761) and the menu entries in 979766 (anchor
+  `confirmUnpin`); Shift skips the questions, whose words are in 145530
+  (anchor `confirmPin`). The search-result menu (847342) has them too.
 - **Voting on polls** (`Poll::view`, `Poll::set_my_votes`, `permissions::vote_held_back`,
   `polls::END_POLL`). The requests, and what tapping, submitting and ending
   do, are watched (`handlePollAnswerTapped`, `handlePollSubmitVote`,
