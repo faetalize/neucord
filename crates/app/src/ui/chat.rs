@@ -321,7 +321,17 @@ impl App {
         page.add_top_bar(&header);
         page.add_top_bar(&self.present_bar);
         page.add_top_bar(&self.unread_bar);
+        page.add_top_bar(&self.failed_bar);
         page.add_top_bar(&self.paused_bar);
+        self.failed_bar.connect_button_clicked({
+            let this = Rc::downgrade(self);
+            move |_| {
+                let Some(this) = this.upgrade() else { return };
+                if let Some(channel) = this.account.state.borrow().channel {
+                    this.load_newest(channel);
+                }
+            }
+        });
         self.unread_bar.connect_button_clicked({
             let this = Rc::downgrade(self);
             move |_| {
@@ -942,6 +952,7 @@ impl App {
             (store, loading, detached, fetch)
         };
         self.scroll_loader.borrow_mut().reset();
+        self.failed_bar.set_revealed(false);
         self.selection.set_model(Some(&store));
         self.update_present_bar();
         self.update_unread_bar();
@@ -968,6 +979,7 @@ impl App {
             timeline.loading = true;
             (timeline.store.clone(), timeline.detached)
         };
+        self.failed_bar.set_revealed(false);
         let limit = self.viewport().first_page();
         let started = self.account.timelines.borrow().held.started();
         let this = self.clone();
@@ -1010,8 +1022,10 @@ impl App {
                     this.refetch_if_stale(id, stale);
                 }
                 Err(e) => {
+                    // The error names the failure (a status, or what didn't parse), never message text.
+                    eprintln!("messages of {id}: {}", e.for_log());
                     if this.account.state.borrow().channel == Some(id) {
-                        this.show_composer_error(&format!("Could not load messages: {e}"));
+                        this.failed_bar.set_revealed(true);
                     }
                 }
             }
