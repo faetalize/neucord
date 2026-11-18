@@ -635,6 +635,9 @@ impl App {
             self.stack.set_visible_child_name("main");
         }
         self.apply_required_action();
+        if self.password_due.replace(false) {
+            self.ask_new_password();
+        }
         // A new session subscribes to nothing: say again what we look at.
         self.subscribe_session(true);
 
