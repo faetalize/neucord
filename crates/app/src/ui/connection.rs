@@ -939,6 +939,18 @@ impl App {
     /// the message box and Reply follow what we may still do.
     pub(super) fn permissions_changed(self: &Rc<Self>, guild: Option<Snowflake>) {
         self.refresh_badges();
+        // What we held of a channel we can't view any more is asked for again.
+        {
+            let state = self.account.state.borrow();
+            let gone: Vec<Snowflake> = match guild {
+                Some(guild) => state.unviewable(guild),
+                None => state.guilds.iter().flat_map(|g| state.unviewable(g.id)).collect(),
+            };
+            let mut timelines = self.account.timelines.borrow_mut();
+            for channel in gone {
+                timelines.held.forget(channel);
+            }
+        }
         let (open, viewable, replyable, editable) = {
             let state = self.account.state.borrow();
             let open = state.guild.filter(|&open| guild.is_none_or(|id| id == open));

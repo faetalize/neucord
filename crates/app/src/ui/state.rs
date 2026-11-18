@@ -1128,6 +1128,15 @@ impl State {
         self.dms().map(|c| self.mentions(c.id)).sum::<u32>() + self.relationships.incoming()
     }
 
+    /// The channels and threads of `guild` we can't view, whose held messages
+    /// are no good: the client marks them stale (`Y` in 596344) when roles,
+    /// our member or the channels change.
+    pub(super) fn unviewable(&self, guild: Snowflake) -> Vec<Snowflake> {
+        let Some(guild) = self.guilds.iter().find(|g| g.id == guild) else { return Vec::new() };
+        let ours = guild.channels.iter().chain(&guild.threads);
+        ours.filter(|c| !self.can_view(c.id)).map(|c| c.id).collect()
+    }
+
     /// `GUILD_DELETE`: we left the server, or lost it. An unavailable one
     /// stays as it is, as in the client's guild store (71393); a removed one
     /// goes, with its voice states. Gives the ids of its channels and threads,
@@ -1690,6 +1699,16 @@ mod tests {
         assert_eq!(state.rail_signature(true).1, 0, "no dot in the title or on the icon");
         state.read = ReadStates::from_ready(&json!([{"id": "9", "last_message_id": "100", "mention_count": 2}]));
         assert_eq!(state.rail_signature(true).1, 2);
+    }
+
+    #[test]
+    fn the_channels_we_cannot_view_are_the_ones_held_messages_go_stale_for() {
+        let mut state = open_server(None, json!({}));
+        state.guilds[0].set_role(serde_json::from_value(json!({"id": "1", "permissions": "1049600"})).unwrap());
+        assert!(state.unviewable(Snowflake(1)).is_empty(), "with View Channel");
+        state.guilds[0].set_role(serde_json::from_value(json!({"id": "1", "permissions": "0"})).unwrap());
+        assert_eq!(state.unviewable(Snowflake(1)), [Snowflake(9)]);
+        assert!(state.unviewable(Snowflake(2)).is_empty(), "a server we don't know");
     }
 
     #[test]
