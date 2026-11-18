@@ -868,6 +868,11 @@ def edit_member(guild, user, body):
     return 200, {"user": USERS.get(user, {"id": user}), "roles": [], **(body or {})}
 
 
+@route("PATCH", r"/channels/(\d+)")
+def edit_channel(channel, body):
+    return 200, {"id": channel, **(body or {})}
+
+
 @route("DELETE", r"/channels/(\d+)")
 def close_channel(channel, body):
     return 200, {"id": channel}

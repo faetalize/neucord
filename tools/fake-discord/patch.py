@@ -1210,3 +1210,40 @@ impl App {
     }
 }
 """)
+
+# A thread's settings form: `thread-settings <id>` opens it (whoever owns the thread), `thread-settings-save <name>
+# <slowmode index> <archive index>` fills it and presses Save Changes.
+edit("crates/app/src/ui/thread_settings.rs", "        form.dialog.present(Some(&self.window));",
+     "        E2E_FORM.with(|f| *f.borrow_mut() = Some(form.clone()));\n        form.dialog.present(Some(&self.window));")
+open(f"{root}/crates/app/src/ui/thread_settings.rs", "a").write(r"""
+thread_local! {
+    static E2E_FORM: std::cell::RefCell<Option<Rc<Form>>> = std::cell::RefCell::default();
+}
+
+impl App {
+    pub(super) fn e2e_thread_settings(self: &Rc<Self>, command: &str, rest: &str) {
+        let mut words = rest.split_whitespace();
+        match command {
+            "thread-settings" => {
+                let id = Snowflake(words.next().and_then(|w| w.parse().ok()).unwrap_or(0));
+                {
+                    let state = self.account.state.borrow();
+                    eprintln!("e2e: thread known={} guild={} account={}", state.find_channel(id).is_some(),
+                              state.find_channel(id).is_some_and(|(g, _)| g.is_some()), state.account.is_some());
+                }
+                self.open_thread_settings(id);
+            }
+            _ => {
+                let Some(form) = E2E_FORM.with(|f| f.borrow().clone()) else { return eprintln!("e2e: no form") };
+                let name = words.next().unwrap_or_default().replace('_', " ");
+                form.name.set_text(&name);
+                form.slowmode.set_selected(words.next().and_then(|w| w.parse().ok()).unwrap_or(0));
+                form.archive.set_selected(words.next().and_then(|w| w.parse().ok()).unwrap_or(0));
+                form.save.emit_clicked();
+            }
+        }
+    }
+}
+""")
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(c) if c == "thread-settings" || c == "thread-settings-save" => self.e2e_thread_settings(c, rest),
+            Some("quit") => {''')

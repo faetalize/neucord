@@ -346,6 +346,7 @@
     "resolvedMessageNotifications",
     "resolveUnreadSetting",
     "retryOpts",
+    "saveChannel",
     "scheduleSaveFromOfflineEdit",
     "selectItem",
     "sendPollMessage",
