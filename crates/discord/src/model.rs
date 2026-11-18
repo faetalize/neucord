@@ -265,6 +265,9 @@ pub struct Channel {
     /// A server channel's topic, in message markup.
     #[serde(default)]
     pub topic: Option<String>,
+    /// What a new post in a forum or media channel starts with.
+    #[serde(default)]
+    pub template: Option<String>,
     /// The other people in a DM or group DM (never includes us).
     #[serde(default)]
     pub recipients: Vec<User>,
@@ -469,6 +472,12 @@ pub struct RoleColors {
 }
 
 impl Channel {
+    /// The text the new-post form starts with: the channel's template without
+    /// the space around it (`i.template.trim()` in 218152).
+    pub fn post_template(&self) -> &str {
+        self.template.as_deref().unwrap_or_default().trim()
+    }
+
     /// Someone joined a group DM (`addRecipient`, 95701): the client keeps
     /// the recipients sorted by id, never lists us, and takes the user as
     /// sent.
@@ -1685,6 +1694,15 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn a_forums_template_is_what_a_new_post_starts_with() {
+        let forum =
+            |extra: &str| -> Channel { serde_json::from_str(&format!(r#"{{"id":"9","type":15{extra}}}"#)).unwrap() };
+        assert_eq!(forum(r#","template":"  Title:\n\nBody \n""#).post_template(), "Title:\n\nBody");
+        assert_eq!(forum("").post_template(), "");
+        assert_eq!(forum(r#","template":null"#).post_template(), "");
+    }
 
     #[test]
     fn a_channel_kind_gives_back_its_number() {
