@@ -214,6 +214,10 @@ impl App {
                 Event::GuildChannelUpdate { guild_id, channel } => self.on_guild_channel(guild_id, channel),
                 Event::GuildChannelDelete { guild_id, id } => self.on_guild_channel_delete(guild_id, id),
                 Event::ThreadUpdate { guild_id, thread } => {
+                    // An archived thread's list is let go of (`THREAD_UPDATE` in 219065).
+                    if thread.is_archived() {
+                        self.account.state.borrow_mut().thread_members.forget(thread.id);
+                    }
                     self.on_threads(guild_id, |g| g.set_thread(thread.clone()));
                     self.forum_thread_updated(&thread);
                 }
@@ -221,7 +225,24 @@ impl App {
                     self.on_threads(guild_id, |g| g.set_thread(thread.clone()));
                     self.forum_thread_created(guild_id, &thread, newly_created);
                 }
-                Event::ThreadDelete { guild_id, id } => self.on_thread_delete(guild_id, id),
+                Event::ThreadDelete { guild_id, id } => {
+                    self.account.state.borrow_mut().thread_members.forget(id);
+                    self.on_thread_delete(guild_id, id)
+                }
+                Event::ThreadMemberList { guild_id, thread, members } => {
+                    {
+                        let mut state = self.account.state.borrow_mut();
+                        let parent = state.find_channel(thread).and_then(|(_, c)| c.parent_id);
+                        state.thread_members.replace(guild_id, thread, parent, members);
+                    }
+                    self.thread_members_changed(thread);
+                }
+                Event::ThreadMembers { thread, added, removed, .. } => {
+                    let changed = self.account.state.borrow_mut().thread_members.changed(thread, &added, &removed);
+                    if changed {
+                        self.thread_members_changed(thread);
+                    }
+                }
                 Event::ThreadListSync { guild_id, threads, members, recent, complete } => {
                     self.on_threads(guild_id, |g| {
                         for thread in threads {
@@ -429,6 +450,7 @@ impl App {
                 Event::PresenceUpdate { user_id, guild_id, presence } => {
                     self.on_list_presence(guild_id, user_id, &presence);
                     self.on_presence(guild_id, user_id, presence);
+                    self.thread_presence_changed(user_id);
                 }
                 Event::GuildMemberRemove { guild_id, user_id } => {
                     let changed = self.account.state.borrow_mut().relationships.forget_member(guild_id, user_id);

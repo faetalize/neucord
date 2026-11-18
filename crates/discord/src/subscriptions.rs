@@ -14,7 +14,8 @@
 //! client's zero-delay timer batches them. A reconnect sends everything
 //! subscribed again ([`Subscriptions::session`]), and a closed connection
 //! drops all but `threads` for the servers we aren't looking at
-//! ([`Subscriptions::closed`]).
+//! ([`Subscriptions::closed`]). A thread's own member list is asked for
+//! with `thread_member_lists`, up to three threads of a server at a time.
 
 use serde::{Serialize, Serializer, ser::SerializeMap};
 
@@ -25,6 +26,9 @@ pub type Ranges = Vec<(u32, u32)>;
 
 /// How many channels' ranges a server keeps (`36124`).
 const CHANNELS: usize = 5;
+
+/// How many threads' member lists a server keeps (`max: 3` in 661670).
+const THREAD_LISTS: usize = 3;
 
 /// A message holds at most this many characters of subscriptions (`868`).
 const CHUNK: usize = 15360;
@@ -66,6 +70,8 @@ struct Server {
     threads: bool,
     /// Least recently used first.
     channels: Vec<(Snowflake, Ranges)>,
+    /// The threads whose member lists we ask for, least recently used first.
+    thread_lists: Vec<Snowflake>,
 }
 
 impl Server {
@@ -96,8 +102,36 @@ impl Server {
             members: [],
             member_updates: false,
             channels: Channels(self.channels.clone()),
-            thread_member_lists: [],
+            thread_member_lists: self.thread_ids(),
         })
+    }
+
+    /// The threads asked for, most recently used first, as the client's cache lists them.
+    fn thread_ids(&self) -> Vec<Snowflake> {
+        self.thread_lists.iter().rev().copied().collect()
+    }
+
+    /// `thread`'s member list is wanted (`subscribe` in 661670's thread lists):
+    /// one already asked for only counts as used now; a new one is added,
+    /// with `previous`, if asked for too, counted as used just before it.
+    /// Whether the list of threads changed.
+    fn subscribe_thread(&mut self, thread: Snowflake, previous: Option<Snowflake>) -> bool {
+        let touch = |lists: &mut Vec<Snowflake>, id: Snowflake| {
+            lists.retain(|t| *t != id);
+            lists.push(id);
+        };
+        if self.thread_lists.contains(&thread) {
+            touch(&mut self.thread_lists, thread);
+            return false;
+        }
+        if let Some(previous) = previous.filter(|p| self.thread_lists.contains(p)) {
+            touch(&mut self.thread_lists, previous);
+        }
+        touch(&mut self.thread_lists, thread);
+        if self.thread_lists.len() > THREAD_LISTS {
+            self.thread_lists.remove(0);
+        }
+        true
     }
 }
 
@@ -108,6 +142,8 @@ struct Pending {
     activities: bool,
     threads: bool,
     channels: Option<Vec<(Snowflake, Ranges)>>,
+    /// The threads asked for now, once that changed, none being a change too.
+    thread_member_lists: Option<Vec<Snowflake>>,
 }
 
 /// The ranges of each channel, as the map the client sends.
@@ -136,10 +172,12 @@ struct Partial {
     threads: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     channels: Option<Channels>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_member_lists: Option<Vec<Snowflake>>,
 }
 
-/// All of it, in the client's field order. Neucord has no member, thread
-/// member list or member update subscriptions: those fields stay empty.
+/// All of it, in the client's field order. Neucord has no member or member
+/// update subscriptions: those fields stay empty.
 #[derive(Debug, Serialize)]
 struct Full {
     typing: bool,
@@ -148,7 +186,7 @@ struct Full {
     members: [Snowflake; 0],
     member_updates: bool,
     channels: Channels,
-    thread_member_lists: [Snowflake; 0],
+    thread_member_lists: Vec<Snowflake>,
 }
 
 #[derive(Debug, Serialize)]
@@ -258,6 +296,41 @@ impl Subscriptions {
         }
     }
 
+    /// `thread`'s member list is showing, `previous` being the channel that
+    /// was open (`subscribeThreadMemberList`): ask for it, among at most
+    /// three of the server's. Whether anything changed to send.
+    pub fn thread_list(&mut self, guild: Snowflake, thread: Snowflake, previous: Option<Snowflake>) -> bool {
+        let state = self.guilds.entry(guild).or_default();
+        let changed = state.subscribe_thread(thread, previous);
+        if changed {
+            let ids = state.thread_ids();
+            self.pending(guild).thread_member_lists = Some(ids);
+        }
+        changed
+    }
+
+    /// `thread`'s member list is not showing any more (`unsubscribeThreadMemberList`).
+    pub fn end_thread_list(&mut self, guild: Snowflake, thread: Snowflake) -> bool {
+        let Some(state) = self.guilds.get_mut(&guild).filter(|s| s.thread_lists.contains(&thread)) else {
+            return false;
+        };
+        state.thread_lists.retain(|t| *t != thread);
+        let ids = state.thread_ids();
+        self.pending(guild).thread_member_lists = Some(ids);
+        true
+    }
+
+    /// The threads of `guild` whose member lists we ask for.
+    pub fn thread_lists(&self, guild: Snowflake) -> Vec<Snowflake> {
+        self.guilds.get(&guild).map(Server::thread_ids).unwrap_or_default()
+    }
+
+    /// The threads of every server whose member lists we ask for
+    /// (`getSubscribedThreadIds`).
+    pub fn subscribed_threads(&self) -> std::collections::HashSet<Snowflake> {
+        self.guilds.values().flat_map(|s| s.thread_lists.iter().copied()).collect()
+    }
+
     /// The changes since the last flush, as the messages to send. Servers we
     /// don't have any more (`known` says which) are left out.
     pub fn flush(&mut self, known: impl Fn(Snowflake) -> bool) -> Vec<String> {
@@ -267,9 +340,12 @@ impl Subscriptions {
                 self.subscribed.push(guild);
             }
             if known(guild) {
-                let Pending { typing, activities, threads, channels } = pending;
+                let Pending { typing, activities, threads, channels, thread_member_lists } = pending;
                 let channels = channels.map(Channels);
-                updates.push((guild, Entry::Partial(Partial { typing, activities, threads, channels })));
+                updates.push((
+                    guild,
+                    Entry::Partial(Partial { typing, activities, threads, channels, thread_member_lists }),
+                ));
             }
         }
         bulk_messages(updates)
@@ -328,10 +404,16 @@ impl Subscriptions {
             self.subscribed.retain(|g| *g != guild);
         }
         self.pending.retain(|(g, _)| *g != guild);
+        let had_lists = self.guilds.get(&guild).is_some_and(|g| !g.thread_lists.is_empty());
         if all {
             self.guilds.remove(&guild);
         } else if let Some(state) = self.guilds.get_mut(&guild) {
             *state = Server { threads: state.threads, ..Server::default() };
+        }
+        // The cache of thread lists says so when it is emptied (`clear` in
+        // 661670), which queues an empty list for the next flush.
+        if had_lists {
+            self.pending(guild).thread_member_lists = Some(Vec::new());
         }
     }
 }
@@ -405,6 +487,64 @@ mod tests {
         let channels = sent[0]["1"]["channels"].as_object().unwrap();
         assert_eq!(channels.len(), 5);
         assert!(!channels.contains_key("10"), "the one used longest ago goes");
+    }
+
+    #[test]
+    fn a_threads_member_list_is_asked_for_three_at_a_time_as_the_clients_cache_does() {
+        let t = |n: u64| Snowflake(100 + n);
+        let mut subs = Subscriptions::default();
+        assert!(subs.thread_list(A, t(1), None));
+        assert_eq!(sent(subs.flush(all)), [json!({"1": {"thread_member_lists": ["101"]}})]);
+        // Asked for already: it counts as used again, and nothing is said.
+        assert!(!subs.thread_list(A, t(1), None));
+        assert!(subs.flush(all).is_empty());
+        assert!(subs.thread_list(A, t(2), Some(t(1))));
+        assert!(subs.thread_list(A, t(3), None));
+        assert_eq!(sent(subs.flush(all)), [json!({"1": {"thread_member_lists": ["103", "102", "101"]}})]);
+        // A fourth drops the one used longest ago; the open one asked for before it counts as used.
+        assert!(subs.thread_list(A, t(4), Some(t(2))));
+        assert_eq!(sent(subs.flush(all)), [json!({"1": {"thread_member_lists": ["104", "102", "103"]}})]);
+        assert_eq!(subs.thread_lists(A), [t(4), t(2), t(3)]);
+        // One that is asked for is used again without a word, and changes who goes next.
+        assert!(!subs.thread_list(A, t(3), None));
+        assert!(subs.thread_list(A, t(5), None));
+        assert_eq!(subs.thread_lists(A), [t(5), t(3), t(4)]);
+        // Another server's are its own.
+        assert!(subs.thread_list(B, t(1), None));
+        assert!(subs.thread_lists(A).len() == 3 && subs.thread_lists(B) == [t(1)]);
+    }
+
+    #[test]
+    fn ending_a_threads_list_says_what_is_left_and_nothing_for_one_not_asked_for() {
+        let t = |n: u64| Snowflake(100 + n);
+        let mut subs = Subscriptions::default();
+        subs.thread_list(A, t(1), None);
+        subs.thread_list(A, t(2), None);
+        subs.flush(all);
+        assert!(!subs.end_thread_list(A, t(9)), "never asked for");
+        assert!(!subs.end_thread_list(B, t(1)), "another server's");
+        assert!(subs.flush(all).is_empty());
+        assert!(subs.end_thread_list(A, t(1)));
+        assert_eq!(sent(subs.flush(all)), [json!({"1": {"thread_member_lists": ["102"]}})]);
+        assert!(subs.end_thread_list(A, t(2)));
+        assert_eq!(sent(subs.flush(all)), [json!({"1": {"thread_member_lists": []}})], "none is a change too");
+    }
+
+    #[test]
+    fn the_lists_go_again_with_a_reconnect_and_an_empty_one_when_the_server_is_let_go() {
+        let t = Snowflake(105);
+        let mut subs = Subscriptions::default();
+        subs.select(A, None);
+        subs.thread_list(A, t, None);
+        subs.select(B, None);
+        subs.flush(all);
+        let resumed = sent(subs.session(false, Some((A, None)), all));
+        assert_eq!(resumed[0]["1"]["thread_member_lists"], json!(["105"]));
+        assert_eq!(resumed[0]["2"]["thread_member_lists"], json!([]));
+        // The connection drops while in B: A is let go of, which empties its lists.
+        subs.closed(Some(B));
+        assert!(subs.thread_lists(A).is_empty());
+        assert_eq!(sent(subs.flush(all)), [json!({"1": {"thread_member_lists": []}})]);
     }
 
     #[test]

@@ -277,7 +277,8 @@ def guild():
             "owner_configured_content_level": NSFW["owner"]}, "roles": [
         {"id": "500", "name": "@everyone", "position": 0,
          "permissions": str(VIEW | SEND | HISTORY | ATTACH | REACT | CONNECT | USE_APPLICATION_COMMANDS)},
-        {"id": "510", "name": "Mods", "permissions": "0", "position": 1, "color": 0, "hoist": False,
+        {"id": "510", "name": "Mods", "permissions": "0", "position": 1, "color": 0,
+         "hoist": bool(os.environ.get("FAKE_THREAD_MEMBERS")),
          "mentionable": True, "managed": False, "flags": 0}],
         "channels": channels, "emojis": custom_emoji(), "stickers": guild_stickers(), "threads": threads, "member_count": 3,
         "data_mode": "full", "joined_at": "2026-01-01T00:00:00.000000+00:00", "large": False, "lazy": True}
@@ -1219,11 +1220,42 @@ class Handler(BaseHTTPRequestHandler):
                     if message["op"] == 8:
                         member_search(send, message.get("d") or {})
                         member_check(send, message.get("d") or {})
+                    if message["op"] == 37:
+                        thread_member_lists(send, message.get("d") or {})
         except (EOFError, OSError):
             pass
         if SESSION[0] is send:
             SESSION[0] = None
         self.close_connection = True
+
+
+def thread_member_lists(send, d):
+    """FAKE_THREAD_MEMBERS=1: op 37's `thread_member_lists` is answered for each thread with its members as Discord
+    sends them: Alice (a Mods member, on), Bob (idle, no role), us (no presence: offline here), and a user nobody
+    has heard of (no member object, so the client can't list them)."""
+    if not os.environ.get("FAKE_THREAD_MEMBERS"):
+        return
+    for guild, subscription in (d.get("subscriptions") or {}).items():
+        for thread in subscription.get("thread_member_lists") or []:
+            joined = "2026-10-28T00:00:00.000000+00:00"
+
+            def entry(user, roles=(), status=None):
+                e = {"user_id": user["id"], "id": thread, "join_timestamp": joined, "flags": 0,
+                     "member": {"user": user, "roles": list(roles), "nick": None, "joined_at": JOINED}}
+                if status:
+                    e["presence"] = {"user": {"id": user["id"]}, "status": status, "client_status": {"desktop": status},
+                                     "activities": []}
+                return e
+            members = [entry(ALICE, ["510"], "online"), entry(BOB, [], "idle"), entry(ME),
+                       {"user_id": "999", "id": thread, "join_timestamp": joined, "flags": 0}]
+            send(0, {"guild_id": guild, "thread_id": thread, "members": members}, "THREAD_MEMBER_LIST_UPDATE")
+
+
+@route("DELETE", r"/channels/(\d+)/thread-members/(\d+)")
+def remove_thread_member(thread, user, body):
+    """Taking someone out of a thread: Discord answers 204 and tells the thread's members."""
+    dispatch("THREAD_MEMBERS_UPDATE", {"id": thread, "guild_id": "500", "member_count": 2, "removed_member_ids": [user]})
+    return 204, None
 
 
 def member_search(send, d):

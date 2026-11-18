@@ -17,6 +17,8 @@ edit("crates/discord/src/identity.rs",
 edit("crates/discord/src/cdn.rs", 'host == "media.discordapp.net" ||', 'host == "127.0.0.1:8099" || host == "media.discordapp.net" ||')
 edit("crates/discord/src/cdn.rs", 'let host = url.strip_prefix("https://").and_then(|rest| rest.split([\'/\', \'?\']).next()).unwrap_or_default();', 'let host = url.strip_prefix("http://").and_then(|rest| rest.split([\'/\', \'?\']).next()).unwrap_or_default();')
 edit("crates/app/src/ui/uploads.rs", "    attach: gtk::Button,", "    pub(super) attach: gtk::Button,")
+edit("crates/app/src/ui/members.rs", "\n    scroller: gtk::ScrolledWindow,", "\n    pub(super) scroller: gtk::ScrolledWindow,")
+edit("crates/app/src/ui/mod.rs", "\n    members: members::Pane,", "\n    pub(super) members: members::Pane,")
 for field in ("stack: adw::ViewStack", "entry: gtk::Entry", "note: gtk::Entry", "note_left: gtk::Label", "note_hint: gtk::Label",
               "send: gtk::Button", "add_status: gtk::Label"):
     edit("crates/app/src/ui/friends.rs", f"\n    {field},", f"\n    pub(super) {field},")
@@ -258,6 +260,7 @@ impl App {
                     Some("composer_box") => Some(self.composer_box.clone().upcast()),
                     Some("gif_button") => Some(self.gif_button.clone().upcast()),
                     Some("emoji_button") => Some(self.emoji_button.clone().upcast()),
+                    Some("members_pane") => Some(self.members.scroller.clone().upcast()),
                     Some(row) if row.starts_with("row:") => {
                         let wanted = id(row.strip_prefix("row:"));
                         self.rows.borrow().iter().filter_map(|r| r.upgrade()).find(|r| {
@@ -355,6 +358,35 @@ impl App {
                 match found {
                     Some(message) => self.start_reply(&message, false),
                     None => eprintln!("e2e: no message to reply to"),
+                }
+            }
+            // A person's menu from the member pane, as a right click on their row opens it: `member-menu <id>`
+            // (the open channel's), `shot-popover members_pane <png> [close]`, and `member-menu-item <name>`.
+            Some("member-menu") => {
+                let user = self.account.state.borrow().whole_users.get(&id(parts.next()).0).cloned();
+                let (guild, channel) = {
+                    let state = self.account.state.borrow();
+                    (state.guild, state.channel)
+                };
+                let anchor: gtk::Widget = self.members.scroller.clone().upcast();
+                match user {
+                    Some(user) => self.user_menu(
+                        crate::ui::profile::UserTarget { user, guild, channel, presence: None, anchor: anchor.clone() },
+                        &anchor,
+                        crate::ui::menus::At::Point(20.0, 20.0),
+                    ),
+                    None => eprintln!("e2e: no such user"),
+                }
+            }
+            Some("member-menu-item") => {
+                let name = parts.next().unwrap_or_default();
+                let anchor: gtk::Widget = self.members.scroller.clone().upcast();
+                match popover_above(&anchor) {
+                    Some(popover) => match popover.activate_action(&format!("menu.{name}"), None) {
+                        Ok(()) => eprintln!("e2e: chose {name}"),
+                        Err(e) => eprintln!("e2e: {e}"),
+                    },
+                    None => eprintln!("e2e: no menu"),
                 }
             }
             // `t` on a message (the shortcut's own action: what the key handler runs for a focused row):

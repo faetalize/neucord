@@ -651,6 +651,14 @@ impl Rest {
         Ok(())
     }
 
+    /// Take `user` out of `thread` (`removeMember` in 7909), naming where
+    /// the click was; Discord answers with nothing, and the thread's members
+    /// change as events.
+    pub async fn remove_thread_member(&self, thread: Snowflake, user: Snowflake, location: &str) -> Result<(), Error> {
+        let _: Value = self.request(remove_thread_member_call(thread, user, location), None).await?;
+        Ok(())
+    }
+
     /// The page of a channel's archived threads that `search` names
     /// (`loadArchivedThreads` in 7909). Unlike the client, a failure isn't
     /// tried again (its `retries: 2`): fewer requests, never more.
@@ -1282,6 +1290,12 @@ fn join_thread_call(thread: Snowflake, location: &str) -> Call {
     call!(JOIN_THREAD, channel = thread).query(&format!("location={location}"))
 }
 
+/// The request that removes someone from a thread: the same query as leaving it.
+fn remove_thread_member_call(thread: Snowflake, user: Snowflake, location: &str) -> Call {
+    let location = glib::uri_escape_string(location, None::<&str>, false);
+    call!(REMOVE_THREAD_MEMBER, channel = thread, user = user).query(&format!("location={location}"))
+}
+
 fn leave_thread_call(thread: Snowflake, location: &str) -> Call {
     let location = glib::uri_escape_string(location, None::<&str>, false);
     call!(LEAVE_THREAD, channel = thread).query(&format!("location={location}"))
@@ -1520,7 +1534,7 @@ mod tests {
         Captcha, Page, Reply, ReplyPing, add_reaction_call, archived_threads_call, base_headers, create_post_call,
         edit_body, edit_scheduled_body, forward_body, is_md5, join_thread_call, leave_thread_call, message_body,
         nothing_to_send, poll_body, poll_voters_call, rate_limit_wait, reactors_call, remove_reaction_call,
-        save_answer, schedule_body, thread_name_search_call, vote_body,
+        remove_thread_member_call, save_answer, schedule_body, thread_name_search_call, vote_body,
     };
     use crate::endpoints::call;
     use crate::model::Emoji;
@@ -1621,6 +1635,11 @@ mod tests {
         assert_eq!(
             (leave.method(), leave.path()),
             ("DELETE", "/channels/7/thread-members/@me?location=Context%20Menu")
+        );
+        let removed = remove_thread_member_call(thread, Snowflake(9), "Context Menu");
+        assert_eq!(
+            (removed.method(), removed.path()),
+            ("DELETE", "/channels/7/thread-members/9?location=Context%20Menu")
         );
         // `loadArchivedThreads` in 7909: no `tag`, since none is chosen.
         let page = archived_threads_call(&crate::forum::Search::plain(thread, 25));

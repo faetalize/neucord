@@ -61,6 +61,8 @@ pub(super) enum Target {
     /// The server's members, from the list `list` of `channel` (see
     /// [`member_list::list_id`]).
     Server { guild: Snowflake, channel: Snowflake, list: String },
+    /// A thread's, from the member list we ask Discord for (`thread_member_lists`).
+    Thread { guild: Snowflake, thread: Snowflake },
     /// A group DM's, which its channel holds.
     Group(Snowflake),
     /// The profile of the person a DM is with, which has no list.
@@ -289,6 +291,8 @@ pub(super) struct State {
     pub(super) subscriptions: Subscriptions,
     /// The rows of the member lists we asked for.
     pub(super) member_lists: MemberLists,
+    /// Who is in the threads whose member lists we asked for.
+    pub(super) thread_members: discord::thread_members::Lists,
     /// What the thread browser asked of each channel's archived threads.
     pub(super) archives: threads::Archives,
     /// Threads we asked Discord for by id, once each a session, found or not.
@@ -698,11 +702,41 @@ impl State {
         discord::profile::connections_role(&guild.roles, guild.id, roles?, channel)
     }
 
+    /// The groups of `thread`'s member list, as the pane shows them: none
+    /// until Discord has sent the list. Someone whose account we haven't
+    /// heard of isn't listed, as in the client (`addUser`, 219065).
+    pub(super) fn thread_sections(&self, thread: Snowflake) -> Option<Vec<discord::thread_members::Section>> {
+        let members = self.thread_members.members(thread)?;
+        let (guild, _) = self.find_channel(thread)?;
+        let guild = guild?;
+        let people = members
+            .iter()
+            .filter_map(|id| {
+                let user = self.whole_users.get(&id.0).filter(|u| !u.username.is_empty())?;
+                // Ours is what we set, as the client has it (`getStatus` of our own status).
+                let status = match self.me() == Some(*id) {
+                    true => discord::relationships::Status::own(self.settings.status.status),
+                    false => self.relationships.presence(*id).status,
+                };
+                let roles = match self.me() == Some(*id) {
+                    true => guild.my_roles.clone(),
+                    false => self.members.roles(guild.id, *id).map(<[Snowflake]>::to_vec).unwrap_or_default(),
+                };
+                Some(discord::thread_members::Person {
+                    id: *id,
+                    on: status != discord::relationships::Status::Offline,
+                    roles,
+                    name: self.name_in(thread, user),
+                })
+            })
+            .collect();
+        Some(discord::thread_members::sections(&guild.roles, people))
+    }
+
     /// Whose member list the open channel has, as the client chooses
     /// (`renderSidebar`, 420018): a server's text, announcement, forum and
     /// media channels, and an announcement thread's parent, which show the
-    /// server's members; and a group DM. Other threads show those in them,
-    /// which Neucord doesn't list yet.
+    /// server's members; and a group DM. Other threads show those in them.
     pub(super) fn member_target(&self) -> Option<Target> {
         let id = self.channel.filter(|_| self.page.is_none())?;
         let (guild, channel) = self.find_channel(id)?;
@@ -718,7 +752,7 @@ impl State {
         };
         let channel = match channel.kind {
             discord::ChannelKind::AnnouncementThread => guild.channel(channel.parent_id?)?,
-            kind if kind.is_thread() => return None,
+            kind if kind.is_thread() => return Some(Target::Thread { guild: guild.id, thread: id }),
             _ => channel,
         };
         let shows = channel.kind.is_text() || channel.kind.is_forum_like();
@@ -1341,7 +1375,11 @@ mod tests {
         with(&mut state, "22", json!(2));
         assert_eq!(state.member_target(), None, "voice");
         with(&mut state, "23", json!(11));
-        assert_eq!(state.member_target(), None, "a public thread has its own list");
+        assert_eq!(
+            state.member_target(),
+            Some(Target::Thread { guild, thread: Snowflake(23) }),
+            "a public thread has its own list"
+        );
         with(&mut state, "24", json!(10));
         assert_eq!(state.member_target(), Some(shown), "an announcement thread shows its parent's");
 

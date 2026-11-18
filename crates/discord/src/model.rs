@@ -457,6 +457,9 @@ pub struct Role {
     /// Anyone may mention it, not only those who may mention everyone.
     #[serde(default, deserialize_with = "null_is_false")]
     pub mentionable: bool,
+    /// Its members are listed apart from the rest, under its name.
+    #[serde(default, deserialize_with = "null_is_false")]
+    pub hoist: bool,
     /// Higher is above; `@everyone` is always at the bottom.
     #[serde(default, deserialize_with = "null_is_default")]
     pub position: i32,

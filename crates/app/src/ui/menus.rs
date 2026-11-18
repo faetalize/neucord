@@ -326,9 +326,11 @@ pub(super) const DIRECT_MESSAGE: Table<sidebar::ChannelTarget> = &[
 /// role and moderation items, which Neucord has no surface for, and Add
 /// Friend, Block and Ignore, whose requests Neucord has never sent. Apps is
 /// in the group of Invite to Server and Remove Friend, and shows in the
-/// channel the menu was opened in.
+/// channel the menu was opened in. Remove from Thread, which the thread's user
+/// menu (202643) puts with the moderation items, comes after the first group.
 pub(super) const USER: Table<profile::UserTarget> = &[
     &[profile::PROFILE, profile::MENTION, profile::MESSAGE, profile::NOTE],
+    &[threads::REMOVE_FROM_THREAD, threads::REMOVE_FROM_POST],
     &[slash::USER_APPS, profile::REMOVE_FRIEND],
     &[profile::COPY_USER_ID],
 ];

@@ -63,6 +63,7 @@ pub(crate) const EMOJI_PACKS: Endpoint = Endpoint::get("/emoji-packs");
 pub(crate) const TOP_EMOJIS: Endpoint = Endpoint::get("/guilds/{guild}/top-emojis");
 pub(crate) const SEARCH_THREADS: Endpoint = Endpoint::get("/channels/{channel}/threads/search");
 pub(crate) const JOIN_THREAD: Endpoint = Endpoint::post("/channels/{channel}/thread-members/@me");
+pub(crate) const REMOVE_THREAD_MEMBER: Endpoint = Endpoint::delete("/channels/{channel}/thread-members/{user}");
 pub(crate) const LEAVE_THREAD: Endpoint = Endpoint::delete("/channels/{channel}/thread-members/@me");
 pub(crate) const POST_DATA: Endpoint = Endpoint::post("/channels/{channel}/post-data");
 pub(crate) const ME: Endpoint = Endpoint::get("/users/@me");

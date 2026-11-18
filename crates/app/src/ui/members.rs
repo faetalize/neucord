@@ -272,12 +272,26 @@ impl App {
         let visible = self.members_visible();
         let state = &mut *self.account.state.borrow_mut();
         let Some(guild) = state.guild else { return };
-        let list = match state.member_target() {
-            Some(Target::Server { channel, .. }) if visible => Some(channel),
+        let target = state.member_target();
+        let list = match &target {
+            Some(Target::Server { channel, .. }) if visible => Some(*channel),
             _ => None,
         };
         state.subscriptions.select(guild, list);
+        Self::ask_thread_list(state, &target, visible);
         self.send_subscriptions(state);
+    }
+
+    /// With a thread's member list showing, ask for it (`x` in 661670): an
+    /// active thread's only, as the client does, the open channel being the
+    /// one it names beside it. Lists no longer asked for are let go of.
+    fn ask_thread_list(state: &mut super::state::State, target: &Option<Target>, visible: bool) {
+        let (Some(Target::Thread { guild, thread }), true) = (target, visible) else { return };
+        let active = state.find_channel(*thread).is_some_and(|(_, c)| c.is_active_thread());
+        if active && state.subscriptions.thread_list(*guild, *thread, state.channel) {
+            let asked = state.subscriptions.subscribed_threads();
+            state.thread_members.keep_asked(&asked);
+        }
     }
 
     /// A session began: send what we are subscribed to again, as the client
@@ -288,14 +302,17 @@ impl App {
             let state = &mut *self.account.state.borrow_mut();
             if fresh {
                 state.member_lists.reset();
+                state.thread_members.clear();
             }
+            let target = state.member_target();
             let open = state.guild.map(|guild| {
-                let list = match state.member_target() {
-                    Some(Target::Server { channel, .. }) if visible => Some(channel),
+                let list = match &target {
+                    Some(Target::Server { channel, .. }) if visible => Some(*channel),
                     _ => None,
                 };
                 (guild, list)
             });
+            Self::ask_thread_list(state, &target, visible);
             let guilds = &state.guilds;
             let messages = state.subscriptions.session(fresh, open, |id| guilds.iter().any(|g| g.id == id));
             if let Some(gateway) = &state.gateway {
@@ -433,6 +450,9 @@ impl App {
             Some(Target::Server { guild, list, .. }) => {
                 self.account.state.borrow().member_lists.get(*guild, list).is_none_or(|l| l.is_unknown())
             }
+            Some(Target::Thread { thread, .. }) => {
+                self.account.state.borrow().thread_members.members(*thread).is_none()
+            }
             _ => false,
         };
         self.members.stack.set_visible_child_name(if loading { "loading" } else { "list" });
@@ -445,6 +465,9 @@ impl App {
         match &*self.members.shown.borrow() {
             Some(Target::Server { guild, list, .. }) => {
                 state.member_lists.get(*guild, list).filter(|l| !l.is_unknown()).map_or(0, |l| l.len())
+            }
+            Some(Target::Thread { thread, .. }) => {
+                state.thread_sections(*thread).map_or(0, |sections| sections.iter().map(|s| 1 + s.people.len()).sum())
             }
             Some(Target::Group(id)) => state.find_channel(*id).map_or(0, |(_, c)| 2 + c.recipients.len()),
             Some(Target::Dm(_)) | None => 0,
@@ -473,6 +496,25 @@ impl App {
         }
     }
 
+    /// Who is in `thread` changed: its pane lists them again, if it is the one showing.
+    pub(super) fn thread_members_changed(self: &Rc<Self>, thread: Snowflake) {
+        if matches!(&*self.members.shown.borrow(), Some(Target::Thread { thread: t, .. }) if *t == thread) {
+            self.refresh_member_rows();
+        }
+    }
+
+    /// `user`'s presence was taken in: a thread's list groups by who is on, so
+    /// it lists them again if they are in the one showing.
+    pub(super) fn thread_presence_changed(self: &Rc<Self>, user: Snowflake) {
+        let thread = match &*self.members.shown.borrow() {
+            Some(Target::Thread { thread, .. }) => *thread,
+            _ => return,
+        };
+        if self.account.state.borrow().thread_members.is_member(thread, user) == Some(true) {
+            self.refresh_member_rows();
+        }
+    }
+
     /// `user`'s presence changed in a server, or everywhere.
     pub(super) fn on_list_presence(
         self: &Rc<Self>,
@@ -482,6 +524,7 @@ impl App {
     ) {
         let changes = self.account.state.borrow_mut().member_lists.set_presence(guild, user, presence);
         let shown = self.members.shown.borrow().clone();
+
         for (g, list, change) in changes {
             if matches!(&shown, Some(Target::Server { guild, list: l, .. }) if *guild == g && *l == list) {
                 self.announce_member_rows(Some(change));
@@ -528,6 +571,32 @@ impl App {
                     }
                     _ => placeholder(),
                 }
+            }
+            Some(Target::Thread { guild, thread }) => {
+                let Some(sections) = state.thread_sections(*thread) else { return placeholder() };
+                let mut at = position;
+                for section in &sections {
+                    // A heading, then its people.
+                    if at == 0 {
+                        return header(&section.title, section.people.len() as u32);
+                    }
+                    at -= 1;
+                    if at >= section.people.len() {
+                        at -= section.people.len();
+                        continue;
+                    }
+                    let Some(user) = state.whole_users.get(&section.people[at].0) else { return placeholder() };
+                    let roles = state.members.roles(*guild, user.id);
+                    let mut presence = state.relationships.presence(user.id);
+                    if state.me.as_ref().is_some_and(|me| me.id == user.id) {
+                        presence.status = Status::own(state.settings.status.status);
+                    }
+                    let guild_ref = state.guilds.iter().find(|g| g.id == *guild);
+                    let colour = guild_ref.and_then(|g| g.member_colour(roles.unwrap_or_default()));
+                    let owner = guild_ref.is_some_and(|g| g.owner_id == Some(user.id));
+                    return self.person(user, Some(*guild), &state.name_in(*thread, user), colour, &presence, owner);
+                }
+                placeholder()
             }
             Some(Target::Group(id)) => {
                 let (Some(me), Some((_, channel))) = (&state.me, state.find_channel(*id)) else { return placeholder() };
