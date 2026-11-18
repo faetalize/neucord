@@ -141,7 +141,7 @@ pub(super) type Table<T, C = App> = &'static [&'static [Entry<T, C>]];
 const MESSAGE: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
     &[reactions::QUICK_REACTIONS, reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
-    &[edits::EDIT, composer::REPLY, forward::MESSAGE_MENU, create_thread::MESSAGE_MENU],
+    &[edits::EDIT, composer::REPLY, forward::MESSAGE_MENU, create_thread::MESSAGE_MENU, create_thread::VIEW_THREAD],
     &[
         chat::COPY_TEXT,
         pins::PIN,
@@ -163,7 +163,7 @@ const MESSAGE: Table<MessageTarget> = &[
 const MESSAGE_REGULATED: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
     &[reactions::QUICK_REACTIONS, reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
-    &[edits::EDIT, composer::REPLY, forward::MESSAGE_MENU, create_thread::MESSAGE_MENU],
+    &[edits::EDIT, composer::REPLY, forward::MESSAGE_MENU, create_thread::MESSAGE_MENU, create_thread::VIEW_THREAD],
     &[
         chat::COPY_TEXT,
         pins::PIN,

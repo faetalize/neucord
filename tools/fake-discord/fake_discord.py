@@ -249,6 +249,14 @@ def guild():
                             "thread_metadata": {"archived": False, "locked": False, "archive_timestamp": now,
                                                 "auto_archive_duration": 4320, "create_timestamp": now},
                             **({"most_recent_message": last} if last else {})})
+    if os.environ.get("FAKE_CHAIN"):
+        # The thread line 10 started: a thread's id is its starter message's.
+        now = time.strftime("%Y-%m-%dT%H:%M:%S.000000+00:00", time.gmtime())
+        threads.append({"id": snowflake(1000 + 10 * 100, 10), "type": 11, "guild_id": "500", "parent_id": "600",
+                        "name": "about line ten", "owner_id": "301", "last_message_id": None, "message_count": 1,
+                        "member_count": 1, "rate_limit_per_user": 0, "flags": 0,
+                        "thread_metadata": {"archived": False, "locked": False, "archive_timestamp": now,
+                                            "auto_archive_duration": 4320, "create_timestamp": now}})
     if os.environ.get("FAKE_FORUM"):
         # A forum (#605) with two tags and three active posts, as THREAD_LIST_SYNC and the guild's threads have them.
         channels.append({"id": "605", "type": 15, "name": "ideas", "position": 5, "parent_id": None, "flags": 0,
@@ -356,6 +364,8 @@ def messages(channel):
             if n == 39:
                 text, files = "the newest picture, and see <#603> for the plan", (attachment(39),)
             msg = message(n, who, text, files)
+            if n == 10 and os.environ.get("FAKE_CHAIN"):
+                msg["flags"] = 1 << 5
             if n == 37 and os.environ.get("FAKE_EMBED"):
                 # A card whose small picture (the thumbnail) is a GIF, to the fake's own image.
                 pic = f"http://127.0.0.1:{PORT}/attachments/1/900/embed.gif?ex=ffffffff&is=1&hm=2&"
@@ -363,6 +373,8 @@ def messages(channel):
                 msg["embeds"] = [{"type": "rich", "title": "A made-up card", "description": "With a small picture beside it.",
                                   "thumbnail": {"url": pic, "proxy_url": pic, "width": 64, "height": 64}}]
             out.append(msg)
+        if os.environ.get("FAKE_CHAIN"):
+            out += reply_chain()
         if os.environ.get("FAKE_ANSWERS"):
             out += answers(out)
         if os.environ.get("FAKE_POLL"):
@@ -413,6 +425,19 @@ def poll_message(n):
 def voter(i):
     return {"id": str(4000 + i), "username": "voter_%03d" % i, "global_name": "Voter %03d" % i, "avatar": None,
             "discriminator": "0"}
+
+
+def reply_chain():
+    """FAKE_CHAIN=1: lines 70 to 73, each a reply to the one before, so a reply to 73 continues a chain of three
+    replies; and line 10 of #general started a thread (see `guild()`), so it carries HAS_THREAD."""
+    chain = [message(70, BOB, "the start of a chain")]
+    for n in (71, 72, 73):
+        quoted = chain[-1]
+        reply = message(n, ALICE if n % 2 else BOB, "a reply, number %d" % (n - 70))
+        reply.update(type=19, message_reference={"type": 0, "message_id": quoted["id"], "channel_id": "600"},
+                     referenced_message=quoted)
+        chain.append(reply)
+    return chain
 
 
 def answers(lines):
@@ -948,6 +973,21 @@ def create_thread(channel, body):
                      "global": False}
     now = time.strftime("%Y-%m-%dT%H:%M:%S.000000+00:00", time.gmtime())
     thread = {"id": snowflake_now(), "type": body.get("type", 11), "guild_id": "500", "parent_id": channel,
+              "name": body.get("name", ""), "owner_id": ME["id"], "last_message_id": None, "message_count": 0,
+              "member_count": 1, "rate_limit_per_user": 0, "flags": 0,
+              "thread_metadata": {"archived": False, "locked": False, "archive_timestamp": now,
+                                  "auto_archive_duration": body.get("auto_archive_duration", 4320),
+                                  "create_timestamp": now},
+              "member": {"id": None, "user_id": ME["id"], "join_timestamp": now, "flags": 1}}
+    GUILD_CHANNELS.add(thread["id"])
+    return 201, thread, lambda: dispatch("THREAD_CREATE", {**thread, "newly_created": True})
+
+
+# A thread from a message: its id is the message's, and it is pushed as THREAD_CREATE.
+@route("POST", r"/channels/(\d+)/messages/(\d+)/threads")
+def create_thread_from_message(channel, message, body):
+    now = time.strftime("%Y-%m-%dT%H:%M:%S.000000+00:00", time.gmtime())
+    thread = {"id": message, "type": body.get("type", 11), "guild_id": "500", "parent_id": channel,
               "name": body.get("name", ""), "owner_id": ME["id"], "last_message_id": None, "message_count": 0,
               "member_count": 1, "rate_limit_per_user": 0, "flags": 0,
               "thread_metadata": {"archived": False, "locked": False, "archive_timestamp": now,

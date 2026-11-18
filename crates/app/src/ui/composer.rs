@@ -14,6 +14,7 @@ use discord::mention_list::{self, Global};
 use discord::notice::Notice;
 use discord::rest::{Reply, ReplyPing};
 use discord::scheduled;
+use discord::thread_creation;
 use discord::verification::Gate;
 use discord::{Channel, ChannelKind, Message, Snowflake};
 use gtk::glib;
@@ -288,6 +289,19 @@ impl App {
         });
         self.reply_bar.append(&cancel);
         area.append(&self.reply_bar);
+        // A long chain of replies is offered a thread, which ends the reply (`tb` in 989161).
+        let start = gtk::Button::builder().label("Create Thread").css_classes(["flat", "link"]).build();
+        start.connect_clicked({
+            let this = Rc::downgrade(self);
+            move |_| {
+                if let Some(this) = this.upgrade() {
+                    this.start_thread_from_nudge();
+                }
+            }
+        });
+        self.reply_nudge.append(&self.reply_nudge_label);
+        self.reply_nudge.append(&start);
+        area.append(&self.reply_nudge);
         self.build_schedule_bar(area);
         self.build_dice_bar(area);
         self.build_edit_bar(area);
@@ -690,6 +704,7 @@ impl App {
             self.reply_ping.set_visible(reply.fixed_ping.is_none());
         }
         self.reply_bar.set_visible(reply.is_some());
+        self.sync_reply_nudge(reply.as_ref());
         let previous = self.reply.replace(reply.clone());
         // A reply ends an app's command, keeping its text (`C` in 870748),
         // which then names nothing the reply offers; the built-ins a reply
@@ -703,6 +718,35 @@ impl App {
             self.refresh_message(id);
         }
         self.reply_changed_slash();
+    }
+
+    /// Offer a thread under the reply bar when the chain being continued is
+    /// two replies deep or more, and a thread may be started from the
+    /// message replied to.
+    fn sync_reply_nudge(&self, reply: Option<&ReplyCtx>) {
+        let chain = reply.and_then(|reply| {
+            let message = self.message_in(reply.channel, reply.to)?;
+            let length =
+                thread_creation::reply_chain_length(reply.to, |id| self.message_in(reply.channel, id)?.reply_to());
+            let offered =
+                length >= thread_creation::NUDGE_AFTER && self.account.state.borrow().can_start_thread_from(&message);
+            offered.then_some(length)
+        });
+        if let Some(length) = chain {
+            self.reply_nudge_label.set_label(&thread_creation::nudge_text(length));
+        }
+        self.reply_nudge.set_visible(chain.is_some());
+    }
+
+    /// The nudge's Create Thread: the reply ends and a thread starts from
+    /// the message that was replied to.
+    fn start_thread_from_nudge(self: &Rc<Self>) {
+        let Some(reply) = self.reply.borrow().clone() else { return };
+        let message = self.message_in(reply.channel, reply.to);
+        self.set_reply(None);
+        if let Some(message) = message {
+            self.open_thread_form(reply.channel, Some(message), thread_creation::FROM_REPLY_NUDGE);
+        }
     }
 
     pub(super) fn show_composer_error(&self, text: &str) {

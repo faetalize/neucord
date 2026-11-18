@@ -17,6 +17,40 @@ pub const FROM_ATTACH_MENU: &str = "Plus Button";
 pub const FROM_MESSAGE_MENU: &str = "Message";
 /// `location` of /thread's request (12115).
 pub const FROM_SLASH_COMMAND: &str = "Slash Command";
+/// `location` of the `t` key on a focused message, and of the nudge in the
+/// reply bar (`Tv` is given them, 812266 and 989161).
+pub const FROM_SHORTCUT: &str = "Message Shortcut";
+pub const FROM_REPLY_NUDGE: &str = "Reply Chain Nudge";
+
+/// How many replies deep the chain a reply continues must be before the reply
+/// bar offers a thread (`C >= 2` in 989161), and how far the client follows it.
+pub const NUDGE_AFTER: usize = 2;
+const CHAIN_LIMIT: usize = 10;
+
+/// How many of the messages a reply continues are replies themselves, up to
+/// ten (`C` in 989161): from `start`, the message being replied to, follow
+/// what each replies to as far as `reply_to` knows it (it gives what a message
+/// we hold replies to, none for any other message or one we don't hold).
+pub fn reply_chain_length(
+    start: crate::Snowflake,
+    reply_to: impl Fn(crate::Snowflake) -> Option<crate::Snowflake>,
+) -> usize {
+    let mut at = start;
+    for length in 0..CHAIN_LIMIT {
+        match reply_to(at) {
+            Some(next) => at = next,
+            None => return length,
+        }
+    }
+    CHAIN_LIMIT
+}
+
+/// What the reply bar asks when a thread would ease a chain of `chain`
+/// replies (`B3V0FM`): the chain counts the reply being written too, and the
+/// count stops at ten.
+pub fn nudge_text(chain: usize) -> String {
+    format!("Want to make it easier to follow this chain of {} replies?", (chain + 1).min(CHAIN_LIMIT))
+}
 
 /// The longest name the client's name box takes, in UTF-16 units (`rm` in
 /// 420018).
@@ -273,6 +307,25 @@ impl Refused {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_reply_chain_counts_the_replies_it_follows_up_to_ten() {
+        use crate::Snowflake;
+        // 5 replies to 4 to 3 to 2 to 1, and 1 replies to nothing.
+        let held = |id: Snowflake| (id.0 > 1 && id.0 <= 5).then(|| Snowflake(id.0 - 1));
+        assert_eq!(reply_chain_length(Snowflake(1), held), 0, "a message that is no reply");
+        assert_eq!(reply_chain_length(Snowflake(3), held), 2);
+        assert_eq!(reply_chain_length(Snowflake(5), held), 4);
+        assert_eq!(reply_chain_length(Snowflake(9), |_| None), 0, "a message we don't hold");
+        assert_eq!(reply_chain_length(Snowflake(50), |id| Some(Snowflake(id.0 - 1))), 10, "no more than ten");
+        // The nudge starts at two, and counts the reply being written.
+        assert!(
+            reply_chain_length(Snowflake(3), held) >= NUDGE_AFTER
+                && reply_chain_length(Snowflake(2), held) < NUDGE_AFTER
+        );
+        assert_eq!(nudge_text(2), "Want to make it easier to follow this chain of 3 replies?");
+        assert_eq!(nudge_text(10), "Want to make it easier to follow this chain of 10 replies?");
+    }
+
     use super::*;
     use crate::Snowflake;
 

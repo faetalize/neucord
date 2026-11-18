@@ -126,7 +126,8 @@ fn opens_reaction_picker(key: gtk::gdk::Key, state: gtk::gdk::ModifierType) -> b
 impl App {
     /// A key pressed in the message list: `+` on a message that has the
     /// focus itself, not something inside it (the client's handler does
-    /// nothing for keys from within), opens the reaction picker over it.
+    /// nothing for keys from within), opens the reaction picker over it, and
+    /// `t` its thread.
     pub(super) fn message_key(
         self: &Rc<Self>,
         list: &gtk::Widget,
@@ -145,6 +146,13 @@ impl App {
             .and_then(|item| item.item().and_downcast::<glib::BoxedAnyObject>())
             .map(|object| object.borrow::<Message>().clone());
         let (Some(cell), Some(message)) = (cell, message) else { return glib::Propagation::Proceed };
+        // `t`: the thread of the message (812266), as that handler checks keys with no modifier named.
+        if matches!(key, gtk::gdk::Key::t | gtk::gdk::Key::T)
+            && message.thread_starter().is_none()
+            && self.thread_shortcut(&message)
+        {
+            return glib::Propagation::Stop;
+        }
         // A thread's first message stands for one in the parent, which isn't this row's to react to.
         if !opens_reaction_picker(key, state)
             || message.thread_starter().is_some()

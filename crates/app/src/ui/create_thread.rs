@@ -11,7 +11,7 @@ use std::time::Duration;
 use adw::prelude::*;
 use discord::cooldowns::wait_words;
 use discord::thread_creation::{
-    self, FROM_ATTACH_MENU, FROM_MESSAGE_MENU, Missing, NAME_MAX, NAME_PLACEHOLDER, Privacy, Refused,
+    self, FROM_ATTACH_MENU, FROM_MESSAGE_MENU, FROM_SHORTCUT, Missing, NAME_MAX, NAME_PLACEHOLDER, Privacy, Refused,
 };
 use discord::{Message, Snowflake};
 use gtk::glib;
@@ -32,7 +32,7 @@ pub(super) const ATTACH_MENU: Entry<()> = Entry::Item(Item {
     shows: |app, _| app.thread_channel().is_some(),
     kind: Kind::Action(|app, _| {
         if let Some(channel) = app.thread_channel() {
-            app.open_thread_form(channel, None);
+            app.open_thread_form(channel, None, FROM_ATTACH_MENU);
         }
     }),
 });
@@ -45,8 +45,17 @@ pub(super) const MESSAGE_MENU: Entry<MessageTarget> = Entry::Item(Item {
     shows: |app, target| app.account.state.borrow().can_start_thread_from(target.shown()),
     kind: Kind::Action(|app, target| {
         let message = target.shown();
-        app.open_thread_form(message.channel_id, Some(message.clone()));
+        app.open_thread_form(message.channel_id, Some(message.clone()), FROM_MESSAGE_MENU);
     }),
+});
+
+/// View Thread in a message's menu, on one that started a thread we may see
+/// (`view-thread` in 812266, where Create Thread isn't offered): it opens the thread.
+pub(super) const VIEW_THREAD: Entry<MessageTarget> = Entry::Item(Item {
+    name: "view-thread",
+    label: "View Thread",
+    shows: |app, target| app.has_viewable_thread(target.shown()),
+    kind: Kind::Action(|app, target| app.open_thread(target.shown().id)),
 });
 
 /// The form's widgets.
@@ -102,7 +111,7 @@ impl App {
     /// Open the form for a thread in `parent`, on `from` if given. A thread
     /// in the channel starts with what is in the message box, which the
     /// client moves into the form.
-    pub(super) fn open_thread_form(self: &Rc<Self>, parent: Snowflake, from: Option<Message>) {
+    pub(super) fn open_thread_form(self: &Rc<Self>, parent: Snowflake, from: Option<Message>, location: &'static str) {
         let privacy = match from {
             Some(_) => Privacy::Public,
             None => self.account.state.borrow().thread_privacy(parent),
@@ -115,7 +124,6 @@ impl App {
             form.message.buffer().set_text(&typed);
         }
         let this = Rc::downgrade(self);
-        let location = if from.is_some() { FROM_MESSAGE_MENU } else { FROM_ATTACH_MENU };
         form.create.connect_clicked({
             let (this, form, from, default) = (this.clone(), form.clone(), from.clone(), default.clone());
             move |_| {
@@ -161,6 +169,21 @@ impl App {
         });
         form.dialog.present(Some(&self.window));
         form.name.grab_focus();
+    }
+
+    /// The `t` key on a focused message (812266): a thread from it where one
+    /// may be started, else the thread it started, if we may see it. Whether
+    /// it did something, which then takes the key.
+    pub(super) fn thread_shortcut(self: &Rc<Self>, message: &Message) -> bool {
+        if self.account.state.borrow().can_start_thread_from(message) {
+            self.open_thread_form(message.channel_id, Some(message.clone()), FROM_SHORTCUT);
+            return true;
+        }
+        if self.has_viewable_thread(message) {
+            self.open_thread(message.id);
+            return true;
+        }
+        false
     }
 
     /// Show how long before another thread in `parent`, while it lasts.

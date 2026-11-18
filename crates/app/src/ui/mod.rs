@@ -213,6 +213,9 @@ pub struct App {
     /// "Replying to …" above the composer, with the ping toggle.
     reply_bar: gtk::Box,
     reply_label: gtk::Label,
+    /// Under it, the offer of a thread for a long chain of replies.
+    reply_nudge: gtk::Box,
+    reply_nudge_label: gtk::Label,
     reply_ping: gtk::ToggleButton,
     /// The message the composer replies to, if any.
     reply: RefCell<Option<composer::ReplyCtx>>,
@@ -477,6 +480,13 @@ impl App {
             integration: integrations::View::new(),
             reply_bar: gtk::Box::builder().spacing(8).visible(false).css_classes(["reply-bar"]).build(),
             reply_label: gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(pango::EllipsizeMode::End).build(),
+            reply_nudge: gtk::Box::builder().spacing(8).visible(false).css_classes(["reply-bar"]).build(),
+            reply_nudge_label: gtk::Label::builder()
+                .xalign(0.0)
+                .hexpand(true)
+                .wrap(true)
+                .css_classes(["caption"])
+                .build(),
             reply_ping: gtk::ToggleButton::builder()
                 .label("@ ON")
                 .active(true)
