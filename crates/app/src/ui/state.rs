@@ -933,10 +933,23 @@ impl State {
         let guild_muted = self.notifications.guild_muted(guild.id, now);
         let mut unread = false;
         let mut mentions = 0;
+        // Opt-in channels only apply to a Community server (`WW`, 395504).
+        let opt_in = self.notifications.opt_in_enabled(guild.id) && guild.features.iter().any(|f| f == "COMMUNITY");
+        // What a channel adds: its dot and mentions, trimmed by the server's opt-in channels.
+        let count = |channel: &Channel, dot: bool| {
+            let (unread, mentions) = (dot && self.is_unread(channel), self.read.mentions(channel.id));
+            if !opt_in {
+                return (unread, mentions);
+            }
+            let place =
+                Place { guild: Some(guild.id), guild_default: 0, channel: channel.id, parent: channel.parent_id };
+            self.notifications.opt_in_badge(&place, channel.last_message_id, unread, mentions, now_ms())
+        };
         // Channels we can't view count for nothing, as in the client.
         for channel in self.visible(guild, ChannelKind::is_text) {
-            mentions += self.read.mentions(channel.id);
-            if !unread && !guild_muted && self.is_unread(channel) {
+            let (channel_unread, channel_mentions) = count(channel, !unread && !guild_muted);
+            mentions += channel_mentions;
+            if channel_unread {
                 let place =
                     Place { guild: Some(guild.id), guild_default: 0, channel: channel.id, parent: channel.parent_id };
                 unread = !self.notifications.channel_muted(&place, now);
@@ -944,7 +957,7 @@ impl State {
         }
         // A call's chat adds its mentions but never a dot of its own
         // (`isGuildVocal() && 0 === t` in 458294).
-        mentions += self.visible(guild, ChannelKind::is_vocal).map(|c| self.read.mentions(c.id)).sum::<u32>();
+        mentions += self.visible(guild, ChannelKind::is_vocal).map(|c| count(c, false).1).sum::<u32>();
         // Threads we've joined count too, unless muted, whatever their parent.
         for thread in threads::joined_active(guild) {
             mentions += self.read.mentions(thread.id);
