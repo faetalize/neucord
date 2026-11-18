@@ -251,6 +251,15 @@ impl App {
             let cell = list.focus_child().and_then(|item| item.first_child());
             cell.is_some_and(|cell| cell.activate_action("message.menu", None).is_ok())
         });
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed({
+            let this = Rc::downgrade(self);
+            move |keys, key, _, state| match (this.upgrade(), keys.widget()) {
+                (Some(this), Some(list)) => this.message_key(&list, key, state),
+                _ => glib::Propagation::Proceed,
+            }
+        });
+        self.list.add_controller(keys);
         self.scroller.set_child(Some(&self.list));
         self.scroller.add_css_class("messages");
 
