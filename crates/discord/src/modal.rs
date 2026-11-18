@@ -1186,7 +1186,7 @@ mod tests {
         );
         assert_eq!(
             form.app_icon(Some((Snowflake(500), Some("m1"))), 128).as_deref(),
-            Some("https://cdn.discordapp.com/guilds/500/users/801/avatars/m1.png?size=128")
+            Some("https://cdn.discordapp.com/guilds/500/users/801/avatars/m1.webp?size=128")
         );
         // A member bot with no avatar: the app icon.
         assert_eq!(

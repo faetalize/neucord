@@ -1,5 +1,5 @@
 //! `gdk::Paintable`s that step through the frames of a `PixbufAnimation`, or
-//! of frames already made such as an APNG's, so GIF/WebP images animate.
+//! of frames already made such as an APNG's or a WebP's, so GIF, APNG and WebP images animate.
 //! GTK's `Picture` otherwise shows only the first frame of an animation.
 //!
 //! Frames advance only while somebody holds a [`Lease`] from [`play`], so a

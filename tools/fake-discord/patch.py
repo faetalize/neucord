@@ -1404,8 +1404,8 @@ edit("crates/app/src/ui/voice.rs", "    fn start_playback(self: &Rc<Self>, id: u
 # `FAKE_EMOJI_IMAGES=1` serves custom emoji from the fake (`/attachments/emojis/<id>.png`, a stand-in picture), which
 # the CDN would, so the picker and the packs page draw them.
 if os.environ.get("FAKE_EMOJI_IMAGES"):
-    edit("crates/discord/src/cdn.rs", 'format!("{CDN}/emojis/{emoji_id}.{ext}?size={size}")',
-         'format!("http://127.0.0.1:8099/attachments/emojis/{emoji_id}.{ext}?width={}&height={}", u32::from(size) * 4, u32::from(size) * 4)')
+    edit("crates/discord/src/cdn.rs", 'format!("{CDN}/emojis/{emoji_id}.webp?{}", query(size, animated))',
+         'format!("http://127.0.0.1:8099/attachments/emojis/{emoji_id}.png?width={}&height={}", u32::from(size) * 4, u32::from(size) * 4)')
 # `FAKE_HOVER=1` shows every row's hover bar, which a pointer would only show on the row it is over.
 if os.environ.get("FAKE_HOVER"):
     edit("crates/app/src/style.css", ".message .message-action { opacity: 0;", ".message .message-action { opacity: 1;")
