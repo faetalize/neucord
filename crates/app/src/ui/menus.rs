@@ -280,10 +280,11 @@ pub(super) const GUILD: Table<notify_menus::GuildTarget> = &[
 /// folder arrangement Neucord only reads.
 pub(super) const FOLDER: Table<notify_menus::FolderTarget> = &[&[notify_menus::MARK_FOLDER_READ]];
 
-/// A DM's or group DM's menu (385913, 4027): Mark As Read first, and Mute
-/// Conversation in a group of its own.
+/// A DM's or group DM's menu (385913, 4027): Mark As Read first, with Close
+/// DM after it in the same group (the one-to-one DM's, as the client has it),
+/// and Mute Conversation in a group of its own.
 pub(super) const DIRECT_MESSAGE: Table<sidebar::ChannelTarget> = &[
-    &[notify_menus::MARK_CHANNEL_READ, notify_menus::MARK_CHANNEL_UNREAD],
+    &[notify_menus::MARK_CHANNEL_READ, notify_menus::MARK_CHANNEL_UNREAD, sidebar::CLOSE_DM],
     &[notify_menus::MUTE_CONVERSATION, notify_menus::UNMUTE_CONVERSATION],
 ];
 
