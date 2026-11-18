@@ -97,7 +97,7 @@ impl App {
     /// Whether `channel` has something unread or a mention waiting.
     fn has_news(&self, channel: Snowflake) -> bool {
         let state = self.account.state.borrow();
-        state.find_channel(channel).is_some_and(|(_, c)| state.is_unread(c)) || state.read.mentions(channel) > 0
+        state.find_channel(channel).is_some_and(|(_, c)| state.is_unread(c)) || state.mentions(channel) > 0
     }
 
     pub(super) fn notify_friend_request(self: &Rc<Self>, request: &discord::relationships::Relationship) {

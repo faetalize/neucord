@@ -234,7 +234,7 @@ fn unread_and_mentions(state: &State) -> (Vec<Snowflake>, Vec<Snowflake>) {
         .iter()
         .flat_map(|g| g.channels.iter().chain(&g.threads))
         .chain(&state.private_channels)
-        .filter(|c| state.read.mentions(c.id) > 0)
+        .filter(|c| state.mentions(c.id) > 0)
         .collect();
     // The client lists them newest-first, in the order the mentions came.
     mentions.sort_by_key(|c| c.activity());
