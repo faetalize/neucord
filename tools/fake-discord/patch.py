@@ -112,6 +112,8 @@ impl App {
             Some("home") => self.select_home(),
             Some("attach") => self.drafts.attach.emit_clicked(),
             // Create Thread for the open channel, as the attach menu's entry opens it.
+            // The open forum's search box, as typed.
+            Some("forum-search") => self.forum.search.set_text(rest),
             // The list of who voted on a poll: its message and the answer to open at.
             Some("poll-votes") => {
                 let message = id(parts.next());

@@ -51,6 +51,18 @@ enum Row {
     Denied(String),
 }
 
+/// One forum's post search.
+#[derive(Default)]
+struct PostSearch {
+    /// What the box holds.
+    query: String,
+    loading: bool,
+    /// The posts the last search found, in its order.
+    results: Option<Vec<Snowflake>>,
+    /// What the last search asked, so the same isn't asked twice.
+    asked: Option<(String, Vec<Snowflake>, TagMatch)>,
+}
+
 /// What the list keeps beside the widgets.
 #[derive(Default)]
 pub(super) struct Data {
@@ -71,6 +83,11 @@ pub(super) struct Data {
     /// When the rows were last made: the list moves by itself after, and
     /// only scrolling asks for more.
     rebuilt: Option<Instant>,
+    /// What each forum's search box and search came to (`ForumSearchStore`,
+    /// 768953), until a new session.
+    searches: HashMap<Snowflake, PostSearch>,
+    /// The search waiting for typing to pause, 350 ms after the last change.
+    search_timer: Option<glib::SourceId>,
     /// The guidelines' card is open (closed until opened, as in the client's
     /// form store, 218152).
     guidelines_open: bool,
@@ -84,6 +101,8 @@ pub(super) struct Page {
     new_posts: gtk::Button,
     /// Opens the form that starts a post, where we may.
     post_button: gtk::Button,
+    /// Searches the forum's posts by name.
+    pub(super) search: gtk::SearchEntry,
     /// Shows or hides the forum's guidelines (its topic), where it has any.
     guidelines_button: gtk::ToggleButton,
     /// The guidelines' card above the posts, and its text.
@@ -115,6 +134,7 @@ impl Page {
                 .valign(gtk::Align::Start)
                 .build(),
             new_posts: gtk::Button::builder().visible(false).valign(gtk::Align::Start).build(),
+            search: gtk::SearchEntry::builder().placeholder_text("Search posts").hexpand(false).build(),
             post_button: gtk::Button::builder()
                 .label("New Post")
                 .visible(false)
@@ -317,7 +337,17 @@ impl App {
                 }
             }
         });
+        // Typing counts at once; what asks Discord waits for it to pause.
+        page.search.connect_changed({
+            let this = Rc::downgrade(self);
+            move |entry| {
+                if let Some(this) = this.upgrade() {
+                    this.forum_search_typed(entry.text().to_string());
+                }
+            }
+        });
         let bar = gtk::Box::builder().spacing(6).margin_top(6).margin_bottom(6).margin_start(12).margin_end(12).build();
+        bar.append(&page.search);
         bar.append(&page.chips);
         bar.append(&page.new_posts);
         bar.append(&page.post_button);
@@ -419,6 +449,8 @@ impl App {
         self.forum_header();
         self.forum_rebuild();
         self.forum_effects();
+        // The tags and their matching are part of what a search asks.
+        self.forum_search_arm();
     }
 
     /// Show the new posts, as the client's button does (`RESORT_THREADS`).
@@ -513,9 +545,121 @@ impl App {
             });
             page.chips.append(&chip);
         }
+        let query = data.searches.get(&id).map(|s| s.query.clone()).unwrap_or_default();
         drop((state, data));
+        // The box shows this forum's query; setting it isn't typing.
+        if page.search.text() != query {
+            page.search.set_text(&query);
+        }
         self.forum_new_posts();
         self.forum_guidelines();
+    }
+
+    /// The search box changed: the query counts at once (`FORUM_SEARCH_QUERY_UPDATED`),
+    /// and the search that follows waits for typing to pause.
+    fn forum_search_typed(self: &Rc<Self>, text: String) {
+        let Some(id) = self.forum_shown() else { return };
+        {
+            let mut data = self.forum.data.borrow_mut();
+            let search = data.searches.entry(id).or_default();
+            // The box being set to what it already holds isn't typing.
+            if search.query == text {
+                return;
+            }
+            search.query = text;
+        }
+        self.forum_rebuild();
+        self.forum_search_arm();
+    }
+
+    /// Ask for the posts the box names once typing has paused 350 ms, unless
+    /// that is what was asked last, or a search is out (`o7` in 435470); where
+    /// the history can't be read, there is no search at all.
+    fn forum_search_arm(self: &Rc<Self>) {
+        let Some(id) = self.forum_shown() else { return };
+        self.forum.data.borrow_mut().search_timer = None;
+        let readable = {
+            let state = self.account.state.borrow();
+            match (state.find_channel(id), state.account.as_ref()) {
+                (Some((Some(guild), forum)), Some(me)) => {
+                    permissions::can_read_post_history(guild, forum, me, now_unix())
+                }
+                _ => false,
+            }
+        };
+        let wanted = {
+            let mut data = self.forum.data.borrow_mut();
+            let tags = data.views.get(&id).map(|v| (v.tags.clone(), v.tag_match));
+            let (Some(search), Some((tags, tag_match))) = (data.searches.get_mut(&id), tags) else { return };
+            if search.query.is_empty() {
+                return;
+            }
+            if !readable {
+                data.searches.remove(&id);
+                None
+            } else if search.loading || search.asked.as_ref() == Some(&(search.query.clone(), tags.clone(), tag_match))
+            {
+                return;
+            } else {
+                Some((search.query.clone(), tags, tag_match))
+            }
+        };
+        let Some((query, tags, tag_match)) = wanted else { return self.forum_rebuild() };
+        let this = Rc::downgrade(self);
+        let timer = glib::timeout_add_local_once(Duration::from_millis(350), move || {
+            if let Some(this) = this.upgrade() {
+                this.forum.data.borrow_mut().search_timer = None;
+                this.forum_search_run(id, query, tags, tag_match);
+            }
+        });
+        self.forum.data.borrow_mut().search_timer = Some(timer);
+    }
+
+    /// Ask (`searchForumPosts`, 919577): the answer's posts join the server's
+    /// and are what the forum lists until the box is emptied. A search that
+    /// fails finds nothing.
+    fn forum_search_run(self: &Rc<Self>, forum: Snowflake, query: String, tags: Vec<Snowflake>, tag_match: TagMatch) {
+        let Some(rest) = self.account.state.borrow().rest.clone() else { return };
+        {
+            let mut data = self.forum.data.borrow_mut();
+            let search = data.searches.entry(forum).or_default();
+            search.loading = true;
+            search.asked = Some((query.clone(), tags.clone(), tag_match));
+        }
+        self.forum_rebuild();
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            let answer = rest.search_thread_names(forum, &query, &tags, tag_match).await;
+            let guild = this.account.state.borrow().find_channel(forum).and_then(|(g, _)| g.map(|g| g.id));
+            let found = match (answer, guild) {
+                (Ok(page), Some(guild)) => {
+                    let ids: Vec<Snowflake> = page.threads.iter().map(|t| t.id).collect();
+                    this.on_threads(guild, |g| {
+                        for thread in page.threads {
+                            g.set_thread(thread);
+                        }
+                        for (thread, member) in page.members {
+                            g.set_thread_member(thread, Some(member));
+                        }
+                    });
+                    ids
+                }
+                (Err(e), _) => {
+                    eprintln!("forum: the search failed: {e}");
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            };
+            {
+                let mut data = this.forum.data.borrow_mut();
+                let search = data.searches.entry(forum).or_default();
+                search.loading = false;
+                search.results = Some(found);
+            }
+            this.forum_rebuild();
+            // The box or the tags may have changed while it was out.
+            this.forum_search_arm();
+        });
     }
 
     /// The guidelines (the forum's topic): their button where it has one, and
@@ -562,39 +706,53 @@ impl App {
             else {
                 return;
             };
-            let mut rows: Vec<Row> = data.listing.shown().iter().map(|&post| Row::Post(post)).collect();
-            let active = !rows.is_empty();
-            let synced = data.synced.contains(&guild.id);
-            let mut loading = !synced || data.archive.is_loading(id, view);
-            if permissions::can_read_post_history(guild, forum, me, now_unix()) {
-                let archived: Vec<Snowflake> = data
-                    .archive
-                    .threads(id, view)
-                    .iter()
+            // A search that has answered shows what it found in place of the lists
+            // (`ee` in 745431: results and a query).
+            if let Some(search) = data.searches.get(&id).filter(|s| !s.query.is_empty() && s.results.is_some()) {
+                let mut rows: Vec<Row> = (search.results.iter().flatten())
                     .copied()
-                    .filter(|&post| {
-                        guild.thread(post).is_some_and(|t| {
-                            t.kind != discord::ChannelKind::MediaThread && guild.can_view(t, me, now_unix())
-                        })
-                    })
+                    .filter(|&post| guild.thread(post).is_some_and(|t| guild.can_view(t, me, now_unix())))
+                    .map(Row::Post)
                     .collect();
-                if active && (!archived.is_empty() || loading) {
-                    rows.push(Row::Older);
+                if search.loading {
+                    rows.extend((0..LOADING_ROWS).map(|_| Row::Loading));
                 }
-                rows.extend(archived.into_iter().map(Row::Post));
-            } else if !forum.is_moderator_report() {
-                rows.push(Row::Denied(format!(
-                    "You do not have permission to view the post history of #{}",
-                    forum.name.as_deref().unwrap_or_default()
-                )));
-                loading = !synced;
+                (rows, view.layout, search.loading)
             } else {
-                loading = !synced;
+                let mut rows: Vec<Row> = data.listing.shown().iter().map(|&post| Row::Post(post)).collect();
+                let active = !rows.is_empty();
+                let synced = data.synced.contains(&guild.id);
+                let mut loading = !synced || data.archive.is_loading(id, view);
+                if permissions::can_read_post_history(guild, forum, me, now_unix()) {
+                    let archived: Vec<Snowflake> = data
+                        .archive
+                        .threads(id, view)
+                        .iter()
+                        .copied()
+                        .filter(|&post| {
+                            guild.thread(post).is_some_and(|t| {
+                                t.kind != discord::ChannelKind::MediaThread && guild.can_view(t, me, now_unix())
+                            })
+                        })
+                        .collect();
+                    if active && (!archived.is_empty() || loading) {
+                        rows.push(Row::Older);
+                    }
+                    rows.extend(archived.into_iter().map(Row::Post));
+                } else if !forum.is_moderator_report() {
+                    rows.push(Row::Denied(format!(
+                        "You do not have permission to view the post history of #{}",
+                        forum.name.as_deref().unwrap_or_default()
+                    )));
+                    loading = !synced;
+                } else {
+                    loading = !synced;
+                }
+                if loading {
+                    rows.extend((0..LOADING_ROWS).map(|_| Row::Loading));
+                }
+                (rows, view.layout, loading)
             }
-            if loading {
-                rows.extend((0..LOADING_ROWS).map(|_| Row::Loading));
-            }
-            (rows, view.layout, loading)
         };
         let page = &self.forum;
         page.data.borrow_mut().rebuilt = Some(Instant::now());
@@ -1019,6 +1177,8 @@ impl App {
         data.first.clear();
         data.unreads.clear();
         data.synced.clear();
+        data.searches.clear();
+        data.search_timer = None;
     }
 
     /// Ask for the counts of the posts' unread messages was answered.
