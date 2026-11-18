@@ -203,9 +203,9 @@ impl Typing {
     }
 }
 
-/// The names of `typers` the line lists: not ours, nobody we blocked, and
-/// only those we have a name for, as the client's `getUser` does. Ignored
-/// users, which the client also leaves out, aren't modelled.
+/// The names of `typers` the line lists: not ours, nobody we blocked or
+/// ignored (`blocked` says who), and only those we have a name for, as the
+/// client's `getUser` does.
 pub fn shown(
     typers: &[Snowflake],
     me: Snowflake,

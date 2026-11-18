@@ -6,7 +6,7 @@
 //! relationship, also when only its type changed (a request was accepted);
 //! RELATIONSHIP_UPDATE and _REMOVE carry only the id and changed fields.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -48,6 +48,9 @@ pub struct Relationship {
     /// An incoming request from someone we share no server or friend with.
     /// Accepting needs an explicit confirmation.
     pub stranger: bool,
+    /// `user_ignored`: we ignored them, which hides a request and silences
+    /// their messages without blocking.
+    pub ignored: bool,
 }
 
 impl Relationship {
@@ -70,6 +73,7 @@ impl Relationship {
             nickname: value["nickname"].as_str().filter(|n| !n.is_empty()).map(String::from),
             spam: value["is_spam_request"].as_bool() == Some(true),
             stranger: value["is_stranger_request"].as_bool() == Some(true),
+            ignored: value["user_ignored"].as_bool() == Some(true),
         })
     }
 }
@@ -161,6 +165,9 @@ pub struct Relationships {
     by_user: HashMap<Snowflake, Relationship>,
     /// Only for users we have a relationship with; absent means offline.
     presences: HashMap<Snowflake, Presence>,
+    /// Whom we ignored. Kept apart from `by_user`: unfriending an ignored
+    /// user removes the relationship but not the ignore.
+    ignored: HashSet<Snowflake>,
 }
 
 impl Relationships {
@@ -186,19 +193,35 @@ impl Relationships {
 
     /// Insert or replace (RELATIONSHIP_ADD).
     pub fn add(&mut self, relationship: Relationship) {
+        self.set_ignored(relationship.user.id, relationship.ignored);
         self.by_user.insert(relationship.user.id, relationship);
     }
 
-    /// A RELATIONSHIP_UPDATE: so far only the nickname changes this way.
-    pub fn update(&mut self, id: Snowflake, nickname: Option<String>) {
+    /// A RELATIONSHIP_UPDATE: the nickname and the ignore flag change this way.
+    pub fn update(&mut self, id: Snowflake, nickname: Option<String>, ignored: bool) {
+        self.set_ignored(id, ignored);
         if let Some(relationship) = self.by_user.get_mut(&id) {
             relationship.nickname = nickname;
+            relationship.ignored = ignored;
         }
     }
 
-    pub fn remove(&mut self, id: Snowflake) {
+    /// A RELATIONSHIP_REMOVE, whose `ignored` says the ignore outlives the
+    /// relationship.
+    pub fn remove(&mut self, id: Snowflake, ignored: bool) {
         self.by_user.remove(&id);
         self.presences.remove(&id);
+        if !ignored {
+            self.ignored.remove(&id);
+        }
+    }
+
+    fn set_ignored(&mut self, id: Snowflake, ignored: bool) {
+        if ignored {
+            self.ignored.insert(id);
+        } else {
+            self.ignored.remove(&id);
+        }
     }
 
     pub fn get(&self, id: Snowflake) -> Option<&Relationship> {
@@ -223,6 +246,17 @@ impl Relationships {
 
     pub fn is_blocked(&self, id: Snowflake) -> bool {
         self.by_user.get(&id).is_some_and(|r| r.kind == Kind::Blocked)
+    }
+
+    /// Ignored, and not blocked, as the client's `isIgnored` (994500) has it.
+    pub fn is_ignored(&self, id: Snowflake) -> bool {
+        self.ignored.contains(&id) && !self.is_blocked(id)
+    }
+
+    /// Whose messages neither count as unread or mentions, notify, nor show
+    /// as typing (`isBlockedOrIgnored`).
+    pub fn is_blocked_or_ignored(&self, id: Snowflake) -> bool {
+        self.is_blocked(id) || self.is_ignored(id)
     }
 
     /// Friend requests waiting for us, not counting likely spam.
@@ -303,7 +337,7 @@ mod tests {
         assert_eq!(names(r.list(List::All)), ["Al", "bea", "new"]);
         assert_eq!(r.incoming(), 0);
 
-        r.update(Snowflake(4), Some("Newt".into()));
+        r.update(Snowflake(4), Some("Newt".into()), false);
         assert_eq!(r.get(Snowflake(4)).unwrap().name(), "Newt");
 
         assert!(r.set_presence(Snowflake(4), Presence { status: Status::Online, text: None }));
@@ -312,9 +346,50 @@ mod tests {
         assert!(r.set_presence(Snowflake(4), Presence::default()), "went offline");
         assert_eq!(names(r.list(List::Online)), ["bea"]);
 
-        r.remove(Snowflake(1));
+        r.remove(Snowflake(1), false);
         assert!(r.get(Snowflake(1)).is_none());
         assert_eq!(r.presence(Snowflake(1)), Presence::default());
+    }
+
+    #[test]
+    fn ignored_users_are_read_from_the_relationships() {
+        let user = |id: &str| json!({"id": id, "username": format!("u{id}")});
+        let mut r = Relationships::from_ready(&json!({
+            "relationships": [
+                {"id": "1", "type": 1, "user": user("1")},
+                {"id": "2", "type": 3, "user_ignored": true, "user": user("2")},
+                {"id": "3", "type": 2, "user": user("3")},
+                {"id": "4", "type": 1, "user_ignored": true, "user": user("4")},
+                {"id": "5", "type": 2, "user_ignored": true, "user": user("5")}
+            ]
+        }));
+        let id = Snowflake;
+        assert!(!r.is_blocked_or_ignored(id(1)), "a plain friend");
+        assert!(r.is_blocked_or_ignored(id(2)) && !r.is_blocked(id(2)), "an ignored request");
+        assert!(r.is_blocked_or_ignored(id(3)), "blocked");
+        assert!(r.is_blocked_or_ignored(id(4)), "an ignored friend");
+        assert!(!r.is_blocked_or_ignored(id(6)), "a stranger");
+
+        // RELATIONSHIP_ADD carries the whole relationship, flag included.
+        let unignored = json!({"id": "4", "type": 1, "user": user("4")});
+        r.add(Relationship::from_value(&unignored, &HashMap::new()).unwrap());
+        assert!(!r.is_blocked_or_ignored(id(4)), "no flag, no longer ignored");
+
+        r.update(id(1), None, true);
+        assert!(r.is_ignored(id(1)), "RELATIONSHIP_UPDATE carries the flag too");
+        r.remove(id(1), true);
+        assert!(r.get(id(1)).is_none() && r.is_ignored(id(1)), "unfriending doesn't unignore");
+        r.remove(id(1), false);
+        assert!(!r.is_ignored(id(1)));
+
+        r.add(
+            Relationship::from_value(
+                &json!({"id": "3", "type": 2, "user_ignored": true, "user": user("3")}),
+                &HashMap::new(),
+            )
+            .unwrap(),
+        );
+        assert!(r.is_blocked_or_ignored(id(3)) && !r.is_ignored(id(3)), "blocked beats ignored");
     }
 
     #[test]
