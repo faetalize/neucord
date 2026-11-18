@@ -653,8 +653,14 @@ impl Rest {
     /// The threads of `channel` whose name has `name`, as the thread
     /// browser's search asks for them when Enter is pressed (`searchThreads`
     /// in 7909): no tag, tags matched by some.
-    pub async fn search_thread_names(&self, channel: Snowflake, name: &str) -> Result<ArchivedPage, Error> {
-        let answer: Value = self.request(thread_name_search_call(channel, name), None).await?;
+    pub async fn search_thread_names(
+        &self,
+        channel: Snowflake,
+        name: &str,
+        tags: &[Snowflake],
+        tag_match: crate::forum::TagMatch,
+    ) -> Result<ArchivedPage, Error> {
+        let answer: Value = self.request(thread_name_search_call(channel, name, tags, tag_match), None).await?;
         ArchivedPage::from_value(&answer).ok_or_else(|| Error::Protocol("thread search without threads".into()))
     }
 
@@ -1263,10 +1269,20 @@ fn archived_threads_call(search: &Search) -> Call {
 }
 
 /// The request of the thread browser's name search (`searchThreads` in
-/// 7909): `name` and `tag_setting`, in that order, the value escaped.
-fn thread_name_search_call(channel: Snowflake, name: &str) -> Call {
+/// 7909): `name`, `tag` when tags are filtered by, and `tag_setting`, in that
+/// order, each value escaped (so the tags' commas are).
+fn thread_name_search_call(
+    channel: Snowflake,
+    name: &str,
+    tags: &[Snowflake],
+    tag_match: crate::forum::TagMatch,
+) -> Call {
     let name = glib::uri_escape_string(name, None::<&str>, false);
-    call!(SEARCH_THREADS, channel = channel).query(&format!("name={name}&tag_setting=match_some"))
+    let tags = match tags.is_empty() {
+        true => String::new(),
+        false => format!("&tag={}", tags.iter().map(ToString::to_string).collect::<Vec<_>>().join("%2C")),
+    };
+    call!(SEARCH_THREADS, channel = channel).query(&format!("name={name}{tags}&tag_setting={}", tag_match.wire()))
 }
 
 /// The request that starts a post: a thread's endpoint, with the query the
@@ -1580,8 +1596,11 @@ mod tests {
             "/channels/7/threads/search?archived=true&sort_by=last_message_time&sort_order=desc&limit=25\
              &tag_setting=match_some&offset=25"
         );
-        let found = thread_name_search_call(thread, "a b&c");
+        use crate::forum::TagMatch;
+        let found = thread_name_search_call(thread, "a b&c", &[], TagMatch::Some);
         assert_eq!(found.path(), "/channels/7/threads/search?name=a%20b%26c&tag_setting=match_some");
+        let tagged = thread_name_search_call(thread, "x", &[Snowflake(4), Snowflake(5)], TagMatch::All);
+        assert_eq!(tagged.path(), "/channels/7/threads/search?name=x&tag=4%2C5&tag_setting=match_all");
         assert_eq!(
             poll_voters_call(Snowflake(1), Snowflake(2), 3, 100, None).path(),
             "/channels/1/polls/2/answers/3?limit=100&type=2"

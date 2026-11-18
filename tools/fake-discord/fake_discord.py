@@ -237,6 +237,21 @@ def guild():
                             "thread_metadata": {"archived": False, "locked": False, "archive_timestamp": now,
                                                 "auto_archive_duration": 4320, "create_timestamp": now},
                             **({"most_recent_message": last} if last else {})})
+    if os.environ.get("FAKE_FORUM"):
+        # A forum (#605) with two tags and three active posts, as THREAD_LIST_SYNC and the guild's threads have them.
+        channels.append({"id": "605", "type": 15, "name": "ideas", "position": 5, "parent_id": None, "flags": 0,
+                         "permission_overwrites": [], "topic": "Share an **idea**.", "template": "",
+                         "available_tags": [{"id": "9001", "name": "alpha", "moderated": False},
+                                            {"id": "9002", "name": "beta", "moderated": False}],
+                         "default_sort_order": 0, "default_forum_layout": 1})
+        now = time.strftime("%Y-%m-%dT%H:%M:%S.000000+00:00", time.gmtime())
+        for n, (tid, name, tags) in enumerate([("7101", "weekend plans", ["9001"]), ("7102", "plan b", ["9002"]),
+                                               ("7103", "other things", [])]):
+            threads.append({"id": tid, "type": 11, "guild_id": "500", "parent_id": "605", "name": name,
+                            "owner_id": "301", "last_message_id": snowflake(9000 + n, 5), "message_count": 1,
+                            "member_count": 1, "rate_limit_per_user": 0, "flags": 0, "applied_tags": tags,
+                            "thread_metadata": {"archived": False, "locked": False, "archive_timestamp": now,
+                                                "auto_archive_duration": 4320, "create_timestamp": now}})
     return {"id": "500", "properties": {"name": "Test Server", "owner_id": "100" if OWNER else "999", "icon": None, "features": [],
             "premium_tier": 0, "default_message_notifications": 0, "nsfw_level": NSFW["level"],
             "owner_configured_content_level": NSFW["owner"]}, "roles": [
@@ -794,12 +809,24 @@ def close_channel(channel, body):
 # The thread browser's name search (`GET /channels/{id}/threads/search?name=…`): two made-up threads of #600,
 # those whose name has the query. They are the server's threads from then on.
 FOUND_THREADS = {"7001": "planning ideas", "7002": "weekend plans"}
+FORUM_POSTS = {"7101": ("weekend plans", ["9001"]), "7102": ("plan b", ["9002"]), "7103": ("other things", [])}
 
 
 @route("GET", r"/channels/(\d+)/threads/search")
 def search_threads(channel, body):
     name = QUERY.get("name", [""])[0].lower()
     now = time.strftime("%Y-%m-%dT%H:%M:%S.000000+00:00", time.gmtime())
+    if channel == "605":
+        # The forum: its posts whose name has the query and that carry one of the tags asked for, if any.
+        wanted = [t for t in QUERY.get("tag", [""])[0].split(",") if t]
+        found = [tid for tid, (tname, tags) in FORUM_POSTS.items()
+                 if name in tname and (not wanted or any(t in tags for t in wanted))]
+        threads = [{"id": tid, "type": 11, "guild_id": "500", "parent_id": "605", "name": FORUM_POSTS[tid][0],
+                    "owner_id": "301", "last_message_id": None, "message_count": 1, "member_count": 1,
+                    "rate_limit_per_user": 0, "flags": 0, "applied_tags": FORUM_POSTS[tid][1],
+                    "thread_metadata": {"archived": False, "locked": False, "archive_timestamp": now,
+                                        "auto_archive_duration": 4320, "create_timestamp": now}} for tid in found]
+        return 200, {"threads": threads, "members": [], "has_more": False, "first_messages": []}
     threads = [{"id": tid, "type": 11, "guild_id": "500", "parent_id": channel, "name": tname, "owner_id": ME["id"],
                 "last_message_id": None, "message_count": 1, "member_count": 1, "rate_limit_per_user": 0, "flags": 0,
                 "thread_metadata": {"archived": False, "locked": False, "archive_timestamp": now,

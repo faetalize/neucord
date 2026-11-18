@@ -10,7 +10,7 @@ use gtk::prelude::*;
 use gtk::{glib, pango};
 
 use super::App;
-use super::menus::{self, At, Entry, Item, Kind};
+use super::menus::{self, Entry, Item, Kind};
 use super::state::{Page, now_ms, now_unix};
 use super::thread_line::ThreadLine;
 use super::widgets::{avatar_still, avatar_widget, badge, round_picture};
@@ -197,12 +197,14 @@ impl App {
         self.watch_thread_expiry(guild);
     }
 
-    /// Open `table`'s menu for `channel` where its row is right-clicked.
+    /// Open `table`'s menu for `channel` where its row is right-clicked, or
+    /// from the keyboard while the row has the focus.
     fn menu_on(self: &Rc<Self>, row: &gtk::ListBoxRow, table: menus::Table<ChannelTarget>, channel: Snowflake) {
-        let (app, row_weak) = (Rc::downgrade(self), row.downgrade());
-        menus::on_secondary(row, move |x, y| {
-            let (Some(app), Some(row)) = (app.upgrade(), row_weak.upgrade()) else { return };
-            menus::popup(&app, table, ChannelTarget(channel), &row, At::Point(x, y));
+        let app = Rc::downgrade(self);
+        menus::on_menu(row, move |row, at| {
+            if let Some(app) = app.upgrade() {
+                menus::popup(&app, table, ChannelTarget(channel), row, at);
+            }
         });
     }
 
