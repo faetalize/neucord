@@ -6,6 +6,7 @@
 use std::rc::{Rc, Weak};
 
 use discord::emoji::{Item, Library};
+use discord::emoji_packs::{pinned_with, pinned_without};
 use discord::frecency::{
     FrecencyPatch, MAX_FAVORITE_EMOJI, MAX_FAVORITE_STICKERS, Setting, TooMany, toggled, toggled_sticker,
 };
@@ -102,6 +103,21 @@ impl App {
             }
         };
         self.edit_frecency(Setting::FavoriteEmojis(list));
+    }
+
+    /// Pin an emoji pack to the picker, or unpin it (`Ls` and `M5` in 934499).
+    pub(super) fn pin_emoji_pack(self: &Rc<Self>, pack: discord::Snowflake, pin: bool) {
+        let list = {
+            let state = self.account.state.borrow();
+            let pinned = &state.frecency.pinned_emoji_packs;
+            match pin {
+                true => pinned_with(&state.emoji_packs, pinned, pack),
+                false => pinned_without(pinned, pack),
+            }
+        };
+        if let Some(list) = list {
+            self.edit_frecency(Setting::PinnedEmojiPacks(list));
+        }
     }
 
     /// Whether the sticker is one of the account's favourites.

@@ -65,6 +65,7 @@ NAMES = {
     "nsfwlevel": "2025-09-server-nsfw-level",
     "chatbar": "2026-06-chat-bar-customization",
     "dice": "2026-05-dice-roll-slash-command",
+    "packs": "2026-09-default-emojis",
 }
 LADDER = json.dumps({"ladder": [64, 128, 256], "maxUpscale": 1.1, "minSnapDownDpr": 2})
 # Under FAKE_OWNER the account owns the server, so its moderation commands show.
@@ -87,6 +88,9 @@ ME = {"id": "100", "username": "tester_fake", "global_name": "Tester Fake", "ava
       "premium_type": 0, "flags": 0, "verified": True, "mfa_enabled": False}
 NSFW = {"allowed": 1, "dms": 0, "status": 3, "gated": 0, "level": 0, "owner": 0}
 NSFW.update((k, int(v)) for k, v in (p.split("=") for p in os.environ.get("FAKE_NSFW", "").split(",") if p))
+# FAKE_NITRO=1: the account has Nitro (premium_type 2), which unlocks emoji packs' emoji.
+if os.environ.get("FAKE_NITRO"):
+    ME["premium_type"] = 2
 ME.update(nsfw_allowed=bool(NSFW["allowed"]), age_verification_status=NSFW["status"])
 ALICE = {"id": "301", "username": "alice_fake", "global_name": "Alice Fake", "avatar": None, "discriminator": "0"}
 BOB = {"id": "302", "username": "bob_fake", "global_name": "Bob Fake", "avatar": None, "discriminator": "0"}
@@ -620,6 +624,23 @@ def poll_answer_voters(channel, message_id, answer, body):
 def top_emojis(guild, body):
     return 200, {"items": [{"emoji_id": "8102", "emoji_rank": 1}, {"emoji_id": "🔥", "emoji_rank": 2},
                            {"emoji_id": "9999", "emoji_rank": 3}, {"emoji_id": "8101", "emoji_rank": 4}]}
+
+
+# FAKE_EMOJI_PACKS=1: two packs (one gone), as `GET /emoji-packs` lists them; without it the route is Discord's 404
+# for an account that doesn't have packs. Run with FAKE_VARIANTS=packs=1 for the client to ask.
+@route("GET", r"/emoji-packs")
+def emoji_packs(body):
+    if not os.environ.get("FAKE_EMOJI_PACKS"):
+        return 404, {"message": "Unknown", "code": 0}
+    def emoji(id, name, available=True):
+        return {"id": id, "name": name, "animated": False, "require_colons": True, "available": available,
+                "managed": False, "roles": []}
+    return 200, [
+        {"id": "9010", "name": "Blobs", "description": "Round and friendly", "available": True,
+         "representative_emoji_id": "8201", "emojis": [emoji("8201", "pack_blob"), emoji("8202", "pack_blob_cry")]},
+        {"id": "9020", "name": "Retired", "description": "No longer on offer", "available": False,
+         "representative_emoji_id": "8203", "emojis": [emoji("8203", "pack_old")]},
+    ]
 
 
 @route("GET", r"/channels/(\d+)/messages/pins")

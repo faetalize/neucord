@@ -13,6 +13,7 @@ use discord::permissions::{self, Permissions};
 use discord::{Setting, Snowflake};
 
 use super::App;
+use super::emoji_packs::Picked;
 use super::menus::{self, Entry, Item as MenuItem, Kind};
 use super::picker::{self, Row, Spec, Target};
 use super::state::{now_ms, now_unix};
@@ -118,10 +119,57 @@ impl App {
             _ => false,
         };
         let guilds = state.guilds_in_picker_order(own);
-        Library {
-            emoticons: state.settings.media.convert_emoticons,
-            ..Library::new(guilds, &state.limits(), &Place { guild: own, external })
-        }
+        let limits = state.limits();
+        let mut library = Library::new(guilds, &limits, &Place { guild: own, external });
+        library.emoticons = state.settings.media.convert_emoticons;
+        library.with_packs(&state.emoji_packs, &state.frecency.pinned_emoji_packs, &limits)
+    }
+
+    /// The packs of `library` again, as the account has them now: after they
+    /// are fetched, or the favourites and pins are loaded or changed.
+    pub(super) fn refresh_emoji_packs(&self, library: &RefCell<Library>) {
+        let state = self.account.state.borrow();
+        library.borrow_mut().set_packs(&state.emoji_packs, &state.frecency.pinned_emoji_packs, &state.limits());
+    }
+
+    /// Whether emoji packs are on for the account.
+    pub(super) fn emoji_packs_enabled(&self) -> bool {
+        let state = self.account.state.borrow();
+        let limits = state.limits();
+        discord::emoji_packs::enabled(limits.experiments, limits.me)
+    }
+
+    /// Ask for the emoji packs when they are on and not asked for yet, as
+    /// the picker does when it opens (`Fp` in 934499); `fetched` runs once
+    /// they are in. A 404 means the account has none.
+    fn fetch_emoji_packs(self: &Rc<Self>, fetched: impl FnOnce() + 'static) {
+        let rest = {
+            let mut state = self.account.state.borrow_mut();
+            let on = {
+                let limits = state.limits();
+                discord::emoji_packs::enabled(limits.experiments, limits.me)
+            };
+            state.rest.clone().filter(|_| on && state.me.is_some() && state.emoji_packs.start_fetch())
+        };
+        let Some(rest) = rest else { return };
+        let this = self.clone();
+        let epoch = self.account.epoch.get();
+        glib::spawn_future_local(async move {
+            let answer = rest.emoji_packs().await;
+            if this.account.epoch.get() != epoch {
+                return;
+            }
+            match answer {
+                Ok(packs) => {
+                    this.account.state.borrow_mut().emoji_packs.fetched(&packs);
+                    fetched();
+                }
+                Err(e) => {
+                    eprintln!("emoji: the emoji packs weren't fetched: {e}");
+                    this.account.state.borrow_mut().emoji_packs.failed();
+                }
+            }
+        });
     }
 
     /// Open the picker over `parent`, for emoji to write in `channel`.
@@ -147,7 +195,9 @@ impl App {
         picked: impl Fn(&Rc<App>, &Item) + 'static,
     ) {
         let guild = library.place.guild;
-        let library = Rc::new(library);
+        // The packs come after the picker is open, so the library takes them in place.
+        let library = Rc::new(RefCell::new(library));
+        let picked: Picked = Rc::new(picked);
         let tone = {
             let app = Rc::downgrade(self);
             move || app.upgrade().and_then(|app| app.account.state.borrow().settings.skin_tone)
@@ -160,6 +210,7 @@ impl App {
                 let (library, tone, app) = (library.clone(), tone.clone(), Rc::downgrade(self));
                 move |query| {
                     let app = app.upgrade();
+                    let library = library.borrow();
                     let shortcuts =
                         app.as_ref().map(|app| app.emoji_shortcuts(&library, intention)).unwrap_or_default();
                     let scores = app.as_ref().map(|app| app.emoji_scores(intention)).unwrap_or_default();
@@ -168,44 +219,60 @@ impl App {
             }),
             cell: Rc::new(cell_button),
             best: Rc::new({
-                let app = Rc::downgrade(self);
+                let (app, library) = (Rc::downgrade(self), library.clone());
                 move |query| {
                     let scores = app.upgrade().map(|app| app.emoji_scores(intention)).unwrap_or_default();
-                    library.search(query, 1, &scores).unlocked.first().cloned().map(|item| toned(item, tone()))
+                    let found = library.borrow().search(query, 1, &scores);
+                    found.unlocked.first().cloned().map(|item| toned(item, tone()))
                 }
             }),
         };
         // The skin tone button lists the emoji again once a tone is chosen.
         let handle: Rc<RefCell<Option<picker::Handle>>> = Rc::default();
-        let hooks = picker::Hooks {
-            trailing: Some(self.tone_button({
-                let handle = handle.clone();
-                move || {
-                    if let Some(handle) = handle.borrow().as_ref() {
-                        handle.reload();
-                    }
-                }
-            })),
-            ..Default::default()
-        };
-        *handle.borrow_mut() = Some(picker::open_with(self, parent, spec, hooks, picked));
-        if let Some(guild) = guild {
-            self.fetch_top_emojis(guild, {
-                let handle = handle.clone();
-                move || {
-                    if let Some(handle) = handle.borrow().as_ref() {
-                        handle.reload();
-                    }
-                }
-            });
-        }
-        // The favourites come from Discord the first time, and fill in then.
-        self.load_frecency({
+        let reload = {
             let handle = handle.clone();
             move || {
                 if let Some(handle) = handle.borrow().as_ref() {
                     handle.reload();
                 }
+            }
+        };
+        let trailing = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        let packs_button = self.emoji_packs_enabled().then(|| self.packs_button(&library, &picked, &handle));
+        if let Some(button) = &packs_button {
+            trailing.append(button);
+        }
+        trailing.append(&self.tone_button(reload.clone()));
+        let hooks = picker::Hooks { trailing: Some(trailing.upcast()), ..Default::default() };
+        *handle.borrow_mut() = Some(picker::open_with(self, parent, spec, hooks, {
+            let picked = picked.clone();
+            move |app, item| picked(app, item)
+        }));
+        if let Some(guild) = guild {
+            self.fetch_top_emojis(guild, reload.clone());
+        }
+        self.fetch_emoji_packs({
+            let (this, library, reload) = (Rc::downgrade(self), library.clone(), reload.clone());
+            let button = packs_button.map(|b| b.downgrade());
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.refresh_emoji_packs(&library);
+                    if let Some(button) = button.as_ref().and_then(|b| b.upgrade()) {
+                        this.show_packs_button(&button);
+                    }
+                }
+                reload();
+            }
+        });
+        // The favourites come from Discord the first time, and fill in then.
+        // The pinned packs are among them.
+        self.load_frecency({
+            let (this, library) = (Rc::downgrade(self), library.clone());
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.refresh_emoji_packs(&library);
+                }
+                reload();
             }
         });
     }
@@ -314,7 +381,12 @@ impl App {
     /// 690521, with the status intention and no channel).
     pub(super) fn status_emoji_library(&self) -> Library {
         let state = self.account.state.borrow();
-        Library::new(state.guilds_in_picker_order(None), &state.limits(), &Place { guild: None, external: true })
+        let limits = state.limits();
+        Library::new(state.guilds_in_picker_order(None), &limits, &Place { guild: None, external: true }).with_packs(
+            &state.emoji_packs,
+            &state.frecency.pinned_emoji_packs,
+            &limits,
+        )
     }
 }
 
@@ -339,6 +411,9 @@ fn rows(library: &Library, query: &str, tone: Option<Tone>, shortcuts: Shortcuts
         }
         Row::section(&mut rows, COLUMNS, "Favorites".to_owned(), toned(shortcuts.favorites));
         Row::section(&mut rows, COLUMNS, "Frequently Used".to_owned(), toned(shortcuts.frequent));
+        for pack in &library.packs {
+            Row::section(&mut rows, COLUMNS, pack.name.clone(), pack.emoji.iter().cloned().map(Item::Custom).collect());
+        }
         for server in library.picker() {
             Row::section(&mut rows, COLUMNS, server.name, server.emoji.into_iter().map(Item::Custom).collect());
         }

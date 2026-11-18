@@ -419,6 +419,10 @@ changed for unrelated reasons only needs a note in the issue.
   A subscription role's emoji (`Guild::emoji_subscription`) are locked by `JN`
   in 492494 (anchor `getUserSubscriptionRoles`), and a restricted server by the
   `CREATOR_MONETIZABLE_RESTRICTED` feature, which its `tE` reads.
+  Emoji packs (`emoji_packs.rs`) are behind the user experiment
+  `2026-09-default-emojis`; their Nitro rule is the pack branch of
+  `getEmojiUnavailableReason` in 690521, and the pins are field 14 of the
+  frecency proto (934499, anchor `PinnedEmojiPacks`).
   Typed emoticons (`emoticons.rs`) are the `emoticon` rule there, with the
   table in 132565 and its order in 7584 (anchor `convertShortcutToName`).
 - **Which stickers we offer, send, and when** (`stickers.rs`, `limits::sticker`,

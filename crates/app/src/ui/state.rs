@@ -173,6 +173,8 @@ pub(super) struct State {
     pub(super) sticker_packs: Packs,
     /// What servers' top emoji are, once the picker has asked.
     pub(super) top_emojis: discord::emoji::TopEmojis,
+    /// The emoji packs, once the picker has asked (and packs are on for the account).
+    pub(super) emoji_packs: discord::emoji_packs::EmojiPacks,
     /// The GIF picker's front page, once it has been fetched.
     pub(super) gif_tiles: Tiles,
     /// DMs and group DMs, message requests included.

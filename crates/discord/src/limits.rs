@@ -373,6 +373,17 @@ impl Limits<'_> {
         Ok(())
     }
 
+    /// Whether we may send an emoji of an emoji pack: only Nitro (Tier 2)
+    /// does, in any channel and for any server (the pack branch of
+    /// `getEmojiUnavailableReason`, 690521, which checks neither Use External
+    /// Emojis nor the pack's place).
+    pub fn pack_emoji(&self) -> Result<(), Unavailable> {
+        match self.nitro.premium_type {
+            Some(PremiumType::Tier2) => Ok(()),
+            _ => Err(Unavailable::Nitro),
+        }
+    }
+
     /// Whether we may send a sticker from `origin` in `place`, as the client's
     /// sendability decides (`W$` in 361670). A standard pack's is open to
     /// everyone. A server's own is, unless its server lost its boosts; from
