@@ -26,7 +26,8 @@ what arrived, IDENTIFY's key order and properties first.
   `FAKE_MODAL_SUBMIT=fail|silent|429` says. Files get an upload URL at the
   fake, which takes the `PUT` and a `DELETE`, unless
   `FAKE_UPLOAD_FAIL=too-large` turns the URL down with Discord's 40005.
-  Both settings protos are kept, and a save merges into them field by field
+  Heartbeats (op 40) are logged and acknowledged, and READY carries a made-up
+  `qos_token`. Both settings protos are kept, and a save merges into them field by field
   as Discord's does. The GIF endpoints answer made-up results, one with a
   numeric id, and take a pick's `POST /gifs/select`. A thread made from a
   channel joins the server and comes back as `THREAD_CREATE`. `FAKE_VARIANTS="hiding=1,voice=1,ladder=1,lazy=1,upload=1,nsfwlevel=1,chatbar=1,dice=1"`
@@ -95,6 +96,7 @@ what arrived, IDENTIFY's key order and properties first.
   on from the message box's menu; `member-check` (with `FAKE_LEFT=302`)
   lists Bob in a pill, whose check then drops him; `mentions` (and with
   `FAKE_OWNER=1`, `@everyone` and `@here`) lists the message box's `@`;
+  `heartbeat` waits for five op 40s, the interval's among them;
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).
 

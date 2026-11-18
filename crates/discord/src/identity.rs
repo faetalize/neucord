@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 use serde_json::{Value, json};
 
-use crate::Snowflake;
+use crate::{Snowflake, gateway, qos};
 
 /// The API version is the one the official client uses (its `API_VERSION`):
 /// a version no official client speaks would set every request apart (#73).
@@ -185,8 +185,19 @@ pub fn beat_delay_ms(since_last_beat_ms: Option<i64>) -> i64 {
     since_last_beat_ms.map_or(0, |since| (BEAT_INTERVAL_MS - since).max(0))
 }
 
-/// The Apex assignments of an account, which the client keeps between
-/// launches in its store, by user id (340344). One for each account.
+/// Op 41, which tells the gateway which heartbeat session the time spent
+/// counts towards (`handleUpdateTimeSpentSessionId`, 868).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct TimeSpent {
+    /// When the session opened, in milliseconds since 1970.
+    initialization_timestamp: i64,
+    session_id: String,
+    client_launch_id: String,
+}
+
+/// What the client keeps of an account between launches, by user id: its
+/// Apex assignments (340344) and its `qos_token` (193799). One for each
+/// account.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Cache {
     /// The account's own, as READY sent them
@@ -195,6 +206,10 @@ pub struct Cache {
     /// only the account's own are kept (see [`crate::obfuscation`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assignments: Vec<Value>,
+    /// What the last READY's `qos_token` vouched for, which IDENTIFY sends
+    /// back (`DerivedQosDataStore`, 193799, kept by user id too).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qos_token: Option<String>,
 }
 
 impl Cache {
@@ -209,7 +224,7 @@ impl Cache {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.assignments.is_empty()
+        self.assignments.is_empty() && self.qos_token.is_none()
     }
 }
 
@@ -246,9 +261,17 @@ struct State {
     /// Whether a token is in use: the heartbeat runs only then.
     signed_in: bool,
     heartbeat: Option<HeartbeatSession>,
+    /// The session came from the stored slot, and the heartbeat hasn't run
+    /// since: the client hasn't loaded it yet, so its first run tells the
+    /// gateway of it as of a new one.
+    stored: bool,
     /// Nobody has signed in yet in this run: the stored slot may be the one
     /// this run continues.
     launching: bool,
+    /// What the heartbeats tell the gateway of the user, see [`qos`].
+    qos: qos::State,
+    /// The account's `qos_token` from READY, see [`Cache::qos_token`].
+    qos_token: Option<String>,
     /// The account's own Apex assignments, see [`Cache`].
     assignments: Vec<Value>,
     /// Whether they put the account in the experiment that hides channels,
@@ -272,7 +295,10 @@ impl State {
             account: None,
             signed_in: false,
             heartbeat: None,
+            stored: false,
             launching: true,
+            qos: qos::State::default(),
+            qos_token: None,
             assignments: Vec::new(),
             obfuscation: false,
         }
@@ -329,6 +355,33 @@ impl State {
     fn active(&self) -> bool {
         self.signed_in && self.focused
     }
+
+    /// The token or the focus changed (`X` in 903063): the gateway is told,
+    /// at once if the user went active. Whether a heartbeat is due now.
+    fn active_state_changed(&mut self) -> bool {
+        self.qos.changed(qos::Payload::now(self.signed_in, self.focused))
+    }
+
+    /// The heartbeat runs (`er` in 903063): a session is opened if the app is
+    /// in use and has none, and counts as used. The session, if it is
+    /// another than the one the last run left.
+    fn beat(&mut self, now_ms: i64, new_id: impl FnOnce() -> String) -> Option<TimeSpent> {
+        let before = (!self.stored).then(|| self.heartbeat.as_ref().map(|s| s.uuid.clone())).flatten();
+        self.stored = false;
+        let active = self.active();
+        self.heartbeat = renewed(self.heartbeat.take(), active, now_ms, new_id);
+        self.time_spent().filter(|t| Some(&t.session_id) != before.as_ref())
+    }
+
+    fn time_spent(&self) -> Option<TimeSpent> {
+        let session = self.heartbeat.as_ref()?;
+        let launch = self.props.get("client_launch_id").and_then(Value::as_str).unwrap_or_default();
+        Some(TimeSpent {
+            initialization_timestamp: session.created_at,
+            session_id: session.uuid.clone(),
+            client_launch_id: launch.to_owned(),
+        })
+    }
 }
 
 /// `X-Super-Properties`: the properties, base64 of their JSON, as of the
@@ -364,7 +417,18 @@ pub fn identify_properties() -> Properties {
 
 /// Whether the window has focus (`isAppFocused`, 531685).
 pub fn set_focused(focused: bool) {
-    STATE.with_borrow_mut(|s| s.focused = focused);
+    beat_if(STATE.with_borrow_mut(|s| {
+        let changed = s.focused != focused;
+        s.focused = focused;
+        changed && s.active_state_changed()
+    }));
+}
+
+/// A heartbeat goes out now if `due`, see [`State::active_state_changed`].
+fn beat_if(due: bool) {
+    if due {
+        gateway::active_state_changed();
+    }
 }
 
 /// Whether the app is in use, which the heartbeat's session needs: a token,
@@ -379,23 +443,30 @@ pub fn is_active() -> bool {
 /// 903063), so the stored slot is the one this run continues only for the
 /// account it was opened for, on the first sign-in of a run.
 pub fn sign_in(account: Option<Snowflake>, slot: Option<Slot>, cache: Cache) {
-    STATE.with_borrow_mut(|s| {
+    beat_if(STATE.with_borrow_mut(|s| {
         if !(s.signed_in && s.account == account) {
             let continued = slot.filter(|slot| s.launching && Some(slot.account) == account);
+            s.stored = continued.is_some();
             s.heartbeat = continued.map(|slot| slot.session);
             s.obfuscation = crate::obfuscation::assigned(&cache.assignments);
             s.assignments = cache.assignments;
+            s.qos_token = cache.qos_token;
             s.account = account;
         }
         s.launching = false;
         s.signed_in = true;
-    });
+        s.active_state_changed()
+    }));
 }
 
 /// READY gave the account a new token (`UPDATE_TOKEN`): the session of the
 /// old one ends.
 pub fn token_replaced() {
-    STATE.with_borrow_mut(|s| s.heartbeat = None);
+    beat_if(STATE.with_borrow_mut(|s| {
+        s.heartbeat = None;
+        s.stored = false;
+        s.active_state_changed()
+    }));
 }
 
 /// READY named the account a first login belongs to.
@@ -404,27 +475,64 @@ pub fn signed_in_as(account: Snowflake) {
 }
 
 pub fn sign_out() {
-    STATE.with_borrow_mut(|s| {
+    beat_if(STATE.with_borrow_mut(|s| {
         s.launching = false;
         s.signed_in = false;
         s.account = None;
         s.heartbeat = None;
+        s.stored = false;
         s.assignments.clear();
+        s.qos_token = None;
         s.obfuscation = false;
-    });
+        s.active_state_changed()
+    }));
 }
 
 pub fn account() -> Option<Snowflake> {
     STATE.with_borrow(|s| s.account)
 }
 
+fn new_id() -> String {
+    glib::uuid_string_random().to_string()
+}
+
 /// The heartbeat runs (`er`): a session is opened if the app is in use and
-/// has none, and counts as used.
-pub fn heartbeat() {
-    STATE.with_borrow_mut(|s| {
-        let active = s.active();
-        s.heartbeat = renewed(s.heartbeat.take(), active, now_ms(), || glib::uuid_string_random().to_string());
+/// has none, and counts as used. Another session than the last run's is
+/// told to the gateway (op 41), and returned.
+pub fn heartbeat() -> Option<TimeSpent> {
+    let told = STATE.with_borrow_mut(|s| s.beat(now_ms(), new_id));
+    if let Some(told) = &told {
+        gateway::time_spent(told);
+    }
+    told
+}
+
+/// READY arrived (`CONNECTION_OPEN`): the heartbeat runs, and whatever
+/// session it leaves is told to the gateway (`q` in 903063), and returned.
+pub fn connection_open() -> Option<TimeSpent> {
+    let told = STATE.with_borrow_mut(|s| {
+        s.beat(now_ms(), new_id);
+        s.time_spent()
     });
+    if let Some(told) = &told {
+        gateway::time_spent(told);
+    }
+    told
+}
+
+/// What READY says of the account's `qos_token`: none drops the one kept.
+pub fn learn_qos_token(token: Option<String>) {
+    STATE.with_borrow_mut(|s| s.qos_token = token);
+}
+
+/// What this heartbeat tells the gateway of the user (op 40).
+pub(crate) fn qos_heartbeat() -> Option<qos::Payload> {
+    STATE.with_borrow_mut(|s| s.qos.consume())
+}
+
+/// IDENTIFY's `qos_token`.
+pub(crate) fn qos_token() -> String {
+    STATE.with_borrow(|s| qos::token(s.qos.user_active(), s.qos_token.as_deref()))
 }
 
 /// What READY says the account is assigned: the next IDENTIFY goes by it.
@@ -437,7 +545,7 @@ pub fn learn_assignments(assignments: Vec<Value>) {
 
 /// The account's assignments, to keep for the next launch.
 pub fn cache() -> Cache {
-    STATE.with_borrow(|s| Cache { assignments: s.assignments.clone() })
+    STATE.with_borrow(|s| Cache { assignments: s.assignments.clone(), qos_token: s.qos_token.clone() })
 }
 
 /// The session, to keep for the next launch: none until the account is known.
@@ -519,7 +627,10 @@ mod tests {
             account: None,
             signed_in: true,
             heartbeat: None,
+            stored: false,
             launching: true,
+            qos: qos::State::default(),
+            qos_token: None,
             assignments: Vec::new(),
             obfuscation: false,
         }
@@ -642,7 +753,7 @@ mod tests {
 
     #[test]
     fn the_cache_and_the_slot_round_trip_and_forget_what_they_cannot_read() {
-        let cache = Cache { assignments: vec![json!([1, 1, 0, 1])] };
+        let cache = Cache { assignments: vec![json!([1, 1, 0, 1])], qos_token: Some("CgA=".into()) };
         assert_eq!(Cache::from_json(&cache.to_json()), cache);
         assert!(Cache::from_json("not json").is_empty());
         assert!(Cache::from_json("{}").is_empty());
@@ -660,7 +771,10 @@ mod tests {
     }
 
     fn assigned() -> Cache {
-        Cache { assignments: vec![json!([crate::experiments::murmur3("2026-02-private-channel-hiding"), 1, 0, 1])] }
+        Cache {
+            assignments: vec![json!([crate::experiments::murmur3("2026-02-private-channel-hiding"), 1, 0, 1])],
+            qos_token: None,
+        }
     }
 
     fn session() -> Option<String> {
@@ -756,6 +870,59 @@ mod tests {
         // Nor does a later sign-in of the same run read the file again.
         sign_in(Some(Snowflake(1)), Some(slot_of(1, "alice")), Cache::default());
         assert_eq!(slot(), None);
+    }
+
+    #[test]
+    fn the_gateway_is_told_of_each_new_session_and_of_the_one_there_at_each_ready() {
+        let now = now_ms();
+        let stored = HeartbeatSession { uuid: "stored".into(), created_at: now - 5, last_used: now };
+        sign_in(Some(Snowflake(1)), Some(Slot { account: Snowflake(1), session: stored }), Cache::default());
+        let told = heartbeat().expect("the client hadn't loaded it, so it is new to it");
+        assert_eq!(told.session_id, "stored");
+        assert_eq!(told.initialization_timestamp, now - 5);
+        let launch = STATE.with_borrow(|s| s.props.get("client_launch_id").cloned());
+        assert_eq!(Some(json!(told.client_launch_id)), launch);
+        assert_eq!(heartbeat(), None, "the same session again");
+        assert_eq!(connection_open().map(|t| t.session_id).as_deref(), Some("stored"), "READY tells it anyway");
+
+        token_replaced();
+        let new = heartbeat().expect("another session");
+        assert_ne!(new.session_id, "stored");
+        let json = serde_json::to_string(&new).unwrap();
+        assert_eq!(keys(&json), ["initialization_timestamp", "session_id", "client_launch_id"]);
+
+        set_focused(false);
+        token_replaced();
+        assert_eq!(heartbeat(), None, "not in use: none is opened");
+        assert_eq!(connection_open(), None, "nor told");
+    }
+
+    #[test]
+    fn the_heartbeats_follow_the_focus_and_the_token() {
+        sign_in(Some(Snowflake(1)), None, Cache::default());
+        let active = |p: Option<qos::Payload>| serde_json::to_value(p).unwrap()["active"].clone();
+        assert_eq!(active(qos_heartbeat()), json!(true), "signed in, in front");
+        set_focused(false);
+        assert_eq!(active(qos_heartbeat()), json!(true), "the heartbeat due was");
+        assert_eq!(active(qos_heartbeat()), json!(false));
+        set_focused(true);
+        sign_out();
+        assert_eq!(active(qos_heartbeat()), json!(true), "it was in front since the last");
+        assert_eq!(active(qos_heartbeat()), json!(false), "nobody signed in");
+    }
+
+    #[test]
+    fn identify_sends_back_what_ready_vouched_for() {
+        let token = |t: String| openssl::base64::decode_block(&t).unwrap();
+        let stored = Cache { assignments: Vec::new(), qos_token: Some(openssl::base64::encode_block(&[0x18, 0x07])) };
+        sign_in(Some(Snowflake(1)), None, stored);
+        assert_eq!(token(qos_token()), [0x0a, 0x02, 0x08, 0x01, 0x12, 0x02, 0x18, 0x07], "active, and the stored one");
+        set_focused(false);
+        learn_qos_token(None);
+        assert_eq!(token(qos_token()), [0x0a, 0x00], "inactive now, and READY sent none");
+        assert_eq!(cache().qos_token, None, "nor is one kept");
+        learn_qos_token(Some("CgA=".into()));
+        assert_eq!(cache().qos_token.as_deref(), Some("CgA="), "kept for the next launch");
     }
 
     #[test]
