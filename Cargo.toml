@@ -16,6 +16,8 @@ adw = { package = "libadwaita", version = "0.9.2", features = ["v1_7"] }
 glib = { version = "0.22", features = ["v2_72"] }
 gio = "0.22"
 gdk-pixbuf = "0.22"
+# Pure-Rust WebP decoding: gdk-pixbuf here has no WebP loader.
+image-webp = "0.2"
 soup = { package = "soup3", version = "0.9" }
 libsecret = "0.9"
 serde = { version = "1", features = ["derive"] }

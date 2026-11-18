@@ -101,6 +101,7 @@ pub mod usage;
 pub mod verification;
 pub mod voice;
 pub mod voice_states;
+pub mod webp;
 
 pub use gateway::{Event, Gateway, Ready, Resume};
 pub use model::{

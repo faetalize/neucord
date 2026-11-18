@@ -794,10 +794,10 @@ impl Viewer {
             // A picture asks for its own size; the thumbnail is this one.
             let thumb = MediaFrame::new((THUMB, THUMB), &picture);
             thumb.set_exact(true);
-            // A video's still is what the proxy makes of it.
+            // A video's still is what the proxy makes of it, as WebP (`fj`, 731068).
             let url = match item.kind {
                 Kind::Image => item.file_url().to_owned(),
-                Kind::Video => discord::cdn::with_params(item.file_url(), &[("format", "png")]),
+                Kind::Video => discord::cdn::with_params(item.file_url(), &[("format", "webp")]),
             };
             app.images.set_sized(&picture, &url, (THUMB, THUMB), item.size);
             let button = gtk::Button::builder()
@@ -976,7 +976,10 @@ pub(super) fn copy_image(app: &Rc<App>, item: &Item) {
     let Some(url) = item.download_url() else { return };
     let app = app.clone();
     glib::spawn_future_local(async move {
-        let texture = app.images.fetch(&url).await.and_then(|bytes| gdk::Texture::from_bytes(&bytes).ok());
+        let texture = match app.images.fetch(&url).await {
+            Some(bytes) => crate::images::decode(&bytes).await,
+            None => None,
+        };
         match texture {
             Some(texture) => {
                 app.window.clipboard().set_texture(&texture);
