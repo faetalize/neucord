@@ -74,6 +74,7 @@ impl App {
             self.roster.borrow_mut().remove(id);
             self.refresh_account_views();
             super::usage::forget_usage(id);
+            super::switcher::forget_history(id);
             super::identity::forget(id);
             if let Err(e) = session::clear_token(id).await {
                 eprintln!("logout: {e}");
@@ -616,6 +617,7 @@ impl App {
         }
         // What was used and not saved: a closed app's, and a lost connection's edit.
         self.restore_usage();
+        self.restore_history();
         let offline_frecency = self.account.state.borrow_mut().frecency_sync.reconnected();
         if let Some(schedule) = offline_frecency {
             self.save_frecency_after(schedule);

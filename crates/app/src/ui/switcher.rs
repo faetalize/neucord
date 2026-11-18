@@ -411,3 +411,50 @@ impl App {
 pub(super) fn visited(state: &mut State, channel: Snowflake) {
     switcher::visited(&mut state.quick_history, channel);
 }
+
+/// Where an account's "Previous Channels" are kept between runs, as the
+/// client keeps its history (`QuickSwitcherStore` is persisted).
+fn history_file_of(id: Snowflake) -> std::path::PathBuf {
+    glib::user_data_dir().join("neucord").join(format!("switcher-{}.json", id.0))
+}
+
+/// Forget an account's history for good, as logging it out does.
+pub(super) fn forget_history(id: Snowflake) {
+    let _ = std::fs::remove_file(history_file_of(id));
+}
+
+impl App {
+    /// Take back the history a closed app kept, under the channels opened
+    /// since connecting (the first one opens before this runs).
+    pub(super) fn restore_history(&self) {
+        let mut state = self.account.state.borrow_mut();
+        let Some(me) = state.me.as_ref().map(|me| me.id) else { return };
+        let Ok(json) = std::fs::read_to_string(history_file_of(me)) else { return };
+        let mut history = switcher::restored_history(&json);
+        for &channel in state.quick_history.iter().rev() {
+            switcher::visited(&mut history, channel);
+        }
+        state.quick_history = history;
+    }
+
+    /// Keep the history. Private to the user, as the other files Neucord
+    /// keeps of what they did.
+    pub(super) fn persist_history(&self) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let (file, json) = {
+            let state = self.account.state.borrow();
+            let Some(me) = state.me.as_ref() else { return };
+            (history_file_of(me.id), switcher::history_json(&state.quick_history))
+        };
+        let write = || -> std::io::Result<()> {
+            std::fs::create_dir_all(file.parent().unwrap_or(&file))?;
+            let mut out =
+                std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&file)?;
+            out.write_all(json.as_bytes())
+        };
+        if let Err(e) = write() {
+            eprintln!("switcher: {e}");
+        }
+    }
+}
