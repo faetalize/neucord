@@ -94,6 +94,15 @@ impl ColorScheme {
     }
 }
 
+/// Notification sounds at all: the client's "Disable All Notification
+/// Sounds" (`disableAllSounds`, 803224), turned round so that on is the
+/// default. Off keeps the preferences below, which come back when it is on.
+pub const ALL_SOUNDS: Key = Key { group: "Notifications", name: "all-sounds", default: true };
+
+/// The sound of a new message (`message1` in 212909's list of sounds, the
+/// one this plays; the voice ones have nothing to play yet).
+pub const MESSAGE_SOUND: Key = Key { group: "Notifications", name: "message-sound", default: true };
+
 /// Closing the window leaves Neucord running behind its tray icon, as the
 /// client's "Minimize Discord to System Tray" does (on, like there).
 pub const MINIMIZE_TO_TRAY: Key = Key { group: "Background", name: "minimize-to-tray", default: true };
@@ -290,6 +299,16 @@ mod tests {
         for scheme in ColorScheme::ALL {
             assert_eq!(ColorScheme::from_name(scheme.name()), scheme);
         }
+    }
+
+    #[test]
+    fn sounds_are_on_until_turned_off() {
+        let dir = Dir::new("sounds");
+        let store = Store::open(dir.file());
+        assert!(store.get(&ALL_SOUNDS) && store.get(&MESSAGE_SOUND));
+        store.set(&MESSAGE_SOUND, false).unwrap();
+        let again = Store::open(dir.file());
+        assert!(!again.get(&MESSAGE_SOUND) && again.get(&ALL_SOUNDS), "one by one");
     }
 
     #[test]

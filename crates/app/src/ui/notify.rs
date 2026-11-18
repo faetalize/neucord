@@ -11,7 +11,7 @@ use gtk::prelude::*;
 use super::state::now_ms;
 use super::uploads::Outgoing;
 use super::{App, friends};
-use crate::{desktop, render};
+use crate::{config, desktop, render};
 
 /// How long a notification waits for the sender's picture before it shows without.
 const ICON_WAIT: Duration = Duration::from_secs(3);
@@ -80,13 +80,14 @@ impl App {
             if let Some(desktop) = this.desktop() {
                 let key = notification_id(channel);
                 this.account.notified.borrow_mut().insert(key.clone());
-                // Sounds are on, as in the client by default (#86 brings the switch).
+                // The client's `isSoundDisabled("message1")`: all sounds off, or this one.
+                let sound = this.config.get(&config::ALL_SOUNDS) && this.config.get(&config::MESSAGE_SOUND);
                 let notice = desktop::Notice {
                     key: &key,
                     title: &title,
                     body: &body,
                     icon: texture.as_ref(),
-                    sound: true,
+                    sound,
                     reply: true,
                 };
                 desktop.show(&notice);
