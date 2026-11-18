@@ -640,6 +640,10 @@ changed for unrelated reasons only needs a note in the issue.
   `renderHeaderToolbar` (420018, anchor `"browser"`): text and announcement
   channels, and threads outside forums. A box under a message shows only for
   a known thread of a message with `HAS_THREAD` (`r8` in 190854).
+- **Where a thread opens** (`threads::Viewed::anchor`). `P` in 123363: its
+  start the first time (no read state on any client, not among the
+  `viewedThreadIds` kept 90 days), else where we left off if it has unread
+  messages and nothing of it is shown, else the newest page.
 
 - **When media moves** (`discord::animation`, `images/play.rs`). Everything
   waits for window focus. Avatars and GIFs: the hook in 45837 (anchor
