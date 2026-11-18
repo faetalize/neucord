@@ -23,6 +23,7 @@ mod forum_post;
 mod friends;
 mod gifs;
 mod identity;
+mod inbox;
 mod integrations;
 mod launcher;
 mod login;
@@ -258,6 +259,9 @@ pub struct App {
     search_button: gtk::Button,
     /// Opens the channel's pinned messages, from the chat's header.
     pins_button: gtk::MenuButton,
+    /// Opens the inbox, from the chat's header, and its parts once made.
+    inbox_button: gtk::MenuButton,
+    inbox_view: RefCell<Option<inbox::InboxView>>,
     /// The pins popover's parts, once it has been made.
     pins_view: RefCell<Option<pin_list::PinsView>>,
     /// The message search box, while it's open.
@@ -507,6 +511,8 @@ impl App {
                 .visible(false)
                 .build(),
             pins_view: RefCell::default(),
+            inbox_button: gtk::MenuButton::builder().icon_name("mail-unread-symbolic").tooltip_text("Inbox").build(),
+            inbox_view: RefCell::default(),
             search_button: gtk::Button::builder()
                 .icon_name("system-search-symbolic")
                 .tooltip_text("Search")

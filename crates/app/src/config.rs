@@ -103,6 +103,16 @@ pub const ALL_SOUNDS: Key = Key { group: "Notifications", name: "all-sounds", de
 /// one this plays; the voice ones have nothing to play yet).
 pub const MESSAGE_SOUND: Key = Key { group: "Notifications", name: "message-sound", default: true };
 
+/// The inbox's mentions include @everyone and @here (`everyoneFilter` in
+/// `recentMentionFilterSettings`, 849171; the client's default is on).
+pub const INBOX_EVERYONE: Key = Key { group: "Inbox", name: "everyone", default: true };
+
+/// ... and @role mentions (`roleFilter`).
+pub const INBOX_ROLES: Key = Key { group: "Inbox", name: "roles", default: true };
+
+/// ... or only the open server's (`guildFilter` THIS_SERVER; default all).
+pub const INBOX_THIS_SERVER: Key = Key { group: "Inbox", name: "this-server", default: false };
+
 /// Closing the window leaves Neucord running behind its tray icon, as the
 /// client's "Minimize Discord to System Tray" does (on, like there).
 pub const MINIMIZE_TO_TRAY: Key = Key { group: "Background", name: "minimize-to-tray", default: true };

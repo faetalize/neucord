@@ -4,7 +4,8 @@
 //! message hold is `discord::voice`; the recording itself is [`crate::recorder`].
 //!
 //! One recording exists at a time, in one channel, as in the client: it
-//! stays there as a draft after it stops, until it is sent or deleted.
+//! stays there as a draft after it stops, until it is sent or deleted, and
+//! can be played in the bar before then (`e7` in 989161).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -12,8 +13,8 @@ use std::time::Duration;
 
 use adw::prelude::*;
 use discord::rest::Reply;
-use discord::uploads::{self, Sent, Voice as Meta};
-use discord::voice::{self, Capture, Recording};
+use discord::uploads::{self, Data, Sent, Voice as Meta};
+use discord::voice::{self, Capture, DraftPlayer, Recording};
 use discord::{Rest, Snowflake};
 use gtk::glib;
 
@@ -22,6 +23,7 @@ use super::attachments::{BAR, BAR_PITCH, WAVE_HEIGHT, clock};
 use super::composer::ReplyCtx;
 use super::menus::{Entry, Item, Kind};
 use super::state::now_ms;
+use super::video::media_bytes;
 use crate::recorder::{self, Event, Recorder};
 
 /// Record Voice Message, in the attach menu.
@@ -36,6 +38,14 @@ pub(super) const RECORD_VOICE: Entry<()> = Entry::Item(Item {
 /// on (198620's `d`).
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How a press on the waveform goes: pressed, dragged, let go.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scrub {
+    Begin,
+    Move,
+    End,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -67,8 +77,16 @@ struct Draft {
     attempts: Rc<Cell<u32>>,
 }
 
+/// The finished draft being listened to.
+struct Playback {
+    id: u64,
+    player: DraftPlayer,
+    stream: gtk::MediaFile,
+}
+
 pub(super) struct Voice {
     draft: RefCell<Option<Draft>>,
+    playback: RefCell<Option<Playback>>,
     ids: Cell<u64>,
     /// How many recordings this run has made, which names the next one.
     count: Cell<u32>,
@@ -76,6 +94,7 @@ pub(super) struct Voice {
     levels: Rc<RefCell<Vec<u8>>>,
     bar: gtk::Box,
     stop: gtk::Button,
+    play: gtk::Button,
     wave: gtk::DrawingArea,
     time: gtk::Label,
     delete: gtk::Button,
@@ -89,11 +108,13 @@ impl Voice {
         };
         Voice {
             draft: RefCell::default(),
+            playback: RefCell::default(),
             ids: Cell::default(),
             count: Cell::default(),
             levels: Rc::default(),
             bar: gtk::Box::builder().spacing(8).hexpand(true).valign(gtk::Align::Center).visible(false).build(),
             stop: button("media-playback-stop-symbolic", "Stop Voice Message Recording"),
+            play: button("media-playback-start-symbolic", "Play"),
             wave: gtk::DrawingArea::builder()
                 .hexpand(true)
                 .content_height(WAVE_HEIGHT)
@@ -135,6 +156,7 @@ impl App {
         let voice = &self.voice;
         for widget in [
             voice.stop.upcast_ref::<gtk::Widget>(),
+            voice.play.upcast_ref(),
             voice.wave.upcast_ref(),
             voice.time.upcast_ref(),
             voice.delete.upcast_ref(),
@@ -150,8 +172,14 @@ impl App {
                 let bars = (width as f64 / BAR_PITCH).floor() as usize;
                 let shown = bars_of(&levels.borrow(), bars, recording);
                 let colour = area.color();
-                cr.set_source_rgba(colour.red().into(), colour.green().into(), colour.blue().into(), 1.0);
+                let progress = this.upgrade().and_then(|this| this.playback_progress());
                 for (n, level) in shown.iter().enumerate() {
+                    // Once played, the bars not reached yet are faint.
+                    let alpha = match progress {
+                        Some(progress) if (n as f64 + 0.5) / shown.len() as f64 > progress => 0.4,
+                        _ => 1.0,
+                    };
+                    cr.set_source_rgba(colour.red().into(), colour.green().into(), colour.blue().into(), alpha);
                     let bar = 22.0 * f64::from(*level) / 255.0 + 2.0;
                     cr.rectangle(n as f64 * BAR_PITCH, (f64::from(height) - bar) / 2.0, BAR, bar);
                     let _ = cr.fill();
@@ -166,6 +194,38 @@ impl App {
                 }
             }
         });
+        voice.play.connect_clicked({
+            let this = Rc::downgrade(self);
+            move |_| {
+                if let Some(this) = this.upgrade() {
+                    this.toggle_playback();
+                }
+            }
+        });
+        // Dragging through the waveform, or clicking on it, moves the playback.
+        let drag = gtk::GestureDrag::new();
+        drag.connect_drag_begin({
+            let this = Rc::downgrade(self);
+            move |_, x, _| {
+                if let Some(this) = this.upgrade() {
+                    this.scrub(x, Scrub::Begin);
+                }
+            }
+        });
+        for step in [Scrub::Move, Scrub::End] {
+            let this = Rc::downgrade(self);
+            let follow = move |drag: &gtk::GestureDrag, offset: f64| {
+                let from = drag.start_point().map_or(0.0, |(x, _)| x);
+                if let Some(this) = this.upgrade() {
+                    this.scrub(from + offset, step);
+                }
+            };
+            match step {
+                Scrub::Move => drag.connect_drag_update(move |drag, x, _| follow(drag, x)),
+                _ => drag.connect_drag_end(move |drag, x, _| follow(drag, x)),
+            };
+        }
+        voice.wave.add_controller(drag);
         voice.delete.connect_clicked({
             let this = Rc::downgrade(self);
             move |_| {
@@ -215,7 +275,7 @@ impl App {
         voice.bar.set_visible(shown.is_some());
         self.composer.set_visible(shown.is_none());
         self.refresh_chat_bar();
-        let Some((phase, started, millis)) = shown else { return };
+        let Some((phase, started, millis)) = shown else { return self.stop_playback() };
         voice.stop.set_visible(phase == Phase::Recording);
         voice.delete.set_sensitive(matches!(phase, Phase::Requesting | Phase::Recording | Phase::Recorded));
         voice.send.set_sensitive(matches!(phase, Phase::Recording | Phase::Recorded));
@@ -227,6 +287,155 @@ impl App {
         // The client counts whole seconds up while recording.
         voice.time.set_label(&clock(if phase == Phase::Recording { seconds.floor() } else { seconds }));
         voice.wave.queue_draw();
+        self.refresh_playback();
+    }
+
+    /// What the draft's player shows: its button, and the clock counting down
+    /// once it has played.
+    fn refresh_playback(&self) {
+        let voice = &self.voice;
+        let phase = self.voice_phase();
+        let playback = voice.playback.borrow();
+        let Some(playback) = playback.as_ref().filter(|_| matches!(phase, Some(Phase::Recorded | Phase::Sending)))
+        else {
+            return voice.play.set_visible(false);
+        };
+        voice.play.set_visible(true);
+        let (icon, tip, label) = match playback.player.is_playing() {
+            true => ("media-playback-pause-symbolic", "Pause", "Pause voice message"),
+            false => ("media-playback-start-symbolic", "Play", "Play voice message"),
+        };
+        voice.play.set_icon_name(icon);
+        voice.play.set_tooltip_text(Some(tip));
+        voice.play.update_property(&[gtk::accessible::Property::Label(label)]);
+        voice.time.set_label(&clock(playback.player.clock_secs() as f64));
+        voice.wave.queue_draw();
+    }
+
+    /// How far the draft has played, once it has.
+    fn playback_progress(&self) -> Option<f64> {
+        let playback = self.voice.playback.borrow();
+        playback.as_ref().filter(|p| p.player.played()).map(|p| p.player.progress())
+    }
+
+    /// Give a finished recording its player, which hears the file as it will
+    /// be sent.
+    fn start_playback(self: &Rc<Self>, id: u64, recording: &Recording) {
+        let Data::Memory(bytes) = &recording.file.data else { return };
+        let stream = media_bytes(bytes);
+        let this = Rc::downgrade(self);
+        // Only weak references: the player owns the stream.
+        stream.connect_timestamp_notify({
+            let this = this.clone();
+            move |stream| {
+                let Some(this) = this.upgrade() else { return };
+                if let Some(playback) = this.voice.playback.borrow_mut().as_mut().filter(|p| p.id == id)
+                    && !playback.player.is_dragging()
+                {
+                    playback.player.moved(stream.timestamp() as f64 / 1e6);
+                }
+                this.refresh_playback();
+            }
+        });
+        stream.connect_duration_notify({
+            let this = this.clone();
+            move |stream| {
+                let Some(this) = this.upgrade() else { return };
+                if let Some(playback) = this.voice.playback.borrow_mut().as_mut().filter(|p| p.id == id) {
+                    playback.player.loaded(stream.duration() as f64 / 1e6);
+                }
+                this.refresh_playback();
+            }
+        });
+        stream.connect_ended_notify({
+            let this = this.clone();
+            move |stream| {
+                if let Some(this) = this.upgrade().filter(|_| stream.is_ended()) {
+                    this.playback_ended(id);
+                }
+            }
+        });
+        stream.connect_error_notify(move |stream| {
+            let Some(this) = this.upgrade() else { return };
+            if let Some(error) = stream.error() {
+                eprintln!("voice message: can't play the draft: {error}");
+                if let Some(playback) = this.voice.playback.borrow_mut().as_mut().filter(|p| p.id == id) {
+                    playback.player.failed();
+                }
+                this.refresh_playback();
+            }
+        });
+        self.voice.playback.replace(Some(Playback { id, player: DraftPlayer::new(recording.duration_secs), stream }));
+    }
+
+    /// The play button.
+    fn toggle_playback(&self) {
+        if let Some(playback) = self.voice.playback.borrow_mut().as_mut() {
+            playback.player.toggle();
+        }
+        self.sound_playback();
+        self.refresh_playback();
+    }
+
+    /// Make the stream play or pause as the player says.
+    fn sound_playback(&self) {
+        let Some((stream, audible)) =
+            self.voice.playback.borrow().as_ref().map(|p| (p.stream.clone(), p.player.audible()))
+        else {
+            return;
+        };
+        match (audible, stream.is_playing()) {
+            (true, false) => stream.play(),
+            (false, true) => stream.pause(),
+            _ => {}
+        }
+    }
+
+    /// The waveform was pressed or dragged at `x`, or let go.
+    fn scrub(&self, x: f64, step: Scrub) {
+        let width = f64::from(self.voice.wave.width());
+        let (stream, position) = {
+            let mut slot = self.voice.playback.borrow_mut();
+            let Some(playback) = slot.as_mut().filter(|_| self.voice_phase() == Some(Phase::Recorded)) else { return };
+            if step == Scrub::Begin {
+                playback.player.drag_start();
+            }
+            if playback.player.is_dragging() && width > 0.0 {
+                playback.player.seek(x / width);
+            }
+            if step == Scrub::End {
+                playback.player.drag_end();
+            }
+            (playback.stream.clone(), playback.player.position())
+        };
+        stream.seek((position * 1e6) as i64);
+        self.sound_playback();
+        self.refresh_playback();
+    }
+
+    /// The media played to its end.
+    fn playback_ended(&self, id: u64) {
+        let stream = {
+            let mut slot = self.voice.playback.borrow_mut();
+            let Some(playback) = slot.as_mut().filter(|p| p.id == id) else { return };
+            playback.player.ended();
+            playback.stream.clone()
+        };
+        stream.seek(0);
+        self.refresh_playback();
+    }
+
+    /// Stop listening and go back to the start, as the client's player does
+    /// when it leaves the screen.
+    fn stop_playback(&self) {
+        let stream = {
+            let mut slot = self.voice.playback.borrow_mut();
+            let Some(playback) = slot.as_mut().filter(|p| p.player.played()) else { return };
+            playback.player.ended();
+            playback.stream.clone()
+        };
+        stream.pause();
+        stream.seek(0);
     }
 
     /// Start a recording in the open channel: Record Voice Message and Alt+R.
@@ -421,8 +630,12 @@ impl App {
                 draft.recording = capture.finish();
             }
             draft.phase = Phase::Recorded;
-            draft.send_when_done
+            (draft.send_when_done, draft.recording.clone())
         };
+        let (send, recording) = send;
+        if let Some(recording) = recording {
+            self.start_playback(id, &recording);
+        }
         self.refresh_voice();
         if send {
             self.send_voice();
@@ -445,6 +658,9 @@ impl App {
     /// [`Self::discard_voice`] without redrawing, for logging out.
     pub(super) fn drop_voice(&self) {
         self.voice.draft.take();
+        if let Some(playback) = self.voice.playback.take() {
+            playback.stream.pause();
+        }
         self.voice.levels.borrow_mut().clear();
     }
 
@@ -511,6 +727,7 @@ impl App {
             draft.phase = Phase::Sending;
             draft.attempts.clone()
         };
+        self.stop_playback();
         self.refresh_voice();
         self.record_slowmode(channel, |slowmode, c, bypass| slowmode.sent(c, bypass, now_ms()));
         let this = self.clone();

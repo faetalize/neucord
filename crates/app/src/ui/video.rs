@@ -38,7 +38,15 @@ fn remember(playback: Playback) {
 /// session manager saved for Neucord: those of its last stream, muted after
 /// a muted video. Moving both away and back tells GStreamer.
 pub(super) fn media_file(path: &Path) -> gtk::MediaFile {
-    let file = gtk::MediaFile::for_filename(path);
+    unmuted(gtk::MediaFile::for_filename(path))
+}
+
+/// [`media_file`] for bytes held in memory, such as a recording not yet sent.
+pub(super) fn media_bytes(bytes: &glib::Bytes) -> gtk::MediaFile {
+    unmuted(gtk::MediaFile::for_input_stream(&gtk::gio::MemoryInputStream::from_bytes(bytes)))
+}
+
+fn unmuted(file: gtk::MediaFile) -> gtk::MediaFile {
     file.set_muted(true);
     file.set_muted(false);
     file.set_volume(0.0);

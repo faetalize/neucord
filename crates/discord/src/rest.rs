@@ -20,7 +20,6 @@ use crate::interaction::{Failure, Press};
 use crate::invalid::{Change, InvalidRequests};
 use crate::model::Emoji;
 use crate::notification_edit;
-use crate::pins;
 use crate::post_creation;
 use crate::profile::{self, Profile};
 use crate::reactions::{Location, Refusal};
@@ -32,6 +31,7 @@ use crate::stickers::Pack;
 use crate::threads::ArchivedPage;
 use crate::uploads::Sent;
 use crate::{Channel, Error, Message, Snowflake, identity, notes};
+use crate::{mentions, pins};
 
 /// Error code for accepting a stranger's friend request without confirming.
 pub const STRANGER_NOT_CONFIRMED: u64 = 80013;
@@ -483,6 +483,22 @@ impl Rest {
     /// Delete `message`, ours or, with Manage Messages, anyone's.
     pub async fn delete_message(&self, channel: Snowflake, message: Snowflake) -> Result<(), Error> {
         self.request(call!(DELETE_MESSAGE, channel, message), None).await
+    }
+
+    /// A page of the messages that mention us (`fetchRecentMentions`, 378939),
+    /// newest first, as [`mentions::query`] asks.
+    pub async fn mentions(
+        &self,
+        before: Option<Snowflake>,
+        guild: Option<Snowflake>,
+        filter: mentions::Filter,
+    ) -> Result<Vec<Message>, Error> {
+        self.request(call!(MENTIONS).query(&mentions::query(before, guild, filter)), None).await
+    }
+
+    /// Take a mention off the inbox (`deleteRecentMention`).
+    pub async fn delete_mention(&self, message: Snowflake) -> Result<(), Error> {
+        self.request(call!(DELETE_MENTION, message), None).await
     }
 
     /// A page of `channel`'s pins, newest pinned first (`fetchPins` in
@@ -1848,6 +1864,9 @@ mod built_in_tests {
         let (pin, unpin) = (call!(PIN_MESSAGE, channel, message), call!(UNPIN_MESSAGE, channel, message));
         assert_eq!((pin.method(), pin.path()), ("PUT", "/channels/7/pins/8"));
         assert_eq!((unpin.method(), unpin.path()), ("DELETE", "/channels/7/pins/8"));
+        let message = 9;
+        let done = call!(DELETE_MENTION, message);
+        assert_eq!((done.method(), done.path()), ("DELETE", "/users/@me/mentions/9"));
         let pins = call!(PINS, channel).query(&pins::query(pins::PAGE, None));
         assert_eq!((pins.method(), pins.path()), ("GET", "/channels/7/messages/pins?limit=25"));
         assert_eq!(Sending::default().audit_log_reason, None, "only /ban and /timeout give a reason");
