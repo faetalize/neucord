@@ -245,7 +245,7 @@ impl View {
         self.refresh(app);
         let (app, view) = (app.clone(), self.clone());
         glib::spawn_future_local(async move {
-            let answer = rest.search_thread_names(view.channel, &text).await;
+            let answer = rest.search_thread_names(view.channel, &text, &[], discord::forum::TagMatch::Some).await;
             view.searching.set(false);
             match answer {
                 Ok(page) => {

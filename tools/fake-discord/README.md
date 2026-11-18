@@ -110,6 +110,10 @@ what arrived, IDENTIFY's key order and properties first.
   with `name` and `tag_setting`, results in place of the lists, emptying the
   box brings them back; `threads`, `thread-search <text>` and `thread-rows`
   are its commands);
+  `forum-search` (with `FAKE_FORUM=1`, a forum #ideas with two tags and three
+  active posts) types in the forum's search box: one request 350 ms after
+  typing pauses, the posts found in place of the list, the list back when
+  the box is emptied;
   `heartbeat` waits for five op 40s, the interval's among them;
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).
