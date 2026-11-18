@@ -97,12 +97,21 @@ pub(super) fn poll(app: &Rc<App>, message: &Message, poll: &Poll) -> gtk::Widget
                 1 => "1 vote".to_owned(),
                 n => format!("{n} votes"),
             };
-            line.append(
-                &gtk::Label::builder()
-                    .label(format!("{votes}  {}%", poll.percent(answer_id)))
-                    .css_classes(["caption", "numeric"])
-                    .build(),
-            );
+            // The count opens who voted (`canShowVoterDetails` in 119591: where counts show).
+            let count = gtk::Button::builder()
+                .label(format!("{votes}  {}%", poll.percent(answer_id)))
+                .css_classes(["flat", "caption", "numeric"])
+                .tooltip_text("See who voted")
+                .build();
+            count.connect_clicked(with(&this, {
+                let (channel, id) = (channel, id);
+                move |app| {
+                    if let Some(message) = app.message_in(channel, id) {
+                        app.view_poll_votes(&message, answer_id);
+                    }
+                }
+            }));
+            line.append(&count);
             row.append(&gtk::ProgressBar::builder().fraction(poll.percent(answer_id) as f64 / 100.0).build());
         }
         column.append(&row);
