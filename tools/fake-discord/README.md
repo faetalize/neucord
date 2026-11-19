@@ -8,11 +8,11 @@ up.
 `run.sh <scenario>` copies this checkout to `target/fake-discord/src`, points
 the copy at the fake with `patch.py`, builds it, and runs the scenario inside
 `unshare -rn` (no network but loopback) and `dbus-run-session` (notifications
-don't reach your desktop), under `mutter --headless`. Output goes to
+don't reach your desktop), under `mutter --headless`, or the compositor `COMPOSITOR` names (`gnome-shell`, `niri` nested, or `host` with `HOST_DISPLAY=<socket path>` for one running already: `DESKTOPS.md`; a scenario's `cshot <png>` shoots what the compositor shows, where it can). Output goes to
 `target/fake-discord/out/<run>`: `fake.log` (one JSON line per request with
 its JSON body and any `X-Audit-Log-Reason` or `X-Context-Properties`, per
 gateway frame, per event a request made it push, and IDENTIFY as sent), the
-app's and mutter's logs, and any screenshots. `analyse.py <fake.log>` prints
+app's and the compositor's logs, and any screenshots. `analyse.py <fake.log>` prints
 what arrived, IDENTIFY's key order and properties first.
 
 - **`fake_discord.py`**: REST and a `zlib-stream` gateway on 127.0.0.1:8099,
@@ -25,15 +25,15 @@ what arrived, IDENTIFY's key order and properties first.
   button that asks for it), and takes a form as
   `FAKE_MODAL_SUBMIT=fail|silent|429` says. Files get an upload URL at the
   fake, which takes the `PUT` and a `DELETE`, unless
-  `FAKE_UPLOAD_FAIL=too-large` turns the URL down with Discord's 40005.
-  `FAKE_IMAGE_FAIL=1` has every image on the CDN answer 404. `FAKE_GIF=1` ends #general with an `anim.gif` and has the CDN serve a real two-frame GIF for a `.gif` (scenario `gif`). `FAKE_VIDEO=<a .webm>` puts that file in
+  `FAKE_UPLOAD_FAIL=too-large` turns the URL down with Discord's 40005, or `=429` has a file's first PUT rate limited with a `retry_after` of 4 s (scenario `upload-retry`).
+  `FAKE_IMAGE_FAIL=1` has every image on the CDN answer 404. `FAKE_GIF=1` ends #general with an `anim.gif` and has the CDN serve a real two-frame GIF for a `.gif` (scenario `gif`). `FAKE_THREAD_SYNCS=<n>` (with `FAKE_CHAIN=1`, whose thread it moves, and `FAKE_THREADS=1`) syncs the same threads again n times, a second apart from 6 s after READY, each time with one more message in the thread line 10 started and a `THREAD_MEMBER_UPDATE` of ours on it (scenario `thread-sync`). `FAKE_VIDEO=<a .webm>` puts that file in
   channel 600 as a video attachment with alt text (scenario `viewer-video`). `FAKE_TYPING=1` has Alice typing in #general for as long as the run lasts (scenario `typing-line`). `FAKE_PING=1` has line 36 of #general ping us and line 34 ping @everyone (scenario `mentioned`). `FAKE_CATEGORY=1` adds a category, Chat Channels, with #fresh-news unread and #caught-up read (scenario `sidebar-read`). `FAKE_MUTED=1` mutes the server until a made-up time and #general with no end (scenario `unmute-caption`).
   `FAKE_SENSITIVE=1` adds to #general pictures Discord's scan has flagged as explicit, one it hasn't looked at, one it found clean and a card with a flagged picture; with `FAKE_NSFW=allowed=0` the filter covers the flagged ones and the unscanned (the `sensitive` scenario shoots them; `sensitive-report` marks one not sensitive, the first picture's, or with `FAKE_SENSITIVE=embed` the card's).
   Heartbeats (op 40) are logged and acknowledged, and READY carries a made-up
   `qos_token`. Both settings protos are kept, and a save merges into them field by field
   as Discord's does. The GIF endpoints answer made-up results, one with a
   numeric id, and take a pick's `POST /gifs/select`. A thread made from a
-  channel joins the server and comes back as `THREAD_CREATE`. `FAKE_VARIANTS="hiding=1,voice=1,ladder=1,lazy=1,upload=1,nsfwlevel=1,chatbar=1,dice=1"`
+  channel joins the server and comes back as `THREAD_CREATE`. `FAKE_VARIANTS="hiding=1,voice=1,ladder=1,lazy=1,upload=1,nsfwlevel=1,chatbar=1,dice=1,ageverify=1"`
   assigns Apex experiments by name, `FAKE_REIDENTIFY=<s>` sends op 9 after
   that many seconds to force a second IDENTIFY, `FAKE_RESUME=invalid|invalid-resumable` answers a RESUME with op 9 (false, or true every time) where it answers RESUMED otherwise, `FAKE_RECONNECT=<s>` sends op 7 that long after the first IDENTIFY, `FAKE_CLOSE=<code>[:<s>]` closes the first connection with that code, and `FAKE_NO_HELLO=1` leaves the first connection without a HELLO (scenario `reconnect`, which prints each connect, IDENTIFY and RESUME with its time; `NEUCORD_DEBUG_DROP=<s>` drops the connection), `FAKE_NEW_TOKEN` puts an
   `auth_token` in READY, `FAKE_LEFT=<user ids>` has those people leave the
@@ -95,7 +95,7 @@ what arrived, IDENTIFY's key order and properties first.
   opened and shoots it), `settings <page>` (the settings window on a page, `activity` for Activity
   Privacy), `activity-share on|off` and `activity-default 1|2|3` (what its rows
   save), `focus-mode <ms>|forever|off`, `focus-state` and `status-menu <png>` (Focus Mode, with
-  `FAKE_NSFW=dms=1` so the settings are in READY), `sound-switch <title> on|off` and `sound-state <title>` (a row of the Neucord page's Sounds group, after `settings neucord`), `quit`. It edits the copy by exact strings
+  `FAKE_NSFW=dms=1` so the settings are in READY), `sound-switch <title> on|off` and `sound-state <title>` (a row of the Neucord page's Sounds group, after `settings neucord`), `end` and `scroll <0..1>` (the chat to its newest message, or that far down what it has loaded), `quit`. It edits the copy by exact strings
   and stops on the first that no longer matches: when the code it patches
   moves, update the string. The module it adds is only built here, so a
   change to what it calls needs a run to show it still builds.
@@ -180,8 +180,22 @@ what arrived, IDENTIFY's key order and properties first.
   Remove from Thread (`member-menu-item remove-from-thread`), which sends the
   DELETE and loses them from the list;
   `heartbeat` waits for five op 40s, the interval's among them;
+  `search-dms` (with `FAKE_NSFW="dms=1"`) searches a server before and after Continue on an age-restricted channel (`include_nsfw=true` only after), a DM, and with the cog every DM at once (the POST's body is in `requests.txt`), with and without `in:`;
+  `idle` (with `NEUCORD_DEBUG_IDLE=4`) lists the op 3 frames: idle and away after four quiet seconds, active again when a channel opens (`IDLE_STEPS=300` waits for the real minute's away instead);
+  `age-verification` (with `AGE_FLOW=1 FAKE_NSFW="status=1,gated=1" FAKE_VARIANTS=ageverify=1`) confirms an age from the gate: the methods, the method picked, a vendor page at the fake that says it has a result and then that it is done, and the account becomes an adult's (the web view can't be photographed headless, so there is no shot of the page);
+  `desktop` (with `FAKE_NOTIFY=10`) looks at the app under `COMPOSITOR` and leaves the notification call and the bus names it made;
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).
+- **`pointer.py`**: a real pointer and keyboard for the headless compositor,
+  through mutter's remote-desktop D-Bus API, for what only real input shows (a
+  popover's grab, which widget a press reaches) and `cmd` can't send. A
+  scenario starts `pointer.py serve $OUT/pointer.fifo &` and writes lines to
+  the fifo: `move X Y`, `click X Y` (window coordinates of the 1280x900
+  monitor), `press`, `release`, `scroll N`, `key Escape|Return|Tab|BackSpace|<character>`,
+  and leaves it a couple of seconds. `profile-switch` goes from one profile
+  popout to the next by clicking avatars: one click each, a second on the same
+  one closes it, as does one outside it and Escape, and the popout's note box
+  takes typing.
 
 Add the endpoints, events and commands a change needs here, in the same pull
 request.

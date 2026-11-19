@@ -33,8 +33,8 @@ const AGE_GATED_COMMANDS: u64 = 32;
 /// `AGE_GATED_SPACES` among the features a region age-gates (687123).
 const AGE_GATED_SPACES: u64 = 1;
 /// `ageVerificationStatus` `UNVERIFIED`. The client's `CLIENT_ONLY_PENDING`
-/// (99999) is its own state during its verification flow, which Neucord has
-/// none of.
+/// (99999) is its own state during its verification flow, which Neucord does
+/// not take.
 const UNVERIFIED: u64 = 1;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -69,6 +69,11 @@ pub struct Gates {
     /// `explicit_content_scan_version`: the newest scan Discord runs, if it
     /// says.
     pub explicit_content_scan_version: Option<i64>,
+    /// What the age-dependent ones above come from, to work them out again
+    /// when the account's age group changes ([`Gates::with_age`]).
+    pub age: u64,
+    pub age_gated: u64,
+    pub teen_defaults: u64,
 }
 
 impl Gates {
@@ -78,19 +83,29 @@ impl Gates {
         let parent_linked = linked.into_iter().any(|l| l["link_status"] == 2 && l["link_type"] == 1);
         let age = ready["user"]["age_verification_status"].as_u64().unwrap_or(0);
         let region = &ready["regional_feature_config"];
-        let teen_defaults = region["teen_by_default_settings"].as_u64().unwrap_or(0);
-        let age_gated = region["age_gated_features"].as_u64().unwrap_or(0);
         Gates {
             parent_linked,
-            message_requests_forced: is_teen(age) && teen_defaults & TEEN_MESSAGE_REQUESTS != 0,
-            message_requests_age_gated: !is_adult(age) && age_gated & AGE_GATED_DM_PRIVACY != 0,
-            activity_status_by_default: teen_defaults & TEEN_ACTIVITY_STATUS != 0,
-            nsfw_commands_age_gated: age == UNVERIFIED && age_gated & AGE_GATED_COMMANDS != 0,
-            spaces_age_gated: !is_adult(age) && age_gated & AGE_GATED_SPACES != 0,
-            age_unverified: age == UNVERIFIED,
-            sensitive_by_default: teen_defaults & TEEN_SENSITIVE_CONTENT != 0,
             explicit_content_scan_version: ready["explicit_content_scan_version"].as_i64(),
+            age_gated: region["age_gated_features"].as_u64().unwrap_or(0),
+            teen_defaults: region["teen_by_default_settings"].as_u64().unwrap_or(0),
+            ..Gates::default()
         }
+        .with_age(age)
+    }
+
+    /// The same gates for an account whose age group is now `age`
+    /// (`age_verification_status` of a user update).
+    pub fn with_age(mut self, age: u64) -> Gates {
+        let (age_gated, teen_defaults) = (self.age_gated, self.teen_defaults);
+        self.age = age;
+        self.message_requests_forced = is_teen(age) && teen_defaults & TEEN_MESSAGE_REQUESTS != 0;
+        self.message_requests_age_gated = !is_adult(age) && age_gated & AGE_GATED_DM_PRIVACY != 0;
+        self.activity_status_by_default = teen_defaults & TEEN_ACTIVITY_STATUS != 0;
+        self.nsfw_commands_age_gated = age == UNVERIFIED && age_gated & AGE_GATED_COMMANDS != 0;
+        self.spaces_age_gated = !is_adult(age) && age_gated & AGE_GATED_SPACES != 0;
+        self.age_unverified = age == UNVERIFIED;
+        self.sensitive_by_default = teen_defaults & TEEN_SENSITIVE_CONTENT != 0;
+        self
     }
 }
 
@@ -99,6 +114,23 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn confirming_an_age_opens_what_the_old_one_held_back() {
+        let ready = json!({"user": {"age_verification_status": 1},
+                           "regional_feature_config": {"age_gated_features": 37, "teen_by_default_settings": 4},
+                           "linked_users": [{"link_status": 2, "link_type": 1}]});
+        let before = Gates::from_ready(&ready);
+        assert!(before.spaces_age_gated && before.age_unverified && before.nsfw_commands_age_gated);
+        let adult = before.with_age(3);
+        assert!(!adult.spaces_age_gated && !adult.age_unverified && !adult.nsfw_commands_age_gated);
+        assert!(!adult.message_requests_age_gated);
+        assert!(adult.parent_linked, "what the age doesn't decide stays");
+        let teen = before.with_age(2);
+        assert!(teen.spaces_age_gated && !teen.age_unverified, "a teen is still asked, to update it");
+        assert!(teen.message_requests_forced);
+        assert_eq!(before.with_age(1), before, "and back");
+    }
 
     #[test]
     fn a_plain_account_has_no_gates() {

@@ -34,6 +34,7 @@ const GUILD_FOLDERS: u32 = 14;
 const DATA_VERSION: u32 = 3;
 
 // VoiceAndVideoSettings.
+const AFK_TIMEOUT: u32 = 6;
 const STREAM_NOTIFICATIONS_ENABLED: u32 = 7;
 
 // TextAndImagesSettings.
@@ -53,6 +54,7 @@ const VIEW_NSFW_COMMANDS: u32 = 23;
 const EXPLICIT_CONTENT_FILTER: u32 = 19;
 const EXPLICIT_CONTENT_SETTINGS: u32 = 29;
 const GORE_CONTENT_SETTINGS: u32 = 32;
+const IS_CROSS_DM_SEARCH_ENABLED: u32 = 36;
 
 // ExplicitContentSettings and GoreContentSettings.
 const IN_GUILDS: u32 = 1;
@@ -190,6 +192,7 @@ impl SettingsPatch {
                     .as_ref()
                     .map(|p| servers(p, ACTIVITY_JOINING_RESTRICTED_GUILD_IDS)),
             },
+            afk_timeout: voice.as_ref().and_then(|v| v.int_value(AFK_TIMEOUT)).map(|seconds| seconds as u32),
             show_current_game: settings.message(STATUS).and_then(|s| s.bool_value(STATUS_SHOW_CURRENT_GAME)),
             // A plain `bool`: `false` is not sent, so appearance without it is off.
             developer_mode: settings.message(APPEARANCE).map(|a| a.bool(DEVELOPER_MODE).unwrap_or(false)),
@@ -200,6 +203,7 @@ impl SettingsPatch {
             nsfw_commands_in_dms: flag(VIEW_NSFW_COMMANDS),
             enable_tts_command: flag(ENABLE_TTS_COMMAND),
             show_command_suggestions: flag(SHOW_COMMAND_SUGGESTIONS),
+            cross_dm_search: flag(IS_CROSS_DM_SEARCH_ENABLED),
             sensitive: text.as_ref().map(|t| preferences(t)),
         })
     }
@@ -314,6 +318,8 @@ pub enum Setting {
     AnimateEmoji(bool),
     /// The message box menu's Suggestions ▸ Slash Commands (194400).
     ShowCommandSuggestions(bool),
+    /// The search's cog: Search this DM or Search all DMs (252715).
+    CrossDmSearch(bool),
     AnimateStickers(StickerAnimation),
     DeveloperMode(bool),
     ReactionNotifications(ReactionNotifications),
@@ -408,6 +414,7 @@ impl Setting {
             Setting::RenderReactions(on) => one(TEXT_AND_IMAGES, RENDER_REACTIONS, Some(bool_value(on))),
             Setting::GifAutoPlay(on) => one(TEXT_AND_IMAGES, GIF_AUTO_PLAY, Some(bool_value(on))),
             Setting::ShowCommandSuggestions(on) => one(TEXT_AND_IMAGES, SHOW_COMMAND_SUGGESTIONS, Some(bool_value(on))),
+            Setting::CrossDmSearch(on) => one(TEXT_AND_IMAGES, IS_CROSS_DM_SEARCH_ENABLED, Some(bool_value(on))),
             Setting::AnimateEmoji(on) => one(TEXT_AND_IMAGES, ANIMATE_EMOJI, Some(bool_value(on))),
             Setting::AnimateStickers(how) => one(TEXT_AND_IMAGES, ANIMATE_STICKERS, Some(uint_value(how.raw() as u32))),
             Setting::DeveloperMode(on) => one(APPEARANCE, DEVELOPER_MODE, plain(on)),
@@ -677,6 +684,18 @@ mod tests {
         assert_eq!((group, written), (TEXT_AND_IMAGES, bool_wrapper(SHOW_COMMAND_SUGGESTIONS, false)));
     }
 
+    #[test]
+    fn searching_every_dm_is_a_wrapper_off_until_it_is_set() {
+        let on = patch(&bytes_field(TEXT_AND_IMAGES, &bool_wrapper(IS_CROSS_DM_SEARCH_ENABLED, true)));
+        assert_eq!(on.cross_dm_search, Some(true));
+        let mut settings = crate::settings::Settings::default();
+        assert!(!settings.cross_dm_search(), "off by default");
+        settings.apply(on);
+        assert!(settings.cross_dm_search());
+        let (group, written) = Setting::CrossDmSearch(false).written(&[]).unwrap();
+        assert_eq!((group, written), (TEXT_AND_IMAGES, bool_wrapper(IS_CROSS_DM_SEARCH_ENABLED, false)));
+    }
+
     /// Developer Mode is a plain `bool`, not a wrapper: proto3 leaves `false`
     /// out, so appearance without it is how another client turns it off.
     #[test]
@@ -796,6 +815,7 @@ mod tests {
             AnimateEmoji(false),
             AnimateStickers(StickerAnimation::Never),
             ShowCommandSuggestions(false),
+            CrossDmSearch(true),
             DeveloperMode(true),
             ReactionNotifications(self::ReactionNotifications::OnlyDms),
             FriendOnlineNotifications(false),
@@ -889,6 +909,7 @@ mod tests {
                 locale: Some("fr".into()),
                 skin_tone: Some(Tone::MediumDark),
                 show_command_suggestions: Some(false),
+                cross_dm_search: Some(true),
                 show_current_game: Some(false),
                 ..Settings::default()
             }
@@ -1075,6 +1096,20 @@ mod tests {
             let (_, written) = Setting::CustomStatus(cleared).written(&proto).unwrap();
             assert_eq!(written, string_wrapper(STATUS_STATUS, "dnd"), "the status stays");
         }
+    }
+
+    #[test]
+    fn reads_the_afk_timeout_a_wrapper_with_nothing_in_it_is_zero() {
+        let uint_wrapper =
+            |seconds: u64| bytes_field(AFK_TIMEOUT, &if seconds == 0 { Vec::new() } else { varint_field(1, seconds) });
+        let timeout = |wrapper: Vec<u8>| patch(&bytes_field(VOICE_AND_VIDEO, &wrapper)).afk_timeout;
+        assert_eq!(timeout(uint_wrapper(300)), Some(300));
+        assert_eq!(timeout(uint_wrapper(0)), Some(0), "set to 0: always away");
+        assert_eq!(timeout(bool_wrapper(STREAM_NOTIFICATIONS_ENABLED, true)), None, "never set");
+        let mut settings = crate::settings::Settings::default();
+        assert_eq!(settings.afk_timeout(), 60, "a minute until the account says otherwise");
+        settings.apply(SettingsPatch { afk_timeout: Some(0), ..SettingsPatch::default() });
+        assert_eq!(settings.afk_timeout(), 0);
     }
 
     #[test]

@@ -22,6 +22,7 @@ use crate::model::Emoji;
 use crate::notification_edit;
 use crate::post_creation;
 use crate::profile::{self, Profile};
+use crate::rate_hold::{self, RateHolds};
 use crate::reactions::{Location, Refusal};
 use crate::scheduled::{self, Scheduled};
 use crate::search;
@@ -213,6 +214,8 @@ pub struct Rest {
     beside: Option<String>,
     captchas: Option<CaptchaSolver>,
     pauses: Option<PauseHandler>,
+    /// The upload URLs that answered 429 or 503, which wait to be sent to.
+    holds: Rc<RefCell<RateHolds>>,
 }
 
 impl Rest {
@@ -225,7 +228,7 @@ impl Rest {
         let session = soup::Session::new();
         session.set_user_agent(&identity::user_agent());
         session.set_timeout(30);
-        Rest { session, token: None, beside: None, captchas: None, pauses: None }
+        Rest { session, token: None, beside: None, captchas: None, pauses: None, holds: Rc::default() }
     }
 
     /// For the login endpoints while `signed_in`'s account stays logged in,
@@ -269,19 +272,24 @@ impl Rest {
     /// many times it has been asked again, which the client writes into the
     /// query itself.
     pub async fn search_messages(&self, request: &search::Request, attempts: u32) -> Result<Searched, Error> {
+        // The query of a server or a DM is in the URL, and of every DM at once
+        // in a body that doesn't change when it is asked again.
         let query = request.query(attempts);
-        let call = match request.context {
-            search::Context::Guild(guild) => call!(SEARCH_GUILD_MESSAGES, guild).query(&query),
-            search::Context::Channel(channel) => call!(SEARCH_CHANNEL_MESSAGES, channel).query(&query),
+        let (call, body) = match request.context {
+            search::Context::Guild(guild) => (call!(SEARCH_GUILD_MESSAGES, guild).query(&query), None),
+            search::Context::Channel(channel) => (call!(SEARCH_CHANNEL_MESSAGES, channel).query(&query), None),
+            search::Context::Dms => (call!(SEARCH_DMS_TABS), Some(request.tabs_body())),
         };
-        let (status, response, retry_after) = self.send_full(call, None, Sending::default()).await?;
+        let (status, response, retry_after) = self.send_full(call, body, Sending::default()).await?;
         match status {
             202 => Ok(Searched::Indexing { retry_after }),
             _ => {
                 let answer: Value = Self::answer(status, &response)?;
-                search::Page::from_value(&answer)
-                    .map(Searched::Page)
-                    .ok_or_else(|| Error::Protocol("search results without a total".into()))
+                let page = match request.context {
+                    search::Context::Dms => search::Page::from_tabs(&answer),
+                    _ => search::Page::from_value(&answer),
+                };
+                page.map(Searched::Page).ok_or_else(|| Error::Protocol("search results without a total".into()))
             }
         }
     }
@@ -1047,9 +1055,10 @@ impl Rest {
         Ok(())
     }
 
-    /// A request of the upload flow: not retried on a rate limit, which the
-    /// client's HTTP layer never does, and saying how many requests failed
-    /// before it in `X-Failed-Requests`, as it does for a retry (620632).
+    /// A request of the upload flow: not retried on a rate limit by itself,
+    /// but held back while its URL is held (see [`RateHolds`]), and saying
+    /// how many requests failed before it in `X-Failed-Requests`, as the
+    /// client's HTTP layer does for a retry (620632).
     pub(crate) async fn send_upload_request(
         &self,
         call: Call,
@@ -1057,8 +1066,30 @@ impl Rest {
         failed: u32,
         original_md5: Option<&str>,
     ) -> Result<(u32, glib::Bytes), Error> {
-        self.send_with(call, body, Sending { retry_rate_limit: false, failed, original_md5, ..Sending::default() })
-            .await
+        // The client keys a hold by the URL without its query.
+        let url = call.path().split('?').next().unwrap_or_default().to_owned();
+        self.hold(&url).await;
+        let sending = Sending { retry_rate_limit: false, failed, original_md5, ..Sending::default() };
+        let (status, response, retry_after) = self.send_full(call, body, sending).await?;
+        self.answered(&url, status, retry_after.as_deref(), &response);
+        Ok((status, response))
+    }
+
+    /// Wait out what holds `url`, if anything.
+    async fn hold(&self, url: &str) {
+        loop {
+            // Looked up before the await: the table is shared by every upload.
+            let wait = self.holds.borrow_mut().wait(url, Instant::now());
+            let Some(wait) = wait else { break };
+            glib::timeout_future(wait).await;
+        }
+    }
+
+    /// Note what `url` answered, which may hold the next request to it.
+    fn answered(&self, url: &str, status: u32, retry_after: Option<&str>, body: &[u8]) {
+        let seconds = rate_hold::retry_after(retry_after, body);
+        let random = glib::random_double_range(0.0, 1.0);
+        self.holds.borrow_mut().answered(url, status, seconds, random, Instant::now());
     }
 
     /// `PUT` to an upload URL, which is Google's and not Discord's: it takes
@@ -1073,6 +1104,7 @@ impl Rest {
         content_range: Option<&str>,
         sent: Rc<dyn Fn(u64)>,
     ) -> Result<(u32, Option<String>), Error> {
+        self.hold(url).await;
         let msg = soup::Message::new("PUT", url).map_err(|_| Error::Protocol("the upload URL isn't one".into()))?;
         // A 308 here means "resume", and has no Location to follow.
         msg.add_flags(soup::MessageFlags::NO_REDIRECT);
@@ -1087,7 +1119,10 @@ impl Rest {
             total.set(total.get() + u64::from(chunk));
             sent(total.get());
         });
-        self.session.send_and_read_future(&msg, glib::Priority::DEFAULT).await.map_err(Error::Transport)?;
+        let response =
+            self.session.send_and_read_future(&msg, glib::Priority::DEFAULT).await.map_err(Error::Transport)?;
+        let retry_after = msg.response_headers().and_then(|h| h.one("Retry-After")).map(|v| v.to_string());
+        self.answered(url, msg.status_code(), retry_after.as_deref(), &response);
         let range = msg.response_headers().and_then(|h| h.one("Range")).map(|r| r.to_string());
         Ok((msg.status_code(), range))
     }

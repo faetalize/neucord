@@ -831,11 +831,17 @@ pub struct Settings {
     /// `show_command_suggestions`, as the account set it; see
     /// [`Self::command_suggestions`].
     pub show_command_suggestions: Option<bool>,
+    /// `is_cross_dm_search_enabled`, as the account set it; see
+    /// [`Self::cross_dm_search`].
+    pub cross_dm_search: Option<bool>,
     /// `status.show_current_game`, as the account set it; see
     /// [`Self::shares_activity`].
     pub show_current_game: Option<bool>,
     /// Which media is covered where, as the account set it.
     pub sensitive: Preferences,
+    /// `voice_and_video.afk_timeout`, as the account set it; see
+    /// [`Self::afk_timeout`].
+    pub afk_timeout: Option<u32>,
 }
 
 /// The settings a payload mentions; the rest are `None`.
@@ -856,9 +862,11 @@ pub struct SettingsPatch {
     pub nsfw_commands_in_dms: Option<bool>,
     pub enable_tts_command: Option<bool>,
     pub show_command_suggestions: Option<bool>,
+    pub cross_dm_search: Option<bool>,
     pub show_current_game: Option<bool>,
     /// What `text_and_images` says of sensitive media: it is saved whole.
     pub sensitive: Option<Preferences>,
+    pub afk_timeout: Option<u32>,
 }
 
 impl SettingsPatch {
@@ -905,12 +913,24 @@ impl Settings {
         if patch.show_command_suggestions.is_some() {
             self.show_command_suggestions = patch.show_command_suggestions;
         }
+        if patch.cross_dm_search.is_some() {
+            self.cross_dm_search = patch.cross_dm_search;
+        }
         if patch.show_current_game.is_some() {
             self.show_current_game = patch.show_current_game;
         }
         if let Some(sensitive) = patch.sensitive {
             self.sensitive = sensitive;
         }
+        if patch.afk_timeout.is_some() {
+            self.afk_timeout = patch.afk_timeout;
+        }
+    }
+
+    /// Seconds without input after which we are away (`afkTimeout`, 253932):
+    /// a minute until the account says otherwise, and 0 is always away.
+    pub fn afk_timeout(&self) -> u32 {
+        self.afk_timeout.unwrap_or(crate::idle::DEFAULT_AFK_TIMEOUT)
     }
 
     /// "Share my activity": on until the account turned it off (253932's
@@ -935,6 +955,12 @@ impl Settings {
     /// (253932's `showCommandSuggestions`): unless the account turned it off.
     pub fn command_suggestions(&self) -> bool {
         self.show_command_suggestions.unwrap_or(true)
+    }
+
+    /// Searching in a DM looks in every DM (`isCrossDmSearchEnabled`,
+    /// 253932): off until the account turns it on.
+    pub fn cross_dm_search(&self) -> bool {
+        self.cross_dm_search.unwrap_or(false)
     }
 
     /// Our status is Do Not Disturb, which silences every notification.

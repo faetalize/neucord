@@ -128,6 +128,14 @@ changed for unrelated reasons only needs a note in the issue.
   `NSFW_CHANNEL_VERIFIED`) and the strings under it; the screen, 522556; what
   Continue keeps, `GUILD_NSFW_AGREE` (517019, per server, forgotten for
   an account the region gates), and Go Back, `nsfwReturnToSafety` in 778858.
+- **Confirming an age** (`age_verification.rs`, `ui/age_verification.rs`).
+  The requests are watched (`AGE_VERIFICATION_METHODS_V2`, `VERIFY_AGE_V2`),
+  and so are `showAgeVerificationGetStartedModal`, which picks the modal by
+  experiment, and `AgeVerificationStore`. Not watched: the modal Neucord
+  follows, 12247 (anchor `AGE_VERIFICATION_METHODS_V2_LOAD_SUCCESS`) with its
+  strings; what `verify/v2` is sent (`en` in 295972: `method` and `vendor`);
+  and the vendor's page, 662558 (anchors `Verification.Result` and
+  `Widget.ExitReview`: its `allow` list and when each message closes what).
 - **Starting a post** (`post_creation.rs`, `ui/forum_post.rs`). `REQUIRE_TAG`
   and the error codes are watched, and `POST CHANNEL_THREADS` is, but the
   snapshot holds only a plain thread's fields: the client builds a post's
@@ -385,7 +393,12 @@ changed for unrelated reasons only needs a note in the issue.
   always; what is checked when files are added, `R` in 518960 (anchor
   `FILE_SIZE_LIMIT_EXCEEDED`: an empty file, then a file or the new
   files' total over the limit, then the count); and at send, where 358579
-  starts failed uploads again except those Discord called too large. The
+  starts failed uploads again except those Discord called too large; what
+  the HTTP layer holds back after a 429 or 503, `T` in 620632 (anchor
+  `cleanupRequestEntry`: `retry_after`, else 5 s, or its backoff), and
+  `awaitOnline` in 209489; and `original_content_type`, Chromium's own
+  table before the system's (`BROWSER_TYPES`: wav, m4a and xml differ in
+  Chromium 157). The
   attach menu is 316576 (anchor `channel-attach`, shown with Attach Files
   and Send Messages): Upload Text as File needs text in the box and sends
   only a fenced block's code with its language as the extension (anchor
@@ -722,8 +735,12 @@ changed for unrelated reasons only needs a note in the issue.
   the sort and page requests (`E`, `N` in 252715), the 10 000 results of 400
   pages (477654), where a DM or a server is searched
   (775427, anchor `isCrossDmSearchEnabled`) and the result menu (847342).
-  The setting that searches every DM at once is a POST to
-  `/users/@me/messages/search/tabs` (956467), which Neucord doesn't send.
+  Searching every DM at once (`isCrossDmSearchEnabled`) is a POST to
+  `/users/@me/messages/search/tabs`: `fetchTabMessages` is watched; its body,
+  `createRequestPayload` in 956467 (anchor `track_exact_total_hits`), the
+  tab's defaults in 768570 and the limit and offset in 753806 (anchor
+  `getLimit`) are not. `include_nsfw` is `L5` in 822382 (anchor
+  `didAgree`), for a server we agreed to go into (`GuildNSFWAgreeStore`).
 
 - **The quick switcher** (`switcher.rs`, `ui/switcher.rs`). The empty
   state (`QuickSwitcherStore`), the channel, server and group DM queries,

@@ -306,6 +306,7 @@ impl App {
             }
         });
         self.watch_scroll_input();
+        self.watch_dismissals();
 
         // After a jump: say so, with the way back.
         self.present_bar.connect_button_clicked({
@@ -951,8 +952,9 @@ impl App {
     /// around it is asked for, not the newest, as the client does when a
     /// link or a search result takes it there.
     pub(super) fn select_channel_at(self: &Rc<Self>, id: Snowflake, target: Option<Snowflake>) {
-        // `CHANNEL_SELECT` closes the app launcher.
+        // `CHANNEL_SELECT` closes the app launcher, and counts as activity.
         self.close_launcher();
+        self.idle_active();
         self.track_channel_use(id);
         let (title, forum, rest, left) = {
             let mut state = self.account.state.borrow_mut();
@@ -1723,6 +1725,18 @@ impl App {
         for row in rows {
             let Some(item) = row.parts().item.upgrade() else { continue };
             if timelines::message_at(&store, item.position()).is_some_and(|m| timelines::shows_user(&m, users)) {
+                self.bind_row(&item);
+            }
+        }
+    }
+
+    /// Fill in again the rows on screen that show one of `messages`.
+    pub(super) fn rebind_messages(self: &Rc<Self>, messages: &std::collections::HashSet<Snowflake>) {
+        let store = self.messages();
+        let rows: Vec<MessageRow> = self.rows.borrow().iter().filter_map(|row| row.upgrade()).collect();
+        for row in rows {
+            let Some(item) = row.parts().item.upgrade() else { continue };
+            if timelines::message_at(&store, item.position()).is_some_and(|m| messages.contains(&m.id)) {
                 self.bind_row(&item);
             }
         }

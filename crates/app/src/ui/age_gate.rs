@@ -55,7 +55,7 @@ impl App {
     }
 
     /// The servers we agreed to go into.
-    fn age_agreed(&self) -> Vec<Snowflake> {
+    pub(super) fn age_agreed(&self) -> Vec<Snowflake> {
         age_gate::agreed_from(&self.remembered.numbers(AGREED))
     }
 
@@ -95,19 +95,42 @@ impl App {
             let this = self.clone();
             move |_| this.age_gate_back(channel, guild)
         });
-        // Confirming an age is for a verification Neucord has none of.
-        if let (Some(text), Kind::Verified) = (screen.agreement, screen.kind) {
-            let go = gtk::Button::builder().label(text).css_classes(["suggested-action"]).build();
-            go.connect_clicked({
-                let this = self.clone();
-                move |_| this.age_gate_agree(channel, guild)
-            });
-            buttons.append(&go);
+        // Confirming an age is the client's verification, offered where it shows its expressive modal.
+        match (screen.agreement, screen.kind) {
+            (Some(text), Kind::Verified) => {
+                let go = gtk::Button::builder().label(text).css_classes(["suggested-action"]).build();
+                go.connect_clicked({
+                    let this = self.clone();
+                    move |_| this.age_gate_agree(channel, guild)
+                });
+                buttons.append(&go);
+            }
+            (Some(text), Kind::Verify) if self.age_verification_offered() => {
+                let go = gtk::Button::builder().label(text).css_classes(["suggested-action"]).build();
+                go.connect_clicked({
+                    let this = self.clone();
+                    move |_| this.show_age_verification()
+                });
+                buttons.append(&go);
+            }
+            _ => {}
         }
         column.append(&buttons);
         let clamp = adw::Clamp::builder().maximum_size(480).child(&column).margin_start(12).margin_end(12).build();
         self.age_gate.root.set_content(Some(&clamp));
         self.content.set_visible_child(&self.age_gate.root);
+    }
+
+    /// The account's age group changed: a gate in view is asked again, for
+    /// the channel it stands in front of.
+    pub(super) fn age_gate_changed(self: &Rc<Self>) {
+        if self.content.visible_child().as_ref() != Some(self.age_gate.root.upcast_ref()) {
+            return;
+        }
+        let channel = self.account.state.borrow().channel;
+        if let Some(channel) = channel {
+            self.select_channel(channel);
+        }
     }
 
     /// Continue: agree to go into `guild` for good, and open `channel`.

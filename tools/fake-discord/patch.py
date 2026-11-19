@@ -1097,8 +1097,13 @@ impl App {
 }
 """)
 
-# `end` scrolls the chat to its newest message.
+# `end` scrolls the chat to its newest message; `scroll <0..1>` to that far down what is loaded.
 edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("end") => self.scroll_to_end(),
+            Some("scroll") => {
+                let adjustment = self.scroller.vadjustment();
+                let fraction: f64 = parts.next().and_then(|w| w.parse().ok()).unwrap_or(0.0);
+                adjustment.set_value(adjustment.lower() + (adjustment.upper() - adjustment.lower() - adjustment.page_size()) * fraction);
+            }
             Some("quit") => {''')
 
 # Stickers' images come from the fake (`Sticker::image`, before model.rs's tests).
@@ -1821,6 +1826,7 @@ impl App {
 
 # The search sidebar: `search-enter` sends what is typed (as Enter does), `search-result <n>` opens the nth result,
 # `search-state` says what the pane on the right shows.
+edit("crates/app/src/ui/search.rs", "    fn set_cross_dm_search(self: &Rc<Self>, on: bool) {", "    pub(super) fn set_cross_dm_search_for_e2e(self: &Rc<Self>, on: bool) {\n        self.set_cross_dm_search(on);\n    }\n\n    fn set_cross_dm_search(self: &Rc<Self>, on: bool) {")
 edit("crates/app/src/ui/search.rs", "    fn enter(self: &Rc<Self>, app: &Rc<App>) {", "    pub(super) fn enter(self: &Rc<Self>, app: &Rc<App>) {")
 open(f"{root}/crates/app/src/ui/search.rs", "a").write(r"""
 impl View {
@@ -1845,6 +1851,7 @@ edit("crates/app/src/ui/e2e.rs", '            Some("search-open") => self.toggle
                     view.e2e_result(parts.next().and_then(|n| n.parse().ok()).unwrap_or(0));
                 }
             }
+            Some("search-dms") => self.set_cross_dm_search_for_e2e(parts.next() == Some("on")),
             Some("search-state") => eprintln!(
                 "e2e: search open={} pane={:?} shown={} channel={:?}",
                 self.search_view.borrow().is_some(),
@@ -1853,3 +1860,40 @@ edit("crates/app/src/ui/e2e.rs", '            Some("search-open") => self.toggle
                 self.account.state.borrow().channel,
             ),
 ''')
+
+# Age verification (#277): the vendor's page is at the fake, on http, so the web view's page is the fake's too (a page
+# over https can't frame it). `age-state` says which dialog is up and the methods' titles, `age-pick <n>` picks one.
+edit("crates/discord/src/age_verification.rs", '.filter(|url| url.starts_with("https://"))', '.filter(|url| url.starts_with("http://"))')
+edit("crates/app/src/ui/age_verification.rs", 'age_verification::frame_page(url), Some("https://discord.com/")', 'age_verification::frame_page(url), Some("http://127.0.0.1:8099/")')
+edit("crates/app/src/ui/age_verification.rs", 'age_verification::frame_page(&url), Some("https://discord.com/")', 'age_verification::frame_page(&url), Some("http://127.0.0.1:8099/")')
+edit("crates/app/src/ui/age_verification.rs", "        view.body.append(&list);", "        view.body.append(&list);\n        E2E_AGE.with(|a| *a.borrow_mut() = Some(list.clone()));")
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(c) if c.starts_with("age-") => self.e2e_age(c, &parts.collect::<Vec<_>>().join(" ")),
+            Some("quit") => {''')
+open(f"{root}/crates/app/src/ui/age_verification.rs", "a").write(r"""
+thread_local! {
+    static E2E_AGE: std::cell::RefCell<Option<gtk::ListBox>> = const { std::cell::RefCell::new(None) };
+}
+
+impl App {
+    pub(super) fn e2e_age(self: &Rc<Self>, command: &str, rest: &str) {
+        let list = E2E_AGE.with(|a| a.borrow().clone());
+        let rows: Vec<adw::ActionRow> = list
+            .iter()
+            .flat_map(|l| std::iter::successors(l.first_child(), |w| w.next_sibling()))
+            .filter_map(|w| w.downcast::<adw::ActionRow>().ok())
+            .collect();
+        match command {
+            "age-state" => eprintln!(
+                "e2e: age offered={} dialog={:?} rows={:?}",
+                self.age_verification_offered(),
+                self.window.visible_dialog().map(|d| d.title().to_string()),
+                rows.iter().map(|r| r.title().to_string()).collect::<Vec<_>>(),
+            ),
+            _ => match rest.parse::<usize>().ok().and_then(|n| rows.get(n)) {
+                Some(row) => adw::prelude::ActionRowExt::activate(row),
+                None => eprintln!("e2e: no method {rest}"),
+            },
+        }
+    }
+}
+""")
