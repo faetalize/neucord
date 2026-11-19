@@ -129,7 +129,16 @@ mod tests {
     const ME: Snowflake = Snowflake(5);
 
     fn me() -> Account {
-        Account { id: ME, verified: true, email: true, phone: false, mfa: false, nsfw_allowed: false, nsfw_set: false }
+        Account {
+            id: ME,
+            verified: true,
+            email: true,
+            phone: false,
+            mfa: false,
+            nsfw_allowed: false,
+            nsfw_set: false,
+            age_status: None,
+        }
     }
 
     fn forum(granted: Permissions, extra: Value) -> (Guild, Channel) {

@@ -5,6 +5,7 @@ mod account;
 mod accounts;
 mod activity_privacy;
 mod age_gate;
+mod age_verification;
 mod attachments;
 mod background;
 mod builtins;

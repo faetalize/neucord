@@ -8,6 +8,7 @@ pub mod account;
 pub mod accounts;
 pub mod activity_sharing;
 pub mod age_gate;
+pub mod age_verification;
 pub mod animation;
 pub mod apng;
 pub mod auth;

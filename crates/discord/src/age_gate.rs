@@ -5,8 +5,8 @@
 //! going back.
 //!
 //! Not copied: the server-specific wording the experiments of 112417 put in
-//! it (off unless the account is in them), and the age verification the
-//! confirm button starts, which Neucord has none of.
+//! it (off unless the account is in them). The age verification the confirm
+//! button starts is [`crate::age_verification`].
 
 use crate::Snowflake;
 use crate::gates::Gates;
