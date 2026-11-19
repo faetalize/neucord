@@ -1856,3 +1856,40 @@ edit("crates/app/src/ui/e2e.rs", '            Some("search-open") => self.toggle
                 self.account.state.borrow().channel,
             ),
 ''')
+
+# Age verification (#277): the vendor's page is at the fake, on http, so the web view's page is the fake's too (a page
+# over https can't frame it). `age-state` says which dialog is up and the methods' titles, `age-pick <n>` picks one.
+edit("crates/discord/src/age_verification.rs", '.filter(|url| url.starts_with("https://"))', '.filter(|url| url.starts_with("http://"))')
+edit("crates/app/src/ui/age_verification.rs", 'age_verification::frame_page(url), Some("https://discord.com/")', 'age_verification::frame_page(url), Some("http://127.0.0.1:8099/")')
+edit("crates/app/src/ui/age_verification.rs", 'age_verification::frame_page(&url), Some("https://discord.com/")', 'age_verification::frame_page(&url), Some("http://127.0.0.1:8099/")')
+edit("crates/app/src/ui/age_verification.rs", "        view.body.append(&list);", "        view.body.append(&list);\n        E2E_AGE.with(|a| *a.borrow_mut() = Some(list.clone()));")
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(c) if c.starts_with("age-") => self.e2e_age(c, &parts.collect::<Vec<_>>().join(" ")),
+            Some("quit") => {''')
+open(f"{root}/crates/app/src/ui/age_verification.rs", "a").write(r"""
+thread_local! {
+    static E2E_AGE: std::cell::RefCell<Option<gtk::ListBox>> = const { std::cell::RefCell::new(None) };
+}
+
+impl App {
+    pub(super) fn e2e_age(self: &Rc<Self>, command: &str, rest: &str) {
+        let list = E2E_AGE.with(|a| a.borrow().clone());
+        let rows: Vec<adw::ActionRow> = list
+            .iter()
+            .flat_map(|l| std::iter::successors(l.first_child(), |w| w.next_sibling()))
+            .filter_map(|w| w.downcast::<adw::ActionRow>().ok())
+            .collect();
+        match command {
+            "age-state" => eprintln!(
+                "e2e: age offered={} dialog={:?} rows={:?}",
+                self.age_verification_offered(),
+                self.window.visible_dialog().map(|d| d.title().to_string()),
+                rows.iter().map(|r| r.title().to_string()).collect::<Vec<_>>(),
+            ),
+            _ => match rest.parse::<usize>().ok().and_then(|n| rows.get(n)) {
+                Some(row) => adw::prelude::ActionRowExt::activate(row),
+                None => eprintln!("e2e: no method {rest}"),
+            },
+        }
+    }
+}
+""")

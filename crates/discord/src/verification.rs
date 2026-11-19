@@ -103,6 +103,8 @@ pub struct Account {
     /// `nsfw_allowed` is a boolean (false, not null): Discord says the
     /// account is not an adult's (`nsfwAllowed === !1`).
     pub nsfw_set: bool,
+    /// `age_verification_status`, if the user object had one.
+    pub age_status: Option<u64>,
 }
 
 impl Account {
@@ -116,6 +118,7 @@ impl Account {
             mfa: user["mfa_enabled"] == true,
             nsfw_allowed: user["nsfw_allowed"] == true,
             nsfw_set: user["nsfw_allowed"].is_boolean(),
+            age_status: user["age_verification_status"].as_u64(),
         })
     }
 }
@@ -249,7 +252,16 @@ mod tests {
     }
 
     fn account() -> Account {
-        Account { id: ME, verified: true, email: true, phone: false, mfa: false, nsfw_allowed: false, nsfw_set: false }
+        Account {
+            id: ME,
+            verified: true,
+            email: true,
+            phone: false,
+            mfa: false,
+            nsfw_allowed: false,
+            nsfw_set: false,
+            age_status: None,
+        }
     }
 
     fn guild(level: u64) -> Guild {
@@ -372,8 +384,11 @@ mod tests {
                 mfa: true,
                 nsfw_allowed: false,
                 nsfw_set: false,
+                age_status: None,
             })
         );
+        let adult = json!({"id": "5", "age_verification_status": 3});
+        assert_eq!(Account::from_user(&adult).unwrap().age_status, Some(3));
         for (nsfw_allowed, adult) in [(json!(true), true), (json!(false), false), (Value::Null, false)] {
             let user = json!({"id": "5", "nsfw_allowed": nsfw_allowed});
             assert_eq!(Account::from_user(&user).unwrap().nsfw_allowed, adult, "{nsfw_allowed}");

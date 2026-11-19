@@ -66,6 +66,7 @@ NAMES = {
     "chatbar": "2026-06-chat-bar-customization",
     "dice": "2026-05-dice-roll-slash-command",
     "packs": "2026-09-default-emojis",
+    "ageverify": "2026-07-expressive-modal-v2",
 }
 LADDER = json.dumps({"ladder": [64, 128, 256], "maxUpscale": 1.1, "minSnapDownDpr": 2})
 # Under FAKE_OWNER the account owns the server, so its moderation commands show.
@@ -1007,6 +1008,31 @@ def upload_put(n, body):
     return 200, None
 
 
+# The age verification flow (#277), with FAKE_VARIANTS=ageverify=1 and an account the gate asks to confirm
+# (FAKE_NSFW="status=1,gated=1"): two methods, the vendor's page at /age-verify-page, which says it has a result
+# and then that it is done, and the account becomes an adult's when it does.
+@route("GET", r"/age-verification/methods/v2")
+def age_methods(body):
+    return 200, {"methods": [
+        {"method": 1, "vendor": "K_ID", "title": "Video selfie via k-ID", "provided_by": "Provided by k-ID",
+         "description": "Estimate your age with a video selfie. Video stays on-device, no biometric data is shared."},
+        {"method": 9, "vendor": "GOOGLE_WALLET", "title": "Google Wallet", "description": "Use an ID from your wallet."},
+    ], "footer_message": "Made-up methods, for a made-up account.", "outage_banner_message": None}
+
+
+@route("POST", r"/age-verification/verify/v2")
+def age_verify(body):
+    return 200, {"verification_webview_url": f"http://127.0.0.1:{PORT}/age-verify-page",
+                 "verification_request_id": "request-1", "verification_vendor_name": body.get("vendor")}
+
+
+AGE_PAGE = b"""<!doctype html><body style="font-family:sans-serif"><h3>Made-up verification</h3>
+<script>
+setTimeout(() => { fetch("/age-verify-done"); window.parent.postMessage({eventType: "Verification.Result"}, "*"); }, 6000);
+setTimeout(() => window.parent.postMessage({eventType: "Widget.ExitReview"}, "*"), 12000);
+</script>"""
+
+
 @route("DELETE", r"/attachments/(\d+)/([^/]+)")
 def upload_delete(n, filename, body):
     return 204, None
@@ -1215,6 +1241,15 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Upgrade", "").lower() == "websocket":
             return self.gateway()
         path = self.path
+        if path == "/age-verify-done":
+            ME["age_verification_status"] = 3
+            ME["nsfw_allowed"] = True
+            log(kind="age-done", at=time.time())
+            self.send(200, b"{}")
+            return dispatch("USER_UPDATE", dict(ME))
+        if path.split("?")[0] == "/age-verify-page":
+            log(kind="age-page", at=time.time())
+            return self.send(200, AGE_PAGE, "text/html")
         if path.startswith("/attachments/"):
             query = dict(p.split("=", 1) for p in path.split("?", 1)[-1].split("&") if "=" in p)
             log(kind="image", path=path, width=query.get("width"), height=query.get("height"), at=time.time())
