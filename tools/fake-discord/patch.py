@@ -1824,6 +1824,7 @@ impl App {
 
 # The search sidebar: `search-enter` sends what is typed (as Enter does), `search-result <n>` opens the nth result,
 # `search-state` says what the pane on the right shows.
+edit("crates/app/src/ui/search.rs", "    fn set_cross_dm_search(self: &Rc<Self>, on: bool) {", "    pub(super) fn set_cross_dm_search_for_e2e(self: &Rc<Self>, on: bool) {\n        self.set_cross_dm_search(on);\n    }\n\n    fn set_cross_dm_search(self: &Rc<Self>, on: bool) {")
 edit("crates/app/src/ui/search.rs", "    fn enter(self: &Rc<Self>, app: &Rc<App>) {", "    pub(super) fn enter(self: &Rc<Self>, app: &Rc<App>) {")
 open(f"{root}/crates/app/src/ui/search.rs", "a").write(r"""
 impl View {
@@ -1848,6 +1849,7 @@ edit("crates/app/src/ui/e2e.rs", '            Some("search-open") => self.toggle
                     view.e2e_result(parts.next().and_then(|n| n.parse().ok()).unwrap_or(0));
                 }
             }
+            Some("search-dms") => self.set_cross_dm_search_for_e2e(parts.next() == Some("on")),
             Some("search-state") => eprintln!(
                 "e2e: search open={} pane={:?} shown={} channel={:?}",
                 self.search_view.borrow().is_some(),

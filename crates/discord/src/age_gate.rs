@@ -43,6 +43,19 @@ pub fn gated(standing: Standing, agreed: bool, channel_restricted: bool, guild_r
     (channel_restricted || guild_restricted) && (!agreed || standing.underage || standing.assurance)
 }
 
+/// Whether we agreed to go into a server for good (`didAgree` in 517019): a
+/// server we agreed to, unless the region asks the account again.
+pub fn did_agree(standing: Standing, agreed: bool) -> bool {
+    agreed && !standing.assurance
+}
+
+/// What `include_nsfw` says of a search in a server we agreed to go into
+/// (`L5` in 822382): whether the account is an adult's, which an account
+/// Discord says nothing of counts as. `None` for a server we didn't agree to.
+pub fn include_nsfw(account: &Account, standing: Standing, agreed: bool) -> Option<bool> {
+    did_agree(standing, agreed).then_some(!account.nsfw_set || account.nsfw_allowed)
+}
+
 /// What the gate asks of us.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -174,6 +187,17 @@ mod tests {
         let assured = Standing { assurance: true, unverified: true, ..ADULT };
         assert!(gated(assured, true, true, false));
         assert!(!gated(assured, true, false, false));
+    }
+
+    #[test]
+    fn a_search_in_a_server_we_agreed_to_says_whether_the_account_is_an_adult() {
+        let account = |allowed, set| Account { nsfw_allowed: allowed, nsfw_set: set, ..Account::default() };
+        assert_eq!(include_nsfw(&account(true, true), ADULT, true), Some(true));
+        assert_eq!(include_nsfw(&account(false, true), ADULT, true), Some(false), "an account that isn't an adult's");
+        assert_eq!(include_nsfw(&account(false, false), ADULT, true), Some(true), "null says nothing: allowed");
+        assert_eq!(include_nsfw(&account(true, true), ADULT, false), None, "not agreed to");
+        let assured = Standing { assurance: true, ..ADULT };
+        assert_eq!(include_nsfw(&account(true, true), assured, true), None, "the region asks again each time");
     }
 
     #[test]

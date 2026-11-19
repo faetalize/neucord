@@ -729,8 +729,12 @@ changed for unrelated reasons only needs a note in the issue.
   the sort and page requests (`E`, `N` in 252715), the 10 000 results of 400
   pages (477654), where a DM or a server is searched
   (775427, anchor `isCrossDmSearchEnabled`) and the result menu (847342).
-  The setting that searches every DM at once is a POST to
-  `/users/@me/messages/search/tabs` (956467), which Neucord doesn't send.
+  Searching every DM at once (`isCrossDmSearchEnabled`) is a POST to
+  `/users/@me/messages/search/tabs`: `fetchTabMessages` is watched; its body,
+  `createRequestPayload` in 956467 (anchor `track_exact_total_hits`), the
+  tab's defaults in 768570 and the limit and offset in 753806 (anchor
+  `getLimit`) are not. `include_nsfw` is `L5` in 822382 (anchor
+  `didAgree`), for a server we agreed to go into (`GuildNSFWAgreeStore`).
 
 - **The quick switcher** (`switcher.rs`, `ui/switcher.rs`). The empty
   state (`QuickSwitcherStore`), the channel, server and group DM queries,

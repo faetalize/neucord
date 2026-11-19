@@ -180,6 +180,7 @@ what arrived, IDENTIFY's key order and properties first.
   Remove from Thread (`member-menu-item remove-from-thread`), which sends the
   DELETE and loses them from the list;
   `heartbeat` waits for five op 40s, the interval's among them;
+  `search-dms` (with `FAKE_NSFW="dms=1"`) searches a server before and after Continue on an age-restricted channel (`include_nsfw=true` only after), a DM, and with the cog every DM at once (the POST's body is in `requests.txt`), with and without `in:`;
   `idle` (with `NEUCORD_DEBUG_IDLE=4`) lists the op 3 frames: idle and away after four quiet seconds, active again when a channel opens (`IDLE_STEPS=300` waits for the real minute's away instead);
   `age-verification` (with `AGE_FLOW=1 FAKE_NSFW="status=1,gated=1" FAKE_VARIANTS=ageverify=1`) confirms an age from the gate: the methods, the method picked, a vendor page at the fake that says it has a result and then that it is done, and the account becomes an adult's (the web view can't be photographed headless, so there is no shot of the page);
   `reopen` and `lazy` relaunch on the same data
