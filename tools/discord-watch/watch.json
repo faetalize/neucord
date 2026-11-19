@@ -216,6 +216,10 @@
   "methods": [
     "_consumeQOSPayload",
     "_doIdentify",
+    "_doResumeOrIdentify",
+    "_handleClose",
+    "_handleInvalidSession",
+    "_handleReconnect",
     "_sendHeartbeat",
     "addReaction",
     "addReactionBatch",

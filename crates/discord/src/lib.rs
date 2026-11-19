@@ -79,6 +79,7 @@ pub mod raster;
 pub mod rate_hold;
 pub mod reactions;
 pub mod read_state;
+pub mod reconnect;
 pub mod regional;
 pub mod relationships;
 pub mod remote_auth;

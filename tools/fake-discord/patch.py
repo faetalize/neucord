@@ -14,6 +14,8 @@ edit("crates/discord/src/identity.rs", 'pub const API_BASE: &str = "https://disc
 edit("crates/discord/src/identity.rs",
      'pub const GATEWAY_URL: &str = "wss://gateway.discord.gg/?encoding=json&v=9&compress=zlib-stream";',
      'pub const GATEWAY_URL: &str = "ws://127.0.0.1:8099/?encoding=json&v=9&compress=zlib-stream";')
+edit("crates/discord/src/gateway.rs", 'const DEFAULT_GATEWAY: &str = "wss://gateway.discord.gg";',
+     'const DEFAULT_GATEWAY: &str = "ws://127.0.0.1:8099";')
 edit("crates/discord/src/cdn.rs", 'host == "media.discordapp.net" ||', 'host == "127.0.0.1:8099" || host == "media.discordapp.net" ||')
 edit("crates/discord/src/cdn.rs", 'let host = url.strip_prefix("https://").and_then(|rest| rest.split([\'/\', \'?\']).next()).unwrap_or_default();', 'let host = url.strip_prefix("http://").and_then(|rest| rest.split([\'/\', \'?\']).next()).unwrap_or_default();')
 edit("crates/app/src/ui/uploads.rs", "    attach: gtk::Button,", "    pub(super) attach: gtk::Button,")

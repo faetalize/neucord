@@ -21,6 +21,7 @@ use discord::notifications::{Level, NotificationSettings, Place, UnreadSetting};
 use discord::permissions;
 use discord::post_creation;
 use discord::read_state::ReadStates;
+use discord::reconnect::Reconnect;
 use discord::relationships::Relationships;
 use discord::restricted::RestrictedSchedule;
 use discord::settings::{RailEntry, Settings};
@@ -157,7 +158,8 @@ pub(super) struct State {
     pub(super) target: Option<Snowflake>,
     /// READY arrived at least once for this token.
     pub(super) ready_seen: bool,
-    pub(super) reconnect_attempts: u32,
+    /// The waits between connection attempts.
+    pub(super) reconnect: Reconnect,
     /// Set while the last session can be resumed; kept across failed
     /// attempts, replaced by each close.
     pub(super) resume: Option<Resume>,

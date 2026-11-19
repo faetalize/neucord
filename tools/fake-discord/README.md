@@ -35,7 +35,7 @@ what arrived, IDENTIFY's key order and properties first.
   numeric id, and take a pick's `POST /gifs/select`. A thread made from a
   channel joins the server and comes back as `THREAD_CREATE`. `FAKE_VARIANTS="hiding=1,voice=1,ladder=1,lazy=1,upload=1,nsfwlevel=1,chatbar=1,dice=1,ageverify=1"`
   assigns Apex experiments by name, `FAKE_REIDENTIFY=<s>` sends op 9 after
-  that many seconds to force a second IDENTIFY, `FAKE_NEW_TOKEN` puts an
+  that many seconds to force a second IDENTIFY, `FAKE_RESUME=invalid|invalid-resumable` answers a RESUME with op 9 (false, or true every time) where it answers RESUMED otherwise, `FAKE_RECONNECT=<s>` sends op 7 that long after the first IDENTIFY, `FAKE_CLOSE=<code>[:<s>]` closes the first connection with that code, and `FAKE_NO_HELLO=1` leaves the first connection without a HELLO (scenario `reconnect`, which prints each connect, IDENTIFY and RESUME with its time; `NEUCORD_DEBUG_DROP=<s>` drops the connection), `FAKE_NEW_TOKEN` puts an
   `auth_token` in READY, `FAKE_LEFT=<user ids>` has those people leave the
   server: op 8 with a `nonce` answers them `not_found`, and a search finds
   them no more. `FAKE_STAGE=1` adds a live stage, #town-hall, with a topic, a speaker and two

@@ -691,6 +691,7 @@ def read_frame(rfile):
 
 
 IDENTIFIES = [0]
+CONNECTIONS = [0]
 # The `send` of the gateway that identified last, which REST answers push their events through.
 SESSION = [None]
 
@@ -1348,6 +1349,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                           f"Sec-WebSocket-Accept: {accept}\r\n\r\n").encode())
         self.wfile.flush()
+        CONNECTIONS[0] += 1
+        first_connection = CONNECTIONS[0] == 1
         log(kind="connect", path=self.path, at=time.time())
         comp = zlib.compressobj()
         conn, seq = self.connection, [0]
@@ -1361,7 +1364,9 @@ class Handler(BaseHTTPRequestHandler):
                 body = comp.compress(json.dumps(payload).encode()) + comp.flush(zlib.Z_SYNC_FLUSH)
                 conn.sendall(frame(body))
 
-        send(10, {"heartbeat_interval": 41250})
+        # FAKE_NO_HELLO=1: the first connection opens and says nothing, as a gateway that never answers does.
+        if not (first_connection and os.environ.get("FAKE_NO_HELLO")):
+            send(10, {"heartbeat_interval": 41250})
         try:
             while True:
                 opcode, data = read_frame(self.rfile)
@@ -1375,6 +1380,19 @@ class Handler(BaseHTTPRequestHandler):
                     if message["op"] == 40:
                         log(kind="gateway", op=40, d=message.get("d"), at=time.time())
                     send(11)
+                elif message["op"] == 6:
+                    # RESUME, answered by FAKE_RESUME: RESUMED (the default), `invalid` (op 9, not resumable) or
+                    # `invalid-resumable` (op 9, resumable, every time).
+                    d = message.get("d") or {}
+                    log(kind="resume", d={k: v for k, v in d.items() if k != "token"}, at=time.time())
+                    mode = os.environ.get("FAKE_RESUME", "")
+                    if mode == "invalid":
+                        send(9, False)
+                    elif mode == "invalid-resumable":
+                        send(9, True)
+                    else:
+                        send(0, {}, "RESUMED")
+                        SESSION[0] = send
                 elif message["op"] == 2:
                     IDENTIFIES[0] += 1
                     log(kind="identify", raw=text, at=time.time())
@@ -1425,6 +1443,13 @@ class Handler(BaseHTTPRequestHandler):
                         typing_start()
                     if IDENTIFIES[0] == 1 and os.environ.get("FAKE_REIDENTIFY"):
                         threading.Timer(float(os.environ["FAKE_REIDENTIFY"]), lambda: send(9, False)).start()
+                    # FAKE_RECONNECT=<s>: op 7 that long after the first IDENTIFY.
+                    if IDENTIFIES[0] == 1 and os.environ.get("FAKE_RECONNECT"):
+                        threading.Timer(float(os.environ["FAKE_RECONNECT"]), lambda: send(7)).start()
+                    # FAKE_CLOSE=<code>[:<s>]: close the first connection with that code, after that many seconds.
+                    if IDENTIFIES[0] == 1 and os.environ.get("FAKE_CLOSE"):
+                        code, _, after = os.environ["FAKE_CLOSE"].partition(":")
+                        threading.Timer(float(after or 1), lambda: conn.sendall(frame(struct.pack(">H", int(code)), 8))).start()
                 else:
                     log(kind="gateway", op=message["op"], d=message.get("d"), at=time.time())
                     if message["op"] == 8:
