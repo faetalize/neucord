@@ -1462,6 +1462,12 @@ impl App {
 }
 """)
 
+# The network going and coming, as GIO's monitor reports it: `network down|up`.
+edit("crates/app/src/ui/connection.rs", "    fn network_changed(self: &Rc<Self>, online: bool) {",
+     "    pub(super) fn network_changed(self: &Rc<Self>, online: bool) {")
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("network") => self.network_changed(parts.next() == Some("up")),
+            Some("quit") => {''')
+
 # Our own profile popout, as the account panel's button opens it: `own-profile`, then `shot-profile <png>` shoots
 # the open profile popout, and `own-row <list> <n>` activates row n of its first (0) or second (1) card.
 edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("own-profile") => {

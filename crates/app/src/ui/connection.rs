@@ -1,14 +1,16 @@
 //! Logging out, the gateway connection (reconnects and resumes), and
 //! routing gateway events to the rest of the UI.
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Instant;
 
 use discord::accounts::Answer;
+use discord::reconnect::{self, NetworkAction};
 use discord::threads::Redraw;
 use discord::{Channel, Event, Gateway, Guild, Member, Ready, Rest, Snowflake, session};
-use gtk::glib;
 use gtk::prelude::*;
+use gtk::{gio, glib};
 
 use super::App;
 use super::accounts::Origin;
@@ -184,8 +186,9 @@ impl App {
         }
         let this = Rc::downgrade(self);
         let epoch = self.account.epoch.get();
-        glib::timeout_add_local_once(delay, move || {
+        let timer = glib::timeout_add_local_once(delay, move || {
             if let Some(this) = this.upgrade() {
+                this.account.reconnect_timer.take();
                 // Logged out or switched meanwhile?
                 if this.account.epoch.get() == epoch && this.account.state.borrow().token.as_ref() == Some(&token) {
                     let persisted = this.account.state.borrow().persisted;
@@ -193,6 +196,60 @@ impl App {
                 }
             }
         });
+        if let Some(old) = self.account.reconnect_timer.replace(Some(timer)) {
+            old.remove();
+        }
+    }
+
+    /// Follow the network coming and going, as the client follows the
+    /// browser's `online` and `offline` events (225123): only a change
+    /// counts, not every route GIO reports.
+    pub(super) fn watch_network(self: &Rc<Self>) {
+        let monitor = gio::NetworkMonitor::default();
+        let online = Cell::new(monitor.is_network_available());
+        let this = Rc::downgrade(self);
+        monitor.connect_network_changed(move |_, available| {
+            if online.replace(available) != available
+                && let Some(this) = this.upgrade()
+            {
+                this.network_changed(available);
+            }
+        });
+    }
+
+    fn network_changed(self: &Rc<Self>, online: bool) {
+        let connected = self.account.state.borrow().gateway.is_some();
+        match reconnect::on_network(online, connected) {
+            NetworkAction::Heartbeat(timeout) => {
+                if let Some(gateway) = &self.account.state.borrow().gateway {
+                    gateway.expedited_heartbeat(timeout);
+                }
+            }
+            NetworkAction::ReconnectNow => self.reconnect_now(),
+            NetworkAction::Nothing => {}
+        }
+    }
+
+    /// The network is back while we wait to reconnect: connect now, with
+    /// the backoff started over (`resetBackoff`, 868), unless the storm guard
+    /// holds.
+    fn reconnect_now(self: &Rc<Self>) {
+        if self.account.reconnect_timer.borrow().is_none() {
+            return;
+        }
+        let (token, persisted) = {
+            let mut state = self.account.state.borrow_mut();
+            if !state.reconnect.reconnect_now(Instant::now()) {
+                return;
+            }
+            (state.token.clone(), state.persisted)
+        };
+        if let Some(timer) = self.account.reconnect_timer.take() {
+            timer.remove();
+        }
+        if let Some(token) = token {
+            self.connect(token, persisted);
+        }
     }
 
     pub(super) async fn run_events(self: &Rc<Self>, events: async_channel::Receiver<Event>, epoch: u64) {
