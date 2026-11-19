@@ -133,10 +133,11 @@ impl App {
         let line = &self.typing_line;
         line.set_markup(&markup(false));
         // The names that don't fit give way to "Multiple people".
-        let room = self.composer_box.width() - line.margin_start();
+        let room = line.parent().map_or(0, |p| p.width()) - line.margin_start() - line.margin_end();
         if room > 0 && line.measure(gtk::Orientation::Horizontal, -1).1 > room {
             line.set_markup(&markup(true));
         }
+        line.set_css_classes(if names.is_empty() { &["typing-line"] } else { &["typing-line", "shown"] });
         self.typing_width.set(self.composer_box.width());
         self.watch_typing_width(!names.is_empty());
     }

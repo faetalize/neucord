@@ -460,9 +460,12 @@ impl App {
             waiting: stickers::Waiting::new(),
             typing_line: gtk::Label::builder()
                 .xalign(0.0)
-                .margin_start(12)
+                .halign(gtk::Align::Start)
+                .margin_start(16)
+                .margin_end(16)
                 .margin_bottom(4)
                 .ellipsize(pango::EllipsizeMode::End)
+                .css_classes(["typing-line"])
                 .build(),
             typing_tick: RefCell::default(),
             typing_width: Cell::default(),
