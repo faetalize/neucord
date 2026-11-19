@@ -8,11 +8,11 @@ up.
 `run.sh <scenario>` copies this checkout to `target/fake-discord/src`, points
 the copy at the fake with `patch.py`, builds it, and runs the scenario inside
 `unshare -rn` (no network but loopback) and `dbus-run-session` (notifications
-don't reach your desktop), under `mutter --headless`. Output goes to
+don't reach your desktop), under `mutter --headless`, or the compositor `COMPOSITOR` names (`gnome-shell`, `niri` nested, or `host` with `HOST_DISPLAY=<socket path>` for one running already: `DESKTOPS.md`; a scenario's `cshot <png>` shoots what the compositor shows, where it can). Output goes to
 `target/fake-discord/out/<run>`: `fake.log` (one JSON line per request with
 its JSON body and any `X-Audit-Log-Reason` or `X-Context-Properties`, per
 gateway frame, per event a request made it push, and IDENTIFY as sent), the
-app's and mutter's logs, and any screenshots. `analyse.py <fake.log>` prints
+app's and the compositor's logs, and any screenshots. `analyse.py <fake.log>` prints
 what arrived, IDENTIFY's key order and properties first.
 
 - **`fake_discord.py`**: REST and a `zlib-stream` gateway on 127.0.0.1:8099,
@@ -183,6 +183,7 @@ what arrived, IDENTIFY's key order and properties first.
   `search-dms` (with `FAKE_NSFW="dms=1"`) searches a server before and after Continue on an age-restricted channel (`include_nsfw=true` only after), a DM, and with the cog every DM at once (the POST's body is in `requests.txt`), with and without `in:`;
   `idle` (with `NEUCORD_DEBUG_IDLE=4`) lists the op 3 frames: idle and away after four quiet seconds, active again when a channel opens (`IDLE_STEPS=300` waits for the real minute's away instead);
   `age-verification` (with `AGE_FLOW=1 FAKE_NSFW="status=1,gated=1" FAKE_VARIANTS=ageverify=1`) confirms an age from the gate: the methods, the method picked, a vendor page at the fake that says it has a result and then that it is done, and the account becomes an adult's (the web view can't be photographed headless, so there is no shot of the page);
+  `desktop` (with `FAKE_NOTIFY=10`) looks at the app under `COMPOSITOR` and leaves the notification call and the bus names it made;
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).
 - **`pointer.py`**: a real pointer and keyboard for the headless compositor,

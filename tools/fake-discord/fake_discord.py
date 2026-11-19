@@ -1406,6 +1406,14 @@ class Handler(BaseHTTPRequestHandler):
                         timer = threading.Timer(6, resync, [int(os.environ["FAKE_THREAD_SYNCS"])])
                         timer.daemon = True
                         timer.start()
+                    if os.environ.get("FAKE_NOTIFY"):
+                        # Alice writes in her DM (not the open place) that many seconds after READY: a notification.
+                        def notify():
+                            dispatch_message = post("201", ALICE, "a made-up message for the notification")[1]
+                            dispatch_message()
+                        timer = threading.Timer(float(os.environ["FAKE_NOTIFY"]), notify)
+                        timer.daemon = True
+                        timer.start()
                     if os.environ.get("FAKE_TYPING"):
                         # Alice types in #general, again before each lapses.
                         def typing_start():
