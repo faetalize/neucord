@@ -256,8 +256,8 @@ fn discover(path: &Path) -> Probe {
 mod tests {
     use super::*;
 
-    /// Theora and Vorbis in Ogg: GStreamer's base plugins make them, so the
-    /// file needs no encoder a CI image lacks.
+    /// Theora and Vorbis in Ogg, which GStreamer's base plugins
+    /// (`gst-plugins-base`) make and read.
     fn clip(path: &Path) {
         gst::init().unwrap();
         let line = format!(
