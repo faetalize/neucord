@@ -3,8 +3,15 @@
 //! 48 kHz, 20 ms frames, voice, around 32 kbps, free to choose its
 //! bandwidth). `discord::voice` puts the packets in an Ogg file.
 //!
-//! Unlike the client's recorder, nothing is done to the sound: no echo
-//! cancellation, noise suppression or gain control.
+//! The client's recorder takes the voice settings' echo cancellation, noise
+//! suppression, noise cancellation and automatic gain control (198620), whose
+//! defaults are echo cancellation, noise cancellation and gain control on and
+//! the legacy noise suppression off (754712). Here GStreamer's `webrtcdsp`
+//! (gst-plugins-bad) stands in for the noise and gain stages; echo
+//! cancellation is left out, since `webrtcdsp` only cancels what a
+//! `webrtcechoprobe` in the playback pipeline hears, and a recording has no
+//! such pipeline: the speakers belong to other programs. A PipeWire
+//! echo-cancel source chosen as the default input covers it outside Neucord.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -25,11 +32,50 @@ pub enum Event {
     Failed(String),
 }
 
-fn pipeline() -> String {
+/// What is done to the microphone's sound before it is encoded.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Processing {
+    /// Noise cancellation: the client runs Krisp, which isn't free software;
+    /// `webrtcdsp`'s suppressor at its high level is the stand-in.
+    pub noise_suppression: bool,
+    pub gain_control: bool,
+}
+
+impl Default for Processing {
+    /// The client's default voice settings (754712).
+    fn default() -> Processing {
+        Processing { noise_suppression: true, gain_control: true }
+    }
+}
+
+/// The plugin that does the work, in gst-plugins-bad.
+const DSP: &str = "webrtcdsp";
+
+impl Processing {
+    /// The pipeline's `webrtcdsp` stage, or none if nothing is asked for.
+    /// `webrtcdsp` runs on 10 ms frames of 8, 16, 32 or 48 kHz S16LE, which
+    /// the recording's caps already are. Echo cancellation is off because
+    /// it fails the pipeline without a probe to listen to.
+    fn stage(self) -> Option<String> {
+        if !self.noise_suppression && !self.gain_control {
+            return None;
+        }
+        let (noise, gain) = (self.noise_suppression, self.gain_control);
+        Some(format!(
+            "{DSP} echo-cancel=false noise-suppression={noise} noise-suppression-level=high \
+            gain-control={gain} gain-control-mode=adaptive-digital ! "
+        ))
+    }
+}
+
+/// `dsp` is whether `webrtcdsp` is installed: without it the sound goes to
+/// the encoder as it came.
+fn pipeline(processing: Processing, dsp: bool) -> String {
     let (rate, bitrate) = (voice::SAMPLE_RATE, voice::BITRATE);
+    let stage = if dsp { processing.stage().unwrap_or_default() } else { String::new() };
     format!(
         "pipewiresrc client-name=Neucord ! audioconvert ! audioresample \
-        ! audio/x-raw,format=S16LE,rate={rate},channels=1 ! opusenc name=encoder audio-type=voice \
+        ! audio/x-raw,format=S16LE,rate={rate},channels=1 ! {stage}opusenc name=encoder audio-type=voice \
         bitrate={bitrate} bitrate-type=vbr frame-size=20 bandwidth=auto ! appsink name=packets sync=false"
     )
 }
@@ -58,7 +104,13 @@ impl Recorder {
         if !available() {
             return Err("GStreamer's PipeWire source or Opus encoder is missing".to_owned());
         }
-        let pipeline = gst::parse::launch(&pipeline()).map_err(|e| e.to_string())?;
+        let dsp = gst::ElementFactory::find(DSP).is_some();
+        if !dsp {
+            eprintln!(
+                "voice message: GStreamer's {DSP} is missing, recording without noise suppression or gain control"
+            );
+        }
+        let pipeline = gst::parse::launch(&pipeline(Processing::default(), dsp)).map_err(|e| e.to_string())?;
         let pipeline = pipeline.downcast::<gst::Pipeline>().map_err(|_| "no pipeline".to_owned())?;
         let (send, events) = async_channel::unbounded();
 
@@ -139,5 +191,45 @@ impl Recorder {
 impl Drop for Recorder {
     fn drop(&mut self) {
         let _ = self.pipeline.set_state(gst::State::Null);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ON: Processing = Processing { noise_suppression: true, gain_control: true };
+
+    #[test]
+    fn the_defaults_are_the_clients() {
+        assert_eq!(Processing::default(), ON);
+    }
+
+    #[test]
+    fn the_stage_sits_between_the_caps_and_the_encoder() {
+        let line = pipeline(ON, true);
+        let at = |needle: &str| line.find(needle).unwrap_or_else(|| panic!("{needle} missing from {line}"));
+        assert!(at("channels=1") < at(DSP) && at(DSP) < at("opusenc"), "{line}");
+        assert!(line.contains("noise-suppression=true") && line.contains("gain-control=true"), "{line}");
+    }
+
+    #[test]
+    fn echo_cancellation_is_never_asked_for() {
+        assert!(pipeline(ON, true).contains("echo-cancel=false"));
+    }
+
+    #[test]
+    fn each_stage_follows_its_setting() {
+        let noise_only = pipeline(Processing { gain_control: false, ..ON }, true);
+        assert!(noise_only.contains("noise-suppression=true") && noise_only.contains("gain-control=false"));
+        let gain_only = pipeline(Processing { noise_suppression: false, ..ON }, true);
+        assert!(gain_only.contains("noise-suppression=false") && gain_only.contains("gain-control=true"));
+    }
+
+    #[test]
+    fn nothing_asked_for_or_no_plugin_leaves_the_sound_alone() {
+        let off = Processing { noise_suppression: false, gain_control: false };
+        assert!(!pipeline(off, true).contains(DSP));
+        assert!(!pipeline(ON, false).contains(DSP));
     }
 }

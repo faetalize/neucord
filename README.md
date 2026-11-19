@@ -32,7 +32,7 @@ I'm trying to get as close as possible to Discord - feature-wise, as well as beh
 - WebKitGTK 6.0, for captchas
 - GtkSourceView 5, to highlight code
 - libspelling, and a dictionary enchant can use (such as Hunspell's), to check spelling
-- GStreamer with its Opus and PipeWire plugins, to record voice messages
+- GStreamer with its Opus and PipeWire plugins, to record voice messages, and optionally `webrtcdsp` (gst-plugins-bad), to suppress their noise and even out their volume
 - libsecret, and a Secret Service provider such as GNOME Keyring or KWallet
 - OpenSSL
 - Rust 1.92 or newer, to build
