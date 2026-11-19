@@ -111,11 +111,7 @@ impl App {
                 let row = self.append_row(&row, Some(Target::Channel(dm.id)), state.channel == Some(dm.id));
                 self.menu_on(&row, menus::DIRECT_MESSAGE, dm.id);
                 let place = Place { guild: None, guild_default: 0, channel: dm.id, parent: None };
-                if state.notifications.channel_muted(&place, now_unix()) {
-                    row.add_css_class("muted");
-                } else if state.is_unread(dm) {
-                    row.add_css_class("unread");
-                }
+                mark_read(&row, state.notifications.channel_muted(&place, now_unix()), state.is_unread(dm));
             }
             return;
         };
@@ -144,6 +140,7 @@ impl App {
                 // Activating it folds or unfolds the category; it is no place to be.
                 let row = self.append_row(&heading, Some(Target::Category(category.id)), false);
                 row.set_selectable(false);
+                row.add_css_class("category-row");
                 self.menu_on(&row, menus::CATEGORY, category.id);
             }
             for channel in channels {
@@ -180,11 +177,7 @@ impl App {
                     channel: channel.id,
                     parent: channel.parent_id,
                 };
-                if state.notifications.channel_muted(&place, now_unix()) {
-                    row.add_css_class("muted");
-                } else if state.shows_unread(channel) {
-                    row.add_css_class("unread");
-                }
+                mark_read(&row, state.notifications.channel_muted(&place, now_unix()), state.shows_unread(channel));
                 if channel.kind == discord::ChannelKind::Voice {
                     for voice in state.voice.in_channel(guild.id, channel.id, |v| state.voice_name(v)) {
                         self.append_voice_state(&state, voice);
@@ -290,11 +283,7 @@ impl App {
         }
         self.thread_menu_on(&row, thread.id);
         let row = self.append_row(&row, Some(Target::Channel(thread.id)), state.channel == Some(thread.id));
-        if super::state::State::thread_muted(thread) {
-            row.add_css_class("muted");
-        } else if state.is_unread(thread) {
-            row.add_css_class("unread");
-        }
+        mark_read(&row, super::state::State::thread_muted(thread), state.is_unread(thread));
     }
 
     /// Look at the sidebar again when a thread it lists would drop out on
@@ -443,4 +432,16 @@ pub(super) fn dm_icon(channel: &Channel, images: &Images) -> gtk::Widget {
     };
     icon.set_valign(gtk::Align::Center);
     icon
+}
+
+/// A conversation's row as the client colours it: muted dimmest, read
+/// dimmed, unread bright and bold.
+fn mark_read(row: &gtk::ListBoxRow, muted: bool, unread: bool) {
+    row.add_css_class(if muted {
+        "muted"
+    } else if unread {
+        "unread"
+    } else {
+        "read"
+    });
 }

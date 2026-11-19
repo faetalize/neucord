@@ -519,7 +519,19 @@ impl NotificationSettings {
     /// Whether `message` pings us: directly, via @everyone/@here, or via one
     /// of our roles, unless the server suppresses that kind.
     pub fn mentions_me(&self, message: &Message, me: Snowflake, my_roles: &[Snowflake]) -> bool {
-        let settings = self.by_guild.get(&message.guild_id);
+        self.mentions_me_in(message.guild_id, message, me, my_roles)
+    }
+
+    /// [`Self::mentions_me`] for a message in `guild`, which a message
+    /// loaded from history doesn't name.
+    pub fn mentions_me_in(
+        &self,
+        guild: Option<Snowflake>,
+        message: &Message,
+        me: Snowflake,
+        my_roles: &[Snowflake],
+    ) -> bool {
+        let settings = self.by_guild.get(&guild);
         let suppress_everyone = settings.is_some_and(|s| s.suppress_everyone);
         let suppress_roles = settings.is_some_and(|s| s.suppress_roles);
         mentions(message, me, my_roles, suppress_everyone, suppress_roles)

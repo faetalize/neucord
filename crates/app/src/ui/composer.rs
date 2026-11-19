@@ -250,7 +250,8 @@ impl MentionCtx {
 }
 
 impl App {
-    /// The message box floating under the list, with its mention popup and keys.
+    /// The message box floating under the list, with its mention popup and
+    /// keys. The typing line goes above the card, not in it.
     pub(super) fn build_composer(self: &Rc<Self>, area: &gtk::Box) {
         menus::extend(
             self,
@@ -345,7 +346,6 @@ impl App {
         });
         self.build_voice();
         area.append(&self.composer_box);
-        area.append(&self.typing_line);
 
         // Autocomplete popup, anchored to the composer.
         let scroller = gtk::ScrolledWindow::builder()

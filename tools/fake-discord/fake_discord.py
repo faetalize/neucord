@@ -242,6 +242,16 @@ def guild():
         {"id": "604", "type": 0, "name": "after-dark", "position": 4, "parent_id": None, "nsfw": True,
          "permission_overwrites": [], "flags": 0},
     ]
+    if os.environ.get("FAKE_CATEGORY"):
+        # A category holding a channel with something new and one read up to its last message.
+        channels += [
+            {"id": "605", "type": 4, "name": "Chat Channels", "position": 5, "parent_id": None,
+             "permission_overwrites": [], "flags": 0},
+            {"id": "606", "type": 0, "name": "fresh-news", "position": 0, "parent_id": "605",
+             "last_message_id": snowflake(6000, 2), "permission_overwrites": [], "flags": 0},
+            {"id": "607", "type": 0, "name": "caught-up", "position": 1, "parent_id": "605",
+             "last_message_id": snowflake(6000, 1), "permission_overwrites": [], "flags": 0},
+        ]
     threads = []
     if os.environ.get("FAKE_THREADS"):
         # Two active threads of #general (#323): one with its newest message, one without.
@@ -325,7 +335,9 @@ def ready():
         "read_state": {"entries": [
             {"id": "201", "last_message_id": snowflake(4000, 3), "mention_count": 0},
             {"id": "500", "read_state_type": 3, "last_message_id": "0", "mention_count": 7},
-        ], "partial": False, "version": 1},
+        ] + ([{"id": "606", "last_message_id": "0", "mention_count": 0},
+              {"id": "607", "last_message_id": snowflake(6000, 1), "mention_count": 0}]
+             if os.environ.get("FAKE_CATEGORY") else []), "partial": False, "version": 1},
         "user_guild_settings": {"entries": MUTED_ENTRIES, "partial": False, "version": 1},
         "apex_experiments": apex(), "experiments": [], "guild_experiments": [],
         "regional_feature_config": {"age_gated_features": NSFW["gated"], "teen_by_default_settings": 0},
@@ -399,6 +411,13 @@ def messages(channel):
             msg = message(n, who, text, files)
             if n == 10 and os.environ.get("FAKE_CHAIN"):
                 msg["flags"] = 1 << 5
+            if n == 36 and os.environ.get("FAKE_PING"):
+                # A line that pings us, then one that pings @everyone.
+                msg["content"] = "<@100> a line that pings you"
+                msg["mentions"] = [ME]
+            if n == 34 and os.environ.get("FAKE_PING"):
+                msg["content"] = "@everyone a line that pings everyone"
+                msg["mention_everyone"] = True
             if n == 37 and os.environ.get("FAKE_EMBED"):
                 # A card whose small picture (the thumbnail) is a GIF, to the fake's own image.
                 pic = f"http://127.0.0.1:{PORT}/attachments/1/900/embed.gif?ex=ffffffff&is=1&hm=2&"
@@ -1292,6 +1311,15 @@ class Handler(BaseHTTPRequestHandler):
                         send(0, {"guild_id": "500", "threads": threads, "members": [], "most_recent_messages": recent},
                              "THREAD_LIST_SYNC")
                     SESSION[0] = send
+                    if os.environ.get("FAKE_TYPING"):
+                        # Alice types in #general, again before each lapses.
+                        def typing_start():
+                            dispatch("TYPING_START", {"channel_id": "600", "guild_id": "500", "user_id": "301",
+                                                      "timestamp": int(time.time()), "member": {"user": ALICE, "roles": []}})
+                            timer = threading.Timer(8, typing_start)
+                            timer.daemon = True
+                            timer.start()
+                        typing_start()
                     if IDENTIFIES[0] == 1 and os.environ.get("FAKE_REIDENTIFY"):
                         threading.Timer(float(os.environ["FAKE_REIDENTIFY"]), lambda: send(9, False)).start()
                 else:
