@@ -399,6 +399,13 @@ def messages(channel):
             msg = message(n, who, text, files)
             if n == 10 and os.environ.get("FAKE_CHAIN"):
                 msg["flags"] = 1 << 5
+            if n == 36 and os.environ.get("FAKE_PING"):
+                # A line that pings us, then one that pings @everyone.
+                msg["content"] = "<@100> a line that pings you"
+                msg["mentions"] = [ME]
+            if n == 34 and os.environ.get("FAKE_PING"):
+                msg["content"] = "@everyone a line that pings everyone"
+                msg["mention_everyone"] = True
             if n == 37 and os.environ.get("FAKE_EMBED"):
                 # A card whose small picture (the thumbnail) is a GIF, to the fake's own image.
                 pic = f"http://127.0.0.1:{PORT}/attachments/1/900/embed.gif?ex=ffffffff&is=1&hm=2&"

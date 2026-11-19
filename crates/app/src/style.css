@@ -79,6 +79,10 @@ listview.messages, listview.messages > row { background: none; padding: 0; }
 .message.editable .message-main { margin-right: 100px; }
 .message.first { padding-top: 14px; }
 .message:hover { background-color: var(--neucord-message-hover-bg); }
+/* A message that pings us, as the client marks it (`mentioned`): tinted,
+   with a bar down its left edge. */
+.message.mentioned { background-color: alpha(var(--neucord-highlight-color), 0.1); box-shadow: inset 2px 0 var(--neucord-highlight-color); }
+.message.mentioned:hover { background-color: alpha(var(--neucord-highlight-color), 0.14); }
 .message.replying, .message.editing { background-color: alpha(var(--neucord-reply-color), 0.12); box-shadow: inset 2px 0 var(--neucord-reply-color); }
 .message.highlight { background-color: alpha(var(--neucord-highlight-color), 0.15); box-shadow: inset 2px 0 var(--neucord-highlight-color); transition: background-color 300ms; }
 .blocked-bar { margin: 3px 50px 3px 74px; opacity: var(--dim-opacity); font-size: 0.9em; border-spacing: 8px; }

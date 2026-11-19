@@ -2207,6 +2207,9 @@ impl App {
         if self.highlight.get() == Some(message.id) {
             classes.push("highlight");
         }
+        if self.account.state.borrow().mentions_me(message) {
+            classes.push("mentioned");
+        }
         if self.reply.borrow().as_ref().is_some_and(|r| r.to == message.id) {
             classes.push("replying");
         }

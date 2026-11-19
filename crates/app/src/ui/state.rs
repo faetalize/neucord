@@ -430,6 +430,16 @@ impl State {
 
     /// The guild a channel or thread belongs to and the channel itself;
     /// `None` guild for DMs.
+    /// Whether `message` pings us (`isMentioned`, 451919), going by the
+    /// server of its channel: a message loaded from history has no
+    /// `guild_id`.
+    pub(super) fn mentions_me(&self, message: &Message) -> bool {
+        let Some(me) = self.me() else { return false };
+        let guild = self.find_channel(message.channel_id).and_then(|(g, _)| g);
+        let roles = guild.map_or(&[][..], |g| &g.my_roles);
+        self.notifications.mentions_me_in(guild.map(|g| g.id), message, me, roles)
+    }
+
     pub(super) fn find_channel(&self, id: Snowflake) -> Option<(Option<&Guild>, &Channel)> {
         if let Some(dm) = self.private_channels.iter().find(|c| c.id == id) {
             return Some((None, dm));
@@ -1374,6 +1384,25 @@ mod tests {
         assert!(state.end_press(Snowflake(3), Some(&refused)).is_some());
         assert!(state.commands.wants(guild, Instant::now()), "fetched again");
         assert!(state.end_press(Snowflake(3), None).is_none(), "a press ends once");
+    }
+
+    #[test]
+    fn a_message_that_pings_us_is_mentioned_by_its_channels_server() {
+        let mut state = open_server(None, json!({}));
+        state.me = Some(serde_json::from_value(json!({"id": "5", "username": "me"})).unwrap());
+        state.notifications.apply(Some(Snowflake(1)), &json!({"suppress_everyone": true}));
+        // Loaded from history: no guild_id, so the server is the channel's.
+        let message = |extra: serde_json::Value| -> Message {
+            let mut m = json!({"id": "70", "channel_id": "9", "author": {"id": "6", "username": "six"},
+                "content": "", "timestamp": "2026-01-01T00:00:00+00:00"});
+            m.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(m).unwrap()
+        };
+        assert!(state.mentions_me(&message(json!({"mentions": [{"id": "5", "username": "me"}]}))));
+        assert!(state.mentions_me(&message(json!({"mention_roles": ["40"]}))), "one of our roles");
+        assert!(!state.mentions_me(&message(json!({"mention_roles": ["41"]}))));
+        assert!(!state.mentions_me(&message(json!({"mention_everyone": true}))), "the server suppresses @everyone");
+        assert!(!state.mentions_me(&message(json!({}))));
     }
 
     #[test]
