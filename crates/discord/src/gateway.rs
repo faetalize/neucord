@@ -58,6 +58,9 @@ use crate::{Channel, Error, Guild, Member, Message, MessageEdit, Role, Snowflake
 /// reconnect). 4000 lets the session be resumed once RESUME exists.
 const CLOSE_RECONNECT: u16 = 4000;
 
+/// Discord's close for a payload it couldn't read.
+const CLOSE_DECODE_ERROR: u16 = 4002;
+
 /// What it takes to resume a session after the connection drops.
 #[derive(Clone, Debug)]
 pub struct Resume {
@@ -577,6 +580,8 @@ struct State {
     acked: Cell<bool>,
     /// Why Neucord closed the connection itself, see [`close`].
     closing: Cell<Option<&'static str>>,
+    /// The shapes of the last payloads sent, see [`record_sent`].
+    sent: RefCell<std::collections::VecDeque<String>>,
     events: async_channel::Sender<Event>,
 }
 
@@ -779,7 +784,7 @@ pub(crate) fn active_state_changed() {
 /// the session is established (`handleUpdateTimeSpentSessionId`, 868).
 pub(crate) fn time_spent(session: &identity::TimeSpent) {
     if let Some((conn, state)) = established_socket() {
-        send_text(&conn, &request_text(41, session));
+        send_text(&conn, &state, &request_text(41, session));
         heartbeat(&conn, &state);
     }
 }
@@ -832,6 +837,7 @@ impl Gateway {
             session: RefCell::new(resume.map(|r| (r.session_id, r.url))),
             acked: Cell::new(true),
             closing: Cell::new(None),
+            sent: RefCell::default(),
             events: tx,
         });
 
@@ -885,7 +891,13 @@ impl Gateway {
                                 }
                                 _ => None,
                             };
-                            let reason = closed_reason(state.closing.take(), code, reason);
+                            let ours = state.closing.take();
+                            if ours.is_none() && code == CLOSE_DECODE_ERROR {
+                                for line in state.sent.borrow().iter() {
+                                    eprintln!("gateway: sent before it: {line}");
+                                }
+                            }
+                            let reason = closed_reason(ours, code, reason);
                             let _ = state.events.try_send(Event::Closed { code, reason, resume });
                             break;
                         }
@@ -905,7 +917,7 @@ impl Gateway {
     /// the client, nothing is sent before the session is established.
     pub fn request_members(&self, guild: Snowflake, users: &[Snowflake]) {
         if self.state.established.get() {
-            send_text(&self.conn, &request_text(8, &MemberRequest::new(guild, users)));
+            send_text(&self.conn, &self.state, &request_text(8, &MemberRequest::new(guild, users)));
         }
     }
 
@@ -915,7 +927,7 @@ impl Gateway {
     pub fn check_members(&self, guild: Snowflake, users: &[Snowflake], nonce: &str) {
         if self.state.established.get() {
             let request = MemberRequest { nonce: Some(nonce), ..MemberRequest::new(guild, users) };
-            send_text(&self.conn, &request_text(8, &request));
+            send_text(&self.conn, &self.state, &request_text(8, &request));
         }
     }
 
@@ -931,7 +943,7 @@ impl Gateway {
     /// sent before the session is established.
     pub fn search_members(&self, guild: Snowflake, query: &str, limit: usize) {
         if self.state.established.get() {
-            send_text(&self.conn, &request_text(8, &MemberSearchRequest::new(guild, query, limit)));
+            send_text(&self.conn, &self.state, &request_text(8, &MemberSearchRequest::new(guild, query, limit)));
         }
     }
 
@@ -940,7 +952,7 @@ impl Gateway {
     /// before the session is established.
     pub fn update_presence(&self, status: UserStatus) {
         if self.state.established.get() {
-            send_text(&self.conn, &request_text(3, &PresenceUpdate::new(status)));
+            send_text(&self.conn, &self.state, &request_text(3, &PresenceUpdate::new(status)));
         }
     }
 
@@ -951,7 +963,7 @@ impl Gateway {
     /// before the session is established.
     pub fn request_forum_unreads(&self, request: &crate::forum::UnreadRequest) {
         if self.state.established.get() {
-            send_text(&self.conn, &request_text(28, request));
+            send_text(&self.conn, &self.state, &request_text(28, request));
         }
     }
 
@@ -961,7 +973,7 @@ impl Gateway {
     pub fn send_subscriptions(&self, messages: &[String]) {
         if self.state.established.get() {
             for message in messages {
-                send_text(&self.conn, message);
+                send_text(&self.conn, &self.state, message);
             }
         }
     }
@@ -1027,8 +1039,9 @@ pub(crate) fn request_text(op: u8, d: &impl serde::Serialize) -> String {
     serde_json::to_string(&Payload { op, d }).unwrap_or_default()
 }
 
-fn send_text(conn: &soup::WebsocketConnection, text: &str) {
+fn send_text(conn: &soup::WebsocketConnection, state: &State, text: &str) {
     if conn.state() == soup::WebsocketState::Open {
+        record_sent(state, text);
         conn.send_text(text);
     }
 }
@@ -1037,7 +1050,7 @@ fn send_text(conn: &soup::WebsocketConnection, text: &str) {
 /// sequence number, 0 before any, and what [`qos`] says of the user. Only
 /// the interval's heartbeats wait for an ACK.
 fn heartbeat(conn: &soup::WebsocketConnection, state: &State) {
-    send_text(conn, &heartbeat_text(state.seq.get(), identity::qos_heartbeat()));
+    send_text(conn, state, &heartbeat_text(state.seq.get(), identity::qos_heartbeat()));
 }
 
 fn heartbeat_text(seq: Option<u64>, qos: Option<qos::Payload>) -> String {
@@ -1062,7 +1075,7 @@ struct ResumeRequest<'a> {
 }
 
 fn resume(conn: &soup::WebsocketConnection, state: &State) {
-    send_text(conn, &resume_text(state));
+    send_text(conn, state, &resume_text(state));
 }
 
 /// IDENTIFY's `d`, in the order `_doIdentify` (868) builds it.
@@ -1097,7 +1110,7 @@ fn identify(conn: &soup::WebsocketConnection, state: &State) {
             identify.properties.names().join(", ")
         );
     }
-    send_text(conn, &request_text(2, &identify));
+    send_text(conn, state, &request_text(2, &identify));
 }
 
 fn identify_payload(token: &str) -> Identify<'_> {
@@ -1169,6 +1182,22 @@ fn close(conn: &soup::WebsocketConnection, state: &State, why: &'static str) {
     eprintln!("gateway: closing: {why}");
     state.closing.set(Some(why));
     conn.close(CLOSE_RECONNECT, Some(why));
+}
+
+/// How many payloads sent [`record_sent`] keeps.
+const SENT_KEPT: usize = 8;
+
+/// Keep the shape of a payload sent, its op and field names without any
+/// value ([`crate::shape::outline`], which hides ids used as keys), so a
+/// close for a payload Discord couldn't read (4002) can say what went out.
+fn record_sent(state: &State, text: &str) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else { return };
+    let line = format!("op {}: {}", value["op"], crate::shape::outline(&value["d"]));
+    let mut sent = state.sent.borrow_mut();
+    if sent.len() == SENT_KEPT {
+        sent.pop_front();
+    }
+    sent.push_back(line);
 }
 
 /// What a closed connection reports: why we closed it, or what Discord said.
@@ -2188,8 +2217,24 @@ mod tests {
             seq: Cell::new(Some(7)),
             acked: Cell::new(true),
             closing: Cell::new(None),
+            sent: RefCell::default(),
             events: async_channel::unbounded().0,
         }
+    }
+
+    #[test]
+    fn what_was_sent_is_kept_as_shapes_without_values() {
+        let state = state_with("secret-token", "secret-token");
+        for seq in 0..10 {
+            record_sent(&state, &heartbeat_text(Some(seq), Some(qos::Payload::now(true, true))));
+        }
+        record_sent(&state, &request_text(8, &MemberRequest::new(Snowflake(123456789), &[Snowflake(987654321)])));
+        let sent = state.sent.borrow();
+        assert_eq!(sent.len(), SENT_KEPT, "only the last few");
+        // Field names come sorted, as `outline` keeps them.
+        assert_eq!(sent.back().unwrap(), "op 8: {guild_id: [str], presences: bool, user_ids: [str]}");
+        assert_eq!(sent.front().unwrap(), "op 40: {qos: {active: bool, reasons: [str], ver: num}, seq: num}");
+        assert!(sent.iter().all(|line| !line.contains("123456789") && !line.contains("foregrounded")));
     }
 
     #[test]
