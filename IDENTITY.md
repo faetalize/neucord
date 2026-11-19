@@ -80,6 +80,13 @@ each would be reconsidered.
   the last READY gave the account, kept for each account as the client keeps
   it by user id. Neucord sends Discord's signed part back as it came and
   never makes or reads one.
+- **Op 3 says when the user is idle or away**, as the web client's
+  `IdleStore` does: no mouse button, wheel or typed character, no channel
+  opened and no focus change for ten minutes is idle (an Online account then
+  shows Idle, with `since` the time it was last active), and none for the
+  account's AFK timeout, a minute unless it says otherwise, is away
+  (`afk`). Both are checked every 30 seconds. `afk` is what keeps Discord
+  from pushing to a phone while we are at the keyboard.
 
 ## Deliberately not sent
 

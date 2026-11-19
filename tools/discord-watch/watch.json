@@ -403,6 +403,7 @@
     "GuildStickersStore",
     "GuildSubscriptionsStore",
     "GuildVerificationStore",
+    "IdleStore",
     "IntegrationQueryStore",
     "InteractionModalStore",
     "InteractionStore",

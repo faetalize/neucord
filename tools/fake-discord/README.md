@@ -180,6 +180,7 @@ what arrived, IDENTIFY's key order and properties first.
   Remove from Thread (`member-menu-item remove-from-thread`), which sends the
   DELETE and loses them from the list;
   `heartbeat` waits for five op 40s, the interval's among them;
+  `idle` (with `NEUCORD_DEBUG_IDLE=4`) lists the op 3 frames: idle and away after four quiet seconds, active again when a channel opens (`IDLE_STEPS=300` waits for the real minute's away instead);
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).
 

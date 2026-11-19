@@ -40,6 +40,7 @@ pub mod gifs;
 pub mod held;
 pub mod history;
 pub mod identity;
+pub mod idle;
 pub mod images;
 mod inflate;
 pub mod interaction;

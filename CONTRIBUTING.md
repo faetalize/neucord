@@ -65,6 +65,8 @@ GTK and libadwaita defaults: no CSS until there's a reason for it.
   the names of its properties.
 - `NEUCORD_DEBUG_DROP=<seconds>` drops the gateway connection that long after
   each connect, to exercise reconnecting and resuming.
+- `NEUCORD_DEBUG_IDLE=<seconds>` makes that long without input idle (ten
+  minutes otherwise), checked every second, to see op 3 go out.
 - `NEUCORD_DEBUG_EXPERIMENTS=<dir>` writes, on READY, the account's
   experiment assignments and server rollouts, and READY's shape, into
   `<dir>`.
