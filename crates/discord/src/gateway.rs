@@ -575,6 +575,8 @@ struct State {
     established: Cell<bool>,
     seq: Cell<Option<u64>>,
     acked: Cell<bool>,
+    /// Why Neucord closed the connection itself, see [`close`].
+    closing: Cell<Option<&'static str>>,
     events: async_channel::Sender<Event>,
 }
 
@@ -829,6 +831,7 @@ impl Gateway {
             seq: Cell::new(resume.as_ref().map(|r| r.seq)),
             session: RefCell::new(resume.map(|r| (r.session_id, r.url))),
             acked: Cell::new(true),
+            closing: Cell::new(None),
             events: tx,
         });
 
@@ -865,7 +868,7 @@ impl Gateway {
                             // new connection, resuming, as the client does.
                             eprintln!("gateway: cannot inflate: {why}");
                             if let Some(conn) = conn.upgrade() {
-                                conn.close(CLOSE_RECONNECT, Some("decompression error"));
+                                close(&conn, &state, "decompression error");
                             }
                         }
                         Output::Closed { code, reason } => {
@@ -882,6 +885,7 @@ impl Gateway {
                                 }
                                 _ => None,
                             };
+                            let reason = closed_reason(state.closing.take(), code, reason);
                             let _ = state.events.try_send(Event::Closed { code, reason, resume });
                             break;
                         }
@@ -1125,7 +1129,7 @@ fn handle(conn: &soup::WebsocketConnection, state: &Rc<State>, parsed: Parsed) {
         What::Dispatch(Dispatched { events, established }) => {
             match established {
                 Some(Established::Ready(session)) => {
-                    debug_drop(conn, "READY");
+                    debug_drop(conn, state, "READY");
                     state.resuming.set(false);
                     state.established.set(true);
                     if session.is_some() {
@@ -1133,7 +1137,7 @@ fn handle(conn: &soup::WebsocketConnection, state: &Rc<State>, parsed: Parsed) {
                     }
                 }
                 Some(Established::Resumed) => {
-                    debug_drop(conn, "RESUMED");
+                    debug_drop(conn, state, "RESUMED");
                     state.established.set(true);
                 }
                 None => {}
@@ -1146,28 +1150,47 @@ fn handle(conn: &soup::WebsocketConnection, state: &Rc<State>, parsed: Parsed) {
         What::Heartbeat => heartbeat(conn, state),
         What::Ack => state.acked.set(true),
         // RECONNECT: drop and let the caller resume.
-        What::Reconnect => conn.close(CLOSE_RECONNECT, Some("reconnect requested")),
+        What::Reconnect => close(conn, state, "reconnect requested"),
         // INVALID SESSION: if the session cannot be resumed, the caller has
         // to IDENTIFY again.
         What::InvalidSession { resumable } => {
             if !resumable {
                 state.resumable.set(false);
             }
-            conn.close(CLOSE_RECONNECT, Some("session invalidated"));
+            close(conn, state, "session invalidated");
         }
         What::Other => {}
     }
 }
 
+/// Close the connection ourselves, keeping `why`: the peer's close frame
+/// echoes the code but not the reason.
+fn close(conn: &soup::WebsocketConnection, state: &State, why: &'static str) {
+    eprintln!("gateway: closing: {why}");
+    state.closing.set(Some(why));
+    conn.close(CLOSE_RECONNECT, Some(why));
+}
+
+/// What a closed connection reports: why we closed it, or what Discord said.
+fn closed_reason(ours: Option<&'static str>, code: u16, peer: String) -> String {
+    match ours {
+        Some(why) => why.to_owned(),
+        None => {
+            eprintln!("gateway: closed by Discord: {code} {peer}");
+            peer
+        }
+    }
+}
+
 /// Debug aid for testing resume: with `NEUCORD_DEBUG_DROP=<seconds>`, drop
 /// each connection that long after it is ready, as a network failure would.
-fn debug_drop(conn: &soup::WebsocketConnection, ready: &str) {
+fn debug_drop(conn: &soup::WebsocketConnection, state: &Rc<State>, ready: &str) {
     let Some(secs) = std::env::var("NEUCORD_DEBUG_DROP").ok().and_then(|v| v.parse::<u64>().ok()) else { return };
     eprintln!("gateway: {ready}; dropping the connection in {secs}s (NEUCORD_DEBUG_DROP)");
-    let conn = conn.downgrade();
+    let (conn, state) = (conn.downgrade(), Rc::downgrade(state));
     glib::timeout_add_local_once(Duration::from_secs(secs), move || {
-        if let Some(conn) = conn.upgrade() {
-            conn.close(CLOSE_RECONNECT, Some("debug drop"));
+        if let (Some(conn), Some(state)) = (conn.upgrade(), state.upgrade()) {
+            close(&conn, &state, "debug drop");
         }
     });
 }
@@ -1186,7 +1209,7 @@ fn spawn_heartbeat(conn: &soup::WebsocketConnection, state: &Rc<State>, interval
             }
             if !state.acked.get() {
                 // No ACK since the last beat: the connection is a zombie.
-                conn.close(CLOSE_RECONNECT, Some("heartbeat not acknowledged"));
+                close(&conn, &state, "heartbeat not acknowledged");
                 break;
             }
             state.acked.set(false);
@@ -2164,8 +2187,16 @@ mod tests {
             established: Cell::new(false),
             seq: Cell::new(Some(7)),
             acked: Cell::new(true),
+            closing: Cell::new(None),
             events: async_channel::unbounded().0,
         }
+    }
+
+    #[test]
+    fn a_close_of_our_own_reports_why_we_closed() {
+        let why = closed_reason(Some("heartbeat not acknowledged"), CLOSE_RECONNECT, String::new());
+        assert_eq!(why, "heartbeat not acknowledged", "the peer echoes the code without our reason");
+        assert_eq!(closed_reason(None, 4004, "Authentication failed.".into()), "Authentication failed.");
     }
 
     #[test]
