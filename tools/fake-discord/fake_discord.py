@@ -91,7 +91,7 @@ IMAGE_FAIL = bool(os.environ.get("FAKE_IMAGE_FAIL"))
 GIF = bool(os.environ.get("FAKE_GIF"))
 # FAKE_VIDEO=<path to a .webm>: channel 600 gets a message with that file as a video attachment.
 VIDEO = os.environ.get("FAKE_VIDEO")
-if UPLOAD_FAIL not in ("", "too-large"):
+if UPLOAD_FAIL not in ("", "too-large", "429"):
     sys.exit("unknown FAKE_UPLOAD_FAIL " + UPLOAD_FAIL)
 
 ME = {"id": "100", "username": "tester_fake", "global_name": "Tester Fake", "avatar": None, "discriminator": "0",
@@ -980,7 +980,7 @@ UPLOADS = [0]
 @route("POST", r"/channels/(\d+)/attachments")
 def upload_url(channel, body):
     """An upload URL per file, here at the fake; FAKE_UPLOAD_FAIL=too-large turns it down as Discord does a file
-    over the limit."""
+    over the limit (`429`: see the PUT)."""
     if UPLOAD_FAIL == "too-large":
         return 400, {"code": 40005, "message": "Request entity too large"}
     slots = []
@@ -992,8 +992,18 @@ def upload_url(channel, body):
     return 200, {"attachments": slots}
 
 
+UPLOAD_PUTS = {}
+
+
 @route("PUT", r"/upload/(\d+)")
 def upload_put(n, body):
+    """FAKE_UPLOAD_FAIL=429: a file's first PUT is rate limited (`retry_after` 4), its second, the check of where
+    the upload stands, says to start from the beginning (308), and the third takes it."""
+    UPLOAD_PUTS[n] = UPLOAD_PUTS.get(n, 0) + 1
+    if UPLOAD_FAIL == "429" and UPLOAD_PUTS[n] == 1:
+        return 429, {"message": "You are being rate limited.", "retry_after": 4}
+    if UPLOAD_FAIL == "429" and UPLOAD_PUTS[n] == 2:
+        return 308, None
     return 200, None
 
 

@@ -379,7 +379,12 @@ changed for unrelated reasons only needs a note in the issue.
   always; what is checked when files are added, `R` in 518960 (anchor
   `FILE_SIZE_LIMIT_EXCEEDED`: an empty file, then a file or the new
   files' total over the limit, then the count); and at send, where 358579
-  starts failed uploads again except those Discord called too large. The
+  starts failed uploads again except those Discord called too large; what
+  the HTTP layer holds back after a 429 or 503, `T` in 620632 (anchor
+  `cleanupRequestEntry`: `retry_after`, else 5 s, or its backoff), and
+  `awaitOnline` in 209489; and `original_content_type`, Chromium's own
+  table before the system's (`BROWSER_TYPES`: wav, m4a and xml differ in
+  Chromium 157). The
   attach menu is 316576 (anchor `channel-attach`, shown with Attach Files
   and Send Messages): Upload Text as File needs text in the box and sends
   only a fenced block's code with its language as the extension (anchor
