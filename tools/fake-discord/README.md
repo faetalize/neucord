@@ -27,7 +27,7 @@ what arrived, IDENTIFY's key order and properties first.
   fake, which takes the `PUT` and a `DELETE`, unless
   `FAKE_UPLOAD_FAIL=too-large` turns the URL down with Discord's 40005.
   `FAKE_IMAGE_FAIL=1` has every image on the CDN answer 404. `FAKE_VIDEO=<a .webm>` puts that file in
-  channel 600 as a video attachment with alt text (scenario `viewer-video`). `FAKE_MUTED=1` mutes the server until a made-up time and #general with no end (scenario `unmute-caption`).
+  channel 600 as a video attachment with alt text (scenario `viewer-video`). `FAKE_PING=1` has line 36 of #general ping us and line 34 ping @everyone (scenario `mentioned`). `FAKE_MUTED=1` mutes the server until a made-up time and #general with no end (scenario `unmute-caption`).
   `FAKE_SENSITIVE=1` adds to #general pictures Discord's scan has flagged as explicit, one it hasn't looked at, one it found clean and a card with a flagged picture; with `FAKE_NSFW=allowed=0` the filter covers the flagged ones and the unscanned (the `sensitive` scenario shoots them; `sensitive-report` marks one not sensitive, the first picture's, or with `FAKE_SENSITIVE=embed` the card's).
   Heartbeats (op 40) are logged and acknowledged, and READY carries a made-up
   `qos_token`. Both settings protos are kept, and a save merges into them field by field
