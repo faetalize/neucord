@@ -9,9 +9,9 @@
 //! URL while anyone shows them) into a frame-stepping paintable that ticks
 //! only while it is playing and in view (GTK's `Picture` shows only the first
 //! frame otherwise). Images from Discord's media proxy are requested at the
-//! size they are shown, which keeps both downloads and decodes small. WebP,
-//! which the client asks for and gdk-pixbuf can't load, decodes on the pool
-//! ([`decode`], `discord::webp`).
+//! size they are shown, which keeps both downloads and decodes small. Every
+//! decode, still or animated, runs on the pool (`discord::raster`) and
+//! arrives as plain pixels that the main loop only wraps in textures.
 //!
 //! Disk reads and writes run on the pool (see CONTRIBUTING.md, "Threads").
 //!
@@ -24,7 +24,6 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gtk::gdk;
-use gtk::gdk_pixbuf::{PixbufAnimation, PixbufLoader};
 use gtk::glib;
 use gtk::prelude::*;
 use soup::prelude::*;
@@ -33,8 +32,8 @@ mod animated;
 mod lazy;
 mod lru;
 mod play;
+use animated::FramePaintable;
 pub use animated::Lease;
-use animated::{AnimatedPaintable, FramePaintable};
 use discord::animation::Subject;
 use discord::cdn::Shown;
 use lru::Lru;
@@ -432,10 +431,7 @@ impl Images {
         if let Some(paintable) = held(self) {
             return Some(paintable);
         }
-        let paintable = match discord::webp::is_webp(&bytes) {
-            true => webp_paintable(&bytes).await,
-            false => apng_paintable(&bytes).or_else(|| animated_paintable(&bytes)),
-        }?;
+        let paintable = animation_paintable(&bytes).await?;
         let mut moving = self.0.moving.borrow_mut();
         moving.retain(|_, weak| weak.upgrade().is_some());
         moving.insert(url.to_owned(), paintable.downgrade());
@@ -645,16 +641,16 @@ pub fn request_size(shown: (i32, i32), scale: f64, original: Option<(u32, u32)>)
     (width, height)
 }
 
-/// The picture in `bytes` as a texture (of an animation, its first frame).
-/// WebP is decoded here, on the pool, as gdk-pixbuf has no loader for it;
-/// the rest is GTK's.
+/// The picture in `bytes` as a texture (of an animation, its first frame),
+/// decoded on the pool. What gdk-pixbuf can't read, GTK may: that is tried
+/// on the main loop, the only place `gdk::Texture::from_bytes` runs.
 pub async fn decode(bytes: &glib::Bytes) -> Option<gdk::Texture> {
-    if !discord::webp::is_webp(bytes) {
-        return gdk::Texture::from_bytes(bytes).ok();
+    let owned = bytes.clone();
+    match gio::spawn_blocking(move || discord::raster::decode_still(&owned)).await.ok()? {
+        Some(still) => Some(rgba_texture(still.width, still.height, still.rgba)),
+        None if discord::webp::is_webp(bytes) => None,
+        None => gdk::Texture::from_bytes(bytes).ok(),
     }
-    let bytes = bytes.clone();
-    let still = gio::spawn_blocking(move || discord::webp::decode_still(&bytes)).await.ok()??;
-    Some(rgba_texture(still.width, still.height, still.rgba))
 }
 
 fn rgba_texture(width: u32, height: u32, rgba: Vec<u8>) -> gdk::Texture {
@@ -663,20 +659,11 @@ fn rgba_texture(width: u32, height: u32, rgba: Vec<u8>) -> gdk::Texture {
     gdk::MemoryTexture::new(width, height, gdk::MemoryFormat::R8g8b8a8, &pixels, width as usize * 4).upcast()
 }
 
-/// An animated WebP's frames, decoded on the pool; `None` for one that
-/// doesn't move.
-async fn webp_paintable(bytes: &glib::Bytes) -> Option<gdk::Paintable> {
+/// The frames of an animated WebP, APNG or GIF, decoded on the pool; `None`
+/// for a picture that doesn't move.
+async fn animation_paintable(bytes: &glib::Bytes) -> Option<gdk::Paintable> {
     let bytes = bytes.clone();
-    let animation = gio::spawn_blocking(move || discord::webp::decode_animation(&bytes)).await.ok()??;
-    Some(frame_paintable(animation))
-}
-
-/// An APNG's frames, which gdk-pixbuf's loader doesn't have.
-fn apng_paintable(bytes: &glib::Bytes) -> Option<gdk::Paintable> {
-    if !discord::apng::is_apng(bytes) {
-        return None;
-    }
-    let animation = discord::apng::decode(bytes)?;
+    let animation = gio::spawn_blocking(move || discord::raster::decode_animation(&bytes)).await.ok()??;
     Some(frame_paintable(animation))
 }
 
@@ -691,17 +678,6 @@ fn frame_paintable(animation: discord::apng::Animation) -> gdk::Paintable {
         })
         .collect();
     FramePaintable::new(frames, animation.plays).upcast()
-}
-
-fn animated_paintable(bytes: &glib::Bytes) -> Option<gdk::Paintable> {
-    let loader = PixbufLoader::new();
-    loader.write_bytes(bytes).ok()?;
-    loader.close().ok()?;
-    let animation: PixbufAnimation = loader.animation()?;
-    if animation.is_static_image() {
-        return None;
-    }
-    Some(AnimatedPaintable::new(animation).upcast())
 }
 
 #[cfg(test)]

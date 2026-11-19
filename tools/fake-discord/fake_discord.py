@@ -86,6 +86,9 @@ MUTED_ENTRIES = [
 ] if os.environ.get("FAKE_MUTED") else []
 # FAKE_IMAGE_FAIL=1: every image on the CDN answers 404.
 IMAGE_FAIL = bool(os.environ.get("FAKE_IMAGE_FAIL"))
+# FAKE_GIF=1: #general ends with an attachment named anim.gif, and what the CDN serves as a .gif is a real two-frame
+# GIF (red for 100 ms, then blue for 300), from Neucord's own test files, which Neucord draws as it plays.
+GIF = bool(os.environ.get("FAKE_GIF"))
 # FAKE_VIDEO=<path to a .webm>: channel 600 gets a message with that file as a video attachment.
 VIDEO = os.environ.get("FAKE_VIDEO")
 if UPLOAD_FAIL not in ("", "too-large"):
@@ -435,6 +438,12 @@ def messages(channel):
             out.append(voice_message(61))
         if os.environ.get("FAKE_SENSITIVE"):
             out += sensitive_messages()
+        if GIF:
+            gif = f"http://127.0.0.1:{PORT}/attachments/1/966/anim.gif?ex=ffffffff&is=1&hm=2&"
+            out.append(message(66, ALICE, "an animated picture", ({
+                "id": "966", "filename": "anim.gif", "size": 93, "width": 1200, "height": 800,
+                "content_type": "image/gif", "url": gif, "proxy_url": gif},)))
+            out[-1]["timestamp"] = "2026-01-01T11:30:00.000000+00:00"
     return list(reversed(out + POSTED.get(channel, [])))
 
 
@@ -1212,6 +1221,9 @@ class Handler(BaseHTTPRequestHandler):
                 name = "animated.webp" if query.get("animated") == "true" else "lossy.webp"
                 with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "crates", "discord", "testdata", name), "rb") as file:
                     return self.send(200, file.read(), "image/webp")
+            if GIF and path.split("?")[0].endswith(".gif"):
+                with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "crates", "discord", "testdata", "two.gif"), "rb") as file:
+                    return self.send(200, file.read(), "image/gif")
             body = png(int(query.get("width", 1200)) // 4, int(query.get("height", 800)) // 4)
             return self.send(200, body, "image/png")
         self.answer()

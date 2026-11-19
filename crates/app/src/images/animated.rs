@@ -1,16 +1,15 @@
-//! `gdk::Paintable`s that step through the frames of a `PixbufAnimation`, or
-//! of frames already made such as an APNG's or a WebP's, so GIF, APNG and WebP images animate.
-//! GTK's `Picture` otherwise shows only the first frame of an animation.
+//! A `gdk::Paintable` that steps through frames already decoded (a GIF's, an
+//! APNG's or a WebP's, by `discord::raster`), so those images animate. GTK's
+//! `Picture` otherwise shows only the first frame of an animation.
 //!
 //! Frames advance only while somebody holds a [`Lease`] from [`play`], so a
 //! paintable nobody can see costs no timer, and widgets showing the same
 //! paintable keep it going between them.
 
 use std::cell::{Cell, RefCell};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use gtk::gdk;
-use gtk::gdk_pixbuf::{PixbufAnimation, PixbufAnimationIter};
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
@@ -30,16 +29,6 @@ impl Drop for Lease {
 /// Make `paintable` advance for as long as the lease lives. `None` for one
 /// that doesn't move.
 pub fn play(paintable: &gdk::Paintable) -> Option<Lease> {
-    if let Some(this) = paintable.downcast_ref::<AnimatedPaintable>() {
-        this.imp().timer.hold();
-        this.schedule();
-        let weak = this.downgrade();
-        return Some(Lease(Some(Box::new(move || {
-            if let Some(this) = weak.upgrade() {
-                this.imp().timer.release();
-            }
-        }))));
-    }
     if let Some(this) = paintable.downcast_ref::<FramePaintable>() {
         this.imp().timer.hold();
         this.schedule();
@@ -72,102 +61,6 @@ impl Timer {
         {
             source.remove();
         }
-    }
-}
-
-mod imp {
-    use super::*;
-
-    #[derive(Default)]
-    pub struct AnimatedPaintable {
-        pub iter: RefCell<Option<PixbufAnimationIter>>,
-        pub texture: RefCell<Option<gdk::Texture>>,
-        pub size: RefCell<(i32, i32)>,
-        pub timer: Timer,
-    }
-
-    #[glib::object_subclass]
-    impl ObjectSubclass for AnimatedPaintable {
-        const NAME: &'static str = "NeucordAnimatedPaintable";
-        type Type = super::AnimatedPaintable;
-        type Interfaces = (gdk::Paintable,);
-    }
-
-    impl ObjectImpl for AnimatedPaintable {}
-
-    impl PaintableImpl for AnimatedPaintable {
-        fn intrinsic_width(&self) -> i32 {
-            self.size.borrow().0
-        }
-
-        fn intrinsic_height(&self) -> i32 {
-            self.size.borrow().1
-        }
-
-        fn snapshot(&self, snapshot: &gdk::Snapshot, width: f64, height: f64) {
-            if let Some(texture) = self.texture.borrow().as_ref() {
-                texture.snapshot(snapshot, width, height);
-            }
-        }
-    }
-}
-
-glib::wrapper! {
-    pub struct AnimatedPaintable(ObjectSubclass<imp::AnimatedPaintable>) @implements gdk::Paintable;
-}
-
-impl AnimatedPaintable {
-    pub fn new(animation: PixbufAnimation) -> Self {
-        let this: Self = glib::Object::new();
-        let iter = animation.iter(Some(SystemTime::now()));
-        let imp = this.imp();
-        *imp.size.borrow_mut() = (animation.width(), animation.height());
-        this.apply_frame(&iter);
-        *imp.iter.borrow_mut() = Some(iter);
-        this
-    }
-
-    fn apply_frame(&self, iter: &PixbufAnimationIter) {
-        // for_pixbuf is deprecated in 4.20 but remains the simplest per-frame path.
-        #[allow(deprecated)]
-        let texture = gdk::Texture::for_pixbuf(&iter.pixbuf());
-        *self.imp().texture.borrow_mut() = Some(texture);
-        self.invalidate_contents();
-    }
-
-    fn schedule(&self) {
-        let timer = &self.imp().timer;
-        if timer.holders.get() == 0 || timer.source.borrow().is_some() {
-            return;
-        }
-        // A missing/zero delay means "no fixed rate"; use a sane minimum.
-        let delay = self
-            .imp()
-            .iter
-            .borrow()
-            .as_ref()
-            .and_then(PixbufAnimationIter::delay_time)
-            .unwrap_or(Duration::from_millis(100));
-        let ms = delay.as_millis().max(20) as u64;
-        let weak = self.downgrade();
-        let source = glib::timeout_add_local_once(Duration::from_millis(ms), move || {
-            if let Some(this) = weak.upgrade() {
-                this.imp().timer.source.take();
-                this.advance();
-            }
-        });
-        *timer.source.borrow_mut() = Some(source);
-    }
-
-    fn advance(&self) {
-        let advanced = match self.imp().iter.borrow().as_ref() {
-            Some(iter) => iter.advance(SystemTime::now()),
-            None => return,
-        };
-        if advanced && let Some(iter) = self.imp().iter.borrow().as_ref() {
-            self.apply_frame(iter);
-        }
-        self.schedule();
     }
 }
 
@@ -231,7 +124,7 @@ impl FramePaintable {
             return;
         }
         let delay = imp.frames.borrow().get(imp.at.get()).map_or(Duration::ZERO, |(_, d)| *d);
-        // No fixed rate is no faster than the GIF path goes.
+        // A frame with no delay (no fixed rate) goes no faster than this.
         let weak = self.downgrade();
         let source = glib::timeout_add_local_once(delay.max(Duration::from_millis(20)), move || {
             if let Some(this) = weak.upgrade() {
