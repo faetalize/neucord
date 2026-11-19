@@ -63,10 +63,17 @@
 /* Mentions that are only a channel notifying for all messages. */
 .badge.low { background-color: alpha(currentColor, 0.25); color: inherit; }
 
-/* Channel list */
-.category { margin-top: 12px; font-size: 0.82em; font-weight: bold; }
+/* Channel list. A category's gap goes above its row, so the row's hover
+   and focus backgrounds hold its name centred. */
+.category { font-size: 0.82em; font-weight: bold; }
+.navigation-sidebar > row.category-row { margin-top: 12px; }
+/* Conversations as the client colours them (`--channels-default`,
+   `--interactive-muted`): read ones dimmed until hovered or open, unread
+   bright and bold, muted dimmest. */
+.navigation-sidebar > row.read { color: alpha(currentColor, 0.62); }
+.navigation-sidebar > row.read:hover, .navigation-sidebar > row.read:selected { color: inherit; }
 .navigation-sidebar > row.unread { font-weight: bold; }
-.navigation-sidebar > row.muted { opacity: var(--dim-opacity); }
+.navigation-sidebar > row.muted { color: alpha(currentColor, 0.38); }
 
 /* Messages. Rows carry no padding of their own, so a collapsed blocked
    message takes no space. */

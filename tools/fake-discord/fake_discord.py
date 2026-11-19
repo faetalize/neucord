@@ -242,6 +242,16 @@ def guild():
         {"id": "604", "type": 0, "name": "after-dark", "position": 4, "parent_id": None, "nsfw": True,
          "permission_overwrites": [], "flags": 0},
     ]
+    if os.environ.get("FAKE_CATEGORY"):
+        # A category holding a channel with something new and one read up to its last message.
+        channels += [
+            {"id": "605", "type": 4, "name": "Chat Channels", "position": 5, "parent_id": None,
+             "permission_overwrites": [], "flags": 0},
+            {"id": "606", "type": 0, "name": "fresh-news", "position": 0, "parent_id": "605",
+             "last_message_id": snowflake(6000, 2), "permission_overwrites": [], "flags": 0},
+            {"id": "607", "type": 0, "name": "caught-up", "position": 1, "parent_id": "605",
+             "last_message_id": snowflake(6000, 1), "permission_overwrites": [], "flags": 0},
+        ]
     threads = []
     if os.environ.get("FAKE_THREADS"):
         # Two active threads of #general (#323): one with its newest message, one without.
@@ -325,7 +335,9 @@ def ready():
         "read_state": {"entries": [
             {"id": "201", "last_message_id": snowflake(4000, 3), "mention_count": 0},
             {"id": "500", "read_state_type": 3, "last_message_id": "0", "mention_count": 7},
-        ], "partial": False, "version": 1},
+        ] + ([{"id": "606", "last_message_id": "0", "mention_count": 0},
+              {"id": "607", "last_message_id": snowflake(6000, 1), "mention_count": 0}]
+             if os.environ.get("FAKE_CATEGORY") else []), "partial": False, "version": 1},
         "user_guild_settings": {"entries": MUTED_ENTRIES, "partial": False, "version": 1},
         "apex_experiments": apex(), "experiments": [], "guild_experiments": [],
         "regional_feature_config": {"age_gated_features": NSFW["gated"], "teen_by_default_settings": 0},
