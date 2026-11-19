@@ -206,7 +206,7 @@ fn has_transparency(pixbuf: &Pixbuf) -> bool {
 }
 
 /// The pixels as 8-bit RGBA, without the padding of each row.
-fn rgba(pixbuf: &Pixbuf) -> Vec<u8> {
+pub(crate) fn rgba(pixbuf: &Pixbuf) -> Vec<u8> {
     let (width, height) = (pixbuf.width() as usize, pixbuf.height() as usize);
     let (channels, stride) = (pixbuf.n_channels() as usize, pixbuf.rowstride() as usize);
     let bytes = pixbuf.read_pixel_bytes();

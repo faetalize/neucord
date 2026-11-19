@@ -24,9 +24,9 @@ megabytes, converting an image) runs off it and comes back as plain owned
 data, applied on the main loop in one go. Nothing that is a GObject or an
 `Rc` crosses. A task with a result is `gio::spawn_blocking`, called from the
 main loop and awaited there; a thread of its own is for what has to stay in
-order, as the gateway's frames do (`gateway.rs`). Decoding a texture stays on
-the main loop for now: gtk4-rs only lets `gdk::Texture::from_bytes` run
-there.
+order, as the gateway's frames do (`gateway.rs`). A picture decodes to plain
+RGBA on the pool (`discord::raster`) and only becomes a `gdk::Texture` on the
+main loop, as gtk4-rs only lets `gdk::Texture::from_bytes` run there.
 
 ## Checks
 
