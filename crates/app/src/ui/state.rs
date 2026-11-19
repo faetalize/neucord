@@ -1282,9 +1282,6 @@ impl State {
         self.dms().map(|c| self.mentions(c.id)).sum::<u32>() + self.relationships.incoming()
     }
 
-    /// The channels and threads of `guild` we can't view, whose held messages
-    /// are no good: the client marks them stale (`Y` in 596344) when roles,
-    /// our member or the channels change.
     /// What the chat takes from each of `threads` in `guild` (see
     /// [`discord::threads::Look`]), `None` for one we don't hold.
     pub(super) fn thread_looks(&self, guild: Snowflake, threads: &[Snowflake]) -> Vec<Option<discord::threads::Look>> {
@@ -1294,6 +1291,9 @@ impl State {
         }
     }
 
+    /// The channels and threads of `guild` we can't view, whose held messages
+    /// are no good: the client marks them stale (`Y` in 596344) when roles,
+    /// our member or the channels change.
     pub(super) fn unviewable(&self, guild: Snowflake) -> Vec<Snowflake> {
         let Some(guild) = self.guilds.iter().find(|g| g.id == guild) else { return Vec::new() };
         let ours = guild.channels.iter().chain(&guild.threads);
