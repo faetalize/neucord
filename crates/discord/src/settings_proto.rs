@@ -34,6 +34,7 @@ const GUILD_FOLDERS: u32 = 14;
 const DATA_VERSION: u32 = 3;
 
 // VoiceAndVideoSettings.
+const AFK_TIMEOUT: u32 = 6;
 const STREAM_NOTIFICATIONS_ENABLED: u32 = 7;
 
 // TextAndImagesSettings.
@@ -190,6 +191,7 @@ impl SettingsPatch {
                     .as_ref()
                     .map(|p| servers(p, ACTIVITY_JOINING_RESTRICTED_GUILD_IDS)),
             },
+            afk_timeout: voice.as_ref().and_then(|v| v.int_value(AFK_TIMEOUT)).map(|seconds| seconds as u32),
             show_current_game: settings.message(STATUS).and_then(|s| s.bool_value(STATUS_SHOW_CURRENT_GAME)),
             // A plain `bool`: `false` is not sent, so appearance without it is off.
             developer_mode: settings.message(APPEARANCE).map(|a| a.bool(DEVELOPER_MODE).unwrap_or(false)),
@@ -1075,6 +1077,20 @@ mod tests {
             let (_, written) = Setting::CustomStatus(cleared).written(&proto).unwrap();
             assert_eq!(written, string_wrapper(STATUS_STATUS, "dnd"), "the status stays");
         }
+    }
+
+    #[test]
+    fn reads_the_afk_timeout_a_wrapper_with_nothing_in_it_is_zero() {
+        let uint_wrapper =
+            |seconds: u64| bytes_field(AFK_TIMEOUT, &if seconds == 0 { Vec::new() } else { varint_field(1, seconds) });
+        let timeout = |wrapper: Vec<u8>| patch(&bytes_field(VOICE_AND_VIDEO, &wrapper)).afk_timeout;
+        assert_eq!(timeout(uint_wrapper(300)), Some(300));
+        assert_eq!(timeout(uint_wrapper(0)), Some(0), "set to 0: always away");
+        assert_eq!(timeout(bool_wrapper(STREAM_NOTIFICATIONS_ENABLED, true)), None, "never set");
+        let mut settings = crate::settings::Settings::default();
+        assert_eq!(settings.afk_timeout(), 60, "a minute until the account says otherwise");
+        settings.apply(SettingsPatch { afk_timeout: Some(0), ..SettingsPatch::default() });
+        assert_eq!(settings.afk_timeout(), 0);
     }
 
     #[test]

@@ -836,6 +836,9 @@ pub struct Settings {
     pub show_current_game: Option<bool>,
     /// Which media is covered where, as the account set it.
     pub sensitive: Preferences,
+    /// `voice_and_video.afk_timeout`, as the account set it; see
+    /// [`Self::afk_timeout`].
+    pub afk_timeout: Option<u32>,
 }
 
 /// The settings a payload mentions; the rest are `None`.
@@ -859,6 +862,7 @@ pub struct SettingsPatch {
     pub show_current_game: Option<bool>,
     /// What `text_and_images` says of sensitive media: it is saved whole.
     pub sensitive: Option<Preferences>,
+    pub afk_timeout: Option<u32>,
 }
 
 impl SettingsPatch {
@@ -911,6 +915,15 @@ impl Settings {
         if let Some(sensitive) = patch.sensitive {
             self.sensitive = sensitive;
         }
+        if patch.afk_timeout.is_some() {
+            self.afk_timeout = patch.afk_timeout;
+        }
+    }
+
+    /// Seconds without input after which we are away (`afkTimeout`, 253932):
+    /// a minute until the account says otherwise, and 0 is always away.
+    pub fn afk_timeout(&self) -> u32 {
+        self.afk_timeout.unwrap_or(crate::idle::DEFAULT_AFK_TIMEOUT)
     }
 
     /// "Share my activity": on until the account turned it off (253932's

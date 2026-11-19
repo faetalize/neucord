@@ -46,7 +46,7 @@ use crate::reactions::{self, Kind};
 use crate::read_state::ReadStates;
 use crate::relationships::{Presence, Relationship, Relationships};
 use crate::restricted::RestrictedSchedule;
-use crate::settings::{Settings, SettingsPatch, UserStatus};
+use crate::settings::{Settings, SettingsPatch};
 use crate::settings_proto;
 use crate::stage::{StageInstance, StageInstances};
 use crate::stickers::Listed;
@@ -950,9 +950,9 @@ impl Gateway {
     /// Tell Discord what we show as, as the client does (`presenceUpdate`,
     /// 868): op 3, see [`crate::presence`]. Like the client, nothing is sent
     /// before the session is established.
-    pub fn update_presence(&self, status: UserStatus) {
+    pub fn update_presence(&self, local: crate::presence::Local) {
         if self.state.established.get() {
-            send_text(&self.conn, &self.state, &request_text(3, &PresenceUpdate::new(status)));
+            send_text(&self.conn, &self.state, &request_text(3, &PresenceUpdate::new(local)));
         }
     }
 
@@ -1014,7 +1014,7 @@ impl<'a> MemberSearchRequest<'a> {
 }
 
 /// Op 3's payload, in the client's field order. Neucord reports no
-/// activities, never goes idle on its own and is never away.
+/// activities.
 #[derive(serde::Serialize)]
 struct PresenceUpdate {
     status: &'static str,
@@ -1024,8 +1024,8 @@ struct PresenceUpdate {
 }
 
 impl PresenceUpdate {
-    fn new(status: UserStatus) -> Self {
-        PresenceUpdate { status: status.wire(), since: 0, activities: [], afk: false }
+    fn new(local: crate::presence::Local) -> Self {
+        PresenceUpdate { status: local.status.wire(), since: local.since, activities: [], afk: local.away }
     }
 }
 
@@ -2923,9 +2923,16 @@ mod tests {
 
     #[test]
     fn presence_update_as_the_client_sends_it() {
+        use crate::presence::Local;
+        use crate::settings::UserStatus;
         assert_eq!(
-            request_text(3, &PresenceUpdate::new(UserStatus::DoNotDisturb)),
+            request_text(3, &PresenceUpdate::new(Local { status: UserStatus::DoNotDisturb, ..Local::INITIAL })),
             r#"{"op":3,"d":{"status":"dnd","since":0,"activities":[],"afk":false}}"#
+        );
+        // Idle since a time, and away.
+        assert_eq!(
+            request_text(3, &PresenceUpdate::new(Local::of(UserStatus::Online, Some(1_700_000_000_000), true))),
+            r#"{"op":3,"d":{"status":"idle","since":1700000000000,"activities":[],"afk":true}}"#
         );
     }
 
