@@ -13,7 +13,7 @@ use std::time::Duration;
 use adw::prelude::*;
 use discord::member_list::{self, Change, Slot};
 use discord::relationships::{Presence, Status};
-use discord::subscriptions::view_ranges;
+use discord::subscriptions::member_list_ranges;
 use discord::{Snowflake, User};
 use gtk::{gdk, glib};
 
@@ -411,11 +411,10 @@ impl App {
             return;
         }
         let adjustment = self.members.scroller.vadjustment();
-        let row = adjustment.upper() / f64::from(rows);
-        if row <= 0.0 {
+        let Some(ranges) = member_list_ranges(adjustment.value(), adjustment.page_size(), adjustment.upper(), rows)
+        else {
             return;
-        }
-        let ranges = view_ranges(adjustment.value(), adjustment.page_size(), row);
+        };
         let state = &mut *self.account.state.borrow_mut();
         state.subscriptions.ranges(guild, channel, ranges);
         self.send_subscriptions(state);

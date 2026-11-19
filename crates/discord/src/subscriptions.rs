@@ -62,6 +62,28 @@ pub fn view_ranges(y: f64, height: f64, row_height: f64) -> Ranges {
     ranges
 }
 
+/// The client's member list row height, which it counts its ranges by
+/// (`rowHeight: 42`, 420018).
+const MEMBER_ROW: f64 = 42.0;
+
+/// Less than this a row is no row: a list not laid out yet.
+const LAID_OUT_ROW: f64 = 16.0;
+
+/// The member list's ranges as it scrolls: `y` and `height` of its view,
+/// and `upper`, the height of its `rows` rows, in pixels. Rows count at
+/// their measured height, once there is one: just after a big server's
+/// list fills, before its rows are laid out, the list is one view tall for
+/// ten thousand rows, which would ask for a hundred and fifty pages at
+/// once, as the client never does. Until then, at the client's. None while
+/// the list has no rows.
+pub fn member_list_ranges(y: f64, height: f64, upper: f64, rows: u32) -> Option<Ranges> {
+    if rows == 0 {
+        return None;
+    }
+    let measured = upper / f64::from(rows);
+    Some(view_ranges(y, height, if measured >= LAID_OUT_ROW { measured } else { MEMBER_ROW }))
+}
+
 /// A server's subscription as the client keeps it (`U.get`).
 #[derive(Debug, Default)]
 struct Server {
@@ -442,6 +464,17 @@ mod tests {
                 m["d"]["subscriptions"].clone()
             })
             .collect()
+    }
+
+    #[test]
+    fn a_member_list_just_filled_asks_for_the_pages_in_view() {
+        // A big server's list has its 10 000 rows before GTK has laid them
+        // out: the list is still one view tall.
+        assert_eq!(member_list_ranges(0.0, 900.0, 900.0, 10_000), Some(vec![(0, 99)]));
+        // Laid out at 36 px a row and scrolled to row 1000: the pages around it, and the first.
+        let pages = Some(vec![(0, 99), (900, 999), (1000, 1099)]);
+        assert_eq!(member_list_ranges(36_000.0, 900.0, 360_000.0, 10_000), pages);
+        assert_eq!(member_list_ranges(0.0, 900.0, 0.0, 0), None, "nothing to ask for");
     }
 
     #[test]
