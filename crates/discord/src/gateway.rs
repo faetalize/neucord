@@ -605,6 +605,11 @@ struct State {
     established: Cell<bool>,
     seq: Cell<Option<u64>>,
     acked: Cell<bool>,
+    /// The expedited heartbeat waiting for its ACK, by number, see
+    /// [`Gateway::expedited_heartbeat`]: an ACK clears it.
+    expedited: Cell<Option<u64>>,
+    /// Numbers expedited heartbeats, never reusing one.
+    expedited_count: Cell<u64>,
     /// Why Neucord closed the connection itself, see [`close`].
     closing: Cell<Option<&'static str>>,
     /// The shapes of the last payloads sent, see [`record_sent`].
@@ -873,6 +878,8 @@ impl Gateway {
             seq: Cell::new(resume.as_ref().map(|r| r.seq)),
             session: RefCell::new(resume.map(|r| (r.session_id, r.url))),
             acked: Cell::new(true),
+            expedited: Cell::new(None),
+            expedited_count: Cell::new(0),
             closing: Cell::new(None),
             sent: RefCell::default(),
             events: tx,
@@ -957,6 +964,13 @@ impl Gateway {
             }
         });
 
+        // Sent as the connection opens, not after HELLO (`onOpen`, 868).
+        if state.resuming.get() {
+            self::resume(&conn, &state);
+        } else {
+            identify(&conn, &state);
+        }
+
         SOCKET.set(Some((conn.downgrade(), Rc::downgrade(&state))));
         Ok((Gateway { conn, state }, rx))
     }
@@ -979,6 +993,25 @@ impl Gateway {
             let request = MemberRequest { nonce: Some(nonce), ..MemberRequest::new(guild, users) };
             send_text(&self.conn, &self.state, &request_text(8, &request));
         }
+    }
+
+    /// Heartbeat now and close the connection, to be reconnected, unless it
+    /// is acknowledged within `timeout` (`expeditedHeartbeat`, 868): the
+    /// network came or went, and a connection that didn't notice is dead.
+    /// A later one replaces it; an ACK of any heartbeat ends it.
+    pub fn expedited_heartbeat(&self, timeout: Duration) {
+        if self.conn.state() != soup::WebsocketState::Open {
+            return;
+        }
+        let number = begin_expedited(&self.state);
+        heartbeat(&self.conn, &self.state);
+        let (conn, state) = (self.conn.downgrade(), Rc::downgrade(&self.state));
+        glib::timeout_add_local_once(timeout, move || {
+            let (Some(conn), Some(state)) = (conn.upgrade(), state.upgrade()) else { return };
+            if expedited_lapsed(&state, number) {
+                close(&conn, &state, "heartbeat not acknowledged");
+            }
+        });
     }
 
     /// Whether the session is established: until then nothing is asked.
@@ -1247,15 +1280,11 @@ fn handle(conn: &soup::WebsocketConnection, state: &Rc<State>, parsed: Parsed) {
         state.seq.set(Some(seq));
     }
     match parsed.what {
-        // HELLO: start heartbeating, then identify.
+        // HELLO: start heartbeating. RESUME or IDENTIFY went out as the
+        // connection opened.
         What::Hello(interval) => {
             state.hello.set(true);
             spawn_heartbeat(conn, state, Duration::from_millis(interval));
-            if state.resuming.get() {
-                resume(conn, state);
-            } else {
-                identify(conn, state);
-            }
         }
         What::Dispatch(Dispatched { events, established }) => {
             match established {
@@ -1281,6 +1310,7 @@ fn handle(conn: &soup::WebsocketConnection, state: &Rc<State>, parsed: Parsed) {
         What::Heartbeat => heartbeat(conn, state),
         What::Ack => {
             state.acked.set(true);
+            state.expedited.set(None);
             state.last_ack.set(Instant::now());
         }
         // RECONNECT: drop and let the caller resume, at once.
@@ -1343,6 +1373,22 @@ fn closed_reason(ours: Option<&'static str>, code: u16, peer: String) -> String 
             peer
         }
     }
+}
+
+/// An expedited heartbeat is about to go out: its number, never one used
+/// before, and no ACK yet.
+fn begin_expedited(state: &State) -> u64 {
+    let number = state.expedited_count.get();
+    state.expedited_count.set(number + 1);
+    state.expedited.set(Some(number));
+    state.acked.set(false);
+    number
+}
+
+/// Whether expedited heartbeat `number` went unacknowledged: still the one
+/// waiting, and no ACK since.
+fn expedited_lapsed(state: &State, number: u64) -> bool {
+    state.expedited.get() == Some(number) && !state.acked.get()
 }
 
 /// Debug aid for testing resume: with `NEUCORD_DEBUG_DROP=<seconds>`, drop
@@ -2354,10 +2400,32 @@ mod tests {
             established: Cell::new(false),
             seq: Cell::new(Some(7)),
             acked: Cell::new(true),
+            expedited: Cell::new(None),
+            expedited_count: Cell::new(0),
             closing: Cell::new(None),
             sent: RefCell::default(),
             events: async_channel::unbounded().0,
         }
+    }
+
+    #[test]
+    fn an_expedited_heartbeat_lapses_only_unacknowledged_and_unreplaced() {
+        let state = state_with("t", "t");
+        // As op 11 answers.
+        let ack = |state: &State| {
+            state.acked.set(true);
+            state.expedited.set(None);
+        };
+        let first = begin_expedited(&state);
+        ack(&state);
+        assert!(!expedited_lapsed(&state, first), "acknowledged");
+        let second = begin_expedited(&state);
+        assert!(!expedited_lapsed(&state, first), "an old one's timer never closes for a newer one");
+        assert!(expedited_lapsed(&state, second));
+        ack(&state);
+        // The regular heartbeat waiting for its own ACK is no expedited one's business.
+        state.acked.set(false);
+        assert!(!expedited_lapsed(&state, second));
     }
 
     #[test]

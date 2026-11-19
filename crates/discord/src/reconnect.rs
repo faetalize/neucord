@@ -62,6 +62,32 @@ pub fn rejects_token(code: u16) -> bool {
     code == 4004
 }
 
+/// What the network coming or going asks of the gateway connection, as the
+/// client does on the browser's `online` and `offline` events (225123's
+/// callbacks into `networkStateChange` and `expeditedHeartbeat`, 868).
+#[derive(Debug, PartialEq, Eq)]
+pub enum NetworkAction {
+    /// Heartbeat now, and reconnect unless it is acknowledged within this.
+    Heartbeat(Duration),
+    /// Connect now, waiting no longer and starting the backoff over
+    /// (`resetBackoff`).
+    ReconnectNow,
+    Nothing,
+}
+
+/// The network went `online` or offline while the connection was
+/// `connected` or not: online checks a live connection within 5 s and ends
+/// the wait of one that is down; offline checks a live one within 15 s and
+/// leaves one that is down to its backoff.
+pub fn on_network(online: bool, connected: bool) -> NetworkAction {
+    match (online, connected) {
+        (true, true) => NetworkAction::Heartbeat(Duration::from_secs(5)),
+        (false, true) => NetworkAction::Heartbeat(Duration::from_secs(15)),
+        (true, false) => NetworkAction::ReconnectNow,
+        (false, false) => NetworkAction::Nothing,
+    }
+}
+
 /// The waits between connection attempts, from the client's `gatewayBackoff`,
 /// with a guard the client doesn't have: a faulty loop (a connection that
 /// reaches READY and drops again at once, which resets the backoff each
@@ -103,6 +129,17 @@ impl Reconnect {
     /// as for a failure.
     pub fn requested(&mut self, random: f64, now: Instant) -> Duration {
         if self.recent(now) < IMMEDIATE_ATTEMPTS { Duration::ZERO } else { self.fail(random, now) }
+    }
+
+    /// The network came back while waiting to reconnect (`resetBackoff`):
+    /// whether to connect now, which starts the backoff over. Not while the
+    /// storm guard holds: then the wait already running stands.
+    pub fn reconnect_now(&mut self, now: Instant) -> bool {
+        if self.recent(now) >= STORM_ATTEMPTS {
+            return false;
+        }
+        self.backoff.succeed();
+        true
     }
 
     /// After this many failures the client forgets the session and identifies
@@ -186,6 +223,34 @@ mod tests {
         assert!(r.forgets_session(), "more than four");
         r.succeed();
         assert!(!r.forgets_session());
+    }
+
+    #[test]
+    fn the_network_coming_and_going_as_the_client_answers_it() {
+        assert_eq!(on_network(true, true), NetworkAction::Heartbeat(secs(5)));
+        assert_eq!(on_network(false, true), NetworkAction::Heartbeat(secs(15)));
+        assert_eq!(on_network(true, false), NetworkAction::ReconnectNow);
+        assert_eq!(on_network(false, false), NetworkAction::Nothing);
+    }
+
+    #[test]
+    fn the_network_back_ends_the_wait_and_starts_the_backoff_over() {
+        let (mut r, now) = (Reconnect::default(), Instant::now());
+        r.attempt(now);
+        for _ in 0..3 {
+            r.fail(0.99, now);
+        }
+        assert!(r.reconnect_now(now));
+        assert!(r.fail(0.0, now) <= secs(1), "the backoff starts over");
+    }
+
+    #[test]
+    fn the_network_back_is_no_way_round_the_storm_guard() {
+        let (mut r, now) = (Reconnect::default(), Instant::now());
+        for _ in 0..STORM_ATTEMPTS {
+            r.attempt(now);
+        }
+        assert!(!r.reconnect_now(now), "the wait already running stands");
     }
 
     #[test]
