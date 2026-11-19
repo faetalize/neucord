@@ -16,9 +16,11 @@ use discord::locales::{self, LOCALES};
 use discord::rest::Rest;
 use discord::settings::{self, ReactionNotifications, Settings, SettingsPatch, StickerAnimation};
 use discord::settings_sync::{Save, SaveError, Schedule};
+use discord::sounds;
 use gtk::glib;
 
 use super::App;
+use super::state::now_ms;
 use crate::config::{self, Key};
 use crate::theme::Theme;
 
@@ -119,6 +121,69 @@ fn page(title: &str, icon: &str, groups: &[&adw::PreferencesGroup]) -> adw::Pref
 }
 
 impl App {
+    /// The Sounds group's switches, set as the client's list sets them
+    /// (`discord::sounds`): the master switch, and the new message sound
+    /// under it, with a button to hear it (the client's "Preview Sound").
+    fn sound_rows(self: &Rc<Self>, form: &mut Form, group: &adw::PreferencesGroup) {
+        let all = adw::SwitchRow::builder()
+            .title("Notification sounds")
+            .subtitle("Turning this off keeps your choices below and brings them back when it is on.")
+            .active(self.config.get(&config::ALL_SOUNDS))
+            .build();
+        let message = adw::SwitchRow::builder().title("New message").build();
+        let preview = gtk::Button::builder()
+            .icon_name("media-playback-start-symbolic")
+            .tooltip_text("Preview Sound")
+            .valign(gtk::Align::Center)
+            .css_classes(["flat"])
+            .build();
+        preview.connect_clicked(|_| crate::sound::play(crate::desktop::SOUND, 1.0));
+        message.add_suffix(&preview);
+        group.add(&all);
+        group.add(&message);
+
+        // The message row is set from the options and Focus Mode, which must
+        // not save what it shows.
+        let setting = Rc::new(Cell::new(false));
+        let show = {
+            let (app, message, setting) = (Rc::downgrade(self), message.clone(), setting.clone());
+            Rc::new(move |settings: &Settings| {
+                let Some(app) = app.upgrade() else { return };
+                let focus = settings.focus_mode(now_ms() as u64);
+                let row =
+                    sounds::row(app.config.get(&config::ALL_SOUNDS), app.config.get(&config::MESSAGE_SOUND), focus);
+                setting.set(true);
+                message.set_active(row.on);
+                setting.set(false);
+                message.set_sensitive(row.enabled);
+                message.set_subtitle(if focus { "This is disabled by Focus Mode" } else { "" });
+            })
+        };
+        let save = |app: &Rc<App>, key: &'static Key, on: bool| {
+            if let Err(e) = app.config.set(key, on) {
+                eprintln!("config: {e}");
+                app.settings_toast("Could not save that option");
+            }
+        };
+        all.connect_active_notify({
+            let (app, show) = (Rc::downgrade(self), show.clone());
+            move |row| {
+                let Some(app) = app.upgrade() else { return };
+                save(&app, &config::ALL_SOUNDS, row.is_active());
+                show(&app.account.state.borrow().settings);
+            }
+        });
+        message.connect_active_notify({
+            let app = Rc::downgrade(self);
+            move |row| {
+                if let (false, Some(app)) = (setting.get(), app.upgrade()) {
+                    save(&app, &config::MESSAGE_SOUND, row.is_active());
+                }
+            }
+        });
+        form.shows.push(Box::new(move |settings| show(settings)));
+    }
+
     pub(super) fn show_settings(self: &Rc<Self>) {
         if let Some(open) = self.settings_window.borrow().as_ref() {
             return open.dialog.present(Some(&self.window));
@@ -302,15 +367,7 @@ impl App {
             "Sounds",
             "Neucord has the new message sound and the one a voice message recording makes when another stops it; the client's call sounds come with voice.",
         );
-        option_switch(
-            self,
-            &sounds,
-            "Notification sounds",
-            "Turning this off keeps your choices below and brings them back when it is on.",
-            &config::ALL_SOUNDS,
-            |_, _| {},
-        );
-        option_switch(self, &sounds, "New message", "", &config::MESSAGE_SOUND, |_, _| {});
+        self.sound_rows(&mut form, &sounds);
         let chat_box = group("Chat box", "");
         option_switch(self, &chat_box, "Show send message button", "", &config::SEND_BUTTON, |app, _| {
             app.refresh_chat_bar()

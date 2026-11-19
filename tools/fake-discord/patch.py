@@ -1713,6 +1713,43 @@ impl App {
     }
 }
 """)
+# The Sounds group of the Neucord settings page (#298): `settings neucord` opens the page, `sound-switch <title> on|off` flips
+# the switch row of that title (`Notification sounds` or `New message`) as a click does, `sound-state` prints whether each is on and enabled.
+edit("crates/app/src/ui/settings.rs", '        neucord.set_description(', '        neucord.set_name(Some("neucord"));\n        neucord.set_description(')
+open(f"{root}/crates/app/src/ui/settings.rs", "a").write(r"""
+fn e2e_switch(widget: &gtk::Widget, title: &str) -> Option<adw::SwitchRow> {
+    if let Some(row) = widget.downcast_ref::<adw::SwitchRow>().filter(|row| row.title() == title) {
+        return Some(row.clone());
+    }
+    let mut child = widget.first_child();
+    while let Some(c) = child {
+        if let Some(found) = e2e_switch(&c, title) {
+            return Some(found);
+        }
+        child = c.next_sibling();
+    }
+    None
+}
+
+impl App {
+    pub(super) fn e2e_sound_switch(self: &Rc<Self>, title: &str, on: Option<bool>) {
+        let Some(dialog) = self.settings_window.borrow().as_ref().map(|w| w.dialog.clone()) else {
+            return eprintln!("e2e: no settings window");
+        };
+        let Some(row) = e2e_switch(dialog.upcast_ref(), title) else { return eprintln!("e2e: no switch {title}") };
+        match on {
+            Some(on) => row.set_active(on),
+            None => eprintln!("e2e: sound {title}: on={} enabled={} subtitle={:?}", row.is_active(), row.is_sensitive(), row.subtitle()),
+        }
+    }
+}
+""")
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("sound-switch") => {
+                let (title, on) = rest.rsplit_once(' ').unwrap_or((rest, "on"));
+                self.e2e_sound_switch(title, Some(on == "on"));
+            }
+            Some("sound-state") => self.e2e_sound_switch(rest, None),
+            Some("quit") => {''')
 edit("crates/app/src/ui/activity_privacy.rs", "    fn set_activity_default(self: &Rc<Self>", "    pub(super) fn set_activity_default(self: &Rc<Self>")
 edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some(c) if c == "settings" || c == "activity-share" || c == "activity-default" => self.e2e_settings(c, rest),
             Some("quit") => {''')
