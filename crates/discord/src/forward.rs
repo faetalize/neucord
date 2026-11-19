@@ -359,6 +359,7 @@ mod tests {
             mfa: false,
             nsfw_allowed: false,
             nsfw_set: false,
+            age_status: None,
         }
     }
 

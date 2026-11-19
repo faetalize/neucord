@@ -335,10 +335,19 @@ impl App {
                 }
                 Event::UserUpdate(user) => self.on_user_update(*user),
                 Event::AccountUpdate(account, nitro) => {
-                    {
+                    let age_changed = {
                         let mut state = self.account.state.borrow_mut();
                         state.account = Some(account);
                         state.nitro = nitro;
+                        // What the new age group opens (or closes).
+                        let changed = account.age_status.filter(|&age| age != state.gates.age);
+                        if let Some(age) = changed {
+                            state.gates = state.gates.with_age(age);
+                        }
+                        changed.is_some()
+                    };
+                    if age_changed {
+                        self.age_gate_changed();
                     }
                     // 2FA turned on or off changes moderators' permissions.
                     self.permissions_changed(None);

@@ -6,9 +6,9 @@
 //! The request is `fetchMessages` in 256796 with the fetcher in 177068. A
 //! server is searched at `/guilds/{id}/messages/search`, a DM at
 //! `/channels/{id}/messages/search`; searching every DM at once is a POST to
-//! `/users/@me/messages/search/tabs`, which the client does only where the
-//! setting `isCrossDmSearchEnabled` is on, and which Neucord, reading no
-//! settings protobuf, never sends.
+//! `/users/@me/messages/search/tabs` (`fetchTabMessages` in 256796, with
+//! `createRequestPayload` in 956467), which the client does where the
+//! setting `isCrossDmSearchEnabled` is on.
 
 use std::time::Duration;
 
@@ -27,16 +27,23 @@ pub const MAX_QUERY: usize = 512;
 /// The client waits this long after Enter before it sends (`te` in 586944).
 pub const DEBOUNCE: Duration = Duration::from_millis(500);
 
-/// Where a search looks: a whole server, or one DM.
+/// Where a search looks: a whole server, one DM, or every DM at once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Context {
     Guild(Snowflake),
     Channel(Snowflake),
+    /// Every DM and group DM, once the account's setting asks for it.
+    Dms,
 }
 
 impl Context {
     pub fn is_guild(self) -> bool {
         matches!(self, Context::Guild(_))
+    }
+
+    /// Whether `in:` is offered: in a server, and among all the DMs (`HM` in 5990).
+    pub fn offers_in(self) -> bool {
+        matches!(self, Context::Guild(_) | Context::Dms)
     }
 }
 
@@ -138,10 +145,11 @@ impl Filter {
         }
     }
 
-    /// The filters the box offers (`u_` in 5990): `in:` only in a server.
+    /// The filters the box offers (`u_` in 5990): `in:` only in a server or
+    /// among every DM.
     pub fn offered(context: Context) -> Vec<Filter> {
         let mut filters = vec![Filter::From];
-        if context.is_guild() {
+        if context.offers_in() {
             filters.push(Filter::In);
         }
         filters.extend([
@@ -246,8 +254,8 @@ fn filter_at(text: &[char], at: usize, context: Context) -> Option<(Filter, usiz
         let keys: &[&str] = if filter == Filter::During { &["on:", "during:"] } else { &[filter.key()] };
         for key in keys {
             if starts_with_ci(text, at, key) {
-                // `in:` is for servers (the rule's validator, 5990).
-                if filter == Filter::In && !context.is_guild() {
+                // `in:` is for servers and every DM (the rule's validator, 5990).
+                if filter == Filter::In && !context.offers_in() {
                     continue;
                 }
                 return Some((filter, at + key.chars().count()));
@@ -500,6 +508,23 @@ pub fn cleaned(text: &str, tokens: &[Token]) -> String {
     out
 }
 
+/// `text` without the `in:` filters and what they name, for the search of one
+/// DM, which has no such filter (`EH` in 822382).
+pub fn without_in(text: &str, tokens: &[Token]) -> String {
+    let mut kept = String::new();
+    let mut last = 0;
+    let chars: Vec<char> = text.chars().collect();
+    for token in tokens {
+        let is_in = matches!(token.part, Part::Filter(Filter::In) | Part::Answer(Filter::In, _));
+        if is_in {
+            kept.extend(&chars[last..token.start.min(chars.len())]);
+            last = token.end.min(chars.len());
+        }
+    }
+    kept.extend(&chars[last..]);
+    kept.trim().to_owned()
+}
+
 /// What goes into the query: its keys in the order they first came up, and
 /// what each has (`Zf` in 822382).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -663,12 +688,16 @@ pub struct Request {
     /// `search_session_id` and `search_query_id`, which the client adds only
     /// to the servers that are in Server Discovery.
     pub discovery: Option<(String, String)>,
+    /// `include_nsfw`: set for a server we agreed to go into, to whether the
+    /// account is an adult's (`L5` in 822382).
+    pub include_nsfw: Option<bool>,
 }
 
 impl Request {
     /// The query string in the client's order: what was typed, the sort,
-    /// Discovery's ids, the offset, and after a 202 the `attempts` so far
-    /// (the fetcher counts them in the query itself, 177068).
+    /// Discovery's ids, the offset, `include_nsfw`, and after a 202 the
+    /// `attempts` so far (the fetcher counts them in the query itself,
+    /// 177068).
     pub fn query(&self, attempts: u32) -> String {
         let (by, order) = self.sort.fields();
         let mut pairs: Vec<(&str, &str)> = Vec::new();
@@ -681,11 +710,54 @@ impl Request {
         }
         let offset = self.offset.to_string();
         pairs.push(("offset", &offset));
+        if let Some(allowed) = self.include_nsfw {
+            pairs.push(("include_nsfw", if allowed { "true" } else { "false" }));
+        }
         let attempts = attempts.to_string();
         if attempts != "0" {
             pairs.push(("attempts", &attempts));
         }
         pairs.iter().map(|(k, v)| format!("{}={}", component(k), component(v))).collect::<Vec<_>>().join("&")
+    }
+}
+
+impl Request {
+    /// The body of the tabs search that looks in every DM (`createRequestPayload`
+    /// in 956467): the `in:` channels as `channel_ids`, and one tab, `messages`
+    /// (`getLimit` is [`PAGE`], and the pagination is the offset), whose fields
+    /// are the query's, sorted. `pinned` is a boolean there, and a field
+    /// that has answers is a list but for `content` and the dates.
+    pub fn tabs_body(&self) -> Value {
+        use serde_json::{Map, json};
+        let (by, order) = self.sort.fields();
+        let mut tab = Map::new();
+        tab.insert("sort_by".into(), json!(by));
+        tab.insert("sort_order".into(), json!(order));
+        let mut channels = None;
+        for (key, values) in &self.fields.0 {
+            let value = match key.as_str() {
+                "channel_id" => {
+                    channels = Some(json!(values));
+                    continue;
+                }
+                "content" | "min_id" | "max_id" => json!(values.join(" ")),
+                "pinned" => json!(values.iter().any(|v| v == "true")),
+                _ => json!(values),
+            };
+            tab.insert(key.clone(), value);
+        }
+        tab.insert("offset".into(), json!(self.offset));
+        tab.insert("limit".into(), json!(PAGE));
+        let mut body = Map::new();
+        if let Some(allowed) = self.include_nsfw {
+            body.insert("include_nsfw".into(), json!(allowed));
+        }
+        if let Some(channels) = channels {
+            body.insert("channel_ids".into(), channels);
+        }
+        body.insert("tabs".into(), json!({ "messages": tab }));
+        body.insert("track_exact_total_hits".into(), json!(true));
+        Value::Object(body)
     }
 }
 
@@ -734,14 +806,24 @@ impl Page {
     /// From a 200: each result is a list of messages round the one found,
     /// whose first the client keeps (`SEARCH_MESSAGES_SUCCESS` in 517381).
     pub fn from_value(answer: &Value) -> Option<Page> {
-        let groups = answer["messages"].as_array()?;
+        Self::read(answer, answer)
+    }
+
+    /// From the answer to the tabs search: its `messages` tab holds the
+    /// results, and the answer itself whether Discord is still indexing.
+    pub fn from_tabs(answer: &Value) -> Option<Page> {
+        Self::read(&answer["tabs"]["messages"], answer)
+    }
+
+    fn read(results: &Value, answer: &Value) -> Option<Page> {
+        let groups = results["messages"].as_array()?;
         let messages = groups
             .iter()
             .filter_map(|g| g.as_array()?.first())
             .filter_map(|m| serde_json::from_value::<Message>(m.clone()).ok())
             .collect();
         Some(Page {
-            total: answer["total_results"].as_u64()?,
+            total: results["total_results"].as_u64()?,
             messages,
             indexing: answer["doing_deep_historical_index"].as_bool().unwrap_or(false),
             documents_indexed: answer["documents_indexed"].as_u64().unwrap_or(0),
@@ -847,12 +929,12 @@ pub fn suggest(text: &str, cursor: usize, tokens: &[Token], context: Context, kn
         return starts();
     }
     match filling(text, cursor, tokens) {
-        Some((_, filter, typed)) => values(filter, &typed, known),
+        Some((_, filter, typed)) => values(filter, &typed, context, known),
         None => starts(),
     }
 }
 
-fn values(filter: Filter, typed: &str, known: &Known) -> Vec<Suggestion> {
+fn values(filter: Filter, typed: &str, context: Context, known: &Known) -> Vec<Suggestion> {
     let limit = 10;
     let value = |label: &str, insert: String| Suggestion::Value { filter, label: label.to_owned(), insert };
     match filter {
@@ -881,7 +963,8 @@ fn values(filter: Filter, typed: &str, known: &Known) -> Vec<Suggestion> {
             let query = typed.trim_start_matches('"').trim_start_matches('#');
             fuzzy_names(query, known.channels.iter().map(String::as_str), limit)
                 .into_iter()
-                .map(|name| value(name, format!("#{}", quoted(name))))
+                // A server's channel is `#name`; a DM, or a group DM, is its name (`Rt` in 822382).
+                .map(|name| value(name, format!("{}{}", if context.is_guild() { "#" } else { "" }, quoted(name))))
                 .collect()
         }
         Filter::Has => {
@@ -962,8 +1045,14 @@ mod tests {
     const DM: Context = Context::Channel(Snowflake(2));
 
     fn query(context: Context, text: &str) -> String {
-        let request =
-            Request { context, fields: fields(&parse(context, text)), sort: Sort::Newest, offset: 0, discovery: None };
+        let request = Request {
+            context,
+            fields: fields(&parse(context, text)),
+            sort: Sort::Newest,
+            offset: 0,
+            discovery: None,
+            include_nsfw: None,
+        };
         request.query(0)
     }
 
@@ -1079,6 +1168,7 @@ mod tests {
             sort: Sort::MostRelevant,
             offset: 50,
             discovery: Some(("s".into(), "q".into())),
+            include_nsfw: None,
         };
         assert_eq!(
             request.query(0),
@@ -1148,6 +1238,134 @@ mod tests {
         // `in:` in a DM isn't a filter.
         let tokens = parse(DM, "in:");
         assert!(suggest("in:", 3, &tokens, DM, &known).iter().all(|s| matches!(s, Suggestion::Filter(_))));
+    }
+
+    const DMS: Context = Context::Dms;
+
+    #[test]
+    fn among_every_dm_in_names_a_dm_or_a_group_without_a_hash() {
+        assert_eq!(
+            query(DMS, "in:general hi"),
+            "channel_id=5&content=hi&sort_by=timestamp&sort_order=desc&offset=0",
+            "`in:` is a filter there"
+        );
+        assert!(Filter::offered(DMS).contains(&Filter::In));
+        assert!(!Filter::offered(DM).contains(&Filter::In));
+        let channels = vec!["alice".to_owned(), "the group".to_owned()];
+        let known = Known { users: &[], channels: &channels };
+        let tokens = parse(DMS, "in:th");
+        let found = suggest("in:th", 5, &tokens, DMS, &known);
+        assert!(matches!(&found[0], Suggestion::Value { insert, .. } if insert == "\"the group\""));
+        let tokens = parse(GUILD, "in:al");
+        let found = suggest("in:al", 5, &tokens, GUILD, &known);
+        assert!(
+            matches!(&found[0], Suggestion::Value { insert, .. } if insert == "#alice"),
+            "a server's keep the hash"
+        );
+    }
+
+    #[test]
+    fn going_to_one_dm_drops_what_in_named() {
+        let text = "hi in:general from:alice there";
+        assert_eq!(
+            without_in(text, &parse(DMS, text)),
+            "hi  from:alice there",
+            "the spaces stay, as the client leaves them"
+        );
+        let text = "in:general";
+        assert_eq!(without_in(text, &parse(DMS, text)), "");
+        let text = "just words";
+        assert_eq!(without_in(text, &parse(DMS, text)), "just words");
+    }
+
+    #[test]
+    fn a_server_we_agreed_to_go_into_is_asked_with_include_nsfw_after_the_offset() {
+        let mut request = Request {
+            context: GUILD,
+            fields: fields(&parse(GUILD, "hi")),
+            sort: Sort::Newest,
+            offset: 25,
+            discovery: None,
+            include_nsfw: Some(true),
+        };
+        assert_eq!(request.query(0), "content=hi&sort_by=timestamp&sort_order=desc&offset=25&include_nsfw=true");
+        assert_eq!(
+            request.query(2),
+            "content=hi&sort_by=timestamp&sort_order=desc&offset=25&include_nsfw=true&attempts=2",
+            "the attempts come last, as the fetcher adds them to the same query"
+        );
+        request.include_nsfw = Some(false);
+        assert!(request.query(0).ends_with("&offset=25&include_nsfw=false"));
+        request.include_nsfw = None;
+        assert!(request.query(0).ends_with("&offset=25"));
+    }
+
+    fn tabs(context: Context, text: &str, include_nsfw: Option<bool>) -> Value {
+        Request {
+            context,
+            fields: fields(&parse(context, text)),
+            sort: Sort::Newest,
+            offset: 50,
+            discovery: None,
+            include_nsfw,
+        }
+        .tabs_body()
+    }
+
+    #[test]
+    fn every_dm_at_once_is_one_tab_asked_as_the_client_does() {
+        assert_eq!(
+            tabs(DMS, "hello from:alice has:image has:link pinned:true", None),
+            json!({
+                "tabs": {"messages": {
+                    "sort_by": "timestamp", "sort_order": "desc", "content": "hello",
+                    "author_id": ["111111111111111111"], "has": ["image", "link"], "pinned": true,
+                    "offset": 50, "limit": 25,
+                }},
+                "track_exact_total_hits": true,
+            }),
+            "`pinned` is a boolean, the rest lists but for the content"
+        );
+        // The channels are asked of at the top, not in the tab.
+        let body = tabs(DMS, "in:general after:2026-11-05 hi", None);
+        assert_eq!(body["channel_ids"], json!(["5"]));
+        assert!(body["tabs"]["messages"].get("channel_id").is_none());
+        assert!(body["tabs"]["messages"]["min_id"].is_string(), "a date is one id, not a list");
+        assert_eq!(body["tabs"]["messages"]["content"], "hi");
+        assert!(body.get("include_nsfw").is_none(), "only a server we agreed to has it");
+        assert_eq!(tabs(DMS, "hi", Some(true))["include_nsfw"], true);
+        let mut oldest = Request {
+            sort: Sort::MostRelevant,
+            ..Request {
+                context: DMS,
+                fields: fields(&parse(DMS, "hi")),
+                sort: Sort::Newest,
+                offset: 0,
+                discovery: None,
+                include_nsfw: None,
+            }
+        };
+        assert_eq!(oldest.tabs_body()["tabs"]["messages"]["sort_by"], "relevance");
+        oldest.sort = Sort::Oldest;
+        assert_eq!(oldest.tabs_body()["tabs"]["messages"]["sort_order"], "asc");
+    }
+
+    #[test]
+    fn the_answer_to_the_tabs_search_has_its_results_in_the_messages_tab() {
+        let message = |id: u64| {
+            json!({"id": id.to_string(), "channel_id": "2", "content": "hi", "timestamp": "2026-01-01T00:00:00.000000+00:00",
+                   "author": {"id": "1", "username": "a"}, "attachments": [], "embeds": [], "mentions": [],
+                   "mention_roles": [], "pinned": false, "tts": false, "type": 0})
+        };
+        let answer = json!({
+            "analytics_id": "x", "doing_deep_historical_index": true, "documents_indexed": 9,
+            "tabs": {"messages": {"total_results": 3, "cursor": null, "messages": [[message(7), message(6)], [message(2)]],
+                                  "channels": [], "threads": [], "members": []}},
+        });
+        let page = Page::from_tabs(&answer).unwrap();
+        assert_eq!((page.total, page.indexing, page.documents_indexed), (3, true, 9));
+        assert_eq!(page.messages.iter().map(|m| m.id.0).collect::<Vec<_>>(), [7, 2]);
+        assert!(Page::from_tabs(&json!({"tabs": {}})).is_none());
     }
 
     #[test]

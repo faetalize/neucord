@@ -5,6 +5,7 @@ mod account;
 mod accounts;
 mod activity_privacy;
 mod age_gate;
+mod age_verification;
 mod attachments;
 mod background;
 mod builtins;
@@ -275,6 +276,10 @@ pub struct App {
     /// Counts changes to what every message's content is drawn from (names,
     /// colours, settings), so rows know to make theirs again.
     row_epoch: Cell<u64>,
+    /// The emoji of the hover bar over a row, by channel and `row_epoch`:
+    /// working them out takes the whole emoji library of the server, and
+    /// each bind of a row asks.
+    hover_emoji: RefCell<crate::kept::Fresh<(Snowflake, u64), Vec<discord::emoji::Item>>>,
     /// The list of who reacted, while it is open.
     reactors_view: RefCell<Option<Rc<reactors::View>>>,
     /// The thread browser, while it's open.
@@ -552,6 +557,7 @@ impl App {
             unread_divider: glib::WeakRef::new(),
             highlight: Cell::default(),
             row_epoch: Cell::default(),
+            hover_emoji: RefCell::new(crate::kept::Fresh::new(std::time::Duration::from_secs(1))),
             reactors_view: RefCell::default(),
             threads_view: RefCell::default(),
             profile_views: RefCell::default(),

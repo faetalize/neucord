@@ -33,7 +33,7 @@ what arrived, IDENTIFY's key order and properties first.
   `qos_token`. Both settings protos are kept, and a save merges into them field by field
   as Discord's does. The GIF endpoints answer made-up results, one with a
   numeric id, and take a pick's `POST /gifs/select`. A thread made from a
-  channel joins the server and comes back as `THREAD_CREATE`. `FAKE_VARIANTS="hiding=1,voice=1,ladder=1,lazy=1,upload=1,nsfwlevel=1,chatbar=1,dice=1"`
+  channel joins the server and comes back as `THREAD_CREATE`. `FAKE_VARIANTS="hiding=1,voice=1,ladder=1,lazy=1,upload=1,nsfwlevel=1,chatbar=1,dice=1,ageverify=1"`
   assigns Apex experiments by name, `FAKE_REIDENTIFY=<s>` sends op 9 after
   that many seconds to force a second IDENTIFY, `FAKE_NEW_TOKEN` puts an
   `auth_token` in READY, `FAKE_LEFT=<user ids>` has those people leave the
@@ -180,7 +180,9 @@ what arrived, IDENTIFY's key order and properties first.
   Remove from Thread (`member-menu-item remove-from-thread`), which sends the
   DELETE and loses them from the list;
   `heartbeat` waits for five op 40s, the interval's among them;
+  `search-dms` (with `FAKE_NSFW="dms=1"`) searches a server before and after Continue on an age-restricted channel (`include_nsfw=true` only after), a DM, and with the cog every DM at once (the POST's body is in `requests.txt`), with and without `in:`;
   `idle` (with `NEUCORD_DEBUG_IDLE=4`) lists the op 3 frames: idle and away after four quiet seconds, active again when a channel opens (`IDLE_STEPS=300` waits for the real minute's away instead);
+  `age-verification` (with `AGE_FLOW=1 FAKE_NSFW="status=1,gated=1" FAKE_VARIANTS=ageverify=1`) confirms an age from the gate: the methods, the method picked, a vendor page at the fake that says it has a result and then that it is done, and the account becomes an adult's (the web view can't be photographed headless, so there is no shot of the page);
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).
 - **`pointer.py`**: a real pointer and keyboard for the headless compositor,
