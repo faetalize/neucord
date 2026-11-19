@@ -21,6 +21,7 @@ use discord::notifications::{Level, NotificationSettings, Place, UnreadSetting};
 use discord::permissions;
 use discord::post_creation;
 use discord::read_state::ReadStates;
+use discord::reconnect::Reconnect;
 use discord::relationships::Relationships;
 use discord::restricted::RestrictedSchedule;
 use discord::settings::{RailEntry, Settings};
@@ -118,6 +119,9 @@ pub(super) struct Account {
     /// and reconnect timers of a session that was left see it changed, and
     /// stop.
     pub(super) epoch: Cell<u64>,
+    /// The wait before the next connection attempt, while there is one: the
+    /// network coming back ends it early.
+    pub(super) reconnect_timer: RefCell<Option<glib::SourceId>>,
 }
 
 impl Account {
@@ -129,6 +133,7 @@ impl Account {
             kept_content: RefCell::new(Kept::new(super::chat::KEPT_CONTENT)),
             notified: RefCell::default(),
             epoch: Cell::new(0),
+            reconnect_timer: RefCell::default(),
         }
     }
 
@@ -138,6 +143,9 @@ impl Account {
     /// to take back.
     pub(super) fn leave(&self) -> (Option<Rest>, Vec<String>) {
         self.epoch.set(self.epoch.get() + 1);
+        if let Some(timer) = self.reconnect_timer.take() {
+            timer.remove();
+        }
         let rest = self.state.replace((self.fresh)()).rest;
         self.timelines.borrow_mut().clear();
         self.kept_content.borrow_mut().clear();
@@ -157,7 +165,8 @@ pub(super) struct State {
     pub(super) target: Option<Snowflake>,
     /// READY arrived at least once for this token.
     pub(super) ready_seen: bool,
-    pub(super) reconnect_attempts: u32,
+    /// The waits between connection attempts.
+    pub(super) reconnect: Reconnect,
     /// Set while the last session can be resumed; kept across failed
     /// attempts, replaced by each close.
     pub(super) resume: Option<Resume>,

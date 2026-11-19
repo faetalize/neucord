@@ -1,14 +1,16 @@
 //! Logging out, the gateway connection (reconnects and resumes), and
 //! routing gateway events to the rest of the UI.
 
+use std::cell::Cell;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::Instant;
 
 use discord::accounts::Answer;
+use discord::reconnect::{self, NetworkAction};
 use discord::threads::Redraw;
 use discord::{Channel, Event, Gateway, Guild, Member, Ready, Rest, Snowflake, session};
-use gtk::glib;
 use gtk::prelude::*;
+use gtk::{gio, glib};
 
 use super::App;
 use super::accounts::Origin;
@@ -121,6 +123,7 @@ impl App {
             state.token = Some(token.clone());
             state.persisted = persisted;
             state.gateway = None;
+            state.reconnect.attempt(Instant::now());
         }
         if !self.account.state.borrow().ready_seen {
             self.show_loading("Connecting to Discord…");
@@ -141,36 +144,51 @@ impl App {
                     this.account.state.borrow_mut().gateway = Some(gateway);
                     this.run_events(events, epoch).await;
                 }
-                Err(e) => this.connection_lost(&e.to_string()),
+                Err(e) => {
+                    // A failed connection forgets the resume URL (`onError` in 868).
+                    if let Some(resume) = this.account.state.borrow_mut().resume.as_mut() {
+                        resume.forget_url();
+                    }
+                    this.connection_lost(&e.to_string(), false)
+                }
             }
         });
     }
 
-    /// Transport-level failure or a non-fatal close: retry with backoff if
-    /// this token is known good, otherwise send the user back to login.
-    pub(super) fn connection_lost(self: &Rc<Self>, why: &str) {
-        let (known_good, attempts, token, resumable) = {
+    /// Transport-level failure or a close other than 4004: retry after the
+    /// client's wait (`discord::reconnect`) if this token is known good,
+    /// otherwise send the user back to login. `requested` is Discord's own
+    /// RECONNECT, which comes at once.
+    pub(super) fn connection_lost(self: &Rc<Self>, why: &str, requested: bool) {
+        let (known_good, token, delay) = {
             let mut state = self.account.state.borrow_mut();
             state.gateway = None;
-            state.reconnect_attempts += 1;
-            (state.persisted || state.ready_seen, state.reconnect_attempts, state.token.clone(), state.resume.is_some())
+            let (random, now) = (glib::random_double_range(0.0, 1.0), Instant::now());
+            let delay =
+                if requested { state.reconnect.requested(random, now) } else { state.reconnect.fail(random, now) };
+            // After a run of failures the session is let go of, and the next
+            // connection identifies afresh.
+            if state.reconnect.forgets_session() {
+                state.resume = None;
+            }
+            (state.persisted || state.ready_seen, state.token.clone(), delay)
         };
         let Some(token) = token.filter(|_| known_good) else {
             return self.show_signed_out(Some(why));
         };
-        // A resumable session is worth retrying at once: Discord only keeps
-        // it for a short while. After that, back off.
-        let delay = if resumable && attempts == 1 { 1 } else { 2u64.saturating_pow(attempts.min(6)).min(60) };
-        let status = format!("Disconnected ({why}). Reconnecting in {delay}s…");
-        if self.account.state.borrow().ready_seen {
-            self.me_label.set_label(&status);
-        } else {
-            self.show_loading(&status);
+        if !delay.is_zero() {
+            let status = format!("Disconnected ({why}). Reconnecting in {}s…", delay.as_secs_f64().ceil());
+            if self.account.state.borrow().ready_seen {
+                self.me_label.set_label(&status);
+            } else {
+                self.show_loading(&status);
+            }
         }
         let this = Rc::downgrade(self);
         let epoch = self.account.epoch.get();
-        glib::timeout_add_local_once(Duration::from_secs(delay), move || {
+        let timer = glib::timeout_add_local_once(delay, move || {
             if let Some(this) = this.upgrade() {
+                this.account.reconnect_timer.take();
                 // Logged out or switched meanwhile?
                 if this.account.epoch.get() == epoch && this.account.state.borrow().token.as_ref() == Some(&token) {
                     let persisted = this.account.state.borrow().persisted;
@@ -178,6 +196,60 @@ impl App {
                 }
             }
         });
+        if let Some(old) = self.account.reconnect_timer.replace(Some(timer)) {
+            old.remove();
+        }
+    }
+
+    /// Follow the network coming and going, as the client follows the
+    /// browser's `online` and `offline` events (225123): only a change
+    /// counts, not every route GIO reports.
+    pub(super) fn watch_network(self: &Rc<Self>) {
+        let monitor = gio::NetworkMonitor::default();
+        let online = Cell::new(monitor.is_network_available());
+        let this = Rc::downgrade(self);
+        monitor.connect_network_changed(move |_, available| {
+            if online.replace(available) != available
+                && let Some(this) = this.upgrade()
+            {
+                this.network_changed(available);
+            }
+        });
+    }
+
+    fn network_changed(self: &Rc<Self>, online: bool) {
+        let connected = self.account.state.borrow().gateway.is_some();
+        match reconnect::on_network(online, connected) {
+            NetworkAction::Heartbeat(timeout) => {
+                if let Some(gateway) = &self.account.state.borrow().gateway {
+                    gateway.expedited_heartbeat(timeout);
+                }
+            }
+            NetworkAction::ReconnectNow => self.reconnect_now(),
+            NetworkAction::Nothing => {}
+        }
+    }
+
+    /// The network is back while we wait to reconnect: connect now, with
+    /// the backoff started over (`resetBackoff`, 868), unless the storm guard
+    /// holds.
+    fn reconnect_now(self: &Rc<Self>) {
+        if self.account.reconnect_timer.borrow().is_none() {
+            return;
+        }
+        let (token, persisted) = {
+            let mut state = self.account.state.borrow_mut();
+            if !state.reconnect.reconnect_now(Instant::now()) {
+                return;
+            }
+            (state.token.clone(), state.persisted)
+        };
+        if let Some(timer) = self.account.reconnect_timer.take() {
+            timer.remove();
+        }
+        if let Some(token) = token {
+            self.connect(token, persisted);
+        }
     }
 
     pub(super) async fn run_events(self: &Rc<Self>, events: async_channel::Receiver<Event>, epoch: u64) {
@@ -517,13 +589,13 @@ impl App {
                     self.resend_presence();
                     let name = {
                         let mut state = self.account.state.borrow_mut();
-                        state.reconnect_attempts = 0;
+                        state.reconnect.succeed();
                         state.me.as_ref().map(|u| u.display_name().to_owned()).unwrap_or_default()
                     };
                     self.me_label.set_label(&name);
                     // Replayed messages have already updated the open channel.
                 }
-                Event::Closed { code, reason, resume } => {
+                Event::Closed { code, reason, resume, requested } => {
                     // A rejected token has nothing to save to.
                     if !Event::is_fatal_close(code) {
                         self.usage_closed();
@@ -563,7 +635,7 @@ impl App {
                         )));
                     } else if self.account.state.borrow().token.is_some() {
                         let why = if reason.is_empty() { format!("code {code}") } else { reason };
-                        self.connection_lost(&why);
+                        self.connection_lost(&why, requested);
                     }
                     return;
                 }
@@ -621,7 +693,7 @@ impl App {
             let mut state = self.account.state.borrow_mut();
             let was_ready = state.ready_seen;
             state.ready_seen = true;
-            state.reconnect_attempts = 0;
+            state.reconnect.succeed();
             state.guilds = guilds;
             // What a session loaded of threads goes with it.
             state.archives.clear();

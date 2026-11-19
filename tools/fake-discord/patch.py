@@ -14,6 +14,8 @@ edit("crates/discord/src/identity.rs", 'pub const API_BASE: &str = "https://disc
 edit("crates/discord/src/identity.rs",
      'pub const GATEWAY_URL: &str = "wss://gateway.discord.gg/?encoding=json&v=9&compress=zlib-stream";',
      'pub const GATEWAY_URL: &str = "ws://127.0.0.1:8099/?encoding=json&v=9&compress=zlib-stream";')
+edit("crates/discord/src/gateway.rs", 'const DEFAULT_GATEWAY: &str = "wss://gateway.discord.gg";',
+     'const DEFAULT_GATEWAY: &str = "ws://127.0.0.1:8099";')
 edit("crates/discord/src/cdn.rs", 'host == "media.discordapp.net" ||', 'host == "127.0.0.1:8099" || host == "media.discordapp.net" ||')
 edit("crates/discord/src/cdn.rs", 'let host = url.strip_prefix("https://").and_then(|rest| rest.split([\'/\', \'?\']).next()).unwrap_or_default();', 'let host = url.strip_prefix("http://").and_then(|rest| rest.split([\'/\', \'?\']).next()).unwrap_or_default();')
 edit("crates/app/src/ui/uploads.rs", "    attach: gtk::Button,", "    pub(super) attach: gtk::Button,")
@@ -1459,6 +1461,12 @@ impl App {
     }
 }
 """)
+
+# The network going and coming, as GIO's monitor reports it: `network down|up`.
+edit("crates/app/src/ui/connection.rs", "    fn network_changed(self: &Rc<Self>, online: bool) {",
+     "    pub(super) fn network_changed(self: &Rc<Self>, online: bool) {")
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("network") => self.network_changed(parts.next() == Some("up")),
+            Some("quit") => {''')
 
 # Our own profile popout, as the account panel's button opens it: `own-profile`, then `shot-profile <png>` shoots
 # the open profile popout, and `own-row <list> <n>` activates row n of its first (0) or second (1) card.

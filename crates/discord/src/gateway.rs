@@ -21,7 +21,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::{Rc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -44,6 +44,7 @@ use crate::obfuscation;
 use crate::qos;
 use crate::reactions::{self, Kind};
 use crate::read_state::ReadStates;
+use crate::reconnect::{self, Answer};
 use crate::relationships::{Presence, Relationship, Relationships};
 use crate::restricted::RestrictedSchedule;
 use crate::settings::{Settings, SettingsPatch};
@@ -73,6 +74,22 @@ pub struct Resume {
     /// when it identifies and resumes with that, whatever the account holds
     /// by then (`_doIdentify` and `_doResume` in 868).
     pub token: String,
+    /// When the connection last heard a heartbeat ACK, or opened: a session
+    /// older than [`reconnect::RESUME_WINDOW`] by the next connection is not
+    /// resumed.
+    pub last_ack: Instant,
+}
+
+/// The gateway a connection starts at when it has no resume URL.
+const DEFAULT_GATEWAY: &str = "wss://gateway.discord.gg";
+
+impl Resume {
+    /// Forget the resume URL, as the client does after a failed connection
+    /// (`setResumeUrl(null)` in 868): the next attempt asks the default
+    /// gateway, which still takes the RESUME.
+    pub fn forget_url(&mut self) {
+        self.url = DEFAULT_GATEWAY.to_owned();
+    }
 }
 
 /// Everything READY gives us to start from.
@@ -482,25 +499,24 @@ pub enum Event {
     /// A resume succeeded; everything missed has been replayed before this.
     Resumed,
     /// The connection is gone. `code` is the websocket close code. `resume`
-    /// is set when the session survives and can be resumed.
+    /// is set when the session survives and can be resumed. `requested` is
+    /// set when Discord told us to reconnect (op 7), which the client
+    /// answers at once.
     Closed {
         code: u16,
         reason: String,
         resume: Option<Resume>,
+        requested: bool,
     },
 }
 
 impl Event {
-    /// Close codes after which reconnecting with the same token is pointless.
+    /// Close codes after which reconnecting with the same token is pointless:
+    /// 4004, authentication failed, as in the client. After the others it
+    /// reconnects, and a session Discord has dropped (4007, 4009) answers
+    /// the RESUME with INVALID SESSION, which is answered with IDENTIFY.
     pub fn is_fatal_close(code: u16) -> bool {
-        // 4004 authentication failed, 4010-4014 invalid shard/version/intents.
-        matches!(code, 4004 | 4010..=4014)
-    }
-
-    /// Close codes after which the session is gone and only IDENTIFY works:
-    /// 4007 invalid sequence, 4009 session timed out, plus the fatal ones.
-    fn ends_session(code: u16) -> bool {
-        matches!(code, 4007 | 4009) || Self::is_fatal_close(code)
+        reconnect::rejects_token(code)
     }
 }
 
@@ -585,12 +601,28 @@ struct State {
     session: RefCell<Option<(String, String)>>,
     /// Send RESUME instead of IDENTIFY on HELLO.
     resuming: Cell<bool>,
-    /// Cleared by INVALID SESSION (not resumable).
+    /// Cleared by INVALID SESSION after the session was established, so the
+    /// reconnect that follows identifies.
     resumable: Cell<bool>,
+    /// The last heartbeat ACK, or when the connection opened or was last
+    /// answered with RESUME or IDENTIFY (`lastHeartbeatAckTime`, 868).
+    last_ack: Cell<Instant>,
+    /// HELLO arrived.
+    hello: Cell<bool>,
+    /// The connection failed before HELLO or on an error, so a resume does
+    /// not return to its URL.
+    url_lost: Cell<bool>,
+    /// INVALID SESSIONs answered on this connection.
+    invalid: Cell<u32>,
     /// READY or RESUMED arrived: Discord takes requests now.
     established: Cell<bool>,
     seq: Cell<Option<u64>>,
     acked: Cell<bool>,
+    /// The expedited heartbeat waiting for its ACK, by number, see
+    /// [`Gateway::expedited_heartbeat`]: an ACK clears it.
+    expedited: Cell<Option<u64>>,
+    /// Numbers expedited heartbeats, never reusing one.
+    expedited_count: Cell<u64>,
     /// Why Neucord closed the connection itself, see [`close`].
     closing: Cell<Option<&'static str>>,
     /// The shapes of the last payloads sent, see [`record_sent`].
@@ -822,6 +854,9 @@ impl Gateway {
         token: &str,
         resume: Option<Resume>,
     ) -> Result<(Gateway, async_channel::Receiver<Event>), Error> {
+        // The client's wait for HELLO starts here and covers the connection
+        // itself (`_connect`, 868).
+        let started = Instant::now();
         let session = soup::Session::new();
         session.set_user_agent(&identity::user_agent());
         let url = match &resume {
@@ -832,10 +867,13 @@ impl Gateway {
             // A malformed resume URL from Discord: nothing to resume against.
             return Err(Error::Http { status: 0, body: format!("bad gateway URL {url}") });
         };
-        let conn = session
-            .websocket_connect_async_future(&msg, None, &[], glib::Priority::DEFAULT)
-            .await
-            .map_err(Error::Transport)?;
+        let conn = glib::future_with_timeout(
+            reconnect::HELLO_TIMEOUT,
+            session.websocket_connect_async_future(&msg, None, &[], glib::Priority::DEFAULT),
+        )
+        .await
+        .map_err(|_| Error::Protocol("the connection timed out before HELLO".into()))?
+        .map_err(Error::Transport)?;
         // READY for a user account easily exceeds libsoup's 128 KiB default.
         conn.set_max_incoming_payload_size(0);
 
@@ -845,14 +883,24 @@ impl Gateway {
             identified: RefCell::new(resume.as_ref().map_or_else(|| token.to_owned(), |r| r.token.clone())),
             resuming: Cell::new(resume.is_some()),
             resumable: Cell::new(true),
+            last_ack: Cell::new(resume.as_ref().map_or(started, |r| r.last_ack)),
+            hello: Cell::new(false),
+            url_lost: Cell::new(false),
+            invalid: Cell::new(0),
             established: Cell::new(false),
             seq: Cell::new(resume.as_ref().map(|r| r.seq)),
             session: RefCell::new(resume.map(|r| (r.session_id, r.url))),
             acked: Cell::new(true),
+            expedited: Cell::new(None),
+            expedited_count: Cell::new(0),
             closing: Cell::new(None),
             sent: RefCell::default(),
             events: tx,
         });
+
+        // As the client does when its connection opens: RESUME if the session
+        // is recent enough, else IDENTIFY afresh.
+        settle(&state, Instant::now());
 
         let (frames, work_input) = std::sync::mpsc::channel();
         let (work_output, answers) = async_channel::unbounded();
@@ -866,6 +914,26 @@ impl Gateway {
             move |_, kind, bytes| {
                 if kind == soup::ffi::SOUP_WEBSOCKET_DATA_BINARY {
                     let _ = frames.send(Input::Frame(bytes.clone()));
+                }
+            }
+        });
+        conn.connect_error({
+            let state = Rc::downgrade(&state);
+            move |_, _| {
+                if let Some(state) = state.upgrade() {
+                    state.url_lost.set(true);
+                }
+            }
+        });
+        glib::timeout_add_local_once(reconnect::HELLO_TIMEOUT.saturating_sub(started.elapsed()), {
+            let (conn, state) = (conn.downgrade(), state.clone());
+            move || {
+                if let Some(conn) = conn.upgrade()
+                    && !state.hello.get()
+                    && conn.state() == soup::WebsocketState::Open
+                {
+                    state.url_lost.set(true);
+                    close(&conn, &state, "no HELLO in time");
                 }
             }
         });
@@ -891,27 +959,16 @@ impl Gateway {
                             }
                         }
                         Output::Closed { code, reason } => {
-                            let resume = match (&*state.session.borrow(), state.seq.get()) {
-                                (Some((session_id, url)), Some(seq))
-                                    if state.resumable.get() && !Event::ends_session(code) =>
-                                {
-                                    Some(Resume {
-                                        session_id: session_id.clone(),
-                                        url: url.clone(),
-                                        seq,
-                                        token: state.identified.borrow().clone(),
-                                    })
-                                }
-                                _ => None,
-                            };
+                            let resume = resume_after(&state, code);
                             let ours = state.closing.take();
+                            let requested = ours == Some(RECONNECT_REQUESTED);
                             if ours.is_none() && code == CLOSE_DECODE_ERROR {
                                 for line in state.sent.borrow().iter() {
                                     eprintln!("gateway: sent before it: {line}");
                                 }
                             }
                             let reason = closed_reason(ours, code, reason);
-                            let _ = state.events.try_send(Event::Closed { code, reason, resume });
+                            let _ = state.events.try_send(Event::Closed { code, reason, resume, requested });
                             break;
                         }
                     }
@@ -919,6 +976,13 @@ impl Gateway {
                 state.events.close();
             }
         });
+
+        // Sent as the connection opens, not after HELLO (`onOpen`, 868).
+        if state.resuming.get() {
+            self::resume(&conn, &state);
+        } else {
+            identify(&conn, &state);
+        }
 
         SOCKET.set(Some((conn.downgrade(), Rc::downgrade(&state))));
         Ok((Gateway { conn, state }, rx))
@@ -942,6 +1006,25 @@ impl Gateway {
             let request = MemberRequest { nonce: Some(nonce), ..MemberRequest::new(guild, users) };
             send_text(&self.conn, &self.state, &request_text(8, &request));
         }
+    }
+
+    /// Heartbeat now and close the connection, to be reconnected, unless it
+    /// is acknowledged within `timeout` (`expeditedHeartbeat`, 868): the
+    /// network came or went, and a connection that didn't notice is dead.
+    /// A later one replaces it; an ACK of any heartbeat ends it.
+    pub fn expedited_heartbeat(&self, timeout: Duration) {
+        if self.conn.state() != soup::WebsocketState::Open {
+            return;
+        }
+        let number = begin_expedited(&self.state);
+        heartbeat(&self.conn, &self.state);
+        let (conn, state) = (self.conn.downgrade(), Rc::downgrade(&self.state));
+        glib::timeout_add_local_once(timeout, move || {
+            let (Some(conn), Some(state)) = (conn.upgrade(), state.upgrade()) else { return };
+            if expedited_lapsed(&state, number) {
+                close(&conn, &state, "heartbeat not acknowledged");
+            }
+        });
     }
 
     /// Whether the session is established: until then nothing is asked.
@@ -1097,6 +1180,73 @@ struct ResumeRequest<'a> {
     seq: Option<u64>,
 }
 
+/// What a connection that is open sends: RESUME if there is a session and
+/// its last ACK is recent, else IDENTIFY afresh, which forgets the session
+/// id and the sequence (`_doResumeOrIdentify` and `_doIdentify`, 868).
+fn settle(state: &State, now: Instant) -> Answer {
+    let answer = reconnect::answer(state.session.borrow().is_some(), state.last_ack.get(), now);
+    state.last_ack.set(now);
+    if answer == Answer::Identify {
+        forget_session(state);
+    }
+    state.resuming.set(answer == Answer::Resume);
+    answer
+}
+
+fn forget_session(state: &State) {
+    state.session.take();
+    state.seq.set(None);
+}
+
+/// What INVALID SESSION is answered with.
+#[derive(Debug, PartialEq, Eq)]
+enum Reply {
+    /// On the connection that is open, as the client does (`_handleInvalidSession`,
+    /// 868): resumable asks the resume rule again, else IDENTIFY.
+    Send(Answer),
+    /// Close and reconnect.
+    Close,
+}
+
+/// INVALID SESSION. Before the session is established it is answered on
+/// the same connection. Once established, what the app holds of the session
+/// is closed by the close that follows, not by a second READY on the same
+/// connection. A connection answered more than [`reconnect::MAX_INVALID_SESSIONS`]
+/// times is closed too, which the client never does.
+fn invalid_session(state: &State, resumable: bool, now: Instant) -> Reply {
+    let again = state.invalid.get() >= reconnect::MAX_INVALID_SESSIONS;
+    if state.established.get() || again {
+        if !resumable || again {
+            state.resumable.set(false);
+        }
+        return Reply::Close;
+    }
+    state.invalid.set(state.invalid.get() + 1);
+    if resumable {
+        return Reply::Send(settle(state, now));
+    }
+    forget_session(state);
+    state.resuming.set(false);
+    Reply::Send(Answer::Identify)
+}
+
+/// What the app resumes with after the connection closed with `code`, if
+/// the session can still be.
+fn resume_after(state: &State, code: u16) -> Option<Resume> {
+    let (session_id, url) = state.session.borrow().clone()?;
+    let seq = state.seq.get()?;
+    if !state.resumable.get() || Event::is_fatal_close(code) {
+        return None;
+    }
+    Some(Resume {
+        session_id,
+        url: if state.url_lost.get() { DEFAULT_GATEWAY.to_owned() } else { url },
+        seq,
+        token: state.identified.borrow().clone(),
+        last_ack: state.last_ack.get(),
+    })
+}
+
 fn resume(conn: &soup::WebsocketConnection, state: &State) {
     send_text(conn, state, &resume_text(state));
 }
@@ -1153,14 +1303,11 @@ fn handle(conn: &soup::WebsocketConnection, state: &Rc<State>, parsed: Parsed) {
         state.seq.set(Some(seq));
     }
     match parsed.what {
-        // HELLO: start heartbeating, then identify.
+        // HELLO: start heartbeating. RESUME or IDENTIFY went out as the
+        // connection opened.
         What::Hello(interval) => {
+            state.hello.set(true);
             spawn_heartbeat(conn, state, Duration::from_millis(interval));
-            if state.resuming.get() {
-                resume(conn, state);
-            } else {
-                identify(conn, state);
-            }
         }
         What::Dispatch(Dispatched { events, established }) => {
             match established {
@@ -1184,20 +1331,24 @@ fn handle(conn: &soup::WebsocketConnection, state: &Rc<State>, parsed: Parsed) {
         }
         // Server asks for an immediate heartbeat.
         What::Heartbeat => heartbeat(conn, state),
-        What::Ack => state.acked.set(true),
-        // RECONNECT: drop and let the caller resume.
-        What::Reconnect => close(conn, state, "reconnect requested"),
-        // INVALID SESSION: if the session cannot be resumed, the caller has
-        // to IDENTIFY again.
-        What::InvalidSession { resumable } => {
-            if !resumable {
-                state.resumable.set(false);
-            }
-            close(conn, state, "session invalidated");
+        What::Ack => {
+            state.acked.set(true);
+            state.expedited.set(None);
+            state.last_ack.set(Instant::now());
         }
+        // RECONNECT: drop and let the caller resume, at once.
+        What::Reconnect => close(conn, state, RECONNECT_REQUESTED),
+        What::InvalidSession { resumable } => match invalid_session(state, resumable, Instant::now()) {
+            Reply::Send(Answer::Resume) => resume(conn, state),
+            Reply::Send(Answer::Identify) => identify(conn, state),
+            Reply::Close => close(conn, state, "session invalidated"),
+        },
         What::Other => {}
     }
 }
+
+/// Why we close on Discord's RECONNECT, which the app answers at once.
+const RECONNECT_REQUESTED: &str = "reconnect requested";
 
 /// Close the connection ourselves, keeping `why`: the peer's close frame
 /// echoes the code but not the reason.
@@ -1245,6 +1396,22 @@ fn closed_reason(ours: Option<&'static str>, code: u16, peer: String) -> String 
             peer
         }
     }
+}
+
+/// An expedited heartbeat is about to go out: its number, never one used
+/// before, and no ACK yet.
+fn begin_expedited(state: &State) -> u64 {
+    let number = state.expedited_count.get();
+    state.expedited_count.set(number + 1);
+    state.expedited.set(Some(number));
+    state.acked.set(false);
+    number
+}
+
+/// Whether expedited heartbeat `number` went unacknowledged: still the one
+/// waiting, and no ACK since.
+fn expedited_lapsed(state: &State, number: u64) -> bool {
+    state.expedited.get() == Some(number) && !state.acked.get()
 }
 
 /// Debug aid for testing resume: with `NEUCORD_DEBUG_DROP=<seconds>`, drop
@@ -2259,13 +2426,39 @@ mod tests {
             session: RefCell::new(Some(("sess".into(), "wss://r".into()))),
             resuming: Cell::new(true),
             resumable: Cell::new(true),
+            last_ack: Cell::new(Instant::now()),
+            hello: Cell::new(false),
+            url_lost: Cell::new(false),
+            invalid: Cell::new(0),
             established: Cell::new(false),
             seq: Cell::new(Some(7)),
             acked: Cell::new(true),
+            expedited: Cell::new(None),
+            expedited_count: Cell::new(0),
             closing: Cell::new(None),
             sent: RefCell::default(),
             events: async_channel::unbounded().0,
         }
+    }
+
+    #[test]
+    fn an_expedited_heartbeat_lapses_only_unacknowledged_and_unreplaced() {
+        let state = state_with("t", "t");
+        // As op 11 answers.
+        let ack = |state: &State| {
+            state.acked.set(true);
+            state.expedited.set(None);
+        };
+        let first = begin_expedited(&state);
+        ack(&state);
+        assert!(!expedited_lapsed(&state, first), "acknowledged");
+        let second = begin_expedited(&state);
+        assert!(!expedited_lapsed(&state, first), "an old one's timer never closes for a newer one");
+        assert!(expedited_lapsed(&state, second));
+        ack(&state);
+        // The regular heartbeat waiting for its own ACK is no expedited one's business.
+        state.acked.set(false);
+        assert!(!expedited_lapsed(&state, second));
     }
 
     #[test]
@@ -2293,6 +2486,125 @@ mod tests {
         let why = closed_reason(Some("heartbeat not acknowledged"), CLOSE_RECONNECT, String::new());
         assert_eq!(why, "heartbeat not acknowledged", "the peer echoes the code without our reason");
         assert_eq!(closed_reason(None, 4004, "Authentication failed.".into()), "Authentication failed.");
+    }
+
+    #[test]
+    fn only_a_rejected_token_ends_the_account() {
+        // The client's `_handleClose` (868) gives up on 4004 alone and reconnects after every other code.
+        assert!(Event::is_fatal_close(4004));
+        for code in [1000, 1006, 4000, 4007, 4009, 4010, 4011, 4012, 4013, 4014] {
+            assert!(!Event::is_fatal_close(code), "{code} is reconnected after, as the client does");
+        }
+    }
+
+    fn minutes(n: u64) -> Duration {
+        Duration::from_secs(60 * n)
+    }
+
+    #[test]
+    fn a_connection_resumes_only_a_session_whose_last_ack_is_recent() {
+        let now = Instant::now();
+        let state = state_with("t", "t");
+        state.last_ack.set(now - minutes(2));
+        assert_eq!(settle(&state, now), Answer::Resume);
+        assert!(state.resuming.get());
+        assert_eq!(state.last_ack.get(), now, "the open counts as an ACK, as in the client");
+        assert_eq!(state.seq.get(), Some(7));
+
+        let state = state_with("t", "t");
+        state.last_ack.set(now - minutes(4));
+        assert_eq!(settle(&state, now), Answer::Identify);
+        assert!(!state.resuming.get());
+        assert!(state.session.borrow().is_none() && state.seq.get().is_none(), "IDENTIFY starts the session over");
+    }
+
+    #[test]
+    fn invalid_session_that_cannot_resume_is_answered_with_identify_on_the_same_connection() {
+        let now = Instant::now();
+        let state = state_with("t", "old");
+        assert_eq!(invalid_session(&state, false, now), Reply::Send(Answer::Identify));
+        assert!(state.session.borrow().is_none() && state.seq.get().is_none());
+        assert!(!state.resuming.get());
+        assert!(state.resumable.get(), "the connection stays; nothing else is cleared");
+    }
+
+    #[test]
+    fn invalid_session_that_can_resume_asks_the_resume_rule_again() {
+        let now = Instant::now();
+        let state = state_with("t", "t");
+        state.last_ack.set(now - minutes(1));
+        assert_eq!(invalid_session(&state, true, now), Reply::Send(Answer::Resume));
+        assert_eq!(state.seq.get(), Some(7), "the session is kept");
+
+        let state = state_with("t", "t");
+        state.last_ack.set(now - minutes(5));
+        assert_eq!(invalid_session(&state, true, now), Reply::Send(Answer::Identify), "too old to resume");
+        assert!(state.session.borrow().is_none());
+
+        let state = state_with("t", "t");
+        state.session.take();
+        assert_eq!(invalid_session(&state, true, now), Reply::Send(Answer::Identify), "nothing to resume");
+    }
+
+    #[test]
+    fn invalid_session_after_the_session_is_established_closes_the_connection() {
+        let now = Instant::now();
+        let state = state_with("t", "t");
+        state.established.set(true);
+        assert_eq!(invalid_session(&state, true, now), Reply::Close);
+        assert!(state.resumable.get(), "a resumable one is resumed after the close");
+        assert_eq!(invalid_session(&state, false, now), Reply::Close);
+        assert!(!state.resumable.get(), "the next connection identifies");
+    }
+
+    #[test]
+    fn a_connection_told_again_and_again_that_its_session_is_invalid_is_closed() {
+        let now = Instant::now();
+        let state = state_with("t", "t");
+        for _ in 0..reconnect::MAX_INVALID_SESSIONS {
+            assert_eq!(invalid_session(&state, false, now), Reply::Send(Answer::Identify));
+        }
+        assert_eq!(invalid_session(&state, false, now), Reply::Close);
+        assert_eq!(invalid_session(&state, true, now), Reply::Close);
+        assert!(!state.resumable.get());
+    }
+
+    #[test]
+    fn what_a_closed_connection_gives_to_resume() {
+        let now = Instant::now();
+        let state = state_with("new", "old");
+        state.last_ack.set(now);
+        let resume = resume_after(&state, 1006).unwrap();
+        assert_eq!((resume.session_id.as_str(), resume.url.as_str(), resume.seq), ("sess", "wss://r", 7));
+        assert_eq!((resume.token.as_str(), resume.last_ack), ("old", now));
+        // The client resumes after these too: Discord answers INVALID SESSION if it cannot.
+        for code in [4000, 4007, 4009, 4010, 4014] {
+            assert!(resume_after(&state, code).is_some(), "{code}");
+        }
+        assert!(resume_after(&state, 4004).is_none(), "the token is rejected");
+
+        state.url_lost.set(true);
+        assert_eq!(resume_after(&state, 1006).unwrap().url, DEFAULT_GATEWAY, "a failed connection forgets its URL");
+
+        state.resumable.set(false);
+        assert!(resume_after(&state, 1006).is_none());
+        let state = state_with("t", "t");
+        state.seq.set(None);
+        assert!(resume_after(&state, 1006).is_none(), "no sequence number: nothing to resume from");
+    }
+
+    #[test]
+    fn the_default_gateway_is_the_one_a_fresh_connection_asks() {
+        assert!(identity::GATEWAY_URL.starts_with(&format!("{DEFAULT_GATEWAY}/?")));
+        let mut resume = Resume {
+            session_id: "s".into(),
+            url: "wss://resume.example".into(),
+            seq: 1,
+            token: "t".into(),
+            last_ack: Instant::now(),
+        };
+        resume.forget_url();
+        assert_eq!(resume.url, DEFAULT_GATEWAY);
     }
 
     #[test]

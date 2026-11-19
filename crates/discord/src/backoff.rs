@@ -11,21 +11,29 @@ pub struct Backoff {
     min: Duration,
     max: Duration,
     current: Duration,
+    /// Failures since the last success (`fails`, 158390).
+    fails: u32,
 }
 
 impl Backoff {
     pub fn new(min: Duration, max: Duration) -> Self {
-        Backoff { min, max, current: min }
+        Backoff { min, max, current: min, fails: 0 }
     }
 
     /// The wait after a failure. `random` is in `0.0..1.0`.
     pub fn fail(&mut self, random: f64) -> Duration {
+        self.fails = self.fails.saturating_add(1);
         self.current = (self.current + self.current.mul_f64(2.0 * random)).min(self.max);
         self.current
     }
 
     pub fn succeed(&mut self) {
         self.current = self.min;
+        self.fails = 0;
+    }
+
+    pub fn fails(&self) -> u32 {
+        self.fails
     }
 }
 
@@ -60,5 +68,16 @@ mod tests {
         b.fail(0.5);
         b.succeed();
         assert_eq!(b.fail(0.5), Duration::from_millis(3000));
+    }
+
+    #[test]
+    fn failures_are_counted_until_a_success() {
+        let mut b = backoff();
+        assert_eq!(b.fails(), 0);
+        b.fail(0.5);
+        b.fail(0.5);
+        assert_eq!(b.fails(), 2);
+        b.succeed();
+        assert_eq!(b.fails(), 0);
     }
 }

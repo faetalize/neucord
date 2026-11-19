@@ -672,6 +672,7 @@ impl App {
     /// tray icon (see [`App::start_background`]).
     pub fn start(self: &Rc<Self>, hidden: bool) {
         self.start_background(hidden);
+        self.watch_network();
         if !hidden {
             self.window.present();
         }
