@@ -26,7 +26,7 @@ what arrived, IDENTIFY's key order and properties first.
   `FAKE_MODAL_SUBMIT=fail|silent|429` says. Files get an upload URL at the
   fake, which takes the `PUT` and a `DELETE`, unless
   `FAKE_UPLOAD_FAIL=too-large` turns the URL down with Discord's 40005.
-  `FAKE_IMAGE_FAIL=1` has every image on the CDN answer 404. `FAKE_GIF=1` ends #general with an `anim.gif` and has the CDN serve a real two-frame GIF for a `.gif` (scenario `gif`). `FAKE_VIDEO=<a .webm>` puts that file in
+  `FAKE_IMAGE_FAIL=1` has every image on the CDN answer 404. `FAKE_GIF=1` ends #general with an `anim.gif` and has the CDN serve a real two-frame GIF for a `.gif` (scenario `gif`). `FAKE_THREAD_SYNCS=<n>` (with `FAKE_CHAIN=1`, whose thread it moves, and `FAKE_THREADS=1`) syncs the same threads again n times, a second apart from 6 s after READY, each time with one more message in the thread line 10 started and a `THREAD_MEMBER_UPDATE` of ours on it (scenario `thread-sync`). `FAKE_VIDEO=<a .webm>` puts that file in
   channel 600 as a video attachment with alt text (scenario `viewer-video`). `FAKE_TYPING=1` has Alice typing in #general for as long as the run lasts (scenario `typing-line`). `FAKE_PING=1` has line 36 of #general ping us and line 34 ping @everyone (scenario `mentioned`). `FAKE_CATEGORY=1` adds a category, Chat Channels, with #fresh-news unread and #caught-up read (scenario `sidebar-read`). `FAKE_MUTED=1` mutes the server until a made-up time and #general with no end (scenario `unmute-caption`).
   `FAKE_SENSITIVE=1` adds to #general pictures Discord's scan has flagged as explicit, one it hasn't looked at, one it found clean and a card with a flagged picture; with `FAKE_NSFW=allowed=0` the filter covers the flagged ones and the unscanned (the `sensitive` scenario shoots them; `sensitive-report` marks one not sensitive, the first picture's, or with `FAKE_SENSITIVE=embed` the card's).
   Heartbeats (op 40) are logged and acknowledged, and READY carries a made-up
@@ -95,7 +95,7 @@ what arrived, IDENTIFY's key order and properties first.
   opened and shoots it), `settings <page>` (the settings window on a page, `activity` for Activity
   Privacy), `activity-share on|off` and `activity-default 1|2|3` (what its rows
   save), `focus-mode <ms>|forever|off`, `focus-state` and `status-menu <png>` (Focus Mode, with
-  `FAKE_NSFW=dms=1` so the settings are in READY), `sound-switch <title> on|off` and `sound-state <title>` (a row of the Neucord page's Sounds group, after `settings neucord`), `quit`. It edits the copy by exact strings
+  `FAKE_NSFW=dms=1` so the settings are in READY), `sound-switch <title> on|off` and `sound-state <title>` (a row of the Neucord page's Sounds group, after `settings neucord`), `end` and `scroll <0..1>` (the chat to its newest message, or that far down what it has loaded), `quit`. It edits the copy by exact strings
   and stops on the first that no longer matches: when the code it patches
   moves, update the string. The module it adds is only built here, so a
   change to what it calls needs a run to show it still builds.

@@ -12,7 +12,9 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
+use crate::permissions::{self, Permissions};
 use crate::read_state::ReadStates;
+use crate::verification::Account;
 use crate::{Channel, ChannelKind, Error, Guild, Snowflake, ThreadMember};
 
 /// What the client sends as `location` when a thread is joined or left from
@@ -503,6 +505,77 @@ fn window_end(thread: &Channel) -> i64 {
     last + i64::from(meta.auto_archive_duration) * 60_000
 }
 
+/// What the open chat takes from a thread, kept to compare before and after
+/// an event touched the thread: our permissions there (a private thread
+/// gives us nothing until we join it), whether it is locked or archived, and
+/// what the box under the message that started it says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Look {
+    name: Option<String>,
+    viewable: bool,
+    permissions: Permissions,
+    archived: bool,
+    locked: bool,
+    message_count: Option<u32>,
+}
+
+impl Look {
+    pub fn of(guild: &Guild, thread: &Channel, me: &Account, now: i64) -> Look {
+        Look {
+            name: thread.name.clone(),
+            viewable: permissions::can_view(guild, thread, me, now),
+            permissions: permissions::in_channel(guild, thread, me, now),
+            archived: thread.is_archived(),
+            locked: thread.is_locked(),
+            message_count: thread.message_count,
+        }
+    }
+}
+
+/// The [`Look`] of each of `threads` among `guild`'s, `None` for one it doesn't hold.
+pub fn looks(guild: &Guild, threads: &[Snowflake], me: &Account, now: i64) -> Vec<Option<Look>> {
+    // A big server syncs thousands at once: one pass over what it holds, not one a thread.
+    let held: HashMap<Snowflake, &Channel> = guild.threads.iter().map(|t| (t.id, t)).collect();
+    threads.iter().map(|id| held.get(id).map(|t| Look::of(guild, t, me, now))).collect()
+}
+
+/// How much of the open chat an event on threads makes draw again.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Redraw {
+    Nothing,
+    /// Only the messages that started these threads, which carry the box
+    /// under them.
+    Starters(Vec<Snowflake>),
+    /// What every message draws from names and permissions.
+    Everything,
+}
+
+/// What to draw again, from each touched thread's [`Look`] before and after
+/// (`None`: not held), with `open` the channel on screen. Its own thread
+/// changing, a thread that wasn't held, or one that is called something else
+/// or can't be seen any more (a `<#thread>` in any message says its name, or
+/// doesn't) is everything; any other change shows only in the thread's
+/// starter. A sync that brings what we hold already, as most do, is nothing.
+pub fn redraw(
+    before: &[Option<Look>],
+    after: &[Option<Look>],
+    touched: &[Snowflake],
+    open: Option<Snowflake>,
+) -> Redraw {
+    let mut starters = Vec::new();
+    for ((before, after), &thread) in before.iter().zip(after).zip(touched) {
+        if before == after {
+            continue;
+        }
+        let (Some(before), Some(after)) = (before, after) else { return Redraw::Everything };
+        if open == Some(thread) || before.name != after.name || before.viewable != after.viewable {
+            return Redraw::Everything;
+        }
+        starters.push(thread);
+    }
+    if starters.is_empty() { Redraw::Nothing } else { Redraw::Starters(starters) }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -872,5 +945,100 @@ mod tests {
         assert!(is_ackable(&g.threads[0]));
         g.threads[0].thread_metadata.as_mut().unwrap().archived = true;
         assert!(!is_ackable(&g.threads[0]));
+    }
+    mod redraw {
+        use super::super::*;
+
+        const OPEN: Snowflake = Snowflake(20);
+        const PUBLIC: Snowflake = Snowflake(21);
+        const PRIVATE: Snowflake = Snowflake(22);
+        const ALL: [Snowflake; 3] = [OPEN, PUBLIC, PRIVATE];
+
+        fn me() -> Account {
+            Account { id: Snowflake(5), ..Account::default() }
+        }
+
+        /// A server whose `@everyone` views, sends and reads; one text channel and three threads under it.
+        fn guild() -> Guild {
+            let everyone = (Permissions::VIEW_CHANNEL
+                | Permissions::SEND_MESSAGES
+                | Permissions::READ_MESSAGE_HISTORY
+                | Permissions::SEND_MESSAGES_IN_THREADS)
+                .0
+                .to_string();
+            let thread = |id: u64, kind: u8| {
+                json!({"id": id.to_string(), "type": kind, "name": "plans", "parent_id": "2", "flags": 0,
+                       "message_count": 3, "thread_metadata": {"archived": false, "locked": false}})
+            };
+            serde_json::from_value(json!({
+                "id": "1", "name": "G", "owner_id": "9",
+                "roles": [{"id": "1", "name": "@everyone", "permissions": everyone}],
+                "channels": [{"id": "2", "type": 0}],
+                "threads": [thread(20, 11), thread(21, 11), thread(22, 12)],
+            }))
+            .unwrap()
+        }
+
+        fn looks_of(guild: &Guild) -> Vec<Option<Look>> {
+            looks(guild, &ALL, &me(), 0)
+        }
+
+        fn change(guild: &mut Guild, id: Snowflake, edit: impl FnOnce(&mut Channel)) {
+            edit(guild.threads.iter_mut().find(|t| t.id == id).unwrap());
+        }
+
+        fn after(change: impl FnOnce(&mut Guild)) -> Redraw {
+            let mut guild = guild();
+            let before = looks_of(&guild);
+            change(&mut guild);
+            redraw(&before, &looks_of(&guild), &ALL, Some(OPEN))
+        }
+
+        fn member() -> Option<ThreadMember> {
+            let member = json!({"id": "21", "user_id": "5", "join_timestamp": "2026-01-01T00:00:00+00:00", "flags": 0});
+            Some(serde_json::from_value(member).expect("a thread member"))
+        }
+
+        #[test]
+        fn a_sync_of_what_we_hold_draws_nothing() {
+            assert_eq!(after(|_| {}), Redraw::Nothing);
+        }
+
+        #[test]
+        fn joining_a_public_thread_draws_nothing() {
+            let joined = after(|guild| guild.set_thread_member(PUBLIC, member()));
+            assert_eq!(joined, Redraw::Nothing, "it was ours to see before");
+        }
+
+        #[test]
+        fn joining_a_private_thread_changes_what_we_may_see() {
+            let joined = after(|guild| guild.set_thread_member(PRIVATE, member()));
+            assert_eq!(joined, Redraw::Everything, "it appears in the names a message can show");
+        }
+
+        #[test]
+        fn a_thread_that_only_counts_differently_draws_its_starter() {
+            let counted = after(|guild| change(guild, PUBLIC, |t| t.message_count = Some(4)));
+            assert_eq!(counted, Redraw::Starters(vec![PUBLIC]));
+            let archived =
+                after(|guild| change(guild, PUBLIC, |t| t.thread_metadata.as_mut().unwrap().archived = true));
+            assert_eq!(archived, Redraw::Starters(vec![PUBLIC]));
+        }
+
+        #[test]
+        fn the_open_thread_changing_draws_everything() {
+            let locked = after(|guild| change(guild, OPEN, |t| t.thread_metadata.as_mut().unwrap().locked = true));
+            assert_eq!(locked, Redraw::Everything);
+        }
+
+        #[test]
+        fn a_new_name_or_a_new_thread_draws_everything() {
+            let renamed = after(|guild| change(guild, PUBLIC, |t| t.name = Some("lunch".into())));
+            assert_eq!(renamed, Redraw::Everything);
+            let mut guild = guild();
+            let before = looks_of(&guild);
+            guild.threads.retain(|t| t.id != PUBLIC);
+            assert_eq!(redraw(&before, &looks_of(&guild), &ALL, Some(OPEN)), Redraw::Everything);
+        }
     }
 }

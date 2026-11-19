@@ -1323,6 +1323,25 @@ class Handler(BaseHTTPRequestHandler):
                         send(0, {"guild_id": "500", "threads": threads, "members": [], "most_recent_messages": recent},
                              "THREAD_LIST_SYNC")
                     SESSION[0] = send
+                    starter = next((t for t in threads if t["name"] == "about line ten"), None)
+                    if os.environ.get("FAKE_THREAD_SYNCS") and starter:
+                        # The same threads synced again, each time with the message count of the one line 10 started (FAKE_CHAIN) a
+                        # message higher (its box under the line says it), and our member of it, as Discord does on
+                        # subscribing and on a join. The rest of each sync is no news.
+
+                        def resync(left):
+                            starter["message_count"] += 1
+                            dispatch("THREAD_LIST_SYNC", {"guild_id": "500", "threads": threads, "members": [],
+                                                          "most_recent_messages": []})
+                            dispatch("THREAD_MEMBER_UPDATE", {"id": starter["id"], "guild_id": "500", "user_id": "100",
+                                                              "flags": 0, "join_timestamp": "2026-01-01T00:00:00.000000+00:00"})
+                            if left > 1:
+                                timer = threading.Timer(1, resync, [left - 1])
+                                timer.daemon = True
+                                timer.start()
+                        timer = threading.Timer(6, resync, [int(os.environ["FAKE_THREAD_SYNCS"])])
+                        timer.daemon = True
+                        timer.start()
                     if os.environ.get("FAKE_TYPING"):
                         # Alice types in #general, again before each lapses.
                         def typing_start():

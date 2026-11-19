@@ -1728,6 +1728,18 @@ impl App {
         }
     }
 
+    /// Fill in again the rows on screen that show one of `messages`.
+    pub(super) fn rebind_messages(self: &Rc<Self>, messages: &std::collections::HashSet<Snowflake>) {
+        let store = self.messages();
+        let rows: Vec<MessageRow> = self.rows.borrow().iter().filter_map(|row| row.upgrade()).collect();
+        for row in rows {
+            let Some(item) = row.parts().item.upgrade() else { continue };
+            if timelines::message_at(&store, item.position()).is_some_and(|m| messages.contains(&m.id)) {
+                self.bind_row(&item);
+            }
+        }
+    }
+
     /// What message content is drawn from changed, so none made before is
     /// good for another message: rows make theirs again when next filled in,
     /// and what rows kept goes.
