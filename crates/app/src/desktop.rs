@@ -16,7 +16,7 @@ const SERVER: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
 const LAUNCHER_INTERFACE: &str = "com.canonical.Unity.LauncherEntry";
 /// The sound theme's name for a message arriving.
-const SOUND: &str = "message-new-instant";
+pub const SOUND: &str = "message-new-instant";
 
 /// Ask the server to take down notification `id`.
 fn close(bus: &gio::DBusConnection, id: u32) {
