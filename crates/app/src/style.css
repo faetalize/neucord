@@ -134,9 +134,9 @@ overlay-split-view > .overlay-pane {
    corners 4 px less round than its, so the two curves are concentric. */
 .account-row { padding: 4px; }
 .me-button, .account-settings { border-radius: 8px; }
-.me-button { padding: 6px 10px 6px 6px; font-weight: normal; }
+.me-button { padding: 2px 10px 2px 6px; font-weight: normal; }
 .me-button label:not(.caption) { font-weight: bold; }
-.account-settings { min-width: 36px; min-height: 36px; margin-right: 4px; }
+.account-settings { min-width: 44px; min-height: 44px; padding: 0; }
 .popout-row { padding: 8px 12px; }
 .account-panel {
   background-color: var(--sidebar-bg-color);
