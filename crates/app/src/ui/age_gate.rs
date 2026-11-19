@@ -55,7 +55,7 @@ impl App {
     }
 
     /// The servers we agreed to go into.
-    fn age_agreed(&self) -> Vec<Snowflake> {
+    pub(super) fn age_agreed(&self) -> Vec<Snowflake> {
         age_gate::agreed_from(&self.remembered.numbers(AGREED))
     }
 

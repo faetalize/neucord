@@ -8,6 +8,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
+use discord::age_gate::{self, Standing};
 use discord::rest::Searched;
 use discord::search::{self, Context, Request, Sort, Status, Suggestion};
 use discord::{Channel, ChannelKind, Message, Snowflake, User};
@@ -49,6 +50,8 @@ pub(super) struct View {
     asked_members: RefCell<String>,
     selected: Cell<Option<usize>>,
     summary: gtk::Label,
+    /// What every DM at once is asked of: all of them, or those `in:` names.
+    scope: gtk::Label,
     sort: gtk::DropDown,
     sort_syncing: Cell<bool>,
     results: gtk::ListBox,
@@ -108,12 +111,14 @@ impl Known {
 }
 
 impl App {
-    /// Where the open channel is searched: its server, or the DM.
+    /// Where the open channel is searched: its server, or the DM, or every DM
+    /// where the account's setting says so (`775427`).
     pub(super) fn search_context(&self) -> Option<Context> {
         let state = self.account.state.borrow();
         let id = state.channel.filter(|_| state.page.is_none())?;
         match state.find_channel(id)? {
             (Some(guild), _) => Some(Context::Guild(guild.id)),
+            (None, _) if state.settings.cross_dm_search() => Some(Context::Dms),
             (None, channel) if channel.kind.is_private() => Some(Context::Channel(channel.id)),
             _ => None,
         }
@@ -187,11 +192,62 @@ impl App {
                     .filter_map(|c| Some((c.name.clone()?, c.id))),
             );
         }
+        // The DMs by the name `in:` writes them: a person's tag, a group's name (`Rt`, 822382).
+        if context == Context::Dms {
+            channels.extend(state.private_channels.iter().filter_map(|c| match c.kind {
+                ChannelKind::Dm => Some((c.recipients.first()?.tag(), c.id)),
+                ChannelKind::GroupDm => Some((c.title(), c.id)),
+                _ => None,
+            }));
+        }
         let guild = match context {
             Context::Guild(id) => Some(id),
             Context::Channel(id) => state.find_channel(id).and_then(|(guild, _)| guild.map(|g| g.id)),
+            Context::Dms => None,
         };
         Known { users: self.known_users(&state, guild), channels, me: state.me().unwrap_or_default() }
+    }
+
+    /// What the search of every DM asked of, under its count: "in all Direct
+    /// Messages", or in how many the `in:` filters named (`f` in 252715).
+    fn dms_scope(&self) -> String {
+        let state = self.account.state.borrow();
+        let text = state.searches.get(&Context::Dms).map(|s| s.text.clone()).unwrap_or_default();
+        drop(state);
+        let known = self.search_known(Context::Dms);
+        let fields = search::fields(&known.tokens(Context::Dms, &text));
+        let named = fields.0.iter().find(|(key, _)| key == "channel_id").map_or(0, |(_, ids)| ids.len());
+        match named {
+            0 => "in all Direct Messages".to_owned(),
+            1 => "in 1 DM".to_owned(),
+            n => format!("in {n} DMs"),
+        }
+    }
+
+    /// The search's cog: this DM or every DM, which is kept as the account's
+    /// setting and moves what is typed to the other (`transitionStateToSearchContext`,
+    /// 753806: going to one DM drops what `in:` named).
+    fn set_cross_dm_search(self: &Rc<Self>, on: bool) {
+        if self.account.state.borrow().settings.cross_dm_search() == on {
+            return;
+        }
+        let Some(view) = self.search_view.borrow().clone() else { return };
+        let text = view.entry.text().to_string();
+        let old = view.context;
+        let text = if on {
+            text
+        } else {
+            let known = self.search_known(old);
+            search::without_in(&text, &known.tokens(old, &text))
+        };
+        self.change_setting(discord::Setting::CrossDmSearch(on));
+        self.take_search();
+        let Some(context) = self.search_context() else { return };
+        self.account.state.borrow_mut().searches.entry(context).or_default().text = text;
+        self.toggle_search();
+        if let Some(view) = self.search_view.borrow().clone() {
+            self.run_search(&view, 0, true);
+        }
     }
 
     /// Open the search sidebar, or close it.
@@ -255,6 +311,7 @@ impl App {
         let context = view.context;
         let text = view.entry.text().to_string();
         let known = self.search_known(context);
+        let agreed = self.age_agreed();
         let tokens = known.tokens(context, &text);
         // Filters given nothing are cut out before asking (`K` in 586944).
         let text = search::cleaned(&text, &tokens);
@@ -272,7 +329,15 @@ impl App {
                     .iter()
                     .find(|g| g.id == id)
                     .is_some_and(|g| g.features.iter().any(|f| f == "DISCOVERABLE")),
-                Context::Channel(_) => false,
+                Context::Channel(_) | Context::Dms => false,
+            };
+            // A server we agreed to go into is searched with `include_nsfw` (`L5`, 822382).
+            let include_nsfw = match (context, state.account.as_ref()) {
+                (Context::Guild(id), Some(account)) => {
+                    let standing = Standing::of(account, &state.gates);
+                    age_gate::include_nsfw(account, standing, agreed.contains(&id))
+                }
+                _ => None,
             };
             let saved = state.searches.entry(context).or_default();
             if submitted {
@@ -284,7 +349,7 @@ impl App {
             saved.generation += 1;
             saved.status = Status::Searching;
             let discovery = discoverable.then(|| Some((saved.session.clone()?, saved.query.clone()?))).flatten();
-            (Request { context, fields, sort: saved.sort, offset, discovery }, saved.generation)
+            (Request { context, fields, sort: saved.sort, offset, discovery, include_nsfw }, saved.generation)
         };
         view.refresh(self);
         let (this, view) = (self.clone(), view.clone());
@@ -349,6 +414,7 @@ impl View {
             match context {
                 Context::Guild(id) => state.guilds.iter().find(|g| g.id == id).map(|g| format!("Search {}", g.name)),
                 Context::Channel(id) => state.find_channel(id).map(|(_, c)| format!("Search {}", c.title())),
+                Context::Dms => Some("Search in DMs".to_owned()),
             }
             .unwrap_or_else(|| "Search".to_owned())
         };
@@ -358,7 +424,8 @@ impl View {
             .accessible_role(gtk::AccessibleRole::SearchBox)
             .build();
         let suggestions = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::Browse).visible(false).build();
-        let summary = gtk::Label::builder().xalign(0.0).hexpand(true).css_classes(["heading"]).build();
+        let summary = gtk::Label::builder().xalign(0.0).css_classes(["heading"]).build();
+        let scope = gtk::Label::builder().xalign(0.0).css_classes(["caption", "dimmed"]).visible(false).build();
         let sort = gtk::DropDown::from_strings(&Sort::ALL.map(Sort::label));
         let results = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).build();
         let scroller = gtk::ScrolledWindow::builder()
@@ -376,7 +443,13 @@ impl View {
         pager.append(&next);
 
         let head = gtk::Box::builder().spacing(12).build();
-        head.append(&summary);
+        let counts = gtk::Box::builder().orientation(gtk::Orientation::Vertical).hexpand(true).build();
+        counts.append(&summary);
+        counts.append(&scope);
+        head.append(&counts);
+        if matches!(context, Context::Channel(_) | Context::Dms) {
+            head.append(&search_settings(app, context == Context::Dms));
+        }
         head.append(&sort);
         let content = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).build();
         content.set_margin_top(12);
@@ -418,6 +491,7 @@ impl View {
             asked_members: RefCell::default(),
             selected: Cell::new(None),
             summary,
+            scope,
             sort,
             sort_syncing: Cell::new(false),
             results,
@@ -610,6 +684,7 @@ impl View {
             let guild = match self.context {
                 Context::Guild(guild) => Some(guild),
                 Context::Channel(channel) => state.find_channel(channel).and_then(|(guild, _)| guild.map(|g| g.id)),
+                Context::Dms => None,
             };
             if let (Some(guild), Some(gateway)) = (guild, &state.gateway) {
                 gateway.search_members(guild, &query, 10);
@@ -729,6 +804,10 @@ impl View {
             }
         };
         *self.rows.borrow_mut() = rows;
+        self.scope.set_visible(self.context == Context::Dms && !summary.is_empty());
+        if self.context == Context::Dms {
+            self.scope.set_label(&app.dms_scope());
+        }
         self.summary.set_label(&summary);
         self.message.set_label(&message);
         self.message.set_visible(!message.is_empty());
@@ -745,6 +824,7 @@ impl View {
         match self.context {
             Context::Guild(_) => "Before searching, we need to index this server. Give us a bit.",
             Context::Channel(_) => "Before searching, we need to index this DM. Give us a bit.",
+            Context::Dms => "Before searching, we need to index your messages. Give us a bit.",
         }
         .to_owned()
     }
@@ -798,6 +878,8 @@ impl App {
                     let name = channel.shown_name().unwrap_or_default().to_owned();
                     Some(if channel.kind.is_thread() { name } else { format!("#{name}") })
                 }
+                // Every DM at once: which one it was in.
+                (Context::Dms, Some((_, channel))) => Some(channel.title()),
                 _ => None,
             }
         };
@@ -855,4 +937,41 @@ impl App {
         });
         row
     }
+}
+
+/// The cog beside the sort: Search this DM or Search all DMs, as the account's
+/// default (`eo` in 252715).
+fn search_settings(app: &Rc<App>, every_dm: bool) -> gtk::MenuButton {
+    let one = gtk::CheckButton::builder().label("Search this DM").active(!every_dm).build();
+    let all = gtk::CheckButton::builder().label("Search all DMs").active(every_dm).group(&one).build();
+    let column = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .margin_top(12)
+        .margin_bottom(12)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    column.append(&gtk::Label::builder().label("By default…").xalign(0.0).css_classes(["heading"]).build());
+    column.append(&one);
+    column.append(&all);
+    let popover = gtk::Popover::builder().child(&column).build();
+    all.connect_toggled({
+        let app = Rc::downgrade(app);
+        move |all| {
+            if let Some(app) = app.upgrade() {
+                let (on, popover) = (all.is_active(), all.ancestor(gtk::Popover::static_type()));
+                if let Some(popover) = popover.and_downcast::<gtk::Popover>() {
+                    popover.popdown();
+                }
+                app.set_cross_dm_search(on);
+            }
+        }
+    });
+    gtk::MenuButton::builder()
+        .icon_name("emblem-system-symbolic")
+        .tooltip_text("Settings")
+        .popover(&popover)
+        .css_classes(["flat"])
+        .build()
 }

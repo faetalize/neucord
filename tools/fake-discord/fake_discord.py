@@ -733,6 +733,25 @@ def search_messages(scope, body):
     return 200, {"messages": [[m] for m in found[:25]], "total_results": len(found)}
 
 
+@route("POST", r"/users/@me/messages/search/tabs")
+def search_dms(body):
+    """Every DM at once: the DMs' lines (Alice's DM, 201, and the one with a stranger, 203) that have the text asked
+    for in the `messages` tab, a result each, in the answer's tabs; `in:` narrows them with `channel_ids`."""
+    tab = ((body or {}).get("tabs") or {}).get("messages") or {}
+    text = (tab.get("content") or "").lower()
+    lines = [("201", ALICE, "dinner at eight, then?"), ("203", {"id": "901", "username": "stranger_fake",
+                                                                  "global_name": None, "avatar": None,
+                                                                  "discriminator": "0"}, "dinner is on me")]
+    wanted = (body or {}).get("channel_ids")
+    found = []
+    for n, (channel, who, content) in enumerate(lines):
+        if text and text in content and (not wanted or channel in wanted):
+            found.append({**message(50 + n, who, content), "channel_id": channel})
+    return 200, {"analytics_id": "fake", "tabs": {"messages": {"total_results": len(found), "cursor": None,
+                                                                "messages": [[m] for m in found], "channels": [],
+                                                                "threads": [], "members": []}}}
+
+
 # The pins of #600 are lines 5, 7 and 9, pinned in that order (newest pin first), two to a page.
 PINNED = ["5", "7", "9"]
 

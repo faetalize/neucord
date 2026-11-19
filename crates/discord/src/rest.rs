@@ -272,19 +272,24 @@ impl Rest {
     /// many times it has been asked again, which the client writes into the
     /// query itself.
     pub async fn search_messages(&self, request: &search::Request, attempts: u32) -> Result<Searched, Error> {
+        // The query of a server or a DM is in the URL, and of every DM at once
+        // in a body that doesn't change when it is asked again.
         let query = request.query(attempts);
-        let call = match request.context {
-            search::Context::Guild(guild) => call!(SEARCH_GUILD_MESSAGES, guild).query(&query),
-            search::Context::Channel(channel) => call!(SEARCH_CHANNEL_MESSAGES, channel).query(&query),
+        let (call, body) = match request.context {
+            search::Context::Guild(guild) => (call!(SEARCH_GUILD_MESSAGES, guild).query(&query), None),
+            search::Context::Channel(channel) => (call!(SEARCH_CHANNEL_MESSAGES, channel).query(&query), None),
+            search::Context::Dms => (call!(SEARCH_DMS_TABS), Some(request.tabs_body())),
         };
-        let (status, response, retry_after) = self.send_full(call, None, Sending::default()).await?;
+        let (status, response, retry_after) = self.send_full(call, body, Sending::default()).await?;
         match status {
             202 => Ok(Searched::Indexing { retry_after }),
             _ => {
                 let answer: Value = Self::answer(status, &response)?;
-                search::Page::from_value(&answer)
-                    .map(Searched::Page)
-                    .ok_or_else(|| Error::Protocol("search results without a total".into()))
+                let page = match request.context {
+                    search::Context::Dms => search::Page::from_tabs(&answer),
+                    _ => search::Page::from_value(&answer),
+                };
+                page.map(Searched::Page).ok_or_else(|| Error::Protocol("search results without a total".into()))
             }
         }
     }

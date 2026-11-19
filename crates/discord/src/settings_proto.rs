@@ -54,6 +54,7 @@ const VIEW_NSFW_COMMANDS: u32 = 23;
 const EXPLICIT_CONTENT_FILTER: u32 = 19;
 const EXPLICIT_CONTENT_SETTINGS: u32 = 29;
 const GORE_CONTENT_SETTINGS: u32 = 32;
+const IS_CROSS_DM_SEARCH_ENABLED: u32 = 36;
 
 // ExplicitContentSettings and GoreContentSettings.
 const IN_GUILDS: u32 = 1;
@@ -202,6 +203,7 @@ impl SettingsPatch {
             nsfw_commands_in_dms: flag(VIEW_NSFW_COMMANDS),
             enable_tts_command: flag(ENABLE_TTS_COMMAND),
             show_command_suggestions: flag(SHOW_COMMAND_SUGGESTIONS),
+            cross_dm_search: flag(IS_CROSS_DM_SEARCH_ENABLED),
             sensitive: text.as_ref().map(|t| preferences(t)),
         })
     }
@@ -316,6 +318,8 @@ pub enum Setting {
     AnimateEmoji(bool),
     /// The message box menu's Suggestions ▸ Slash Commands (194400).
     ShowCommandSuggestions(bool),
+    /// The search's cog: Search this DM or Search all DMs (252715).
+    CrossDmSearch(bool),
     AnimateStickers(StickerAnimation),
     DeveloperMode(bool),
     ReactionNotifications(ReactionNotifications),
@@ -410,6 +414,7 @@ impl Setting {
             Setting::RenderReactions(on) => one(TEXT_AND_IMAGES, RENDER_REACTIONS, Some(bool_value(on))),
             Setting::GifAutoPlay(on) => one(TEXT_AND_IMAGES, GIF_AUTO_PLAY, Some(bool_value(on))),
             Setting::ShowCommandSuggestions(on) => one(TEXT_AND_IMAGES, SHOW_COMMAND_SUGGESTIONS, Some(bool_value(on))),
+            Setting::CrossDmSearch(on) => one(TEXT_AND_IMAGES, IS_CROSS_DM_SEARCH_ENABLED, Some(bool_value(on))),
             Setting::AnimateEmoji(on) => one(TEXT_AND_IMAGES, ANIMATE_EMOJI, Some(bool_value(on))),
             Setting::AnimateStickers(how) => one(TEXT_AND_IMAGES, ANIMATE_STICKERS, Some(uint_value(how.raw() as u32))),
             Setting::DeveloperMode(on) => one(APPEARANCE, DEVELOPER_MODE, plain(on)),
@@ -679,6 +684,18 @@ mod tests {
         assert_eq!((group, written), (TEXT_AND_IMAGES, bool_wrapper(SHOW_COMMAND_SUGGESTIONS, false)));
     }
 
+    #[test]
+    fn searching_every_dm_is_a_wrapper_off_until_it_is_set() {
+        let on = patch(&bytes_field(TEXT_AND_IMAGES, &bool_wrapper(IS_CROSS_DM_SEARCH_ENABLED, true)));
+        assert_eq!(on.cross_dm_search, Some(true));
+        let mut settings = crate::settings::Settings::default();
+        assert!(!settings.cross_dm_search(), "off by default");
+        settings.apply(on);
+        assert!(settings.cross_dm_search());
+        let (group, written) = Setting::CrossDmSearch(false).written(&[]).unwrap();
+        assert_eq!((group, written), (TEXT_AND_IMAGES, bool_wrapper(IS_CROSS_DM_SEARCH_ENABLED, false)));
+    }
+
     /// Developer Mode is a plain `bool`, not a wrapper: proto3 leaves `false`
     /// out, so appearance without it is how another client turns it off.
     #[test]
@@ -798,6 +815,7 @@ mod tests {
             AnimateEmoji(false),
             AnimateStickers(StickerAnimation::Never),
             ShowCommandSuggestions(false),
+            CrossDmSearch(true),
             DeveloperMode(true),
             ReactionNotifications(self::ReactionNotifications::OnlyDms),
             FriendOnlineNotifications(false),
@@ -891,6 +909,7 @@ mod tests {
                 locale: Some("fr".into()),
                 skin_tone: Some(Tone::MediumDark),
                 show_command_suggestions: Some(false),
+                cross_dm_search: Some(true),
                 show_current_game: Some(false),
                 ..Settings::default()
             }

@@ -12,6 +12,7 @@ use std::fmt::Display;
 pub(crate) const EXPLICIT_MEDIA_REPORT_FALSE_POSITIVE: Endpoint = Endpoint::post("/attachments/report-false-positive");
 pub(crate) const MESSAGES: Endpoint = Endpoint::get("/channels/{channel}/messages");
 pub(crate) const SEARCH_GUILD_MESSAGES: Endpoint = Endpoint::get("/guilds/{guild}/messages/search");
+pub(crate) const SEARCH_DMS_TABS: Endpoint = Endpoint::post("/users/@me/messages/search/tabs");
 pub(crate) const SEARCH_CHANNEL_MESSAGES: Endpoint = Endpoint::get("/channels/{channel}/messages/search");
 pub(crate) const SEND_MESSAGE: Endpoint = Endpoint::post("/channels/{channel}/messages");
 pub(crate) const EDIT_MESSAGE: Endpoint = Endpoint::patch("/channels/{channel}/messages/{message}");
