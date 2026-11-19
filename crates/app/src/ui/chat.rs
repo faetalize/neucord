@@ -323,6 +323,11 @@ impl App {
             .css_classes(["composer-area", "floating-card", "floating"])
             .build();
         self.build_composer(&composer);
+        // Who is typing shows over the list, just above the card, so the
+        // card is the account panel's height and its row stays centred.
+        let dock = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+        dock.append(&self.typing_line);
+        dock.append(&composer);
         let page = adw::ToolbarView::builder()
             .content(&self.scroller)
             .extend_content_to_top_edge(true)
@@ -388,7 +393,7 @@ impl App {
                 }
             }
         });
-        page.add_bottom_bar(&composer);
+        page.add_bottom_bar(&dock);
 
         // The list scrolls under the bars, and pads its ends to their height
         // so its first and last messages can come out from under them. The
@@ -2201,6 +2206,9 @@ impl App {
         }
         if self.highlight.get() == Some(message.id) {
             classes.push("highlight");
+        }
+        if self.account.state.borrow().mentions_me(message) {
+            classes.push("mentioned");
         }
         if self.reply.borrow().as_ref().is_some_and(|r| r.to == message.id) {
             classes.push("replying");

@@ -86,6 +86,10 @@ listview.messages, listview.messages > row { background: none; padding: 0; }
 .message.editable .message-main { margin-right: 100px; }
 .message.first { padding-top: 14px; }
 .message:hover { background-color: var(--neucord-message-hover-bg); }
+/* A message that pings us, as the client marks it (`mentioned`): tinted,
+   with a bar down its left edge. */
+.message.mentioned { background-color: alpha(var(--neucord-highlight-color), 0.1); box-shadow: inset 2px 0 var(--neucord-highlight-color); }
+.message.mentioned:hover { background-color: alpha(var(--neucord-highlight-color), 0.14); }
 .message.replying, .message.editing { background-color: alpha(var(--neucord-reply-color), 0.12); box-shadow: inset 2px 0 var(--neucord-reply-color); }
 .message.highlight { background-color: alpha(var(--neucord-highlight-color), 0.15); box-shadow: inset 2px 0 var(--neucord-highlight-color); transition: background-color 300ms; }
 .blocked-bar { margin: 3px 50px 3px 74px; opacity: var(--dim-opacity); font-size: 0.9em; border-spacing: 8px; }
@@ -119,16 +123,21 @@ overlay-split-view > .overlay-pane {
 }
 
 /* Cards floating over the bottom of a pane: the composer, and the account
-   panel beside it, alike so they line up. */
+   panel beside it, alike so they line up: one row height, one bottom edge.
+   Only the composer grows, as its text wraps. */
 .floating-card {
   margin: 0 12px 12px 12px; border-radius: 12px;
   border: 1px solid alpha(currentColor, 0.1); box-shadow: 0 4px 16px alpha(black, 0.12);
 }
-.card-row { min-height: 34px; padding: 4px 4px 4px 12px; }
+.card-row { min-height: 44px; padding: 4px 4px 4px 12px; }
 .account-panel {
   background-color: var(--sidebar-bg-color);
   background-image: linear-gradient(alpha(currentColor, 0.05), alpha(currentColor, 0.05));
 }
+/* Who is typing, over the list just above the composer: a backdrop only
+   while it names someone, so the empty line is the list beneath it. */
+.typing-line { font-size: 0.9em; padding: 1px 8px; border-radius: 8px; }
+.typing-line.shown { background-color: alpha(var(--window-bg-color), var(--neucord-bar-opacity)); backdrop-filter: blur(var(--neucord-blur)); }
 /* The composer has the reply bar or an error at its top. */
 .composer { padding-right: 12px; }
 textview.composer-input, textview.composer-input text { background: none; }

@@ -411,6 +411,13 @@ def messages(channel):
             msg = message(n, who, text, files)
             if n == 10 and os.environ.get("FAKE_CHAIN"):
                 msg["flags"] = 1 << 5
+            if n == 36 and os.environ.get("FAKE_PING"):
+                # A line that pings us, then one that pings @everyone.
+                msg["content"] = "<@100> a line that pings you"
+                msg["mentions"] = [ME]
+            if n == 34 and os.environ.get("FAKE_PING"):
+                msg["content"] = "@everyone a line that pings everyone"
+                msg["mention_everyone"] = True
             if n == 37 and os.environ.get("FAKE_EMBED"):
                 # A card whose small picture (the thumbnail) is a GIF, to the fake's own image.
                 pic = f"http://127.0.0.1:{PORT}/attachments/1/900/embed.gif?ex=ffffffff&is=1&hm=2&"
@@ -1304,6 +1311,15 @@ class Handler(BaseHTTPRequestHandler):
                         send(0, {"guild_id": "500", "threads": threads, "members": [], "most_recent_messages": recent},
                              "THREAD_LIST_SYNC")
                     SESSION[0] = send
+                    if os.environ.get("FAKE_TYPING"):
+                        # Alice types in #general, again before each lapses.
+                        def typing_start():
+                            dispatch("TYPING_START", {"channel_id": "600", "guild_id": "500", "user_id": "301",
+                                                      "timestamp": int(time.time()), "member": {"user": ALICE, "roles": []}})
+                            timer = threading.Timer(8, typing_start)
+                            timer.daemon = True
+                            timer.start()
+                        typing_start()
                     if IDENTIFIES[0] == 1 and os.environ.get("FAKE_REIDENTIFY"):
                         threading.Timer(float(os.environ["FAKE_REIDENTIFY"]), lambda: send(9, False)).start()
                 else:
