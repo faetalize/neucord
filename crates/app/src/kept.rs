@@ -1,6 +1,8 @@
-//! The most recently used few of something, by key.
+//! The most recently used few of something, by key, and something worked out
+//! once for a while.
 
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use discord::Message;
 
@@ -53,6 +55,34 @@ impl<K: PartialEq, V> Kept<K, V> {
 
     pub fn clear(&mut self) {
         self.entries.clear();
+    }
+}
+
+/// One value worked out for a key, handed out again until it is `ttl` old or
+/// the key differs. For what costs more to work out than it moves: it is a
+/// look at the state as it was a moment ago, never a copy to rely on.
+pub struct Fresh<K, V> {
+    held: Option<(K, Instant, V)>,
+    ttl: Duration,
+}
+
+impl<K: PartialEq, V: Clone> Fresh<K, V> {
+    pub fn new(ttl: Duration) -> Self {
+        Fresh { held: None, ttl }
+    }
+
+    /// The value held for `key` if it was made less than `ttl` before
+    /// `now`, else what `make` gives, which is held from then on.
+    pub fn get(&mut self, key: K, now: Instant, make: impl FnOnce() -> V) -> V {
+        if let Some((held, at, value)) = &self.held
+            && *held == key
+            && now.saturating_duration_since(*at) < self.ttl
+        {
+            return value.clone();
+        }
+        let value = make();
+        self.held = Some((key, now, value.clone()));
+        value
     }
 }
 
@@ -168,5 +198,23 @@ mod tests {
         kept.put(1, "a");
         assert_eq!(kept.take(&1, |_| false), None);
         assert_eq!(kept.take(&1, |_| true), None, "gone, not left for the next taker");
+    }
+
+    #[test]
+    fn a_value_is_made_once_while_fresh_and_for_its_own_key() {
+        let start = Instant::now();
+        let mut fresh = Fresh::new(Duration::from_secs(1));
+        let mut made = 0;
+        let mut get = |fresh: &mut Fresh<u32, u32>, key, after_ms| {
+            fresh.get(key, start + Duration::from_millis(after_ms), || {
+                made += 1;
+                made * 10
+            })
+        };
+        assert_eq!(get(&mut fresh, 1, 0), 10);
+        assert_eq!(get(&mut fresh, 1, 999), 10, "fresh: the same one");
+        assert_eq!(get(&mut fresh, 1, 1000), 20, "a second old: made again");
+        assert_eq!(get(&mut fresh, 2, 1001), 30, "another key");
+        assert_eq!(get(&mut fresh, 1, 1002), 40, "and the first doesn't come back");
     }
 }
