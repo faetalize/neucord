@@ -27,6 +27,7 @@ mod forward;
 mod friends;
 mod gifs;
 mod identity;
+mod idle;
 mod inbox;
 mod integrations;
 mod launcher;
@@ -265,6 +266,8 @@ pub struct App {
     paused_bar: adw::Banner,
     /// Hides the paused bar when the pause is over.
     paused_end: RefCell<Option<glib::SourceId>>,
+    /// When the user was last active, for the idle and away presence.
+    idle: RefCell<discord::idle::Idle>,
     /// The divider above the first unread message, while it has a row.
     unread_divider: glib::WeakRef<gtk::Box>,
     /// A message flashed after jumping to it.
@@ -546,6 +549,10 @@ impl App {
             failed_bar: adw::Banner::builder().title("Could not load messages").button_label("Try Again").build(),
             paused_bar: adw::Banner::new(""),
             paused_end: RefCell::default(),
+            idle: RefCell::new(match discord::idle::debug_idle_after() {
+                Some(after) => discord::idle::Idle::after(state::now_ms() as u64, after.as_millis() as u64),
+                None => discord::idle::Idle::new(state::now_ms() as u64),
+            }),
             unread_divider: glib::WeakRef::new(),
             highlight: Cell::default(),
             row_epoch: Cell::default(),
@@ -810,6 +817,7 @@ impl App {
         }
 
         self.track_motion();
+        self.watch_idle();
 
         // Coming back to the open channel reads it.
         let read_open = {
@@ -824,7 +832,14 @@ impl App {
         };
         self.window.connect_is_active_notify({
             let read_open = read_open.clone();
-            move |_| read_open()
+            let this = Rc::downgrade(self);
+            move |_| {
+                // `WINDOW_FOCUS`, in either direction, counts as activity.
+                if let Some(this) = this.upgrade() {
+                    this.idle_active();
+                }
+                read_open()
+            }
         });
         self.split.connect_show_sidebar_notify(move |_| read_open());
 

@@ -5,6 +5,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use discord::accounts::Answer;
+use discord::threads::Redraw;
 use discord::{Channel, Event, Gateway, Guild, Member, Ready, Rest, Snowflake, session};
 use gtk::glib;
 use gtk::prelude::*;
@@ -256,7 +257,8 @@ impl App {
                     }
                 }
                 Event::ThreadListSync { guild_id, threads, members, recent, complete } => {
-                    self.on_threads(guild_id, |g| {
+                    let touched = threads.iter().map(|t| t.id).chain(members.iter().map(|(thread, _)| *thread));
+                    self.on_threads_touching(guild_id, touched.collect(), |g| {
                         for thread in threads {
                             g.set_thread(thread);
                         }
@@ -271,7 +273,7 @@ impl App {
                 }
                 Event::ForumUnreads { threads, .. } => self.forum_unreads_answered(&threads),
                 Event::ThreadMember { guild_id, thread, member } => {
-                    self.on_threads(guild_id, |g| g.set_thread_member(thread, member))
+                    self.on_threads_touching(guild_id, vec![thread], |g| g.set_thread_member(thread, member))
                 }
                 Event::MemberUpdate { guild_id, member } => self.on_member(guild_id, member),
                 Event::Members { guild_id, members, not_found, users } => {
@@ -993,6 +995,29 @@ impl App {
     /// renamed, archived, locked, joined or left. Whether we may post in one,
     /// or still see it, may have changed with them.
     pub(super) fn on_threads(self: &Rc<Self>, guild_id: Snowflake, change: impl FnOnce(&mut Guild)) {
+        self.threads_changed(guild_id, None, change);
+    }
+
+    /// [`on_threads`](Self::on_threads) for a change that touches only
+    /// `touched`: the open chat then draws again only what that changed,
+    /// which for a sync of what we hold already is nothing, rather than
+    /// every row on each event.
+    pub(super) fn on_threads_touching(
+        self: &Rc<Self>,
+        guild_id: Snowflake,
+        touched: Vec<Snowflake>,
+        change: impl FnOnce(&mut Guild),
+    ) {
+        self.threads_changed(guild_id, Some(touched), change);
+    }
+
+    fn threads_changed(
+        self: &Rc<Self>,
+        guild_id: Snowflake,
+        touched: Option<Vec<Snowflake>>,
+        change: impl FnOnce(&mut Guild),
+    ) {
+        let before = touched.as_deref().map(|touched| self.account.state.borrow().thread_looks(guild_id, touched));
         let open = {
             let mut state = self.account.state.borrow_mut();
             let Some(guild) = state.guilds.iter_mut().find(|g| g.id == guild_id) else { return };
@@ -1001,11 +1026,30 @@ impl App {
         };
         if open {
             self.rebuild_sidebar();
-            self.refresh_thread_boxes();
+            // Told which threads changed, the boxes of their starters are the only ones to fill in again.
+            if touched.is_none() {
+                self.refresh_thread_boxes();
+            }
             self.sync_threads_button();
         }
         self.refresh_threads_view();
-        self.permissions_changed(Some(guild_id));
+        match (touched, before) {
+            (Some(touched), Some(before)) => {
+                let (after, channel) = {
+                    let state = self.account.state.borrow();
+                    (state.thread_looks(guild_id, &touched), state.channel.filter(|_| open))
+                };
+                match discord::threads::redraw(&before, &after, &touched, channel) {
+                    Redraw::Nothing => {}
+                    Redraw::Starters(starters) => {
+                        self.refresh_badges();
+                        self.rebind_messages(&starters.into_iter().collect());
+                    }
+                    Redraw::Everything => self.permissions_changed(Some(guild_id)),
+                }
+            }
+            _ => self.permissions_changed(Some(guild_id)),
+        }
         self.thread_arrivals();
     }
 

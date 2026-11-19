@@ -12,7 +12,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use adw::prelude::*;
-use discord::presence::Send;
+use discord::presence::{Local, Send};
 use discord::relationships::{Presence, Status};
 use discord::settings::{ClearAfter, CustomStatus, StatusSettings, UserStatus};
 use discord::{Setting, Snowflake};
@@ -443,15 +443,31 @@ impl App {
         }
     }
 
+    /// What we show as now: the status setting, which idle turns to Idle
+    /// when it is Online, and whether we are away (`SelfPresenceStore`,
+    /// 894768).
+    fn local_presence(&self) -> Local {
+        let status = self.account.state.borrow().settings.status.status;
+        let idle = self.idle.borrow();
+        Local::of(status, idle.idle_since(), idle.away())
+    }
+
     /// Tell Discord what we show as, if that changed (`B.update()` in
-    /// 225123). Also what the first READY does: an account that is not
-    /// Online is told so.
+    /// 225123).
     pub(super) fn report_presence(self: &Rc<Self>) {
-        let send = {
-            let mut state = self.account.state.borrow_mut();
-            let status = state.settings.status.status;
-            state.presence.changed(status, now_ms() as u64)
-        };
+        let local = self.local_presence();
+        let send = self.account.state.borrow_mut().presence.changed(local, now_ms() as u64);
+        if let Some(send) = send {
+            self.send_presence(send);
+        }
+    }
+
+    /// A session started: tell Discord what it doesn't know, which is
+    /// everything but an Online account that is active and present
+    /// (`handleConnectionOpen`, 225123).
+    fn open_presence(self: &Rc<Self>) {
+        let local = self.local_presence();
+        let send = self.account.state.borrow_mut().presence.opened(local, now_ms() as u64);
         if let Some(send) = send {
             self.send_presence(send);
         }
@@ -471,19 +487,19 @@ impl App {
             state.presence_timer
         };
         match send {
-            Send::Now(status) => {
+            Send::Now(local) => {
                 if let Some(gateway) = &self.account.state.borrow().gateway {
-                    gateway.update_presence(status);
+                    gateway.update_presence(local);
                 }
             }
-            Send::After(wait, status) => {
+            Send::After(wait, local) => {
                 let this = Rc::downgrade(self);
                 let epoch = self.account.epoch.get();
                 glib::timeout_add_local_once(wait, move || {
                     let Some(this) = this.upgrade().filter(|this| this.account.epoch.get() == epoch) else { return };
                     let send = {
                         let mut state = this.account.state.borrow_mut();
-                        (state.presence_timer == generation).then(|| state.presence.admit(status, now_ms() as u64))
+                        (state.presence_timer == generation).then(|| state.presence.admit(local, now_ms() as u64))
                     };
                     if let Some(send) = send {
                         this.send_presence(send);
@@ -537,7 +553,7 @@ impl App {
     /// READY: show the status, say it, and soon look for what has ended.
     pub(super) fn status_ready(self: &Rc<Self>) {
         self.refresh_status();
-        self.report_presence();
+        self.open_presence();
         let this = Rc::downgrade(self);
         let epoch = self.account.epoch.get();
         glib::timeout_add_local_once(AFTER_READY, move || {

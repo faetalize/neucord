@@ -91,7 +91,7 @@ IMAGE_FAIL = bool(os.environ.get("FAKE_IMAGE_FAIL"))
 GIF = bool(os.environ.get("FAKE_GIF"))
 # FAKE_VIDEO=<path to a .webm>: channel 600 gets a message with that file as a video attachment.
 VIDEO = os.environ.get("FAKE_VIDEO")
-if UPLOAD_FAIL not in ("", "too-large"):
+if UPLOAD_FAIL not in ("", "too-large", "429"):
     sys.exit("unknown FAKE_UPLOAD_FAIL " + UPLOAD_FAIL)
 
 ME = {"id": "100", "username": "tester_fake", "global_name": "Tester Fake", "avatar": None, "discriminator": "0",
@@ -980,7 +980,7 @@ UPLOADS = [0]
 @route("POST", r"/channels/(\d+)/attachments")
 def upload_url(channel, body):
     """An upload URL per file, here at the fake; FAKE_UPLOAD_FAIL=too-large turns it down as Discord does a file
-    over the limit."""
+    over the limit (`429`: see the PUT)."""
     if UPLOAD_FAIL == "too-large":
         return 400, {"code": 40005, "message": "Request entity too large"}
     slots = []
@@ -992,8 +992,18 @@ def upload_url(channel, body):
     return 200, {"attachments": slots}
 
 
+UPLOAD_PUTS = {}
+
+
 @route("PUT", r"/upload/(\d+)")
 def upload_put(n, body):
+    """FAKE_UPLOAD_FAIL=429: a file's first PUT is rate limited (`retry_after` 4), its second, the check of where
+    the upload stands, says to start from the beginning (308), and the third takes it."""
+    UPLOAD_PUTS[n] = UPLOAD_PUTS.get(n, 0) + 1
+    if UPLOAD_FAIL == "429" and UPLOAD_PUTS[n] == 1:
+        return 429, {"message": "You are being rate limited.", "retry_after": 4}
+    if UPLOAD_FAIL == "429" and UPLOAD_PUTS[n] == 2:
+        return 308, None
     return 200, None
 
 
@@ -1323,6 +1333,25 @@ class Handler(BaseHTTPRequestHandler):
                         send(0, {"guild_id": "500", "threads": threads, "members": [], "most_recent_messages": recent},
                              "THREAD_LIST_SYNC")
                     SESSION[0] = send
+                    starter = next((t for t in threads if t["name"] == "about line ten"), None)
+                    if os.environ.get("FAKE_THREAD_SYNCS") and starter:
+                        # The same threads synced again, each time with the message count of the one line 10 started (FAKE_CHAIN) a
+                        # message higher (its box under the line says it), and our member of it, as Discord does on
+                        # subscribing and on a join. The rest of each sync is no news.
+
+                        def resync(left):
+                            starter["message_count"] += 1
+                            dispatch("THREAD_LIST_SYNC", {"guild_id": "500", "threads": threads, "members": [],
+                                                          "most_recent_messages": []})
+                            dispatch("THREAD_MEMBER_UPDATE", {"id": starter["id"], "guild_id": "500", "user_id": "100",
+                                                              "flags": 0, "join_timestamp": "2026-01-01T00:00:00.000000+00:00"})
+                            if left > 1:
+                                timer = threading.Timer(1, resync, [left - 1])
+                                timer.daemon = True
+                                timer.start()
+                        timer = threading.Timer(6, resync, [int(os.environ["FAKE_THREAD_SYNCS"])])
+                        timer.daemon = True
+                        timer.start()
                     if os.environ.get("FAKE_TYPING"):
                         # Alice types in #general, again before each lapses.
                         def typing_start():
