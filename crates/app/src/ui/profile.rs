@@ -144,6 +144,9 @@ pub(super) struct View {
     open: RefCell<HashSet<&'static str>>,
     /// The note's box holds text not sent yet: nothing is built over it.
     editing: std::cell::Cell<bool>,
+    /// Ours, from the account panel: with our status and accounts, and
+    /// without what only someone else's has (a note, mutuals, Message).
+    own: bool,
 }
 
 /// The profiles on screen: the popout, if one is open, and the panel.
@@ -167,6 +170,21 @@ impl App {
     /// not at all while it holds one that is current, in the background while
     /// it holds an old one, and before showing anything if it holds none.
     pub(super) fn show_profile(self: &Rc<Self>, target: &UserTarget, note: bool) {
+        self.show_popout(target, note, false);
+    }
+
+    /// Our own profile popout, from the account panel's button.
+    pub(super) fn show_own_profile(self: &Rc<Self>, anchor: &gtk::Widget) {
+        let (user, presence) = {
+            let state = self.account.state.borrow();
+            let Some(user) = state.me.clone() else { return };
+            (user, super::own_status::own_presence(&state.settings.status))
+        };
+        let target = UserTarget { user, guild: None, channel: None, presence: Some(presence), anchor: anchor.clone() };
+        self.show_popout(&target, false, true);
+    }
+
+    fn show_popout(self: &Rc<Self>, target: &UserTarget, note: bool, own: bool) {
         let Some(request) = self.popout_request(target) else { return };
         let popover = gtk::Popover::builder().has_arrow(true).build();
         popover.set_parent(&self.window);
@@ -187,6 +205,7 @@ impl App {
             note,
             open: RefCell::default(),
             editing: std::cell::Cell::default(),
+            own,
         });
         // The app holds it while it is open: nothing else does once its
         // requests are answered, and it still has to follow what changes.
@@ -263,6 +282,7 @@ impl App {
             note: false,
             open: RefCell::default(),
             editing: std::cell::Cell::default(),
+            own: false,
         });
         self.profile_views.borrow_mut().panel = Some(view.clone());
         self.begin_profile(&view);
@@ -622,6 +642,12 @@ impl View {
             });
         }
 
+        if self.own {
+            drop(state);
+            column.append(&app.own_popout_actions(self.close_handle()));
+            column.set_margin_bottom(12);
+            return column.upcast();
+        }
         column.append(&self.since(&state, user, guild, member.as_ref().and_then(|m| m.joined_at)));
 
         if let (Some(guild), Some(member)) = (guild, &member) {

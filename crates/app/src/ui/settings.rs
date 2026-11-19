@@ -359,6 +359,9 @@ impl App {
         neucord.set_description("These are saved on this computer only, not to your Discord account.");
 
         let dialog = adw::PreferencesDialog::builder().title("Settings").build();
+        let (account, about) = self.account_settings(&dialog);
+        neucord.add(&about);
+        dialog.add(&account);
         dialog.add(&chat);
         dialog.add(&notifications);
         dialog.add(&privacy);
@@ -382,6 +385,40 @@ impl App {
         };
         show(&self.account.state.borrow().settings);
         Window { dialog, show: Box::new(show) }
+    }
+
+    /// What the client's settings hold of the account and the app, which
+    /// Neucord's are where they live: Account Standing, Scheduled Messages
+    /// and Log Out on an Account page, and About Neucord. Each closes the
+    /// settings and does what the window's action does.
+    fn account_settings(
+        self: &Rc<Self>,
+        dialog: &adw::PreferencesDialog,
+    ) -> (adw::PreferencesPage, adw::PreferencesGroup) {
+        let row = |title: &str, action: &'static str, classes: &[&str]| {
+            let row = adw::ButtonRow::builder().title(title).css_classes(classes.to_vec()).build();
+            row.connect_activated({
+                let (dialog, window) = (dialog.downgrade(), self.window.downgrade());
+                move |_| {
+                    if let Some(dialog) = dialog.upgrade() {
+                        dialog.close();
+                    }
+                    if let Some(window) = window.upgrade() {
+                        let _ = WidgetExt::activate_action(&window, action, None);
+                    }
+                }
+            });
+            row
+        };
+        let account = group("Account", "");
+        account.add(&row("Account Standing", "win.account-standing", &[]));
+        account.add(&row("Scheduled Messages", "win.scheduled-messages", &[]));
+        let leave = group("", "");
+        leave.add(&row("Log Out", "win.logout", &["destructive-action"]));
+        let page = page("Account", "avatar-default-symbolic", &[&account, &leave]);
+        let about = group("", "");
+        about.add(&row("About Neucord", "app.about", &[]));
+        (page, about)
     }
 
     /// What a question about a setting is put to: the window, which covers

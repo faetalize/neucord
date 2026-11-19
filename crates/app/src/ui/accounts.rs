@@ -435,16 +435,14 @@ impl App {
         }
     }
 
-    /// The submenu of the account menu: the accounts, ticking the shown one,
-    /// then Manage Accounts (166783).
+    /// Switch Accounts in our profile popout: the accounts, ticking the
+    /// shown one, then Manage Accounts (166783).
     pub(super) fn switch_menu(&self) -> gio::Menu {
-        let submenu = gio::Menu::new();
-        submenu.append_section(None, &self.switch_items);
+        let menu = gio::Menu::new();
+        menu.append_section(None, &self.switch_items);
         let manage = gio::Menu::new();
         manage.append(Some("_Manage Accounts"), Some("win.manage-accounts"));
-        submenu.append_section(None, &manage);
-        let menu = gio::Menu::new();
-        menu.append_submenu(Some("_Switch Accounts"), &submenu);
+        menu.append_section(None, &manage);
         menu
     }
 
