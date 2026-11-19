@@ -1455,6 +1455,64 @@ impl App {
 }
 """)
 
+# Our own profile popout, as the account panel's button opens it: `own-profile`, then `shot-profile <png>` shoots
+# the open profile popout, and `own-row <list> <n>` activates row n of its first (0) or second (1) card.
+edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("own-profile") => {
+                if let Some(button) = self.status_button.borrow().clone() {
+                    button.emit_clicked();
+                }
+            }
+            Some("shot-profile") => self.e2e_shot_profile(parts.next().unwrap_or("profile.png")),
+            Some("own-row") => {
+                let list = parts.next().and_then(|w| w.parse().ok()).unwrap_or(0);
+                let row = parts.next().and_then(|w| w.parse().ok()).unwrap_or(0);
+                self.e2e_own_row(list, row, parts.next().map(str::to_owned));
+            }
+            Some("quit") => {''')
+open(f"{root}/crates/app/src/ui/profile.rs", "a").write(r"""
+impl App {
+    /// Activates row `row` of card `list` in the open profile popout, and shoots the menu it opens to `png`.
+    pub(super) fn e2e_own_row(&self, list: usize, row: i32, png: Option<String>) {
+        let Some(Host::Popout(popover)) = self.profile_views.borrow().popout.as_ref().map(|v| match &v.host {
+            Host::Popout(p) => Host::Popout(p.clone()),
+            Host::Panel(b) => Host::Panel(b.clone()),
+        }) else { return eprintln!("e2e: no profile popout") };
+        fn lists(w: &gtk::Widget, out: &mut Vec<gtk::ListBox>) {
+            let mut child = w.first_child();
+            while let Some(c) = child {
+                match c.clone().downcast::<gtk::ListBox>() {
+                    Ok(l) => out.push(l),
+                    Err(c) => lists(&c, out),
+                }
+                child = c.next_sibling();
+            }
+        }
+        let mut found = Vec::new();
+        lists(popover.upcast_ref(), &mut found);
+        let Some(target) = found.get(list).and_then(|l| l.row_at_index(row)) else { return eprintln!("e2e: no row") };
+        target.activate();
+        let Some(png) = png else { return };
+        glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
+            let mut child = target.first_child();
+            while let Some(c) = child {
+                if let Ok(menu) = c.clone().downcast::<gtk::Popover>() {
+                    return super::e2e::shot(&menu, &png);
+                }
+                child = c.next_sibling();
+            }
+            eprintln!("e2e: no menu");
+        });
+    }
+
+    pub(super) fn e2e_shot_profile(&self, path: &str) {
+        match self.profile_views.borrow().popout.as_ref().map(|v| &v.host) {
+            Some(Host::Popout(popover)) => super::e2e::shot(popover, path),
+            _ => eprintln!("e2e: no profile popout"),
+        }
+    }
+}
+""")
+
 # A thread's settings form: `thread-settings <id>` opens it (whoever owns the thread), `thread-settings-save <name>
 # <slowmode index> <archive index>` fills it and presses Save Changes.
 edit("crates/app/src/ui/thread_settings.rs", "        form.dialog.present(Some(&self.window));",
@@ -1678,16 +1736,17 @@ edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''           
                           state.settings.notifications.quiet_mode);
             }
             Some("status-menu") => {
+                // Our profile popout, then its status row's menu.
                 let png = parts.next().unwrap_or("status.png").to_owned();
-                let button = self.status_button.borrow().clone();
-                if let Some(button) = button {
-                    button.popup();
-                    glib::timeout_add_local_once(Duration::from_millis(400), move || {
-                        if let Some(popover) = button.popover() {
-                            shot(&popover, &png);
-                        }
-                    });
+                if let Some(button) = self.status_button.borrow().clone() {
+                    button.emit_clicked();
                 }
+                let this = Rc::downgrade(self);
+                glib::timeout_add_local_once(Duration::from_millis(600), move || {
+                    if let Some(this) = this.upgrade() {
+                        this.e2e_own_row(0, 0, Some(png));
+                    }
+                });
             }
             Some("quit") => {''')
 edit("crates/app/src/ui/own_status.rs", "    fn set_focus_mode(self: &Rc<Self>", "    pub(super) fn set_focus_mode_for_e2e(self: &Rc<Self>, on: bool, duration_ms: Option<u64>) {\n        self.set_focus_mode(on, duration_ms);\n    }\n\n    fn set_focus_mode(self: &Rc<Self>")

@@ -127,10 +127,12 @@ pub struct App {
     me_label: gtk::Label,
     /// Under our name: the custom status, else the status.
     me_status: gtk::Box,
-    /// Beside our name, the colour of the status.
+    /// At the corner of our avatar, the colour of the status.
     me_dot: gtk::Box,
-    /// Opens the status menu, which `refresh_status` keeps up to date.
-    status_button: RefCell<Option<gtk::MenuButton>>,
+    /// Holds our avatar, which `refresh_me_avatar` replaces.
+    me_avatar: gtk::Box,
+    /// Opens our profile popout; `refresh_status` keeps its tooltip.
+    status_button: RefCell<Option<gtk::Button>>,
     header: widgets::Title,
     /// The open channel's chat, or one of Home's pages.
     content: gtk::Stack,
@@ -386,9 +388,14 @@ impl App {
             guild_name: widgets::Title::new(""),
             channels: gtk::ListBox::builder().css_classes(["navigation-sidebar"]).build(),
             targets: RefCell::default(),
-            me_label: gtk::Label::builder().xalign(0.0).hexpand(true).ellipsize(pango::EllipsizeMode::End).build(),
+            me_label: gtk::Label::builder().xalign(0.0).ellipsize(pango::EllipsizeMode::End).build(),
             me_status: gtk::Box::new(gtk::Orientation::Horizontal, 0),
-            me_dot: gtk::Box::builder().valign(gtk::Align::Center).css_classes(["presence", "online"]).build(),
+            me_dot: gtk::Box::builder()
+                .halign(gtk::Align::End)
+                .valign(gtk::Align::End)
+                .css_classes(["presence", "online"])
+                .build(),
+            me_avatar: gtk::Box::new(gtk::Orientation::Horizontal, 0),
             status_button: RefCell::default(),
             header: widgets::Title::new(""),
             content: gtk::Stack::new(),
@@ -917,37 +924,24 @@ impl App {
         self.split.clone().upcast()
     }
 
-    /// Who is logged in, with the app's menu: a card floating over the
-    /// bottom of the rail and channel list, which scroll on beneath it, the
-    /// same size and in the same place as the composer beside it.
+    /// Who is logged in, as the client's account panel: our avatar, name
+    /// and status, which open our profile popout, and the settings. A card
+    /// floating over the bottom of the rail and channel list, which scroll
+    /// on beneath it, the same size and in the same place as the composer
+    /// beside it.
     fn build_account_panel(self: &Rc<Self>) -> gtk::Widget {
-        let row = gtk::Box::builder().spacing(4).css_classes(["card-row"]).build();
+        let row = gtk::Box::builder().spacing(4).css_classes(["card-row", "account-row"]).build();
         row.append(&self.build_status_button());
-        // The app's menu too, as Discord's settings live here.
-        let menu = gio::Menu::new();
-        menu.append(Some("_User Settings"), Some("win.settings"));
-        menu.append_section(None, &self.switch_menu());
-        menu.append(Some("_Scheduled Messages"), Some("win.scheduled-messages"));
-        menu.append(Some("Account _Standing"), Some("win.account-standing"));
-        menu.append(Some("_About Neucord"), Some("app.about"));
-        menu.append(Some("_Log Out"), Some("win.logout"));
-        let button = gtk::MenuButton::builder()
-            .icon_name("view-more-symbolic")
-            .tooltip_text("Account")
-            .primary(true)
-            .menu_model(&menu)
-            .css_classes(["flat"])
+        let settings = gtk::Button::builder()
+            .icon_name("emblem-system-symbolic")
+            .tooltip_text("User Settings")
+            .action_name("win.settings")
+            .hexpand(true)
+            .halign(gtk::Align::End)
+            .valign(gtk::Align::Center)
+            .css_classes(["flat", "account-settings"])
             .build();
-        // The client asks who each account is when its list opens.
-        button.connect_active_notify({
-            let this = Rc::downgrade(self);
-            move |button| {
-                if let (true, Some(this)) = (button.is_active(), this.upgrade()) {
-                    this.validate_accounts();
-                }
-            }
-        });
-        row.append(&button);
+        row.append(&settings);
         let panel = gtk::Box::builder().valign(gtk::Align::End).css_classes(["account-panel", "floating-card"]).build();
         panel.append(&row);
 

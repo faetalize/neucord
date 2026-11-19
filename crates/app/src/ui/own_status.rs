@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use adw::prelude::*;
 use discord::presence::Send;
+use discord::relationships::{Presence, Status};
 use discord::settings::{ClearAfter, CustomStatus, StatusSettings, UserStatus};
 use discord::{Setting, Snowflake};
 use gtk::{gio, glib};
@@ -41,6 +42,8 @@ const CUSTOM_STATUS_LENGTH: i32 = 128;
 /// (`POST_CONNECTION_OPEN` fires 2 s after the connection opens, 225123).
 const AFTER_READY: Duration = Duration::from_secs(2);
 const EMOJI_SIZE: i32 = 16;
+/// Our avatar in the account panel, as the client's (`SIZE_32`).
+const ME_AVATAR: i32 = 32;
 
 /// The window action's argument: `<status>:<duration in ms, 0 for ever>`.
 fn action_target(status: UserStatus, duration_ms: Option<u64>) -> String {
@@ -125,6 +128,48 @@ fn menu(status: &StatusSettings, focus: Option<u64>) -> gio::Menu {
     menu
 }
 
+/// Our presence as our profile shows it: the status we set, and our
+/// custom status.
+pub(super) fn own_presence(status: &StatusSettings) -> Presence {
+    let shown = match status.status {
+        UserStatus::Online => Status::Online,
+        UserStatus::Idle => Status::Idle,
+        UserStatus::DoNotDisturb => Status::DoNotDisturb,
+        UserStatus::Invisible => Status::Offline,
+    };
+    Presence { status: shown, text: status.custom.as_ref().map(|c| c.text.clone()), mobile: false }
+}
+
+/// A row of a card in our profile popout: an optional leading widget, the
+/// label, and an arrow when it opens a menu.
+fn popout_row(lead: Option<&gtk::Widget>, label: &str, opens: bool) -> gtk::ListBoxRow {
+    let content = gtk::Box::builder().spacing(10).build();
+    if let Some(lead) = lead {
+        content.append(lead);
+    }
+    content.append(
+        &gtk::Label::builder().label(label).xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::End).build(),
+    );
+    if opens {
+        content.append(&gtk::Image::from_icon_name("go-next-symbolic"));
+    }
+    gtk::ListBoxRow::builder().child(&content).css_classes(["popout-row"]).build()
+}
+
+/// Open `model` beside `row`; closing it closes the popout too, as choosing
+/// from it does in the client.
+fn submenu(row: &gtk::ListBoxRow, model: &gio::Menu, close: Rc<dyn Fn()>) {
+    let menu = gtk::PopoverMenu::from_model(Some(model));
+    menu.set_parent(row);
+    menu.set_position(gtk::PositionType::Right);
+    menu.connect_closed(move |menu| {
+        close();
+        let menu = menu.clone();
+        glib::idle_add_local_once(move || menu.unparent());
+    });
+    menu.popup();
+}
+
 /// "Until 3:45 PM", "until tomorrow at 3:45 PM": when an expiring status
 /// ends.
 fn until(expires_at_ms: u64) -> Option<String> {
@@ -138,24 +183,108 @@ fn until(expires_at_ms: u64) -> Option<String> {
 }
 
 impl App {
-    /// The account panel's status: a dot, and under the name the custom
-    /// status, else the status. Opens the status menu.
-    pub(super) fn build_status_button(self: &Rc<Self>) -> gtk::MenuButton {
-        let text = gtk::Box::builder().orientation(gtk::Orientation::Vertical).hexpand(true).build();
+    /// The account panel's button: our avatar with the status at its
+    /// corner, our name, and under it the custom status, else the status.
+    /// As wide as that, and it opens our profile popout, as the client's
+    /// account panel does.
+    pub(super) fn build_status_button(self: &Rc<Self>) -> gtk::Button {
+        let avatar = gtk::Overlay::builder().child(&self.me_avatar).valign(gtk::Align::Center).build();
+        avatar.add_overlay(&self.me_dot);
+        let text = gtk::Box::builder().orientation(gtk::Orientation::Vertical).valign(gtk::Align::Center).build();
         text.append(&self.me_label);
         text.append(&self.me_status);
-        let content = gtk::Box::builder().spacing(10).build();
-        content.append(&self.me_dot);
+        let content = gtk::Box::builder().spacing(8).build();
+        content.append(&avatar);
         content.append(&text);
-        let button = gtk::MenuButton::builder()
-            .child(&content)
-            .hexpand(true)
-            .direction(gtk::ArrowType::Up)
-            .css_classes(["flat"])
-            .build();
-        button.set_menu_model(Some(&menu(&StatusSettings::default(), None)));
+        let button =
+            gtk::Button::builder().child(&content).halign(gtk::Align::Start).css_classes(["flat", "me-button"]).build();
+        button.connect_clicked({
+            let this = Rc::downgrade(self);
+            move |button| {
+                if let Some(this) = this.upgrade() {
+                    this.show_own_profile(button.upcast_ref());
+                }
+            }
+        });
         *self.status_button.borrow_mut() = Some(button.clone());
+        self.refresh_me_avatar();
         button
+    }
+
+    /// The cards under our profile in its popout, as the client's: our status,
+    /// which opens the status menu, then Switch Accounts and, in Developer
+    /// Mode, Copy User ID.
+    pub(super) fn own_popout_actions(self: &Rc<Self>, close: impl Fn() + 'static) -> gtk::Widget {
+        let close: Rc<dyn Fn()> = Rc::new(close);
+        let (status, focus, developer, me) = {
+            let state = self.account.state.borrow();
+            let settings = &state.settings;
+            let focus = settings.focus_mode(now_ms() as u64).then_some(settings.notifications.focus_expires_at_ms);
+            (settings.status.clone(), focus, settings.developer_mode, state.me())
+        };
+        let column = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(8)
+            .margin_start(12)
+            .margin_end(12)
+            .build();
+
+        let card =
+            || gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).css_classes(["boxed-list"]).build();
+        let statuses = card();
+        let dot = super::friends::presence_dot(&own_presence(&status));
+        dot.set_valign(gtk::Align::Center);
+        statuses.append(&popout_row(Some(&dot), status.status.label(), true));
+        statuses.connect_row_activated({
+            let close = close.clone();
+            let model = menu(&status, focus);
+            move |_, row| submenu(row, &model, close.clone())
+        });
+        column.append(&statuses);
+
+        let accounts = card();
+        accounts.append(&popout_row(None, "Switch Accounts", true));
+        if developer {
+            accounts.append(&popout_row(None, "Copy User ID", false));
+        }
+        accounts.connect_row_activated({
+            let this = Rc::downgrade(self);
+            move |_, row| {
+                let Some(this) = this.upgrade() else { return };
+                match row.index() {
+                    0 => {
+                        // The client asks who each account is when its list opens.
+                        this.validate_accounts();
+                        submenu(row, &this.switch_menu(), close.clone());
+                    }
+                    _ => {
+                        if let Some(me) = me {
+                            this.copy(&me.to_string());
+                        }
+                        close();
+                    }
+                }
+            }
+        });
+        column.append(&accounts);
+        column.upcast()
+    }
+
+    /// Our avatar in the account panel, as it is now.
+    pub(super) fn refresh_me_avatar(&self) {
+        let me = self.account.state.borrow().me.clone();
+        let name = me.as_ref().map_or("", |u| u.display_name());
+        let picture = me.as_ref().and_then(|u| {
+            let hash = u.avatar.as_deref()?;
+            let size = super::widgets::asked(ME_AVATAR, Some(&self.images));
+            Some((discord::cdn::avatar_url(u.id.0, hash, size), hash))
+        });
+        let avatar =
+            super::widgets::avatar_from(name, ME_AVATAR, Some(&self.images), picture, crate::images::Row::None);
+        while let Some(old) = self.me_avatar.first_child() {
+            self.me_avatar.remove(&old);
+        }
+        self.me_avatar.append(&avatar);
     }
 
     pub(super) fn status_actions(self: &Rc<Self>) -> Vec<gio::ActionEntry<adw::ApplicationWindow>> {
@@ -290,9 +419,6 @@ impl App {
         };
         if let Some(button) = self.status_button.borrow().as_ref() {
             button.set_tooltip_text(Some(&tooltip));
-            let settings = &self.account.state.borrow().settings;
-            let focus = settings.focus_mode(now_ms() as u64).then_some(settings.notifications.focus_expires_at_ms);
-            button.set_menu_model(Some(&menu(&status, focus)));
         }
     }
 

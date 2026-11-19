@@ -130,6 +130,14 @@ overlay-split-view > .overlay-pane {
   border: 1px solid alpha(currentColor, 0.1); box-shadow: 0 4px 16px alpha(black, 0.12);
 }
 .card-row { min-height: 44px; padding: 4px 4px 4px 12px; }
+/* The account panel's buttons sit 4 px in from the card's edges with
+   corners 4 px less round than its, so the two curves are concentric. */
+.account-row { padding: 4px; }
+.me-button, .account-settings { border-radius: 8px; }
+.me-button { padding: 2px 10px 2px 6px; font-weight: normal; }
+.me-button label:not(.caption) { font-weight: bold; }
+.account-settings { min-width: 44px; min-height: 44px; padding: 0; }
+.popout-row { padding: 8px 12px; }
 .account-panel {
   background-color: var(--sidebar-bg-color);
   background-image: linear-gradient(alpha(currentColor, 0.05), alpha(currentColor, 0.05));

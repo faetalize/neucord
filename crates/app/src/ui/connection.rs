@@ -671,6 +671,7 @@ impl App {
         self.usage_connected();
         let me = self.account.state.borrow().me.as_ref().map(|u| u.display_name().to_owned()).unwrap_or_default();
         self.me_label.set_label(&me);
+        self.refresh_me_avatar();
         // A new session has no command (`CONNECTION_OPEN` in 861382); its line goes with it.
         self.end_command(super::slash::Keep::Nothing);
         // READY may bring other Nitro, which changes the length limit.
@@ -773,6 +774,7 @@ impl App {
         self.roster.borrow_mut().updated(&user);
         let changed = self.roster.borrow().to_json() != before;
         self.account.state.borrow_mut().me = Some(user);
+        self.refresh_me_avatar();
         self.refresh_account_views();
         if changed {
             let this = self.clone();
