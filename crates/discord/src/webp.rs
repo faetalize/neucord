@@ -79,7 +79,7 @@ fn rgba(raw: Vec<u8>, has_alpha: bool) -> Vec<u8> {
     if has_alpha {
         return raw;
     }
-    raw.chunks_exact(3).flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255]).collect()
+    raw.as_chunks::<3>().0.iter().flat_map(|&[r, g, b]| [r, g, b, 255]).collect()
 }
 
 #[cfg(test)]
