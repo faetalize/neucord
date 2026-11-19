@@ -1095,8 +1095,13 @@ impl App {
 }
 """)
 
-# `end` scrolls the chat to its newest message.
+# `end` scrolls the chat to its newest message; `scroll <0..1>` to that far down what is loaded.
 edit("crates/app/src/ui/e2e.rs", '            Some("quit") => {', '''            Some("end") => self.scroll_to_end(),
+            Some("scroll") => {
+                let adjustment = self.scroller.vadjustment();
+                let fraction: f64 = parts.next().and_then(|w| w.parse().ok()).unwrap_or(0.0);
+                adjustment.set_value(adjustment.lower() + (adjustment.upper() - adjustment.lower() - adjustment.page_size()) * fraction);
+            }
             Some("quit") => {''')
 
 # Stickers' images come from the fake (`Sticker::image`, before model.rs's tests).
