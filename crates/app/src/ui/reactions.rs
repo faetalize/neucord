@@ -184,7 +184,9 @@ impl App {
             return;
         }
         let channel = message.channel_id;
-        let items = self.hover_bar_emoji(channel);
+        // Held for a second: they follow what we react with and the emoji of the server, which don't move that fast.
+        let key = (channel, self.row_epoch.get());
+        let items = self.hover_emoji.borrow_mut().get(key, std::time::Instant::now(), || self.hover_bar_emoji(channel));
         for item in items {
             let emoji = Emoji::from(&item);
             let ours = message.reactions.iter().any(|r| r.me && r.emoji.same(&emoji));
