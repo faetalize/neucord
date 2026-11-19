@@ -185,6 +185,16 @@ what arrived, IDENTIFY's key order and properties first.
   `age-verification` (with `AGE_FLOW=1 FAKE_NSFW="status=1,gated=1" FAKE_VARIANTS=ageverify=1`) confirms an age from the gate: the methods, the method picked, a vendor page at the fake that says it has a result and then that it is done, and the account becomes an adult's (the web view can't be photographed headless, so there is no shot of the page);
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).
+- **`pointer.py`**: a real pointer and keyboard for the headless compositor,
+  through mutter's remote-desktop D-Bus API, for what only real input shows (a
+  popover's grab, which widget a press reaches) and `cmd` can't send. A
+  scenario starts `pointer.py serve $OUT/pointer.fifo &` and writes lines to
+  the fifo: `move X Y`, `click X Y` (window coordinates of the 1280x900
+  monitor), `press`, `release`, `scroll N`, `key Escape|Return|Tab|BackSpace|<character>`,
+  and leaves it a couple of seconds. `profile-switch` goes from one profile
+  popout to the next by clicking avatars: one click each, a second on the same
+  one closes it, as does one outside it and Escape, and the popout's note box
+  takes typing.
 
 Add the endpoints, events and commands a change needs here, in the same pull
 request.
