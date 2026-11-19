@@ -341,6 +341,12 @@ changed for unrelated reasons only needs a note in the issue.
 - **Captchas** (`Captcha` in `rest.rs`, `ui/captcha.rs`). The retry is
   watched (`interceptResponse`). The fields read are in 295562, and the
   services in 319400 (hCaptcha, reCAPTCHA, reCAPTCHA Enterprise, Turnstile).
+- **When the gateway reconnects** (`reconnect.rs`, `HELLO_TIMEOUT`,
+  `RESUME_WINDOW`). The rules are watched (`_handleClose`,
+  `_doResumeOrIdentify`, `_handleInvalidSession`, `_handleReconnect`). Not
+  watched, being constants in 868's module scope and its constructor: the
+  30 s wait for HELLO (`tu`), the 3 minutes a session stays resumable
+  (`t_`), and `new Backoff(1000, 6e4)` for `gatewayBackoff`.
 - **QR login retries** (`on_qr`, `retry_qr` in `ui/login.rs`;
   `remote_auth.rs`). How often Neucord reconnects to the remote auth
   gateway. Client: 785161 (logger `useAuthWebsocket`), with the backoff in
