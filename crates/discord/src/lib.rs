@@ -18,6 +18,7 @@ pub mod builtins;
 pub mod cdn;
 pub mod channel_icon;
 pub mod channel_list;
+pub mod channel_status;
 pub mod chat_bar;
 pub mod clyde;
 pub mod command_line;

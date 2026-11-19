@@ -316,6 +316,8 @@ pub(super) struct State {
     pub(super) voice: VoiceStates,
     /// The stages live in them, with their topics.
     pub(super) stage: discord::stage::StageInstances,
+    /// What voice channels say under their names.
+    pub(super) channel_status: discord::channel_status::ChannelStatuses,
     /// What each message search holds, by where it looks.
     pub(super) searches: HashMap<discord::search::Context, super::search::Saved>,
     /// The inbox's mentions, and what they include.
@@ -1233,6 +1235,9 @@ impl State {
                         channel_icon::of(guild, c).hash(&mut icon);
                         sig.push(icon.finish());
                         if c.kind == ChannelKind::Voice {
+                            let mut status = std::collections::hash_map::DefaultHasher::new();
+                            self.channel_status.of(guild.id, c.id).hash(&mut status);
+                            sig.push(status.finish());
                             for v in self.voice.in_channel(guild.id, c.id, |v| self.voice_name(v)) {
                                 let mut hash = std::collections::hash_map::DefaultHasher::new();
                                 (v.user_id, v.muted(), v.deafened(), v.self_video, v.self_stream, self.voice_name(v))
@@ -1321,6 +1326,7 @@ impl State {
         let guild = self.guilds.remove(at);
         self.voice.replace_guild(id, Vec::new());
         self.stage.forget_guild(id);
+        self.channel_status.forget_guild(id);
         let was_open = self.guild == Some(id);
         let gone: Vec<Snowflake> = guild.channels.iter().chain(&guild.threads).map(|c| c.id).collect();
         self.mentions.remove_where(|m| gone.contains(&m.channel_id));

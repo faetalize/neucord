@@ -277,6 +277,14 @@ impl App {
                     self.account.state.borrow_mut().stage.remove(channel_id);
                     self.refresh_badges();
                 }
+                Event::VoiceChannelStatus { guild_id, channel_id, status } => {
+                    self.account.state.borrow_mut().channel_status.set(guild_id, channel_id, status);
+                    self.refresh_badges();
+                }
+                Event::ChannelInfo { guild_id, channels } => {
+                    self.account.state.borrow_mut().channel_status.replace_guild(guild_id, channels);
+                    self.refresh_badges();
+                }
                 Event::VoiceStates(updates) => {
                     let mut changed = false;
                     {
@@ -569,6 +577,7 @@ impl App {
                         let mut state = self.account.state.borrow_mut();
                         state.sync.disconnected();
                         state.frecency_sync.disconnected();
+                        state.channel_status.reconnected();
                     }
                     self.usage_connected();
                     self.account.timelines.borrow_mut().held.resumed();
@@ -714,6 +723,7 @@ impl App {
             state.member_counts.clear();
             state.voice = voice_states;
             state.stage = stage_instances;
+            state.channel_status.reconnected();
             // A new session: every index is out of date, and no command is waiting on this one.
             state.commands.session_started();
             state.running.clear();
@@ -962,6 +972,8 @@ impl App {
             }
             // Its own count is the news.
             state.member_counts.remove(&id);
+            // Its voice channels' statuses are asked for again (`GUILD_CREATE`, 309698).
+            state.channel_status.asked_again(id);
             state.guild == Some(id)
         };
         self.rebuild_rail();

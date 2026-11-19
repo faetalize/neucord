@@ -174,6 +174,19 @@ pub enum Event {
     StageInstanceDelete {
         channel_id: Snowflake,
     },
+    /// The status of a voice channel changed (`VOICE_CHANNEL_STATUS_UPDATE`);
+    /// none when it was cleared.
+    VoiceChannelStatus {
+        guild_id: Snowflake,
+        channel_id: Snowflake,
+        status: Option<String>,
+    },
+    /// The statuses of a server's voice channels, which op 43 asks for
+    /// (`CHANNEL_INFO`; see [`Gateway::request_channel_info`]).
+    ChannelInfo {
+        guild_id: Snowflake,
+        channels: Vec<(Snowflake, Option<String>)>,
+    },
     /// The DMs READY left for later (`lazy_private_channels` of
     /// `READY_SUPPLEMENTAL`).
     LazyPrivateChannels(Vec<Channel>),
@@ -1047,6 +1060,16 @@ impl Gateway {
     pub fn request_forum_unreads(&self, request: &crate::forum::UnreadRequest) {
         if self.state.established.get() {
             send_text(&self.conn, &self.state, &request_text(28, request));
+        }
+    }
+
+    /// Ask for the status of `guild`'s voice channels, as the client does the
+    /// first time it draws one of them (`requestChannelInfo`, 868): op 43,
+    /// answered with [`Event::ChannelInfo`]. Like the client, nothing is sent
+    /// before the session is established.
+    pub fn request_channel_info(&self, guild: Snowflake) {
+        if self.state.established.get() {
+            send_text(&self.conn, &self.state, &request_text(43, &crate::channel_status::InfoRequest::new(guild)));
         }
     }
 
@@ -1958,6 +1981,16 @@ fn dispatch(parser: &Parser, name: &str, data: Value) {
             Some(instance) => Event::StageInstance(instance),
             None => return,
         },
+        "VOICE_CHANNEL_STATUS_UPDATE" => {
+            let (Some(guild_id), Some(channel_id)) = (parse_id(&data["guild_id"]), parse_id(&data["id"])) else {
+                return;
+            };
+            Event::VoiceChannelStatus { guild_id, channel_id, status: crate::channel_status::status(&data["status"]) }
+        }
+        "CHANNEL_INFO" => match crate::channel_status::parse_info(&data) {
+            Some((guild_id, channels)) => Event::ChannelInfo { guild_id, channels },
+            None => return,
+        },
         "STAGE_INSTANCE_DELETE" => match parse_id(&data["channel_id"]) {
             Some(channel_id) => Event::StageInstanceDelete { channel_id },
             None => return,
@@ -2807,6 +2840,26 @@ mod tests {
         dispatch(&state, "GUILD_MEMBER_REMOVE", json!({"guild_id": "1", "user": {"id": "7"}}));
         let Ok(Event::GuildMemberRemove { guild_id, user_id }) = state.try_recv() else { panic!("no member remove") };
         assert_eq!((guild_id, user_id), (Snowflake(1), Snowflake(7)));
+    }
+
+    #[test]
+    fn voice_channel_statuses_are_reported() {
+        let state = Parser::default();
+        dispatch(&state, "VOICE_CHANNEL_STATUS_UPDATE", json!({"id": "3", "guild_id": "2", "status": "game night"}));
+        let Ok(Event::VoiceChannelStatus { guild_id, channel_id, status }) = state.try_recv() else {
+            panic!("no status")
+        };
+        assert_eq!((guild_id, channel_id, status.as_deref()), (Snowflake(2), Snowflake(3), Some("game night")));
+        dispatch(&state, "VOICE_CHANNEL_STATUS_UPDATE", json!({"id": "3", "guild_id": "2", "status": null}));
+        let Ok(Event::VoiceChannelStatus { status, .. }) = state.try_recv() else { panic!("no cleared status") };
+        assert_eq!(status, None);
+        dispatch(&state, "VOICE_CHANNEL_STATUS_UPDATE", json!({"status": "x"}));
+        assert!(state.try_recv().is_err(), "one that names no channel is nothing");
+
+        let info = json!({"guild_id": "2", "channels": [{"id": "3", "status": "movie", "voice_start_time": null}]});
+        dispatch(&state, "CHANNEL_INFO", info);
+        let Ok(Event::ChannelInfo { guild_id, channels }) = state.try_recv() else { panic!("no info") };
+        assert_eq!((guild_id, channels), (Snowflake(2), vec![(Snowflake(3), Some("movie".to_owned()))]));
     }
 
     #[test]
