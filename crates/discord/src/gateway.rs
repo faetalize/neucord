@@ -1192,7 +1192,20 @@ const SENT_KEPT: usize = 8;
 /// close for a payload Discord couldn't read (4002) can say what went out.
 fn record_sent(state: &State, text: &str) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else { return };
-    let line = format!("op {}: {}", value["op"], crate::shape::outline(&value["d"]));
+    let mut line = format!("op {}: {}", value["op"], crate::shape::outline(&value["d"]));
+    // A member list's rows asked for are numbers only, and what a range
+    // Discord turns down looks like.
+    let ranges: Vec<&serde_json::Value> = value["d"]["subscriptions"]
+        .as_object()
+        .into_iter()
+        .flat_map(|servers| servers.values())
+        .filter_map(|server| server["channels"].as_object())
+        .flat_map(|channels| channels.values())
+        .collect();
+    if !ranges.is_empty() {
+        let ranges: Vec<String> = ranges.iter().map(|r| r.to_string()).collect();
+        line.push_str(&format!(" ranges {}", ranges.join(" ")));
+    }
     let mut sent = state.sent.borrow_mut();
     if sent.len() == SENT_KEPT {
         sent.pop_front();
@@ -2235,6 +2248,11 @@ mod tests {
         assert_eq!(sent.back().unwrap(), "op 8: {guild_id: [str], presences: bool, user_ids: [str]}");
         assert_eq!(sent.front().unwrap(), "op 40: {qos: {active: bool, reasons: [str], ver: num}, seq: num}");
         assert!(sent.iter().all(|line| !line.contains("123456789") && !line.contains("foregrounded")));
+        drop(sent);
+        let ranges = r#"{"op":37,"d":{"subscriptions":{"555":{"channels":{"666":[[0,99],[100,199]]}}}}}"#;
+        record_sent(&state, ranges);
+        let last = state.sent.borrow().back().cloned().unwrap();
+        assert_eq!(last, "op 37: {subscriptions: {<id>: {channels: {<id>: [[num]]}}}} ranges [[0,99],[100,199]]");
     }
 
     #[test]
