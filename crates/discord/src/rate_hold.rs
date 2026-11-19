@@ -14,6 +14,10 @@ use crate::backoff::Backoff;
 /// What the client assumes when a 429 or 503 says nothing about how long.
 const DEFAULT_RETRY_AFTER: f64 = 5.0;
 
+/// The longest hold an answer can ask for. The client takes any number; here
+/// one huge `retry_after` would panic `Duration` or park an upload for good.
+const MAX_HOLD: Duration = Duration::from_secs(60 * 60);
+
 /// The statuses that hold a URL back (`A`, 620632).
 pub fn holds(status: u32) -> bool {
     matches!(status, 429 | 503)
@@ -79,7 +83,8 @@ impl RateHolds {
             waited: false,
         });
         let backoff = entry.backoff.fail(random);
-        let wait = backoff.max(Duration::from_secs_f64(retry_after.unwrap_or(DEFAULT_RETRY_AFTER)));
+        let asked = Duration::try_from_secs_f64(retry_after.unwrap_or(DEFAULT_RETRY_AFTER)).unwrap_or(MAX_HOLD);
+        let wait = backoff.max(asked).min(MAX_HOLD);
         // A hold that already runs longer stays.
         entry.until = entry.until.max(now + wait);
     }
@@ -183,5 +188,13 @@ mod tests {
         holds.answered("u", 429, Some(60.0), 0.0, now);
         holds.answered("u", 429, Some(2.0), 0.0, now);
         assert_eq!(holds.wait("u", now), Some(secs(60.0)));
+    }
+
+    #[test]
+    fn a_huge_retry_after_is_held_for_an_hour_at_most() {
+        let now = Instant::now();
+        let mut holds = RateHolds::default();
+        holds.answered("u", 429, Some(1e30), 0.0, now);
+        assert_eq!(holds.wait("u", now), Some(MAX_HOLD));
     }
 }
