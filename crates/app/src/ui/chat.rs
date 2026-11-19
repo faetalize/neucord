@@ -306,6 +306,7 @@ impl App {
             }
         });
         self.watch_scroll_input();
+        self.watch_dismissals();
 
         // After a jump: say so, with the way back.
         self.present_bar.connect_button_clicked({
