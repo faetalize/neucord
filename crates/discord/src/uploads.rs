@@ -20,6 +20,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::limits::Uploads;
+use crate::network;
 use crate::rest::Rest;
 use crate::{Error, Snowflake};
 
@@ -673,7 +674,11 @@ pub async fn upload(
         };
         match step.await {
             Ok(()) => return Ok(slot.filename),
-            Err(e) if retryable(&e) => glib::timeout_future(backoff.fail()).await,
+            // Online again first, then the wait (`uploadFileWithResumption`).
+            Err(e) if retryable(&e) => {
+                network::await_online().await;
+                glib::timeout_future(backoff.fail()).await
+            }
             Err(e) => return Err(Failure::Request(e)),
         }
     }
@@ -690,7 +695,8 @@ pub async fn delete(rest: &Rest, uploaded_filename: &str) {
 impl Rest {
     /// An upload URL for a file (`getUploadPayload`'s body). The client's HTTP
     /// layer retries this on a few statuses and on network errors, telling
-    /// Discord how often in `X-Failed-Requests`, and never on a rate limit.
+    /// Discord how often in `X-Failed-Requests`, and not on a rate limit,
+    /// which only holds back what is sent next to the same URL.
     /// A converted file adds its original's hash (`buildOriginalMd5Headers`).
     async fn create_upload(&self, channel: Snowflake, body: Value, original_md5: Option<&str>) -> Result<Slot, Error> {
         use crate::endpoints::call;
@@ -717,7 +723,10 @@ impl Rest {
                 };
             }
             failed += 1;
+            // The client's HTTP layer waits, then asks whether it is online
+            // (the hook 526227 gives the HTTP layer, 620632) before it sends again.
             glib::timeout_future(backoff.fail()).await;
+            network::await_online().await;
         }
     }
 
