@@ -183,6 +183,16 @@ what arrived, IDENTIFY's key order and properties first.
   `idle` (with `NEUCORD_DEBUG_IDLE=4`) lists the op 3 frames: idle and away after four quiet seconds, active again when a channel opens (`IDLE_STEPS=300` waits for the real minute's away instead);
   `reopen` and `lazy` relaunch on the same data
   (`ACCOUNT=<name>` keeps it between runs).
+- **`pointer.py`**: a real pointer and keyboard for the headless compositor,
+  through mutter's remote-desktop D-Bus API, for what only real input shows (a
+  popover's grab, which widget a press reaches) and `cmd` can't send. A
+  scenario starts `pointer.py serve $OUT/pointer.fifo &` and writes lines to
+  the fifo: `move X Y`, `click X Y` (window coordinates of the 1280x900
+  monitor), `press`, `release`, `scroll N`, `key Escape|Return|Tab|BackSpace|<character>`,
+  and leaves it a couple of seconds. `profile-switch` goes from one profile
+  popout to the next by clicking avatars: one click each, a second on the same
+  one closes it, as does one outside it and Escape, and the popout's note box
+  takes typing.
 
 Add the endpoints, events and commands a change needs here, in the same pull
 request.

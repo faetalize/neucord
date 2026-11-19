@@ -186,7 +186,17 @@ impl App {
 
     fn show_popout(self: &Rc<Self>, target: &UserTarget, note: bool, own: bool) {
         let Some(request) = self.popout_request(target) else { return };
-        let popover = gtk::Popover::builder().has_arrow(true).build();
+        // The same name again closes the popout it opened, as the client's does.
+        let open = self.open_popout();
+        if let Some((popover, anchor)) = &open
+            && *anchor == target.anchor
+        {
+            return popover.popdown();
+        }
+        // Not a modal popover: that one takes the press that dismisses it, so a
+        // click on another name would only close it. `watch_dismissals` closes
+        // it on a click outside as the client does, and lets that click through.
+        let popover = gtk::Popover::builder().has_arrow(true).autohide(false).build();
         popover.set_parent(&self.window);
         if let Some(bounds) = target.anchor.compute_bounds(&self.window) {
             popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
@@ -228,6 +238,60 @@ impl App {
         }
         self.begin_profile(&view);
         popover.popup();
+    }
+
+    /// The open popout and what it opened from.
+    fn open_popout(&self) -> Option<(gtk::Popover, gtk::Widget)> {
+        let views = self.profile_views.borrow();
+        let view = views.popout.as_ref()?;
+        match &view.host {
+            Host::Popout(popover) if popover.is_mapped() => Some((popover.clone(), view.target.anchor.clone())),
+            _ => None,
+        }
+    }
+
+    /// A press anywhere in the window but the popout's own surface, and the
+    /// release after it, close the open popout, as the client's does on the
+    /// mouse up of a click outside it (`handleDocumentMouseDown` and
+    /// `handleDocumentMouseUp` in 453903), and the click goes on to what is
+    /// under it. A press on what opened the popout is left to it, which closes
+    /// the popout itself.
+    pub(super) fn watch_dismissals(self: &Rc<Self>) {
+        let armed = std::cell::Cell::new(false);
+        let controller = gtk::EventControllerLegacy::new();
+        controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+        controller.connect_event({
+            let this = Rc::downgrade(self);
+            move |_, event| {
+                let Some(this) = this.upgrade() else { return glib::Propagation::Proceed };
+                match event.event_type() {
+                    gtk::gdk::EventType::ButtonPress | gtk::gdk::EventType::TouchBegin => {
+                        armed.set(this.outside_popout(event));
+                    }
+                    gtk::gdk::EventType::ButtonRelease | gtk::gdk::EventType::TouchEnd => {
+                        if armed.replace(false)
+                            && let Some((popover, _)) = this.open_popout()
+                        {
+                            popover.popdown();
+                        }
+                    }
+                    _ => {}
+                }
+                glib::Propagation::Proceed
+            }
+        });
+        self.window.add_controller(controller);
+    }
+
+    /// Whether `event`, in the window, is out of the open popout and of what
+    /// opened it.
+    fn outside_popout(&self, event: &gtk::gdk::Event) -> bool {
+        let Some((_, anchor)) = self.open_popout() else { return false };
+        let Some((x, y)) = event.position() else { return false };
+        // Event positions are the surface's; a window's widgets start inside its shadow.
+        let (dx, dy) = self.window.surface_transform();
+        let point = gtk::graphene::Point::new((x - dx) as f32, (y - dy) as f32);
+        !anchor.compute_bounds(&self.window).is_some_and(|bounds| bounds.contains_point(&point))
     }
 
     /// What `target`'s popout asks for, if it is of a person.
