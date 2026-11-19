@@ -1299,6 +1299,15 @@ class Handler(BaseHTTPRequestHandler):
                         send(0, {"guild_id": "500", "threads": threads, "members": [], "most_recent_messages": recent},
                              "THREAD_LIST_SYNC")
                     SESSION[0] = send
+                    if os.environ.get("FAKE_TYPING"):
+                        # Alice types in #general, again before each lapses.
+                        def typing_start():
+                            dispatch("TYPING_START", {"channel_id": "600", "guild_id": "500", "user_id": "301",
+                                                      "timestamp": int(time.time()), "member": {"user": ALICE, "roles": []}})
+                            timer = threading.Timer(8, typing_start)
+                            timer.daemon = True
+                            timer.start()
+                        typing_start()
                     if IDENTIFIES[0] == 1 and os.environ.get("FAKE_REIDENTIFY"):
                         threading.Timer(float(os.environ["FAKE_REIDENTIFY"]), lambda: send(9, False)).start()
                 else:
