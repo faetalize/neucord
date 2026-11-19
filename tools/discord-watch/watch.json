@@ -108,7 +108,7 @@
       "BETA_GUILD_SIZE",
       "CANNOT_USE_EXTERNAL_APPS"
     ],
-    "GatewayOpcode": ["DISPATCH", "HEARTBEAT", "IDENTIFY", "PRESENCE_UPDATE", "RESUME", "HELLO", "HEARTBEAT_ACK", "REQUEST_GUILD_MEMBERS", "REQUEST_FORUM_UNREADS", "GUILD_SUBSCRIPTIONS_BULK"],
+    "GatewayOpcode": ["DISPATCH", "HEARTBEAT", "IDENTIFY", "PRESENCE_UPDATE", "RESUME", "HELLO", "HEARTBEAT_ACK", "REQUEST_GUILD_MEMBERS", "REQUEST_FORUM_UNREADS", "REQUEST_CHANNEL_INFO", "GUILD_SUBSCRIPTIONS_BULK"],
     "GuildMemberFlags": [
       "DID_REJOIN",
       "BYPASSES_VERIFICATION",
@@ -342,6 +342,7 @@
     "removeReactionsForEmoji",
     "renderEmbeds",
     "removeFromMsgDraft",
+    "requestChannelInfo",
     "requestForumUnreads",
     "requestGuildMembers",
     "resolvedMessageNotifications",
@@ -393,6 +394,7 @@
     "AgeVerificationStore",
     "AuthenticationStore",
     "ChannelMemberStore",
+    "ChannelStatusStore",
     "DerivedQosDataStore",
     "EmojiStore",
     "ForumActivePostStore",

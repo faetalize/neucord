@@ -119,6 +119,7 @@ impl App {
             return;
         };
         self.guild_name.set(&guild.name, None);
+        let mut voice_drawn = false;
         for section in state.sidebar(guild) {
             let channels = section.channels;
             if let Some(category) = section.category {
@@ -179,6 +180,8 @@ impl App {
                 };
                 mark_read(&row, state.notifications.channel_muted(&place, now_unix()), state.shows_unread(channel));
                 if channel.kind == discord::ChannelKind::Voice {
+                    voice_drawn = true;
+                    self.append_status(state.channel_status.of(guild.id, channel.id));
                     for voice in state.voice.in_channel(guild.id, channel.id, |v| state.voice_name(v)) {
                         self.append_voice_state(&state, voice);
                     }
@@ -193,6 +196,41 @@ impl App {
             }
         }
         self.watch_thread_expiry(guild);
+        let guild = guild.id;
+        drop(state);
+        if voice_drawn {
+            self.ask_channel_statuses(guild);
+        }
+    }
+
+    /// Ask for the statuses of `guild`'s voice channels the first time one is
+    /// drawn, as the client does (`requestChannelInfo`, 52074, from the hooks
+    /// of 882840 and 475889 that draw a voice channel): once a connection,
+    /// and not before the session is established.
+    fn ask_channel_statuses(&self, guild: Snowflake) {
+        let state = &mut *self.account.state.borrow_mut();
+        let Some(gateway) = state.gateway.as_ref().filter(|gateway| gateway.is_established()) else { return };
+        if state.channel_status.ask(guild) {
+            gateway.request_channel_info(guild);
+        }
+    }
+
+    /// What was set on the voice channel above as its status, under its name
+    /// (`r4` in 616740), cut to the width with the whole in a tooltip.
+    fn append_status(&self, status: Option<&str>) {
+        let Some(status) = status else { return };
+        let row = gtk::Box::builder().margin_start(GLYPH_WIDTH + 6).build();
+        row.append(
+            &gtk::Label::builder()
+                .label(status)
+                .xalign(0.0)
+                .hexpand(true)
+                .ellipsize(pango::EllipsizeMode::End)
+                .tooltip_text(status)
+                .css_classes(["caption", "dimmed"])
+                .build(),
+        );
+        self.append_row(&row, None, false);
     }
 
     /// Open `table`'s menu for `channel` where its row is right-clicked, or

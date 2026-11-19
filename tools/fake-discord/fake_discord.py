@@ -720,6 +720,22 @@ def route(method, pattern):
     return add
 
 
+# Op 43: the statuses of a server's voice channels, as CHANNEL_INFO. FAKE_VOICE_STATUS=<text> sets Lounge's (#602)
+# status, and FAKE_VOICE_STATUS_LATER=<text> (`none` clears it) changes it with VOICE_CHANNEL_STATUS_UPDATE eight seconds
+# after.
+def channel_info(send, request):
+    if request.get("guild_id") != "500":
+        return
+    status = os.environ.get("FAKE_VOICE_STATUS") or None
+    send(0, {"guild_id": "500", "channels": [{"id": "602", "status": status, "voice_start_time": None}]}, "CHANNEL_INFO")
+    later = os.environ.get("FAKE_VOICE_STATUS_LATER")
+    if later:
+        update = {"id": "602", "guild_id": "500", "status": None if later == "none" else later}
+        timer = threading.Timer(8, dispatch, ["VOICE_CHANNEL_STATUS_UPDATE", update])
+        timer.daemon = True
+        timer.start()
+
+
 @route("GET", r"/channels/(\d+)/messages")
 def history(channel, body):
     return 200, messages(channel)
@@ -1424,6 +1440,8 @@ class Handler(BaseHTTPRequestHandler):
                         member_check(send, message.get("d") or {})
                     if message["op"] == 37:
                         thread_member_lists(send, message.get("d") or {})
+                    if message["op"] == 43:
+                        channel_info(send, message.get("d") or {})
         except (EOFError, OSError):
             pass
         if SESSION[0] is send:

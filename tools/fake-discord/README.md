@@ -38,7 +38,7 @@ what arrived, IDENTIFY's key order and properties first.
   that many seconds to force a second IDENTIFY, `FAKE_NEW_TOKEN` puts an
   `auth_token` in READY, `FAKE_LEFT=<user ids>` has those people leave the
   server: op 8 with a `nonce` answers them `not_found`, and a search finds
-  them no more. `FAKE_STAGE=1` adds a live stage, #town-hall, with a topic, a speaker and two
+  them no more. `FAKE_VOICE_STATUS=<text>` answers op 43 (the statuses of the server's voice channels) with that status on Lounge, and `FAKE_VOICE_STATUS_LATER=<text>` (`none` clears it) changes it with `VOICE_CHANNEL_STATUS_UPDATE` eight seconds after (scenario `voice-status`). `FAKE_STAGE=1` adds a live stage, #town-hall, with a topic, a speaker and two
   listeners. `FAKE_SLOWMODE=<s>` gives `#general` that slowmode and
   refuses a thread there with 20016, as inside its cooldown.
   `FAKE_NSFW="allowed=1,dms=0,status=3,gated=0,level=0,owner=0"`
