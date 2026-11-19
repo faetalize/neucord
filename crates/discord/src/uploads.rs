@@ -79,11 +79,20 @@ pub struct File {
     pub original_md5: Option<String>,
 }
 
+/// Types Chromium's own table gives where the system's database says another
+/// (`File.type` of a picked file in Chromium 157: `audio/vnd.wave`,
+/// `audio/mp4` and `application/xml` here). The client sends it as
+/// `original_content_type`. Every other extension checked, 70 of them,
+/// comes out the same.
+const BROWSER_TYPES: [(&str, &str); 3] = [("wav", "audio/wav"), ("m4a", "audio/x-m4a"), ("xml", "text/xml")];
+
 /// The type a browser gives a file by its name: by the extension alone, and
 /// none for one it doesn't know.
 pub fn content_type(filename: &str) -> String {
-    if !filename.contains('.') {
-        return String::new();
+    let Some((_, extension)) = filename.rsplit_once('.') else { return String::new() };
+    let extension = extension.to_ascii_lowercase();
+    if let Some((_, browser)) = BROWSER_TYPES.iter().find(|(known, _)| *known == extension) {
+        return (*browser).to_owned();
     }
     let (guess, _) = gio::content_type_guess(Some(filename), None::<&[u8]>);
     if guess == "application/octet-stream" { String::new() } else { guess.to_string() }
@@ -1038,6 +1047,16 @@ mod tests {
         assert_eq!(content_type("notes.txt"), "text/plain");
         assert_eq!(content_type("README"), "", "no extension");
         assert_eq!(content_type("data.zzzunknown"), "");
+    }
+
+    #[test]
+    fn types_chromium_names_differently_from_the_systems_database() {
+        // What a file input gives `File.type` in Chromium 157, whose own table comes before the system's.
+        assert_eq!(content_type("clip.wav"), "audio/wav");
+        assert_eq!(content_type("voice.m4a"), "audio/x-m4a");
+        assert_eq!(content_type("feed.xml"), "text/xml");
+        assert_eq!(content_type("LOUD.WAV"), "audio/wav", "by the extension in any case");
+        assert_eq!(content_type("icon.ico"), "image/vnd.microsoft.icon");
     }
 
     #[test]
