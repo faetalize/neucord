@@ -309,6 +309,9 @@ pub(super) struct State {
     pub(super) archives: threads::Archives,
     /// Threads we asked Discord for by id, once each a session, found or not.
     pub(super) fetched_threads: HashSet<Snowflake>,
+    /// Messages of threads we were told were deleted, so that a message in both
+    /// a delete and a purge is taken off its thread's count once.
+    pub(super) deleted_in_threads: HashSet<Snowflake>,
     /// The user closed the member list pane beside the chat, which is open
     /// until they do.
     pub(super) members_closed: bool,
@@ -899,6 +902,24 @@ impl State {
         match thread {
             Some(thread) if kind != THREAD_STARTER && message.0 != channel.0 => {
                 thread.message_count = Some((thread.message_count.unwrap_or(0) + 1).min(100_000));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A message of `thread` was deleted: it isn't the thread's newest any
+    /// more, and the thread has one less (`MESSAGE_DELETE` in 456874), but for
+    /// a forum post's first message, which isn't counted, and a message we were
+    /// told of already. Whether the count changed.
+    pub(super) fn thread_message_deleted(&mut self, thread: Snowflake, id: Snowflake) -> bool {
+        let Some(guild) = self.guilds.iter_mut().find(|g| g.thread(thread).is_some()) else { return false };
+        guild.thread_message_deleted(thread, id);
+        let counted = self.deleted_in_threads.insert(id) && id.0 != thread.0;
+        let count = guild.threads.iter_mut().find(|t| t.id == thread).and_then(|t| t.message_count.as_mut());
+        match count {
+            Some(count) if counted && *count > 0 => {
+                *count -= 1;
                 true
             }
             _ => false,
@@ -1557,6 +1578,24 @@ mod tests {
         assert_eq!(state.threads_button(&[]), None, "a forum post lists no threads");
         state.channel = None;
         assert_eq!(state.threads_button(&[]), None, "nowhere");
+    }
+
+    #[test]
+    fn a_deleted_message_is_one_less_in_its_thread() {
+        let mut state = open_server(None, json!({}));
+        state.guilds[0].threads = vec![
+            serde_json::from_value(json!({"id": "20", "type": 11, "parent_id": "9", "message_count": 2})).unwrap(),
+        ];
+        let count = |state: &State| state.guilds[0].thread(Snowflake(20)).unwrap().message_count;
+        assert!(state.thread_message_deleted(Snowflake(20), Snowflake(90)));
+        assert_eq!(count(&state), Some(1));
+        assert!(!state.thread_message_deleted(Snowflake(20), Snowflake(90)), "told twice");
+        assert!(!state.thread_message_deleted(Snowflake(20), Snowflake(20)), "a post's first message isn't counted");
+        assert!(!state.thread_message_deleted(Snowflake(9), Snowflake(91)), "a channel has no count");
+        assert_eq!(count(&state), Some(1));
+        state.thread_message_deleted(Snowflake(20), Snowflake(92));
+        state.thread_message_deleted(Snowflake(20), Snowflake(93));
+        assert_eq!(count(&state), Some(0), "never below none");
     }
 
     #[test]
