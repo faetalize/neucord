@@ -17,6 +17,7 @@ use gtk::glib;
 use super::state::now_ms;
 use super::uploads::{Draft as FilesDraft, Stopped};
 use super::{App, polls};
+use crate::render;
 
 /// The form's widgets, and what it has picked.
 pub(super) struct PostForm {
@@ -28,6 +29,14 @@ pub(super) struct PostForm {
     tags: RefCell<Vec<Snowflake>>,
     tag_error: gtk::Label,
     message: gtk::TextView,
+    /// The message being written, or how it will look.
+    message_stack: gtk::Stack,
+    message_label: gtk::Label,
+    /// What the label says while writing.
+    message_title: &'static str,
+    preview: gtk::Box,
+    /// Shown once the post has a title and a message.
+    preview_button: gtk::ToggleButton,
     /// What the message started as: the forum's post template, which doesn't
     /// count as something typed.
     template: String,
@@ -35,6 +44,8 @@ pub(super) struct PostForm {
     /// The files' rows, which `uploads.rs` fills.
     files: gtk::Box,
     attach: Option<gtk::Button>,
+    /// Picks the picture a media channel shows for the post.
+    thumbnail: Option<gtk::Button>,
     slowmode: gtk::Label,
     post: gtk::Button,
     /// While the files go up, which the message waits for.
@@ -58,8 +69,8 @@ impl PostForm {
         for (_, chip) in &self.chips {
             chip.set_sensitive(!busy);
         }
-        if let Some(attach) = &self.attach {
-            attach.set_sensitive(!busy);
+        for button in self.attach.iter().chain(&self.thumbnail) {
+            button.set_sensitive(!busy);
         }
         self.stop.set_visible(false);
     }
@@ -184,8 +195,38 @@ impl App {
             body.append(&chips);
             body.append(&tag_error);
         }
-        body.append(&label(if media { "Description" } else { "Message" }));
-        body.append(&scroller);
+        let message_title = if media { "Description" } else { "Message" };
+        let message_label = label(message_title);
+        message_label.set_hexpand(true);
+        let preview_button = gtk::ToggleButton::builder()
+            .icon_name("view-reveal-symbolic")
+            .tooltip_text("Preview")
+            .visible(false)
+            .css_classes(["flat"])
+            .build();
+        let heading = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        heading.append(&message_label);
+        heading.append(&preview_button);
+        let preview = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .margin_top(8)
+            .margin_bottom(8)
+            .margin_start(8)
+            .margin_end(8)
+            .build();
+        let previewed = gtk::ScrolledWindow::builder()
+            .child(&preview)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .min_content_height(120)
+            .max_content_height(240)
+            .propagate_natural_height(true)
+            .css_classes(["card"])
+            .build();
+        let message_stack = gtk::Stack::builder().vhomogeneous(false).build();
+        message_stack.add_named(&scroller, Some("write"));
+        message_stack.add_named(&previewed, Some("preview"));
+        body.append(&heading);
+        body.append(&message_stack);
         body.append(&message_error);
         let files = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
         let add = attach
@@ -204,8 +245,11 @@ impl App {
             );
         }
         body.append(&files);
-        if let Some(add) = &add {
-            body.append(add);
+        let thumbnail = (media && attach).then(|| {
+            gtk::Button::builder().label("Upload thumbnail").halign(gtk::Align::Start).css_classes(["flat"]).build()
+        });
+        for button in add.iter().chain(&thumbnail) {
+            body.append(button);
         }
         body.append(&slowmode);
 
@@ -234,10 +278,16 @@ impl App {
             tags: RefCell::default(),
             tag_error,
             message,
+            message_stack,
+            message_label,
+            message_title,
+            preview,
+            preview_button,
             template,
             message_error,
             files,
             attach: add,
+            thumbnail,
             slowmode,
             post,
             stop,
@@ -311,6 +361,24 @@ impl App {
                 }
             }
         });
+        form.preview_button.connect_toggled({
+            let (this, form) = (Rc::downgrade(self), Rc::downgrade(form));
+            move |_| {
+                if let (Some(this), Some(form)) = (this.upgrade(), form.upgrade()) {
+                    this.show_post_preview(&form);
+                }
+            }
+        });
+        if let Some(thumbnail) = &form.thumbnail {
+            thumbnail.connect_clicked({
+                let (this, forum) = (Rc::downgrade(self), form.forum);
+                move |_| {
+                    if let Some(this) = this.upgrade() {
+                        this.choose_thumbnail(forum);
+                    }
+                }
+            });
+        }
         if let Some(attach) = &form.attach {
             attach.connect_clicked({
                 let (this, forum) = (Rc::downgrade(self), form.forum);
@@ -387,6 +455,16 @@ impl App {
         let wait = self.thread_slowmode_left(form.forum);
         let postable = problems.none() && !name.trim().is_empty() && wait == 0;
         form.post.set_sensitive(postable && !form.submitting.get());
+        // A preview ends with what there is to preview.
+        let previewable = !name.trim().is_empty() && !text.is_empty();
+        form.preview_button.set_visible(previewable);
+        if !previewable {
+            form.preview_button.set_active(false);
+        }
+        if let Some(thumbnail) = &form.thumbnail {
+            let picked = self.drafts.of(form.forum).iter().any(|u| u.thumbnail);
+            thumbnail.set_label(if picked { "Change thumbnail" } else { "Upload thumbnail" });
+        }
         form.tag_error.set_visible(problems.tag);
         let full = form.tags.borrow().len() >= TAGS_MAX;
         for (id, chip) in &form.chips {
@@ -401,6 +479,43 @@ impl App {
                 wait_words((wait + 999) / 1000)
             ));
         }
+    }
+
+    /// Show the message as it will look, or go back to writing it (`iy` and
+    /// `ip` in 745431).
+    fn show_post_preview(self: &Rc<Self>, form: &PostForm) {
+        let on = form.preview_button.is_active();
+        form.preview_button.set_icon_name(if on { "view-conceal-symbolic" } else { "view-reveal-symbolic" });
+        form.preview_button.set_tooltip_text(Some(if on { "Exit Preview" } else { "Preview" }));
+        form.message_label.set_label(if on { "Preview Mode" } else { form.message_title });
+        while let Some(child) = form.preview.first_child() {
+            form.preview.remove(&child);
+        }
+        if on {
+            // `:name:`s show as the emoji they go out as.
+            let text = self.emoji_library(form.forum).translate(&form.text()).text;
+            let names = self.names();
+            let cx = render::Context::new(&names, Some(&self.images));
+            form.preview.append(&render::render(&discord::markup::parse(&text), &cx, false));
+        }
+        form.message_stack.set_visible_child_name(if on { "preview" } else { "write" });
+    }
+
+    /// Ask for the picture a media channel shows for the post.
+    fn choose_thumbnail(self: &Rc<Self>, forum: Snowflake) {
+        // What the client's picker takes (`lH` in 745431).
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("Media Post Thumbnail"));
+        for suffix in ["jpg", "jpeg", "png", "gif", "webp"] {
+            filter.add_suffix(suffix);
+        }
+        let dialog = gtk::FileDialog::builder().title("Upload thumbnail").default_filter(&filter).build();
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            if let Ok(file) = dialog.open_future(Some(&this.window)).await {
+                this.set_thumbnail(forum, file).await;
+            }
+        });
     }
 
     /// The file picker, for a form's `draft`.
@@ -514,7 +629,9 @@ impl App {
         let library = self.emoji_library(form.forum);
         let translated = library.translate(&text);
         let text = translated.text;
-        let files = self.drafts.of(form.forum);
+        let mut files = self.drafts.of(form.forum);
+        // A media channel's post names its thumbnail first (745431).
+        files.sort_by_key(|u| !u.thumbnail);
         let (rest, forum, limits) = {
             let state = self.account.state.borrow();
             let found = state.find_channel(form.forum);

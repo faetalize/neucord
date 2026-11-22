@@ -1731,6 +1731,7 @@ mod tests {
             spoiler: false,
             content_type: "image/png",
             voice: None,
+            thumbnail: false,
         };
         let body = message_body(Snowflake(9), "", "1", 0, None, &[sent("a.png"), sent("b.png")], None, false);
         assert_eq!(body["content"], "", "files alone are a message");
@@ -1761,6 +1762,7 @@ mod tests {
             spoiler: false,
             content_type: "image/png",
             voice: None,
+            thumbnail: false,
         };
         let body = message_body(Snowflake(9), "hi", "1", 0, Some(reply), &[sent], Some(Snowflake(5)), false);
         assert_eq!((body["content"].as_str(), body["sticker_ids"].clone()), (Some("hi"), json!(["5"])));
@@ -1777,6 +1779,7 @@ mod tests {
             spoiler: false,
             content_type: "audio/ogg",
             voice: Some(Voice { duration_secs: 3.0, waveform: "AAEC" }),
+            thumbnail: false,
         };
         let body = message_body(Snowflake(9), "", "1", Message::IS_VOICE_MESSAGE, None, &[recording], None, false);
         assert_eq!(body["flags"], 8192);
@@ -1848,6 +1851,7 @@ mod tests {
             spoiler: false,
             content_type: "image/png",
             voice: None,
+            thumbnail: false,
         };
         let body = schedule_body(Snowflake(9), at, "hi", Some(reply), &[sent], Some(Snowflake(5)), None);
         assert_eq!(body["message_reference"], json!({ "message_id": "3", "channel_id": "9", "guild_id": "2" }));

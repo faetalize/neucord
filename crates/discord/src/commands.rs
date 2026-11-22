@@ -3666,6 +3666,7 @@ mod tests {
             spoiler: false,
             content_type: "image/png",
             voice: None,
+            thumbnail: false,
         };
         assert_eq!(
             run(roll, None).body(&[file])["data"]["attachments"],

@@ -164,6 +164,8 @@ pub struct Sent<'a> {
     pub content_type: &'a str,
     /// What a voice message adds.
     pub voice: Option<Voice<'a>>,
+    /// The picture a media channel's post shows for itself.
+    pub thumbnail: bool,
 }
 
 /// A voice message's length and waveform.
@@ -189,6 +191,9 @@ impl Sent<'_> {
         if let Some(voice) = self.voice {
             body["duration_secs"] = json!(voice.duration_secs);
             body["waveform"] = json!(voice.waveform);
+        }
+        if self.thumbnail {
+            body["is_thumbnail"] = json!(true);
         }
         body["original_content_type"] = json!(self.content_type);
         body
@@ -832,6 +837,7 @@ mod tests {
             spoiler: false,
             content_type: "image/png",
             voice: None,
+            thumbnail: false,
         };
         assert_eq!(
             plain.body(0),
@@ -848,6 +854,25 @@ mod tests {
     }
 
     #[test]
+    fn a_media_posts_thumbnail_says_so() {
+        // `OW` (292348) puts it after what a voice message adds, before the type.
+        let sent = Sent {
+            filename: "cover.png",
+            uploaded_filename: "u/cover.png",
+            description: None,
+            spoiler: false,
+            content_type: "image/png",
+            voice: None,
+            thumbnail: true,
+        };
+        assert_eq!(
+            sent.body(0),
+            json!({ "id": "0", "filename": "cover.png", "uploaded_filename": "u/cover.png", "is_thumbnail": true,
+                "original_content_type": "image/png" })
+        );
+    }
+
+    #[test]
     fn a_voice_message_names_its_length_and_waveform() {
         // `OW` (292348) puts both after `is_spoiler`, before the type.
         let sent = Sent {
@@ -857,6 +882,7 @@ mod tests {
             spoiler: false,
             content_type: "audio/ogg",
             voice: Some(Voice { duration_secs: 4.68, waveform: "AAEC/w==" }),
+            thumbnail: false,
         };
         assert_eq!(
             sent.body(0),

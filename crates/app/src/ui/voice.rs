@@ -864,6 +864,7 @@ impl App {
             spoiler: false,
             content_type: &recording.file.content_type,
             voice: Some(Meta { duration_secs: recording.duration_secs, waveform: &recording.waveform }),
+            thumbnail: false,
         };
         rest.send_voice_message(channel, reply, sent).await.map_err(Stopped::Send)
     }
