@@ -139,6 +139,9 @@ what arrived, IDENTIFY's key order and properties first.
   active posts) types in the forum's search box: one request 350 ms after
   typing pauses, the posts found in place of the list, the list back when
   the box is emptied;
+  `forum-cards` (with `FAKE_FORUM=list` or `grid`, the same forum laid out so,
+  with a default reaction and a post with a video made since we read it)
+  shoots its cards;
   `poll-votes` (with `FAKE_POLL=1`, a finished poll in #general whose first
   answer has 130 voters) opens the list of who voted (`poll-votes <message>
   <answer>`) and asks for the first page of voters (`limit=100&type=2`);

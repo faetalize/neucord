@@ -2468,7 +2468,7 @@ impl App {
     /// cover where it is. A forward's is the forwarding message's place with
     /// no author, which the client takes from the original if it has it
     /// (282108's `nx`), and Neucord has no such lookup.
-    fn sensitivity(&self, message: &Message, forwarded_in: Option<&Message>) -> (Rules, Harms) {
+    pub(super) fn sensitivity(&self, message: &Message, forwarded_in: Option<&Message>) -> (Rules, Harms) {
         let state = self.account.state.borrow();
         let (Some(me), Some(account)) = (state.me(), state.account.as_ref()) else { return Default::default() };
         let scans = state.experiments.apex_user(me, SELF_HARM_SCANS).is_some_and(|a| a.variant == 1);

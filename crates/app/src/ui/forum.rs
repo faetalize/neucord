@@ -17,9 +17,9 @@ use adw::prelude::*;
 use discord::forum::{self, Archive, FirstMessages, Layout, Listing, Search, Sort, TagMatch, Unreads, View};
 use discord::model::{Emoji, Tag};
 use discord::permissions;
-use discord::reactions::{Kind as ReactionKind, Pill};
+use discord::reactions::{Kind as ReactionKind, Location, Pill};
 use discord::threads::ArchivedPage;
-use discord::{Channel, Message, Snowflake};
+use discord::{Attachment, Channel, ChannelKind, Message, Snowflake};
 use gtk::{gio, glib};
 
 use super::menus::{self, At, Choice, Choices, Entry, Item, Kind, Style};
@@ -72,6 +72,9 @@ pub(super) struct Data {
     archive: Archive,
     first: FirstMessages,
     unreads: Unreads,
+    /// What we had read of each forum when we last opened it, which the posts
+    /// made since are new against.
+    read_at_open: HashMap<Snowflake, Snowflake>,
     /// The servers whose active threads we have all of.
     synced: HashSet<Snowflake>,
     /// Requests for first messages are going out one after another.
@@ -408,6 +411,10 @@ impl App {
             let view = data.views.entry(id).or_insert_with(|| View::new(forum)).clone();
             data.listing.refresh(guild, id, &view);
             data.ahead = forum::sorted_posts(guild, id, view.sort);
+            // Before the forum's own ack, which follows (`CHANNEL_SELECT` in 218461).
+            let joined = guild.joined_at.map_or_else(now_ms, |s| s * 1000);
+            let read = state.read.acked(id).unwrap_or_else(|| Snowflake::from_unix_ms(joined));
+            data.read_at_open.insert(id, read);
         }
         self.forum_header();
         self.forum_rebuild();
@@ -768,8 +775,8 @@ impl App {
 
     /// Draw the cards again, for what they say having changed.
     pub(super) fn forum_refresh_cards(&self) {
-        let n = self.forum.model.n_items();
-        self.forum.model.items_changed(0, n, n);
+        self.forum.data.borrow_mut().rebuilt = Some(Instant::now());
+        renew(&self.forum.model);
     }
 
     /// A row came into view.
@@ -1174,6 +1181,7 @@ impl App {
         data.archive.clear();
         data.first.clear();
         data.unreads.clear();
+        data.read_at_open.clear();
         data.synced.clear();
         data.searches.clear();
         data.search_timer = None;
@@ -1214,11 +1222,15 @@ impl App {
             (Some(slot), None) if slot.loaded => Some(escape("Original message was deleted")),
             _ => None,
         };
+        // What the sensitive media filter covers is left out, as a spoiler is.
         let media = first.filter(|_| !blocked).and_then(|m| {
-            m.attachments
-                .iter()
-                .find(|a| a.content_type.as_deref().is_some_and(|t| t.starts_with("image/")) && !a.is_spoiler())
-                .map(|a| (a.proxy_url.clone().unwrap_or_else(|| a.url.clone()), a.width.zip(a.height)))
+            let (rules, harms) = self.sensitivity(m, None);
+            let shown = |a: &Attachment| !a.is_spoiler() && rules.cover(harms, a.scan(), true).is_none();
+            forum::card_media(m, forum.kind == ChannelKind::Media, shown).map(|a| CardMedia {
+                url: a.proxy_url.clone().unwrap_or_else(|| a.url.clone()),
+                size: a.width.zip(a.height),
+                video: a.is_video(),
+            })
         });
         // The reaction most people chose (`lQ` in 435470).
         let reaction = first.and_then(|m| {
@@ -1237,6 +1249,21 @@ impl App {
                 })
         });
 
+        // What the forum offers while a post has no reaction (`e8` in 745431, `eN` in 173404).
+        let offered = first.filter(|m| m.reactions.is_empty() && state.reacting(post).create).and_then(|m| {
+            let emoji = forum.default_reaction_emoji.as_ref()?.reaction(|id| {
+                let mut all = state.guilds.iter().flat_map(|g| &g.emojis);
+                all.find(|e| e.id == id).map(|e| (e.name.clone(), e.animated))
+            })?;
+            Some((m.id, emoji))
+        });
+        let new = forum::is_new(
+            thread,
+            state.read.persisted(post),
+            data.read_at_open.get(&forum.id).copied(),
+            guild.joined_at.map(|s| s * 1000),
+        );
+
         let messages = thread.message_count.unwrap_or(0);
         let unread_count = (unread && state.read.acked(post).is_some())
             .then(|| forum::unread_text(data.unreads.count(post), messages));
@@ -1249,11 +1276,13 @@ impl App {
             title: thread.name.clone().unwrap_or_default(),
             pinned: thread.is_pinned(),
             unread,
+            new,
             tags,
             more_tags: applied.len().saturating_sub(3),
             preview,
             media,
             reaction,
+            offered,
             reactable: state.settings.media.render_reactions && state.reacting(post).update,
             count: forum::message_count_text(messages, post),
             unread_count,
@@ -1279,7 +1308,7 @@ impl App {
         inner.set_margin_start(12);
         inner.set_margin_end(12);
 
-        let picture = |size: (i32, i32)| {
+        let picture = |media: &CardMedia, size: (i32, i32)| -> gtk::Widget {
             let picture = gtk::Picture::builder()
                 .content_fit(gtk::ContentFit::Cover)
                 .width_request(size.0)
@@ -1287,20 +1316,34 @@ impl App {
                 .overflow(gtk::Overflow::Hidden)
                 .valign(gtk::Align::Center)
                 .build();
-            if let Some((url, original)) = &card.media {
-                self.images.set_sized(&picture, url, size, *original);
+            self.images.set_sized(&picture, &media.url, size, media.size);
+            // The client marks a video in the grid alone (`containsVideo`, 745431).
+            if !media.video || layout != Layout::Grid {
+                return picture.upcast();
             }
-            picture
+            let overlay = gtk::Overlay::builder().child(&picture).build();
+            overlay.add_overlay(
+                &gtk::Image::builder()
+                    .icon_name("media-playback-start-symbolic")
+                    .halign(gtk::Align::Start)
+                    .valign(gtk::Align::End)
+                    .margin_start(6)
+                    .margin_bottom(6)
+                    .css_classes(["osd"])
+                    .build(),
+            );
+            overlay.upcast()
         };
-        if layout == Layout::Grid && card.media.is_some() {
-            widget.append(&picture((260, 160)));
+        if let Some(media) = card.media.as_ref().filter(|_| layout == Layout::Grid) {
+            widget.append(&picture(media, (260, 160)));
         }
         widget.append(&inner);
-        if layout == Layout::List && card.media.is_some() {
-            widget.append(&picture((72, 72)));
+        if let Some(media) = card.media.as_ref().filter(|_| layout == Layout::List) {
+            widget.append(&picture(media, (72, 72)));
         }
 
-        inner.append(
+        let title = gtk::Box::builder().spacing(6).build();
+        title.append(
             &gtk::Label::builder()
                 .label(&card.title)
                 .xalign(0.0)
@@ -1310,6 +1353,16 @@ impl App {
                 .css_classes(if card.unread { vec!["heading"] } else { vec!["heading", "dimmed"] })
                 .build(),
         );
+        if card.new {
+            title.append(
+                &gtk::Label::builder()
+                    .label("New")
+                    .valign(gtk::Align::Center)
+                    .css_classes(["caption-heading", "accent"])
+                    .build(),
+            );
+        }
+        inner.append(&title);
 
         if card.pinned || !card.tags.is_empty() {
             let tags = adw::WrapBox::builder().child_spacing(6).line_spacing(4).build();
@@ -1357,6 +1410,9 @@ impl App {
             let pill = Pill { emoji, kind: *kind, count: *count, me: *me };
             footer.append(&self.pill(message, &pill, card.reactable));
         }
+        if let Some((message, emoji)) = &card.offered {
+            footer.append(&self.default_reaction(post, *message, emoji));
+        }
         let messages = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         messages.append(&gtk::Image::from_icon_name("chat-message-new-symbolic"));
         messages.append(&gtk::Label::builder().label(&card.count).css_classes(["caption"]).build());
@@ -1387,6 +1443,23 @@ impl App {
             }
         });
         Some(widget.upcast())
+    }
+
+    /// The button that makes the forum's default reaction to `message`, the
+    /// first of `post`.
+    fn default_reaction(self: &Rc<Self>, post: Snowflake, message: Snowflake, emoji: &Emoji) -> gtk::Widget {
+        let button = gtk::Button::builder()
+            .child(&polls::emoji_widget(emoji, &self.images))
+            .tooltip_text("Add Reaction")
+            .css_classes(["flat"])
+            .build();
+        let (this, emoji) = (Rc::downgrade(self), emoji.clone());
+        button.connect_clicked(move |_| {
+            if let Some(this) = this.upgrade() {
+                this.add_reaction(post, message, emoji.clone(), Location::InlineButton, true);
+            }
+        });
+        button.upcast()
     }
 
     /// Whether Pin Post and Unpin Post show.
@@ -1520,18 +1593,41 @@ impl App {
     }
 }
 
+/// Have every row of `model` made again, from new items: a list keeps the row
+/// of an item that is there before and after a change. One at a time, so the
+/// list stays where it is scrolled to.
+fn renew(model: &gio::ListStore) {
+    for position in 0..model.n_items() {
+        if let Some(item) = model.item(position).and_downcast::<glib::BoxedAnyObject>() {
+            let row = item.borrow::<Row>().clone();
+            model.splice(position, 1, &[glib::BoxedAnyObject::new(row)]);
+        }
+    }
+}
+
+/// The picture on a card, or a video's still.
+struct CardMedia {
+    url: String,
+    size: Option<(u32, u32)>,
+    video: bool,
+}
+
 /// What a card says.
 struct Card {
     title: String,
     pinned: bool,
     unread: bool,
+    /// Made since we last read the forum, and never opened.
+    new: bool,
     /// The first three of its tags, and whether the filter has each.
     tags: Vec<(Tag, bool)>,
     more_tags: usize,
     /// In markup.
     preview: Option<String>,
-    media: Option<(String, Option<(u32, u32)>)>,
+    media: Option<CardMedia>,
     reaction: Option<(Message, Emoji, (ReactionKind, u32, bool))>,
+    /// The first message, and the forum's default reaction to offer on it.
+    offered: Option<(Snowflake, Emoji)>,
     reactable: bool,
     count: String,
     unread_count: Option<String>,
@@ -1549,4 +1645,25 @@ pub(super) fn tag_emoji(tag: &Tag) -> Option<Emoji> {
 
 fn escape(text: &str) -> String {
     glib::markup_escape_text(text).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renewed_rows_are_other_items_as_a_list_keeps_the_row_of_the_same_one() {
+        let model = gio::ListStore::new::<glib::BoxedAnyObject>();
+        model.append(&glib::BoxedAnyObject::new(Row::Post(Snowflake(7))));
+        model.append(&glib::BoxedAnyObject::new(Row::Older));
+        let items = || -> Vec<glib::Object> { (0..model.n_items()).filter_map(|i| model.item(i)).collect() };
+        let before = items();
+        renew(&model);
+        let after = items();
+        assert_eq!(after.len(), 2);
+        assert!(before.iter().zip(&after).all(|(b, a)| b != a), "the same items");
+        let rows: Vec<Row> =
+            after.iter().map(|o| o.downcast_ref::<glib::BoxedAnyObject>().unwrap().borrow::<Row>().clone()).collect();
+        assert!(matches!(rows[..], [Row::Post(Snowflake(7)), Row::Older]));
+    }
 }

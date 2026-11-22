@@ -15,8 +15,9 @@ use std::collections::{HashMap, HashSet};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::model::{Emoji, ReactionEmoji};
 use crate::threads::{ArchivedPage, PAGE};
-use crate::{Channel, ChannelKind, Guild, Message, Snowflake};
+use crate::{Attachment, Channel, ChannelKind, Guild, Message, Snowflake};
 
 /// How many posts one `post-data` request names at most (`getNextBatch`,
 /// 473503).
@@ -729,6 +730,43 @@ pub fn ago(now_ms: i64, then_ms: i64) -> String {
     }
 }
 
+/// Whether `post` is new to us (`isNewForumThread` in 218461): made after what
+/// we had read of the forum when we opened it (`read_at_open`), and after we
+/// joined the server, and never opened, on any client.
+pub fn is_new(post: &Channel, opened: bool, read_at_open: Option<Snowflake>, joined_ms: Option<i64>) -> bool {
+    let newer = read_at_open.is_some_and(|read| post.id > read);
+    // The client takes a server that doesn't say when we joined as joined now.
+    newer && !opened && !post.is_archived() && joined_ms.is_some_and(|joined| post.id.unix_ms() > joined)
+}
+
+/// The attachment a post's card shows of its first message (`Ky` and `no` in
+/// 256265): the first picture, or video the proxy can take a still of, that
+/// `shown` lets be seen. In a media channel, the one marked as the thumbnail
+/// comes before them.
+pub fn card_media(first: &Message, media_channel: bool, shown: impl Fn(&Attachment) -> bool) -> Option<&Attachment> {
+    let mut media = first.attachments.iter().filter(|a| {
+        let video = a.is_video() && a.proxy_url.is_some();
+        (video || (a.is_image() && !a.is_video())) && shown(a)
+    });
+    let thumbnail = media.clone().find(|a| media_channel && a.is_hidden());
+    thumbnail.or_else(|| media.next())
+}
+
+impl ReactionEmoji {
+    /// The reaction it makes (`Ck` in 435470): a custom emoji of a server
+    /// we're in, which `custom` gives the name of and whether it moves, or
+    /// else what the forum calls it.
+    pub fn reaction(&self, custom: impl Fn(Snowflake) -> Option<(String, bool)>) -> Option<Emoji> {
+        if let Some(id) = self.emoji_id
+            && let Some((name, animated)) = custom(id)
+        {
+            return Some(Emoji { id: Some(id), name: Some(name), animated });
+        }
+        let name = self.emoji_name.clone()?;
+        Some(Emoji { id: self.emoji_id, name: Some(name), animated: false })
+    }
+}
+
 /// How many messages a post has, as a card says it (`Mw` in 321045). Posts
 /// made before 2022-06-01 stop counting at 50.
 pub fn message_count_text(count: u32, post: Snowflake) -> String {
@@ -1290,5 +1328,69 @@ mod tests {
             (unread_text(Some(7), 40), unread_text(Some(30), 40), unread_text(Some(9), 3)),
             ("7".into(), "25+".into(), "3".into())
         );
+    }
+
+    #[test]
+    fn a_post_is_new_until_it_is_opened_or_the_forum_read_past_it() {
+        let made = |minute: i64| Snowflake::from_unix_ms(1_700_000_000_000 + minute * 60_000);
+        let mut new = channel(post(made(10).0, None, false, &[], false));
+        let joined = Some(made(0).unix_ms());
+        assert!(is_new(&new, false, Some(made(5)), joined));
+        assert!(!is_new(&new, true, Some(made(5)), joined), "opened before, on any client");
+        assert!(!is_new(&new, false, Some(made(10)), joined), "the forum was read up to it");
+        assert!(!is_new(&new, false, None, joined), "the forum isn't open");
+        assert!(!is_new(&new, false, Some(made(5)), Some(made(20).unix_ms())), "made before we joined");
+        assert!(!is_new(&new, false, Some(made(5)), None), "as if we joined now");
+        new.thread_metadata.as_mut().unwrap().archived = true;
+        assert!(!is_new(&new, false, Some(made(5)), joined), "archived");
+    }
+
+    fn first_message(attachments: Value) -> Message {
+        serde_json::from_value(
+            json!({"id": "20", "channel_id": "20", "content": "", "timestamp": "2026-01-01T00:00:00Z",
+            "author": {"id": "5", "username": "a"}, "attachments": attachments}),
+        )
+        .unwrap()
+    }
+
+    fn file(id: u64, name: &str, kind: &str, flags: u64) -> Value {
+        json!({"id": id.to_string(), "filename": name, "url": format!("https://cdn.discordapp.com/attachments/1/{id}/{name}"),
+               "proxy_url": format!("https://media.discordapp.net/attachments/1/{id}/{name}"), "size": 1,
+               "content_type": kind, "width": 100, "height": 50, "flags": flags})
+    }
+
+    #[test]
+    fn a_card_shows_the_first_picture_or_video_and_in_a_media_channel_the_thumbnail() {
+        let chosen = |attachments: Value, media: bool| {
+            card_media(&first_message(attachments), media, |a| !a.is_spoiler()).map(|a| a.id.0)
+        };
+        let text = file(1, "a.txt", "text/plain", 0);
+        let video = file(2, "b.mp4", "video/mp4", 0);
+        let picture = file(3, "c.png", "image/png", 0);
+        assert_eq!(chosen(json!([text, video, picture]), false), Some(2));
+        assert_eq!(chosen(json!([picture, video]), false), Some(3));
+        assert_eq!(chosen(json!([text]), false), None);
+        let mut unproxied = video.clone();
+        unproxied["proxy_url"] = Value::Null;
+        assert_eq!(chosen(json!([unproxied, picture]), false), Some(3), "no still without the proxy");
+        assert_eq!(chosen(json!([file(4, "SPOILER_d.mp4", "video/mp4", 0), picture]), false), Some(3), "held back");
+        let thumbnail = file(5, "e.png", "image/png", 2);
+        assert_eq!(chosen(json!([video, thumbnail]), true), Some(5), "a media channel's thumbnail");
+        assert_eq!(chosen(json!([video, thumbnail]), false), Some(2), "a forum doesn't look for one");
+    }
+
+    #[test]
+    fn a_default_reaction_is_a_custom_emoji_we_have_or_its_name() {
+        let custom = |id: Snowflake| (id.0 == 77).then(|| ("blob".to_owned(), true));
+        let reaction = |id: Option<u64>, name: Option<&str>| {
+            ReactionEmoji { emoji_id: id.map(Snowflake), emoji_name: name.map(Into::into) }.reaction(custom)
+        };
+        assert_eq!(
+            reaction(Some(77), None),
+            Some(Emoji { id: Some(Snowflake(77)), name: Some("blob".into()), animated: true })
+        );
+        assert_eq!(reaction(None, Some("x")), Some(Emoji { id: None, name: Some("x".into()), animated: false }));
+        assert_eq!(reaction(Some(78), None), None, "one we can't name");
+        assert_eq!(reaction(None, None), None);
     }
 }
