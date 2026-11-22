@@ -66,6 +66,8 @@ pub(super) struct Upload {
     /// What the message calls it, which the edit dialog may change.
     name: RefCell<String>,
     spoiler: Cell<bool>,
+    /// The picture a media channel's post shows for itself.
+    pub(super) thumbnail: bool,
     description: RefCell<Option<String>>,
     status: RefCell<Status>,
     /// How many times it has been tried, which a send doesn't reset.
@@ -377,6 +379,7 @@ impl Details {
                 spoiler: u.spoiler.get(),
                 content_type: &self.types[i],
                 voice: None,
+                thumbnail: u.thumbnail,
             })
             .collect()
     }
@@ -428,6 +431,7 @@ fn upload_of(
     spoiler: Option<gtk::ToggleButton>,
     edit: Option<gtk::Button>,
     remove: &str,
+    thumbnail: bool,
 ) -> Rc<Upload> {
     let root = gtk::Box::builder().spacing(8).margin_start(12).margin_top(4).margin_bottom(4).build();
     root.append(&preview(&file));
@@ -441,6 +445,9 @@ fn upload_of(
     let remove =
         gtk::Button::builder().icon_name("window-close-symbolic").tooltip_text(remove).css_classes(["flat"]).build();
     root.append(&name);
+    if thumbnail {
+        root.append(&gtk::Label::builder().label("Thumbnail").css_classes(["caption", "accent"]).build());
+    }
     root.append(&state);
     if let Some(spoiler) = &spoiler {
         root.append(spoiler);
@@ -455,6 +462,7 @@ fn upload_of(
         file: RefCell::new(file),
         optimized: Cell::new(false),
         spoiler: Cell::new(false),
+        thumbnail,
         description: RefCell::default(),
         status: RefCell::new(Status::Uploading(0)),
         attempts: Rc::default(),
@@ -904,12 +912,26 @@ impl App {
         for task in tasks {
             prepared.extend(task.await);
         }
-        self.add_prepared(draft, prepared);
+        self.add_prepared(draft, prepared, false);
+    }
+
+    /// Have `path` be the thumbnail of the post being written in `forum`, in
+    /// place of the one there is (`R` in 518960 with `isThumbnail`).
+    pub(super) async fn set_thumbnail(self: &Rc<Self>, forum: Snowflake, path: gio::File) {
+        let draft = Draft::Message(forum);
+        for old in self.drafts.of(draft).into_iter().filter(|u| u.thumbnail) {
+            self.remove_upload(draft, &old);
+        }
+        let Some(file) = file_at(path).await else { return };
+        if file.size == 0 {
+            return self.show_refusal(&Refusal::Empty);
+        }
+        self.add_prepared(draft, vec![images::prepare(file).await], true);
     }
 
     /// Put files in `draft` and start uploading them, unless they're over
     /// what a message may carry, in which case none are added.
-    fn add_prepared(self: &Rc<Self>, draft: impl Into<Draft>, files: Vec<File>) {
+    fn add_prepared(self: &Rc<Self>, draft: impl Into<Draft>, files: Vec<File>, thumbnail: bool) {
         let draft = draft.into();
         if files.is_empty() || !self.takes_files(draft) {
             return;
@@ -924,7 +946,7 @@ impl App {
             return self.show_refusal(&refusal);
         }
         for file in files {
-            let upload = self.new_upload(draft, file);
+            let upload = self.new_upload(draft, file, thumbnail);
             self.start_upload(&upload);
             self.drafts.files.borrow_mut().entry(draft).or_default().push(upload);
         }
@@ -941,7 +963,8 @@ impl App {
         });
     }
 
-    fn new_upload(self: &Rc<Self>, draft: Draft, file: File) -> Rc<Upload> {
+    /// A thumbnail takes no spoiler (`disableSpoiler`, 745431).
+    fn new_upload(self: &Rc<Self>, draft: Draft, file: File, thumbnail: bool) -> Rc<Upload> {
         let spoiler = gtk::ToggleButton::builder()
             .icon_name("view-conceal-symbolic")
             .tooltip_text("Mark as spoiler")
@@ -952,7 +975,7 @@ impl App {
             .tooltip_text("Edit")
             .css_classes(["flat"])
             .build();
-        let upload = upload_of(draft.channel(), file, Some(spoiler), Some(edit), "Remove");
+        let upload = upload_of(draft.channel(), file, (!thumbnail).then_some(spoiler), Some(edit), "Remove", thumbnail);
         if let Some(spoiler) = &upload.row.spoiler {
             spoiler.connect_toggled({
                 let upload = Rc::downgrade(&upload);
@@ -1026,7 +1049,7 @@ impl App {
             state.limits().uploads(state.find_channel(channel).and_then(|(guild, _)| guild))
         };
         let checked = uploads::check_upload(&limits, file.size);
-        let upload = upload_of(channel, file, None, None, remove);
+        let upload = upload_of(channel, file, None, None, remove, false);
         upload.optimized.set(!convert);
         upload.row.remove.connect_clicked(move |_| removed());
         match checked {
@@ -1152,7 +1175,7 @@ impl App {
         };
         let before = self.drafts.of(channel).len();
         // Text is never converted.
-        self.add_prepared(channel, vec![file]);
+        self.add_prepared(channel, vec![file], false);
         // The text leaves the box only once it has become a file.
         if self.drafts.of(channel).len() > before {
             self.set_composer_text(&split.rest);
