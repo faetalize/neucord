@@ -170,7 +170,11 @@ impl App {
                 .filter(|c| {
                     matches!(
                         c.kind,
-                        ChannelKind::Text | ChannelKind::Announcement | ChannelKind::Forum | ChannelKind::Media
+                        ChannelKind::Text
+                            | ChannelKind::Announcement
+                            | ChannelKind::Forum
+                            | ChannelKind::Media
+                            | ChannelKind::App
                     )
                 })
                 .filter(|c| state.can_view(c.id))

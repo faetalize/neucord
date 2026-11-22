@@ -59,7 +59,8 @@
       "GUILD_STAGE_VOICE",
       "GUILD_FORUM",
       "GUILD_MEDIA",
-      "MEDIA_THREAD"
+      "MEDIA_THREAD",
+      "GUILD_APP"
     ],
     "ForgotPasswordMethod": ["ONE_TIME_LOGIN", "PASSWORD_RESET"],
     "ForumLayout": ["DEFAULT", "LIST", "GRID"],

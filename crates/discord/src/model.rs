@@ -161,6 +161,9 @@ pub enum ChannelKind {
     Media,
     /// Its own kind of thread (19), which only ever takes reading.
     MediaThread,
+    /// A text channel of an app's (21), which the client shows the app in
+    /// with the chat beside it. Neucord shows the chat.
+    App,
     Other(u8),
 }
 
@@ -180,6 +183,7 @@ impl ChannelKind {
             15 => Self::Forum,
             16 => Self::Media,
             19 => Self::MediaThread,
+            21 => Self::App,
             other => Self::Other(other),
         }
     }
@@ -200,13 +204,14 @@ impl ChannelKind {
             Self::Forum => 15,
             Self::Media => 16,
             Self::MediaThread => 19,
+            Self::App => 21,
             Self::Other(raw) => raw,
         }
     }
 
     /// Channels that hold a plain message history.
     pub fn is_text(self) -> bool {
-        matches!(self, Self::Text | Self::Announcement | Self::Dm | Self::GroupDm)
+        matches!(self, Self::Text | Self::Announcement | Self::App | Self::Dm | Self::GroupDm)
     }
 
     /// Voice and stage channels (`isGuildVocal` in 95701). Each also has a text
@@ -247,7 +252,8 @@ impl ChannelKind {
                 | Self::PrivateThread
                 | Self::Stage
                 | Self::MediaThread
-                | Self::Other(17 | 18 | 21)
+                | Self::App
+                | Self::Other(17 | 18)
         )
     }
 }
@@ -1902,6 +1908,23 @@ mod tests {
         assert_eq!(forum(r#","template":"  Title:\n\nBody \n""#).post_template(), "Title:\n\nBody");
         assert_eq!(forum("").post_template(), "");
         assert_eq!(forum(r#","template":null"#).post_template(), "");
+    }
+
+    #[test]
+    fn the_sidebar_lists_every_kind_of_channel_that_opens() {
+        let channels: Vec<Value> = [0, 2, 4, 5, 13, 15, 16, 21, 99]
+            .into_iter()
+            .map(|kind| json!({"id": (100 + kind).to_string(), "type": kind, "name": "c", "position": kind}))
+            .collect();
+        let guild: Guild = serde_json::from_value(json!({
+            "id": "1", "name": "G", "owner_id": "5", "roles": [{"id": "1", "name": "@everyone", "permissions": "1024"}],
+            "channels": channels,
+        }))
+        .unwrap();
+        let me = Account { id: Snowflake(5), ..Account::default() };
+        let listed: Vec<u64> =
+            guild.sidebar(&me, 0).into_iter().flat_map(|(_, channels)| channels).map(|c| c.id.0 - 100).collect();
+        assert_eq!(listed, [0, 5, 15, 16, 21, 2, 13], "no category and nothing unknown, voice channels last");
     }
 
     #[test]

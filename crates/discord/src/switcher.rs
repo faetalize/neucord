@@ -228,6 +228,7 @@ fn text_like(kind: ChannelKind) -> bool {
             | ChannelKind::Announcement
             | ChannelKind::Forum
             | ChannelKind::Media
+            | ChannelKind::App
             | ChannelKind::AnnouncementThread
             | ChannelKind::PublicThread
             | ChannelKind::PrivateThread

@@ -504,7 +504,7 @@ impl State {
         let listed = if channel.kind.is_thread() {
             channel.parent_id.and_then(|p| guild.channel(p)).filter(|p| !p.kind.is_forum_like())
         } else {
-            Some(channel).filter(|c| matches!(c.kind, ChannelKind::Text | ChannelKind::Announcement))
+            Some(channel).filter(|c| matches!(c.kind, ChannelKind::Text | ChannelKind::Announcement | ChannelKind::App))
         };
         listed.map(|c| self.age_gate(c.id, agreed).is_none())
     }

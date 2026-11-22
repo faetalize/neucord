@@ -2561,6 +2561,7 @@ mod tests {
             ChannelKind::PublicThread,
             ChannelKind::PrivateThread,
             ChannelKind::Stage,
+            ChannelKind::App,
         ] {
             assert!(offers_apps(kind), "{kind:?}");
         }

@@ -405,6 +405,7 @@ pub(super) fn glyph_widget(glyph: Glyph) -> gtk::Widget {
         Glyph::Stage => ("microphone-sensitivity-high-symbolic", "Stage channel"),
         Glyph::Forum => ("view-list-symbolic", "Forum channel"),
         Glyph::Media => ("image-x-generic-symbolic", "Media channel"),
+        Glyph::App => ("view-app-grid-symbolic", "App channel"),
         Glyph::Rules => ("text-x-generic-symbolic", "Rules channel"),
     };
     gtk::Image::builder()
