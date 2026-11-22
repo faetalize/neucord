@@ -705,7 +705,9 @@ changed for unrelated reasons only needs a note in the issue.
   list's end (`R` in 628707), both only with Read Message History. Its
   active sections are `jO` there. The header button is in
   `renderHeaderToolbar` (420018, anchor `"browser"`): text and announcement
-  channels, and threads outside forums. A box under a message shows only for
+  channels, and threads outside forums; 494208 disables it behind the age gate.
+  `Fr` skips a moderator report channel only once its "show resolved" is off,
+  which starts on (212007, anchor `report-to-mod-channel-storage`). A box under a message shows only for
   a known thread of a message with `HAS_THREAD` (`r8` in 190854).
 - **Where a thread opens** (`threads::Viewed::anchor`). `P` in 123363: its
   start the first time (no read state on any client, not among the

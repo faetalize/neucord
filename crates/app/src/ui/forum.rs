@@ -739,13 +739,11 @@ impl App {
                         rows.push(Row::Older);
                     }
                     rows.extend(archived.into_iter().map(Row::Post));
-                } else if !forum.is_moderator_report() {
+                } else {
                     rows.push(Row::Denied(format!(
                         "You do not have permission to view the post history of #{}",
                         forum.name.as_deref().unwrap_or_default()
                     )));
-                    loading = !synced;
-                } else {
                     loading = !synced;
                 }
                 if loading {

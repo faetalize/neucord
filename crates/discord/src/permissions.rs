@@ -693,12 +693,12 @@ fn forum_of<'a>(guild: &'a Guild, post: &Channel) -> Option<&'a Channel> {
 }
 
 /// Whether the posts of `forum` we can't see in our lists, the archived ones,
-/// may be asked for (`O3` in 435470, and the load in 424798): reading the
-/// forum's history, and in a channel of moderator reports only once we've
-/// asked for resolved ones too, which Neucord has no way to.
+/// may be asked for and searched (`O3` in 435470, and the load in 424798):
+/// reading the forum's history. In a channel of moderator reports they are
+/// the resolved ones, which the client shows until its "show resolved" is
+/// turned off (212007); Neucord has no such setting.
 pub fn can_read_post_history(guild: &Guild, forum: &Channel, me: &Account, now: i64) -> bool {
-    forum.flags & IS_MODERATOR_REPORT_CHANNEL == 0
-        && in_channel(guild, forum, me, now).contains(Permissions::READ_MESSAGE_HISTORY)
+    in_channel(guild, forum, me, now).contains(Permissions::READ_MESSAGE_HISTORY)
 }
 
 /// Whether Pin Post and Unpin Post show on `post` (`A` in 41402, with `H_`
@@ -1241,7 +1241,7 @@ mod tests {
     }
 
     #[test]
-    fn archived_posts_are_asked_for_with_history_and_not_in_moderator_reports() {
+    fn archived_posts_are_asked_for_with_history_in_moderator_reports_too() {
         let me = me();
         let (mut guild, _) = forum_post(false, 0, json!({}));
         assert!(can_read_post_history(&guild, &guild.channels[0].clone(), &me, 0));
@@ -1249,7 +1249,9 @@ mod tests {
         assert!(!can_read_post_history(&guild, &guild.channels[0].clone(), &me, 0), "no history");
         guild.channels[0].permission_overwrites[0].deny = Permissions::NONE;
         guild.channels[0].flags = 1 << 19;
-        assert!(!can_read_post_history(&guild, &guild.channels[0].clone(), &me, 0), "a channel of reports");
+        assert!(can_read_post_history(&guild, &guild.channels[0].clone(), &me, 0), "a channel of reports");
+        guild.channels[0].permission_overwrites[0].deny = HISTORY;
+        assert!(!can_read_post_history(&guild, &guild.channels[0].clone(), &me, 0), "reports without history");
     }
 
     #[test]
