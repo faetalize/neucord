@@ -4,6 +4,7 @@ mod background;
 mod config;
 mod desktop;
 mod highlight;
+mod icons;
 mod images;
 mod kept;
 mod recorder;

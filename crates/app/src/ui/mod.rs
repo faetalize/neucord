@@ -466,11 +466,12 @@ impl App {
                 .position(gtk::PositionType::Top)
                 .child(&gtk::Label::new(Some("Added to Favorites")))
                 .build(),
+            // `image-button` is the padding `icon_name` would bring.
             sticker_button: gtk::Button::builder()
-                .icon_name("image-x-generic-symbolic")
+                .child(&gtk::Image::from_paintable(Some(&crate::icons::sticker())))
                 .tooltip_text("Stickers")
                 .valign(gtk::Align::Center)
-                .css_classes(["flat", "circular"])
+                .css_classes(["flat", "circular", "image-button"])
                 .build(),
             waiting: stickers::Waiting::new(),
             typing_line: gtk::Label::builder()
