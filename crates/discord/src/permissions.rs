@@ -694,9 +694,8 @@ fn forum_of<'a>(guild: &'a Guild, post: &Channel) -> Option<&'a Channel> {
 
 /// Whether the posts of `forum` we can't see in our lists, the archived ones,
 /// may be asked for and searched (`O3` in 435470, and the load in 424798):
-/// reading the forum's history. In a channel of moderator reports they are
-/// the resolved ones, which the client shows until its "show resolved" is
-/// turned off (212007); Neucord has no such setting.
+/// reading the forum's history. Whether a channel of moderator reports lists
+/// them is [`Channel::lists_archived`]'s.
 pub fn can_read_post_history(guild: &Guild, forum: &Channel, me: &Account, now: i64) -> bool {
     in_channel(guild, forum, me, now).contains(Permissions::READ_MESSAGE_HISTORY)
 }

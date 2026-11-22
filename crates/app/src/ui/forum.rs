@@ -36,6 +36,10 @@ const LOADING_ROWS: usize = 3;
 /// for, in pixels (`onScroll` in 745431).
 const NEAR_END: f64 = 200.0;
 
+/// Where whether each channel of moderator reports shows resolved ones is
+/// kept: its id, and 0 once it doesn't.
+const RESOLVED: &str = "ShowResolvedReports";
+
 /// How long after the rows are made scrolling is the list settling.
 const SETTLING: Duration = Duration::from_millis(500);
 
@@ -378,6 +382,23 @@ impl App {
         });
         radio("layout", |view, value| view.layout = if value == "grid" { Layout::Grid } else { Layout::List });
         radio("match", |view, value| view.tag_match = if value == "all" { TagMatch::All } else { TagMatch::Some });
+        let resolved = gio::SimpleAction::new_stateful("resolved", None, &true.to_variant());
+        resolved.connect_activate({
+            let this = Rc::downgrade(self);
+            move |action, _| {
+                let Some(this) = this.upgrade() else { return };
+                let Some(id) = this.forum_shown() else { return };
+                let shown = !this.forum_shows_resolved(id);
+                let kept = forum::with_resolved(&this.remembered.numbers(RESOLVED), id, shown);
+                if let Err(e) = this.remembered.set_numbers(RESOLVED, &kept) {
+                    eprintln!("could not save whether resolved reports show: {e}");
+                }
+                action.set_state(&shown.to_variant());
+                // The list is sorted again as it changes (`Fr` in 424798).
+                this.forum_resort();
+            }
+        });
+        self.forum.actions.add_action(&resolved);
         let reset = gio::SimpleAction::new("reset", None);
         reset.connect_activate({
             let this = Rc::downgrade(self);
@@ -495,7 +516,13 @@ impl App {
             Some("Sort by"),
             &radio("sort", &[("Recently Active", "active"), ("Date Posted", "created")]),
         );
-        if forum.kind != discord::ChannelKind::Media {
+        let reports = forum.is_moderator_report();
+        if reports {
+            let show = gio::Menu::new();
+            show.append(Some("Show"), Some("forum.resolved"));
+            menu.append_section(Some("Resolved flags"), &show);
+        }
+        if forum.kind != discord::ChannelKind::Media && !reports {
             menu.append_section(Some("View as"), &radio("layout", &[("List", "list"), ("Gallery", "grid")]));
         }
         if !forum.available_tags.is_empty() {
@@ -513,6 +540,9 @@ impl App {
         set("sort", if view.sort == Sort::CreationDate { "created" } else { "active" });
         set("layout", if view.layout == Layout::Grid { "grid" } else { "list" });
         set("match", if view.tag_match == TagMatch::All { "all" } else { "some" });
+        if let Some(action) = page.actions.lookup_action("resolved").and_downcast::<gio::SimpleAction>() {
+            action.set_state(&self.forum_shows_resolved(id).to_variant());
+        }
 
         page.post_button.set_visible(state.can_post(id));
 
@@ -722,8 +752,15 @@ impl App {
                 let mut rows: Vec<Row> = data.listing.shown().iter().map(|&post| Row::Post(post)).collect();
                 let active = !rows.is_empty();
                 let synced = data.synced.contains(&guild.id);
-                let mut loading = !synced || data.archive.is_loading(id, view);
-                if permissions::can_read_post_history(guild, forum, me, now_unix()) {
+                let archived = forum.lists_archived(self.forum_shows_resolved(id));
+                let mut loading = !synced || (archived && data.archive.is_loading(id, view));
+                if !permissions::can_read_post_history(guild, forum, me, now_unix()) {
+                    rows.push(Row::Denied(format!(
+                        "You do not have permission to view the post history of #{}",
+                        forum.name.as_deref().unwrap_or_default()
+                    )));
+                    loading = !synced;
+                } else if archived {
                     let archived: Vec<Snowflake> = data
                         .archive
                         .threads(id, view)
@@ -739,12 +776,6 @@ impl App {
                         rows.push(Row::Older);
                     }
                     rows.extend(archived.into_iter().map(Row::Post));
-                } else {
-                    rows.push(Row::Denied(format!(
-                        "You do not have permission to view the post history of #{}",
-                        forum.name.as_deref().unwrap_or_default()
-                    )));
-                    loading = !synced;
                 }
                 if loading {
                     rows.extend((0..LOADING_ROWS).map(|_| Row::Loading));
@@ -881,6 +912,11 @@ impl App {
         self.learn_users(authors.iter());
     }
 
+    /// Whether the channel of moderator reports `id` shows resolved ones.
+    fn forum_shows_resolved(&self, id: Snowflake) -> bool {
+        forum::shows_resolved(&self.remembered.numbers(RESOLVED), id)
+    }
+
     /// Ask for the next page of archived posts (`loadArchivedThreads`).
     fn forum_load_archived(self: &Rc<Self>) {
         let Some(id) = self.forum_shown() else { return };
@@ -889,7 +925,9 @@ impl App {
             let (Some((Some(guild), forum)), Some(me)) = (state.find_channel(id), state.account.as_ref()) else {
                 return;
             };
-            if !permissions::can_read_post_history(guild, forum, me, now_unix()) {
+            if !permissions::can_read_post_history(guild, forum, me, now_unix())
+                || !forum.lists_archived(self.forum_shows_resolved(id))
+            {
                 return;
             }
             let mut data = self.forum.data.borrow_mut();
