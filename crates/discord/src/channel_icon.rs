@@ -22,6 +22,7 @@ pub enum Glyph {
     Stage,
     Forum,
     Media,
+    App,
     Rules,
 }
 
@@ -50,6 +51,7 @@ pub fn of(guild: &Guild, channel: &Channel) -> Option<Icon> {
         ChannelKind::Stage => Glyph::Stage,
         ChannelKind::Forum => Glyph::Forum,
         ChannelKind::Media => Glyph::Media,
+        ChannelKind::App => Glyph::App,
         _ => return None,
     };
     if guild.rules_channel_id == Some(channel.id) {
@@ -114,6 +116,7 @@ mod tests {
         assert_eq!(icon(13, none.clone()), plain(Glyph::Stage));
         assert_eq!(icon(15, none.clone()), plain(Glyph::Forum));
         assert_eq!(icon(16, none.clone()), plain(Glyph::Media));
+        assert_eq!(icon(21, none.clone()), plain(Glyph::App));
         for unlisted in [1, 3, 4, 10, 11, 12, 19, 99] {
             assert_eq!(icon(unlisted, none.clone()), None, "type {unlisted}");
         }
@@ -131,7 +134,7 @@ mod tests {
 
     #[test]
     fn age_restricted_channels_are_marked() {
-        for kind in [0, 2, 5, 15, 16] {
+        for kind in [0, 2, 5, 15, 16, 21] {
             assert_eq!(icon(kind, json!({"nsfw": true})).unwrap().mark, Some(Mark::Nsfw), "type {kind}");
             assert_eq!(icon(kind, json!({"nsfw": null})).unwrap().mark, None, "type {kind}: null is off");
         }
@@ -141,7 +144,7 @@ mod tests {
     #[test]
     fn channels_everyone_cannot_view_are_locked() {
         let hidden = deny(GUILD, VIEW);
-        for kind in [0, 2, 5, 13, 15, 16] {
+        for kind in [0, 2, 5, 13, 15, 16, 21] {
             assert_eq!(icon(kind, hidden.clone()).unwrap().mark, Some(Mark::Locked), "type {kind}");
         }
         // Only `@everyone`'s overwrite counts, whoever else it hides the channel from.

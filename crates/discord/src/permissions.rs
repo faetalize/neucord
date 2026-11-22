@@ -425,7 +425,10 @@ pub fn can_view(guild: &Guild, channel: &Channel, me: &Account, now: i64) -> boo
 pub fn hidden_from_everyone(guild: &Guild, channel: &Channel) -> bool {
     let kind = channel.kind;
     let lockable = kind.is_forum_like()
-        || matches!(kind, ChannelKind::Text | ChannelKind::Announcement | ChannelKind::Voice | ChannelKind::Stage);
+        || matches!(
+            kind,
+            ChannelKind::Text | ChannelKind::Announcement | ChannelKind::App | ChannelKind::Voice | ChannelKind::Stage
+        );
     if !lockable {
         return false;
     }

@@ -71,10 +71,12 @@ const PUBLIC_THREAD: u8 = 11;
 const PRIVATE_THREAD: u8 = 12;
 
 /// Whether the parent's kind takes threads (`wE` in 95701), before
-/// permissions. The client lists app channels (21) too, which Neucord has no
-/// kind for.
+/// permissions.
 fn takes_threads(kind: ChannelKind) -> bool {
-    matches!(kind, ChannelKind::Text | ChannelKind::Announcement | ChannelKind::Forum | ChannelKind::Media)
+    matches!(
+        kind,
+        ChannelKind::Text | ChannelKind::Announcement | ChannelKind::Forum | ChannelKind::Media | ChannelKind::App
+    )
 }
 
 /// `C` in 406704: a kind that takes threads, `allowed` by permissions, and
