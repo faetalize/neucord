@@ -15,7 +15,7 @@ use gtk::glib;
 use super::App;
 use super::friends::confirm;
 use super::menus::{self, Entry, Item, Kind};
-use super::state::{now_ms, now_unix};
+use super::state::{State, now_ms, now_unix};
 
 /// How close to the end of the list scrolling asks for the next page (the
 /// client asks within 200 pixels).
@@ -491,6 +491,25 @@ fn detail(
     }
 }
 
+impl State {
+    /// The threads header button: shown for a channel that takes threads and
+    /// for a thread, whose parent's threads it lists (`renderHeaderToolbar` in
+    /// 420018), and whether it can be pressed, which it can't while the channel
+    /// it lists is behind the age gate (494208, by `ni` in 323073). `None` is
+    /// no button.
+    pub(super) fn threads_button(&self, agreed: &[Snowflake]) -> Option<bool> {
+        let id = self.channel.filter(|_| self.page.is_none())?;
+        let (guild, channel) = self.find_channel(id)?;
+        let guild = guild?;
+        let listed = if channel.kind.is_thread() {
+            channel.parent_id.and_then(|p| guild.channel(p)).filter(|p| !p.kind.is_forum_like())
+        } else {
+            Some(channel).filter(|c| matches!(c.kind, ChannelKind::Text | ChannelKind::Announcement))
+        };
+        listed.map(|c| self.age_gate(c.id, agreed).is_none())
+    }
+}
+
 impl App {
     /// The threads of `channel`, or of a thread's parent: open the browser,
     /// and ask for archived threads if it never has.
@@ -604,22 +623,11 @@ impl App {
         });
     }
 
-    /// The threads header button: shown for a channel that takes threads
-    /// and for a thread, whose parent's threads it lists (`renderHeaderToolbar`
-    /// in 420018).
+    /// The threads header button, for where we are.
     pub(super) fn sync_threads_button(&self) {
-        let shown = {
-            let state = self.account.state.borrow();
-            let channel = state.channel.filter(|_| state.page.is_none()).and_then(|id| state.find_channel(id));
-            match channel {
-                Some((Some(guild), c)) if c.kind.is_thread() => {
-                    c.parent_id.and_then(|p| guild.channel(p)).is_some_and(|p| !p.kind.is_forum_like())
-                }
-                Some((Some(_), c)) => matches!(c.kind, ChannelKind::Text | ChannelKind::Announcement),
-                _ => false,
-            }
-        };
-        self.threads_button.set_visible(shown);
+        let offered = self.account.state.borrow().threads_button(&self.age_agreed());
+        self.threads_button.set_visible(offered.is_some());
+        self.threads_button.set_sensitive(offered == Some(true));
         self.sync_search_button();
     }
 

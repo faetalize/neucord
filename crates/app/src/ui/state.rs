@@ -1542,6 +1542,24 @@ mod tests {
     }
 
     #[test]
+    fn the_threads_button_is_off_behind_the_age_gate() {
+        let mut state = open_server(None, json!({"nsfw": true}));
+        state.guilds[0].threads =
+            vec![serde_json::from_value(json!({"id": "20", "type": 11, "parent_id": "9"})).unwrap()];
+        for (channel, what) in [(9, "a channel"), (20, "a thread, for the channel it is in")] {
+            state.channel = Some(Snowflake(channel));
+            assert_eq!(state.threads_button(&[]), Some(false), "{what}");
+            assert_eq!(state.threads_button(&[Snowflake(1)]), Some(true), "{what}, once we agreed");
+        }
+        state.guilds[0].channels[0].nsfw = false;
+        assert_eq!(state.threads_button(&[]), Some(true), "nothing restricted");
+        state.guilds[0].channels[0].kind = ChannelKind::Forum;
+        assert_eq!(state.threads_button(&[]), None, "a forum post lists no threads");
+        state.channel = None;
+        assert_eq!(state.threads_button(&[]), None, "nowhere");
+    }
+
+    #[test]
     fn archived_threads_wait_for_history_access() {
         let mut state = open_server(None, json!({}));
         let everyone =

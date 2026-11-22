@@ -86,12 +86,6 @@ impl Channel {
         }
     }
 
-    /// A channel where members' reports reach moderators, whose archived
-    /// posts the list leaves out.
-    pub fn is_moderator_report(&self) -> bool {
-        self.flags & (1 << 19) != 0
-    }
-
     /// A forum that keeps its posts' media from being saved, copied or
     /// opened in a browser (`HIDE_MEDIA_DOWNLOAD_OPTIONS`; the client reads
     /// it off a post's parent in 207133).
