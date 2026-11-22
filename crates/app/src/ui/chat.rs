@@ -627,7 +627,14 @@ impl App {
     }
 
     pub(super) fn on_message_delete(self: &Rc<Self>, id: Snowflake, channel_id: Snowflake) {
-        self.thread_recent(channel_id, |g| g.thread_message_deleted(channel_id, id));
+        let in_thread = self.account.state.borrow().thread_joined(channel_id).is_some();
+        if self.account.state.borrow_mut().thread_message_deleted(channel_id, id) {
+            // The thread's box under the message that started it counts one less.
+            self.refresh_message(channel_id);
+        }
+        if in_thread {
+            self.refresh_threads_view();
+        }
         self.forum_message_deleted(id, channel_id);
         self.account.state.borrow_mut().pins.deleted(channel_id, id);
         self.account.state.borrow_mut().mentions.remove(id);

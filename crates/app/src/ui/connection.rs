@@ -698,6 +698,7 @@ impl App {
             // What a session loaded of threads goes with it.
             state.archives.clear();
             state.fetched_threads.clear();
+            state.deleted_in_threads.clear();
             // A new session: what we asked for before is forgotten, as in the client.
             state.members = members;
             state.member_check.connected(std::time::Instant::now());
