@@ -90,6 +90,8 @@ IMAGE_FAIL = bool(os.environ.get("FAKE_IMAGE_FAIL"))
 # FAKE_GIF=1: #general ends with an attachment named anim.gif, and what the CDN serves as a .gif is a real two-frame
 # GIF (red for 100 ms, then blue for 300), from Neucord's own test files, which Neucord draws as it plays.
 GIF = bool(os.environ.get("FAKE_GIF"))
+# FAKE_FORUM=1|list|grid: a forum, #605. list and grid lay it out so, with a post made after we read it.
+FORUM = os.environ.get("FAKE_FORUM")
 # FAKE_VIDEO=<path to a .webm>: channel 600 gets a message with that file as a video attachment.
 VIDEO = os.environ.get("FAKE_VIDEO")
 if UPLOAD_FAIL not in ("", "too-large", "429"):
@@ -278,16 +280,18 @@ def guild():
                         "member_count": 1, "rate_limit_per_user": 0, "flags": 0,
                         "thread_metadata": {"archived": False, "locked": False, "archive_timestamp": now,
                                             "auto_archive_duration": 4320, "create_timestamp": now}})
-    if os.environ.get("FAKE_FORUM"):
+    if FORUM:
         # A forum (#605) with two tags and three active posts, as THREAD_LIST_SYNC and the guild's threads have them.
         channels.append({"id": "605", "type": 15, "name": "ideas", "position": 5, "parent_id": None, "flags": 0,
                          "permission_overwrites": [], "topic": "Share an **idea**.", "template": "",
                          "available_tags": [{"id": "9001", "name": "alpha", "moderated": False},
                                             {"id": "9002", "name": "beta", "moderated": False}],
-                         "default_sort_order": 0, "default_forum_layout": 1})
+                         "default_sort_order": 0, "default_forum_layout": 2 if FORUM == "grid" else 1,
+                         "default_reaction_emoji": {"emoji_id": None, "emoji_name": "\U0001f44d"} if FORUM else None})
         now = time.strftime("%Y-%m-%dT%H:%M:%S.000000+00:00", time.gmtime())
         for n, (tid, name, tags) in enumerate([("7101", "weekend plans", ["9001"]), ("7102", "plan b", ["9002"]),
-                                               ("7103", "other things", [])]):
+                                               ("7103", "other things", [])] + (
+                [(snowflake(86_400_000, 1), "made today", [])] if FORUM in ("list", "grid") else [])):
             threads.append({"id": tid, "type": 11, "guild_id": "500", "parent_id": "605", "name": name,
                             "owner_id": "301", "last_message_id": snowflake(9000 + n, 5), "message_count": 1,
                             "member_count": 1, "rate_limit_per_user": 0, "flags": 0, "applied_tags": tags,
@@ -341,7 +345,9 @@ def ready():
             {"id": "500", "read_state_type": 3, "last_message_id": "0", "mention_count": 7},
         ] + ([{"id": "606", "last_message_id": "0", "mention_count": 0},
               {"id": "607", "last_message_id": snowflake(6000, 1), "mention_count": 0}]
-             if os.environ.get("FAKE_CATEGORY") else []), "partial": False, "version": 1},
+             if os.environ.get("FAKE_CATEGORY") else [])
+            + ([{"id": "605", "last_message_id": snowflake(1000, 1), "mention_count": 0}] if FORUM in ("list", "grid") else []),
+            "partial": False, "version": 1},
         "user_guild_settings": {"entries": MUTED_ENTRIES, "partial": False, "version": 1},
         "apex_experiments": apex(), "experiments": [], "guild_experiments": [],
         "regional_feature_config": {"age_gated_features": NSFW["gated"], "teen_by_default_settings": 0},
@@ -1103,6 +1109,26 @@ def edit_channel(channel, body):
 @route("DELETE", r"/channels/(\d+)")
 def close_channel(channel, body):
     return 200, {"id": channel}
+
+
+# The first messages of a forum's posts: the made-up post made today has a video, the first a picture.
+@route("POST", r"/channels/(\d+)/post-data")
+def post_data(channel, body):
+    threads = {}
+    for post in body.get("thread_ids", []):
+        files = []
+        if len(post) > 8:
+            url = f"http://127.0.0.1:{PORT}/attachments/1/960/clip.mp4?ex=ffffffff&is=1&hm=2&"
+            files = [{"id": "960", "filename": "clip.mp4", "size": 4000, "width": 320, "height": 180,
+                      "content_type": "video/mp4", "url": url, "proxy_url": url}]
+        elif post == "7101":
+            files = [attachment(1)]
+        threads[post] = {"owner": None, "first_message": {
+            "id": post, "channel_id": post, "author": ALICE, "content": "the first message of the post",
+            "timestamp": "2026-01-02T10:00:00.000000+00:00", "edited_timestamp": None, "tts": False,
+            "mention_everyone": False, "mentions": [], "mention_roles": [], "attachments": files,
+            "embeds": [], "pinned": False, "type": 0, "flags": 0}}
+    return 200, {"threads": threads}
 
 
 # The thread browser's name search (`GET /channels/{id}/threads/search?name=…`): two made-up threads of #600,
