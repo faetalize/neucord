@@ -873,6 +873,18 @@ mod tests {
     }
 
     #[test]
+    fn resolved_reports_show_until_turned_off() {
+        let forum = |flags: u64| channel(json!({"id": "15", "type": 15, "flags": flags}));
+        assert!(forum(0).lists_archived(false), "any other forum's archived posts");
+        assert!(forum(1 << 19).lists_archived(true) && !forum(1 << 19).lists_archived(false));
+        assert!(shows_resolved(&[], Snowflake(15)), "never chosen");
+        let off = with_resolved(&[], Snowflake(15), false);
+        assert!(!shows_resolved(&off, Snowflake(15)) && shows_resolved(&off, Snowflake(16)), "each channel its own");
+        let on = with_resolved(&off, Snowflake(15), true);
+        assert!(shows_resolved(&on, Snowflake(15)) && on.len() == 1);
+    }
+
+    #[test]
     fn tags_with_no_emoji_id_are_read_whatever_discord_sends() {
         let forum =
             channel(json!({"id": "15", "type": 15, "default_reaction_emoji": {"emoji_id": null, "emoji_name": "x"},
@@ -1318,17 +1330,5 @@ mod tests {
             (unread_text(Some(7), 40), unread_text(Some(30), 40), unread_text(Some(9), 3)),
             ("7".into(), "25+".into(), "3".into())
         );
-    }
-
-    #[test]
-    fn resolved_reports_show_until_turned_off() {
-        let forum = |flags: u64| channel(json!({"id": "15", "type": 15, "flags": flags}));
-        assert!(forum(0).lists_archived(false), "any other forum's archived posts");
-        assert!(forum(1 << 19).lists_archived(true) && !forum(1 << 19).lists_archived(false));
-        assert!(shows_resolved(&[], Snowflake(15)), "never chosen");
-        let off = with_resolved(&[], Snowflake(15), false);
-        assert!(!shows_resolved(&off, Snowflake(15)) && shows_resolved(&off, Snowflake(16)), "each channel its own");
-        let on = with_resolved(&off, Snowflake(15), true);
-        assert!(shows_resolved(&on, Snowflake(15)) && on.len() == 1);
     }
 }
