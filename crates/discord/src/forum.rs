@@ -87,6 +87,19 @@ impl Channel {
         }
     }
 
+    /// A channel where members' reports reach moderators, whose archived posts
+    /// are the resolved ones.
+    pub fn is_moderator_report(&self) -> bool {
+        self.flags & (1 << 19) != 0
+    }
+
+    /// Whether the list has archived posts and asks for them (`Fr` in 424798):
+    /// always, but in a channel of moderator reports only while it shows
+    /// resolved ones.
+    pub fn lists_archived(&self, show_resolved: bool) -> bool {
+        show_resolved || !self.is_moderator_report()
+    }
+
     /// A forum that keeps its posts' media from being saved, copied or
     /// opened in a browser (`HIDE_MEDIA_DOWNLOAD_OPTIONS`; the client reads
     /// it off a post's parent in 207133).
@@ -712,6 +725,21 @@ impl Unreads {
     }
 }
 
+/// Whether a channel of moderator reports shows resolved ones (212007): it
+/// does until it is turned off, which `kept` has as a channel's id and 0.
+pub fn shows_resolved(kept: &[(String, u64)], channel: Snowflake) -> bool {
+    let channel = channel.0.to_string();
+    !kept.iter().any(|(id, shown)| *id == channel && *shown == 0)
+}
+
+/// What to keep once `channel` shows resolved reports, or doesn't.
+pub fn with_resolved(kept: &[(String, u64)], channel: Snowflake, shown: bool) -> Vec<(String, u64)> {
+    let channel = channel.0.to_string();
+    let mut kept: Vec<(String, u64)> = kept.iter().filter(|(id, _)| *id != channel).cloned().collect();
+    kept.push((channel, shown.into()));
+    kept
+}
+
 /// When a post was last active, in milliseconds since 1970: when its last
 /// message was sent, or when it began (`JO` in 707539).
 pub fn last_activity_ms(post: &Channel) -> i64 {
@@ -880,6 +908,18 @@ mod tests {
         assert_eq!(forum(json!({"default_forum_layout": 0})).default_layout(), Layout::List);
         let media = channel(json!({"id": "16", "type": 16, "default_forum_layout": 1}));
         assert_eq!(media.default_layout(), Layout::Grid, "a media channel is always a grid");
+    }
+
+    #[test]
+    fn resolved_reports_show_until_turned_off() {
+        let forum = |flags: u64| channel(json!({"id": "15", "type": 15, "flags": flags}));
+        assert!(forum(0).lists_archived(false), "any other forum's archived posts");
+        assert!(forum(1 << 19).lists_archived(true) && !forum(1 << 19).lists_archived(false));
+        assert!(shows_resolved(&[], Snowflake(15)), "never chosen");
+        let off = with_resolved(&[], Snowflake(15), false);
+        assert!(!shows_resolved(&off, Snowflake(15)) && shows_resolved(&off, Snowflake(16)), "each channel its own");
+        let on = with_resolved(&off, Snowflake(15), true);
+        assert!(shows_resolved(&on, Snowflake(15)) && on.len() == 1);
     }
 
     #[test]
