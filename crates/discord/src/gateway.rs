@@ -3409,7 +3409,8 @@ mod tests {
         // 225123 passes `type` and `burst_colors` on with the rest.
         let state = fresh_state();
         let fire = json!({"id": null, "name": "🔥"});
-        let one = json!({"channel_id": "3", "message_id": "9", "user_id": "5", "emoji": fire, "guild_id": "1"});
+        let one =
+            json!({"channel_id": "3", "message_id": "9", "user_id": "5", "emoji": fire, "guild_id": "1", "type": 0});
         dispatch(&state, "MESSAGE_REACTION_ADD", one.clone());
         let Ok(Event::Reaction(reactions::Reacted { channel_id, message_id, user_id, emoji, kind, colors, added })) =
             state.try_recv()
@@ -3437,7 +3438,7 @@ mod tests {
     }
 
     #[test]
-    fn reactions_that_are_poll_votes_or_unreadable_are_dropped() {
+    fn reactions_that_are_votes_sounds_or_unreadable_are_dropped() {
         let state = fresh_state();
         let base = json!({"channel_id": "3", "message_id": "9", "user_id": "5", "emoji": {"name": "🔥"}});
         let with = |key: &str, value: Value| {
@@ -3446,6 +3447,11 @@ mod tests {
             event
         };
         dispatch(&state, "MESSAGE_REACTION_ADD", with("type", json!(2)));
+        // Sound reactions, and any type the client doesn't know.
+        dispatch(&state, "MESSAGE_REACTION_ADD", with("type", json!(3)));
+        dispatch(&state, "MESSAGE_REACTION_REMOVE", with("type", json!(3)));
+        dispatch(&state, "MESSAGE_REACTION_ADD", with("type", json!(9)));
+        dispatch(&state, "MESSAGE_REACTION_ADD", base.clone());
         dispatch(&state, "MESSAGE_REACTION_ADD", with("emoji", json!("🔥")));
         dispatch(&state, "MESSAGE_REACTION_ADD", with("user_id", json!(null)));
         assert!(state.try_recv().is_err());
