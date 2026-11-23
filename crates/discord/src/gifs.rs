@@ -23,12 +23,12 @@ pub const SEARCH_DEBOUNCE_MS: u32 = 250;
 const SUGGESTIONS: u8 = 5;
 
 /// How long the GIF button pulses after a GIF is favourited, from any star:
-/// each favourite restarts it (`es` in 290153).
+/// each favourite restarts it (`el` in 12764).
 pub const PULSE_MS: u32 = 2000;
 
 /// Whether "Added to Favorites" shows on the GIF button while it pulses,
 /// with the account holding `favorites` after the add: only for the first
-/// two (`es` in 290153).
+/// two (`el` in 12764).
 pub fn favorited_hint(favorites: usize) -> bool {
     favorites <= 2
 }
@@ -176,7 +176,7 @@ impl Gif {
 }
 
 /// What a star on a GIF hands `wg` (497685): the picker's results, and a GIF
-/// of a message (`b` in 343552 for an embed's, `cO` in 190854 for an
+/// of a message (`b` in 343552 for an embed's, `cF` in 190854 for an
 /// attachment's).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Starred {
@@ -226,7 +226,7 @@ impl Starred {
         is_favorite(favorites, &self.url)
     }
 
-    /// The star on an attachment (`cO`, 190854): one the proxy serves as a
+    /// The star on an attachment (`cF`, 190854): one the proxy serves as a
     /// GIF, or as a WebP or AVIF flagged animated, and that has a size. The
     /// proxied link is the picture, and the attachment's own the link.
     pub fn attachment(attachment: &crate::Attachment) -> Option<Starred> {
@@ -323,7 +323,7 @@ fn names(url: &str, extensions: &[&str], ends: &[char]) -> bool {
 
 /// An image the client shows from an answer: the store strips the scheme
 /// (`g`, 821102), so it loads over the page's own, and Discord's media
-/// proxy is asked to keep it animated (`b`, 884037).
+/// proxy is asked to keep it animated (`F`, 884037).
 fn preview_url(src: &str) -> String {
     let without = src.strip_prefix("https:").or_else(|| src.strip_prefix("http:")).unwrap_or(src);
     let url = if without.starts_with("//") { format!("https:{without}") } else { without.to_owned() };

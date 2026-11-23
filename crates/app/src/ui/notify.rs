@@ -142,7 +142,7 @@ impl App {
     }
 
     /// Whether anything may notify us. Not while our status is Do Not
-    /// Disturb or quiet mode is on (`eA` in 534765, and `K` in 411238 for
+    /// Disturb or quiet mode is on (`tE` in 534765, and `K` in 411238 for
     /// messages), which also keeps their sound, nor during restricted hours
     /// (`eA` and the message handler's sound check). Not while Discord requires a step: the official
     /// client stays quiet then too, and a notification would lead nowhere.

@@ -183,7 +183,7 @@ pub struct Hit {
 
 impl Hit {
     /// What its row says it is "Similar to:", when it matched by something
-    /// other than its name, lowercased (`eL` in 927659).
+    /// other than its name, lowercased (`eT` in 927659).
     pub fn similar_to(&self) -> Option<&str> {
         (self.matched != self.entry.listed.sticker.name.to_lowercase()).then_some(self.matched.as_str())
     }

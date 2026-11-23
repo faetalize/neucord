@@ -22,7 +22,7 @@ use super::polls;
 use crate::timelines;
 
 /// The emoji the account reacts with most, after its favourites: up to four
-/// at the top of the menu (`tr` in 761304), below nothing when text is
+/// at the top of the menu (`tg` in 333881), below nothing when text is
 /// selected. The client draws them as a row of buttons, and its Add Reaction
 /// opens a submenu of twelve more as well as the picker; this item opens
 /// only the picker.
@@ -62,7 +62,7 @@ pub(super) const ADD_REACTION: Entry<MessageTarget> = Entry::Item(Item {
     kind: MenuKind::Action(|app, target| app.pick_reaction(&target.message, &target.row)),
 });
 
-/// Remove Reactions, one emoji at a time, with Manage Messages (761304).
+/// Remove Reactions, one emoji at a time, with Manage Messages (333881).
 pub(super) const REMOVE_EMOJI_REACTIONS: Entry<MessageTarget> = Entry::Item(Item {
     name: "remove-emoji-reactions-menu",
     label: "Re_move Reactions",
@@ -247,7 +247,7 @@ impl App {
     /// The emoji the quick reactions offer in `channel`: the favourites then
     /// the reactions used most, each once, up to four, without those Nitro
     /// locks and without the faces the client leaves out (`getEmojiInPriorityOrder`,
-    /// 121681, and 761304).
+    /// 121681, and 333881).
     pub(super) fn quick_reactions(&self, channel: Snowflake) -> Vec<discord::emoji::Item> {
         use discord::emoji::{Intention, Item as EmojiItem, Library};
         use discord::limits::Unavailable;

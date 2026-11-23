@@ -153,7 +153,7 @@ impl Pins {
     }
 
     /// Whether a pin holds a link that has expired, which the client asks the
-    /// list again for (`b5` in 945830).
+    /// list again for (945830, with `$r` in 679164).
     pub fn expired(&self, channel: Snowflake, now_ms: u64) -> bool {
         self.channels
             .get(&channel)

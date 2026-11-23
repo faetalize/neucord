@@ -1,5 +1,5 @@
 //! Mark As Not Sensitive in a message's menu on media the filter covers
-//! (761304, `report-image-false-positive`; the confirmation is 544135 over
+//! (333881, `report-image-false-positive`; the confirmation is 544135 over
 //! 961997): it asks, then forwards the media to Discord to improve its
 //! scans.
 

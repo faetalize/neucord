@@ -5,7 +5,7 @@
 //!
 //! One recording exists at a time, in one channel, as in the client: it
 //! stays there as a draft after it stops, until it is sent or deleted, and
-//! can be played in the bar before then (`e7` in 989161).
+//! can be played in the bar before then (`e8` in 989161).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -473,7 +473,7 @@ impl App {
         let elsewhere = self.voice.draft.borrow().as_ref().map(|d| (d.channel, d.phase));
         match elsewhere {
             // One still going elsewhere is stopped and nothing else happens,
-            // with a toast saying so (`ed` in 841817); a draft, though, asks.
+            // with a toast saying so (`eu` in 841817); a draft, though, asks.
             Some((_, phase @ (Phase::Requesting | Phase::Recording))) => {
                 match phase {
                     Phase::Recording => self.stop_voice(),

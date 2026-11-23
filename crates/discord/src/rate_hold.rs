@@ -23,7 +23,7 @@ pub fn holds(status: u32) -> bool {
     matches!(status, 429 | 503)
 }
 
-/// How long an answer says to wait, in seconds (`h`, 620632): the whole
+/// How long an answer says to wait, in seconds (`I`, 620632): the whole
 /// seconds of a `Retry-After` header (`parseInt`: a date, or a fraction
 /// under one, says nothing), else the body's `retry_after` number. Only
 /// more than zero counts.

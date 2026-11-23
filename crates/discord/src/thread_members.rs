@@ -136,7 +136,7 @@ pub fn hoist_role(roles: &[Role], held: &[Snowflake]) -> Option<Snowflake> {
 }
 
 /// The sections of a thread's list as the pane shows them
-/// (`ThreadMemberListStore` and its list in 420018): each role that lists its
+/// (`ThreadMemberListStore` and its list in 903137): each role that lists its
 /// members apart, from the highest, then online, then offline; people by name,
 /// ignoring case, then by id, and only the sections that have anyone.
 pub fn sections(roles: &[Role], people: Vec<Person>) -> Vec<Section> {

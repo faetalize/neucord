@@ -5,7 +5,7 @@
 //! order, with Neucord's own values where the client reads the browser's. The
 //! client builds them once (`getSuperProperties`, 613412), adds the build
 //! and its launch id, and brings the heartbeat session and the focus up to
-//! date before every request (`prepareRequest`, 526227, over 618651). The
+//! date before every request (`prepareRequest`, 555084, over 618651). The
 //! gateway sends the same object (`handleIdentify`, 225123), refreshed only
 //! by the last request, plus what only it carries.
 
@@ -33,7 +33,7 @@ pub const GATEWAY_URL: &str = "wss://gateway.discord.gg/?encoding=json&v=9&compr
 /// raises it once that week's changes are handled (`discord-watch`'s
 /// `raise-build`), so it never claims a build Neucord hasn't been compared
 /// with; one some weeks old is what a tab left open sends.
-pub const CLIENT_BUILD_NUMBER: u32 = 673919;
+pub const CLIENT_BUILD_NUMBER: u32 = 679544;
 
 /// The locale every request names: `X-Discord-Locale`, and the `locale` the
 /// client's sticker packs request carries, which are the same setting there.

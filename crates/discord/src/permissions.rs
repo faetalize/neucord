@@ -448,7 +448,7 @@ pub fn hidden_from_everyone(guild: &Guild, channel: &Channel) -> bool {
 /// servers, and in one where we can see it with Send Messages. The client
 /// asks only for the latter, but never opens a channel we can't see. Never
 /// a forum or media channel: Send Messages there starts posts, which are
-/// threads, and the client shows them no message box (420018).
+/// threads, and the client shows them no message box (903137).
 pub fn can_send(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64) -> bool {
     match guild {
         None => !channel.is_system_dm(),
@@ -633,7 +633,7 @@ pub fn can_pin(guild: Option<&Guild>, channel: &Channel, message: &Message, me: 
 }
 
 /// What the client offers of reactions in a channel (`A` in 707985, with
-/// what `cw` in 190854 feeds it).
+/// what `cK` in 190854 feeds it).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Reacting {
     /// Add one with an emoji nobody has used on the message: the add button,
@@ -662,7 +662,7 @@ pub fn reacting(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64
 }
 
 /// Whether `me` may remove other people's reactions in `channel`: Manage
-/// Messages there, where messages [`can_change`] (761304's menu entries and
+/// Messages there, where messages [`can_change`] (333881's menu entries and
 /// the list of who reacted in 112753).
 pub fn can_remove_reactions(guild: Option<&Guild>, channel: &Channel, me: &Account, now: i64) -> bool {
     let manage = guild.is_some_and(|g| in_channel(g, channel, me, now).contains(Permissions::MANAGE_MESSAGES));

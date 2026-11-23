@@ -25,7 +25,7 @@ const REQUIRE_TAG: u64 = 1 << 4;
 pub const AUTOMOD_REASON: &str = "This post cannot be sent because it contains content blocked by this community. Please revise your post and try again.";
 
 /// Whether the client shows the post form in `forum` (`canCreatePost`, `ig`
-/// in 745431): Send Messages in the forum itself, which is what `g` in 406704
+/// in 745431): Send Messages in the forum itself, which is what `T` in 406704
 /// asks of a forum or media channel, and never in the channel of a server's
 /// moderator reports.
 pub fn can_post(guild: &Guild, forum: &Channel, me: &Account, now: i64) -> bool {

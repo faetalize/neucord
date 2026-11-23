@@ -31,7 +31,7 @@ use super::slash::Keep;
 
 /// What a GIF is shown at: this high, as wide as its ratio makes it.
 const GIF_HEIGHT: i32 = 100;
-/// A sticker's row (`eL` in 927659).
+/// A sticker's row (`eT` in 927659).
 const STICKER: i32 = 40;
 
 /// What the popup holds now.
@@ -64,7 +64,7 @@ pub(super) struct View {
     stickers: gtk::ListBox,
     shown: RefCell<Shown>,
     /// The trimmed `/gif` query last seen: the search goes only when it
-    /// changes (`y` in 31498's `queryResults`).
+    /// changes (`E` in 31498's `queryResults`).
     asked: RefCell<Option<String>>,
 }
 
@@ -532,7 +532,7 @@ impl App {
         let guild = self.account.state.borrow().find_channel(channel).and_then(|(guild, _)| guild.map(|g| g.id));
         self.command_used(&command, guild);
         match picked {
-            // The box's own send (`sendMessage(meta.url)` → `handleSendMessage`, 699344),
+            // The box's own send (`sendMessage(meta.url)` → `handleSendMessage`, 5206),
             // which clears it and so ends the command.
             Picked::Gif(url) if send => {
                 if self.send_text(channel, url, false) {
@@ -546,7 +546,7 @@ impl App {
                 buffer.set_text(&url);
                 buffer.place_cursor(&buffer.end_iter());
             }
-            // `nE` in 989161's `BUILT_IN_INTEGRATION` arm, where the box's text never
+            // `nm` in 989161's `BUILT_IN_INTEGRATION` arm, where the box's text never
             // counts: alone it goes at once and the box clears whatever the send does;
             // with files or a sticker waiting it waits instead, and the command stays.
             Picked::Sticker(entry) => {

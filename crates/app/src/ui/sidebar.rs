@@ -216,7 +216,7 @@ impl App {
     }
 
     /// What was set on the voice channel above as its status, under its name
-    /// (`r4` in 616740), cut to the width with the whole in a tooltip.
+    /// (`r9` in 616740), cut to the width with the whole in a tooltip.
     fn append_status(&self, status: Option<&str>) {
         let Some(status) = status else { return };
         let row = gtk::Box::builder().margin_start(GLYPH_WIDTH + 6).build();

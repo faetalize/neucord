@@ -455,7 +455,7 @@ impl MemberLists {
     }
 }
 
-/// The people of a group DM, as its list shows them (`sS`, 420018): us and
+/// The people of a group DM, as its list shows them (`rS`, 903137): us and
 /// the others, by username.
 pub fn group_members<'a>(me: &'a User, recipients: &'a [User]) -> Vec<&'a User> {
     let mut people: Vec<&User> = std::iter::once(me).chain(recipients).collect();

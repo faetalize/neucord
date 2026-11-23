@@ -10,11 +10,11 @@ use std::time::{Duration, Instant};
 use crate::backoff::Backoff;
 
 /// How long a connection attempt waits for HELLO, from the moment it starts
-/// (`tu`, 868). Past it the attempt counts as a failed close.
+/// (`tc`, 868). Past it the attempt counts as a failed close.
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A session is resumed only if the last heartbeat ACK, or the last time a
-/// connection opened, is no older than this (`t_`, 868). Discord keeps a
+/// connection opened, is no older than this (`tu`, 868). Discord keeps a
 /// dropped session for a few minutes at most.
 pub const RESUME_WINDOW: Duration = Duration::from_secs(3 * 60);
 

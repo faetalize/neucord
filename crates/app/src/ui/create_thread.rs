@@ -82,7 +82,7 @@ pub(super) struct Form {
     /// What Create does, which a sticker picked from an empty form does too.
     submit: RefCell<Option<Rc<dyn Fn()>>>,
     /// The wait slowmode asks before another thread, which the client shows
-    /// and doesn't hold Create for (420018).
+    /// and doesn't hold Create for (903137).
     slowmode: gtk::Label,
     create: gtk::Button,
     /// While the files go up, which the message waits for.
@@ -516,7 +516,7 @@ impl App {
         self.refresh_thread_guard(form);
     }
 
-    /// What a pick does in the form (`nE` in 989161): with nothing else in
+    /// What a pick does in the form (`nm` in 989161): with nothing else in
     /// it, Create at once with the sticker alone, as a box sends one; else
     /// it waits for the message. Create turning it down (no name, say) keeps
     /// nothing, as the client does.

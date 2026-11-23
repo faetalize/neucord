@@ -1067,7 +1067,7 @@ impl BuiltIns {
 }
 
 /// What the message box's `/` offers (`ta` in 496533, and the bare `/`'s
-/// browser, `eu` in 989161): while a reply is pending
+/// browser, `ed` in 989161): while a reply is pending
 /// (`canOnlyUseTextCommands`), no app's commands and only the built-ins
 /// that write text (`NEW_TEXT_ONLY`).
 pub fn offer(replying: bool) -> Offer {
@@ -1157,7 +1157,7 @@ pub struct Browsed<'a> {
     pub commands: Vec<Found<'a>>,
 }
 
-/// What a bare `/` lists: the client's command browser (`eu` in 989161,
+/// What a bare `/` lists: the client's command browser (`ed` in 989161,
 /// through `XC` and `ei` in 264322), the commands `offer` and `builtins`
 /// allow in sections. The used most come first when any count here (at most
 /// [`FREQUENTLY_USED`], by score, each still in its own section too), then
@@ -1347,7 +1347,7 @@ fn channel_rule(rules: &[Rule], place: &Place, guild: Snowflake) -> Option<bool>
         .map(|r| r.permission)
 }
 
-/// `T` in 46477 and in 168186: our own rule, else our roles' (any allow
+/// `g` in 46477 and in 168186: our own rule, else our roles' (any allow
 /// wins; a rule on any role denies), else `@everyone`'s.
 fn allows(rules: &[Rule], guild: Snowflake, me: Snowflake, roles: &[Snowflake]) -> Option<bool> {
     if let Some(user) = rule(rules, RuleKind::User, me) {
@@ -1902,7 +1902,7 @@ pub fn match_choices<'c>(choices: &'c [Choice], query: &str) -> Vec<&'c Choice> 
     scored.into_iter().map(|(_, choice)| choice).collect()
 }
 
-/// A limit as the client writes it (`I` in 300541, `toLocaleString` without
+/// A limit as the client writes it (`x` in 300541, `toLocaleString` without
 /// grouping): the number's shortest decimal form, rounded half away from zero
 /// to at most three decimals, with its sign even where that leaves a zero.
 fn plain(n: f64) -> String {

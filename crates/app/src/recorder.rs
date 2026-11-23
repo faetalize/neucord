@@ -6,7 +6,7 @@
 //! The client's recorder takes the voice settings' echo cancellation, noise
 //! suppression, noise cancellation and automatic gain control (198620), whose
 //! defaults are echo cancellation, noise cancellation and gain control on and
-//! the legacy noise suppression off (754712). Here GStreamer's `webrtcdsp`
+//! the legacy noise suppression off (988468). Here GStreamer's `webrtcdsp`
 //! (gst-plugins-bad) stands in for the noise and gain stages; echo
 //! cancellation is left out, since `webrtcdsp` only cancels what a
 //! `webrtcechoprobe` in the playback pipeline hears, and a recording has no
@@ -42,7 +42,7 @@ pub struct Processing {
 }
 
 impl Default for Processing {
-    /// The client's default voice settings (754712).
+    /// The client's default voice settings (988468).
     fn default() -> Processing {
         Processing { noise_suppression: true, gain_control: true }
     }

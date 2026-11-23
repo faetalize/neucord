@@ -25,7 +25,7 @@ const FIRST_SEND_DELAY_MS: i64 = 1_500;
 const CROWD: usize = 5;
 
 /// What the message box's text says about typing, whenever the user changed
-/// it (`handleTextareaChange` in 699344).
+/// it (`handleTextareaChange` in 5206).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Input {
     /// Typing: a send is due.

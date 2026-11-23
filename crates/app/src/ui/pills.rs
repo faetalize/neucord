@@ -453,7 +453,7 @@ impl App {
         self.refresh_line();
     }
 
-    /// Enter found options that fail (`eX` in 84046): required ones without
+    /// Enter found options that fail (`e$` in 84046): required ones without
     /// a pill get an empty one at the end (`insertCommandOption` in 35277),
     /// `first` is selected, and the box shakes (`SHAKE_APP`).
     pub(super) fn command_failed(self: &Rc<Self>, first: &str) {
@@ -602,7 +602,7 @@ impl App {
         slot.as_ref()?.command.options.iter().find(|o| o.name == pill.option).map(|o| o.kind)
     }
 
-    /// The app's picture in the attach button's place (`eQ` in 699344,
+    /// The app's picture in the attach button's place (`eQ` in 5206,
     /// `getApplicationIconURL` with `botIconFirst`): the bot's avatar in
     /// this server, else its own, else the app's icon, never animated; a
     /// symbolic icon without one. Its tooltip names the bot, else the app.
@@ -940,7 +940,7 @@ impl App {
 
     /// The members a USER or MENTIONABLE pill offers for `query`, `@everyone`
     /// and the roles (`td` in 496533, `XM` in 168186). In a server the
-    /// members it knows that have joined and passed screening (`eg` in
+    /// members it knows that have joined and passed screening (`eT` in
     /// 997625), and a search for the rest as the query changes
     /// (`queryGuildUsers`); with nothing typed, who last talked here. In a
     /// DM, its people. Every role but `@everyone`'s own, which `@everyone`

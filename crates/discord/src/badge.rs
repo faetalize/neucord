@@ -1,5 +1,5 @@
 //! The unread count the client puts on its icon and in its window title
-//! (`N0` in 526227, `sF` in 726249): what is left of a server's and a DM's
+//! (`Cl` in 555084, `sF` in 726249): what is left of a server's and a DM's
 //! mentions once read, plus friend requests, or a dot when there are none
 //! but something is unread. Linux has no dot on the icon (`setBadgeCount` in
 //! the desktop app's wrapper, 253400): it shows a count or nothing.

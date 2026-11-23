@@ -52,7 +52,7 @@ pub struct Change {
     pub setting_name: &'static str,
 }
 
-/// What a visibility maps to (`A`, 365258).
+/// What a visibility maps to (`E`, 365258).
 fn mapped(visibility: ProfileVisibility) -> ActivityDefault {
     match visibility {
         ProfileVisibility::FriendsAndAllServers => ActivityDefault::Off,
@@ -182,7 +182,7 @@ pub struct Listed {
     pub joined_at: Option<i64>,
 }
 
-/// How the list is ordered (`S4` in 212909).
+/// How the list is ordered (`pQ` in 404997).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Order {
     #[default]

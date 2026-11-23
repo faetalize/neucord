@@ -1,7 +1,7 @@
 //! Pressing a message's buttons and picking from its menus, as the official
 //! client does: what it sends (`sendComponentInteraction` in 964363), what a
 //! message shows until Discord answers (`InteractionStore`, 436283), and how a
-//! refusal reads (`T` in 964363).
+//! refusal reads (`g` in 964363).
 
 use std::collections::BTreeMap;
 
@@ -211,7 +211,7 @@ impl Failure {
         self.code.is_some() && self.message.is_none()
     }
 
-    /// From a response that wasn't a success (`T` in 964363).
+    /// From a response that wasn't a success (`g` in 964363).
     pub fn from_response(status: u32, body: &[u8]) -> Failure {
         let body: Option<Value> = serde_json::from_slice(body).ok().filter(|v: &Value| v.is_object());
         let code = body.as_ref().and_then(|b| b["code"].as_u64());

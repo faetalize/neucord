@@ -101,7 +101,7 @@ impl ColorScheme {
 /// (`voice_message_recording_stopped`), which the client lists nowhere else.
 pub const ALL_SOUNDS: Key = Key { group: "Notifications", name: "all-sounds", default: true };
 
-/// The sound of a new message (`message1` in 212909's list of sounds, the
+/// The sound of a new message (`message1` in 404997's list of sounds, the
 /// one this plays; the voice ones have nothing to play yet).
 pub const MESSAGE_SOUND: Key = Key { group: "Notifications", name: "message-sound", default: true };
 

@@ -383,7 +383,7 @@ pub fn commands(facts: &Facts, offer: BuiltIns, max_message_length: u64) -> Vec<
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
     /// The text ones: the message the box then sends as if it was typed
-    /// (`handleSendMessage`, 699344), read aloud with `tts`.
+    /// (`handleSendMessage`, 5206), read aloud with `tts`.
     Message {
         content: String,
         tts: bool,

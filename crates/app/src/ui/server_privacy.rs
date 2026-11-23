@@ -1,5 +1,5 @@
 //! A server's Privacy Settings, from its icon's menu (`guild-context`,
-//! 871638; the dialog is 632038): the switches of the Privacy page for that
+//! 587369; the dialog is 632038): the switches of the Privacy page for that
 //! server alone, and the two that exist only here, saved as the page saves
 //! them. They are the account's lists of servers (`restricted_guild_ids` and
 //! its kin), so what changes here shows on the page and the other way round.
@@ -20,7 +20,7 @@ use super::settings::Show;
 
 /// Privacy Settings is in every server's menu, between Server Settings and
 /// Edit Per-server Profile. A hub's menu calls it Hub Privacy Settings
-/// (`IlFwwR` in 871638), so the two stand in one place and one shows.
+/// (`IlFwwR` in 587369), so the two stand in one place and one shows.
 pub(super) const PRIVACY_SETTINGS: Entry<GuildTarget> = Entry::Item(Item {
     name: "server-privacy-settings",
     label: "_Privacy Settings",

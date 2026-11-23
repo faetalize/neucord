@@ -1,4 +1,4 @@
-//! Which buttons the message box's bar shows (`eA` in 290153,
+//! Which buttons the message box's bar shows (`ed` in 12764,
 //! `ChannelTextAreaButtons`), and the character count beside them. The
 //! device's choice of apps, emoji, GIF and sticker buttons only counts for
 //! accounts in `2026-06-chat-bar-customization` (951260); everyone else gets
@@ -8,20 +8,20 @@ use crate::Snowflake;
 use crate::experiments::Experiments;
 
 /// The bar follows the device's button choices: variant 1 of the Apex user
-/// experiment (its `enabled`), which also shows their switches (`tP` in
-/// 212909).
+/// experiment (its `enabled`), which also shows their switches (`tL` in
+/// 404997).
 pub fn customizable(experiments: &Experiments, me: Snowflake) -> bool {
     experiments.apex_user(me, "2026-06-chat-bar-customization").is_some_and(|a| a.variant == 1)
 }
 
 /// A server announcement channel gets the announcement composer (`e2` in
-/// 699344, variant 1), whose box takes no commands
+/// 5206, variant 1), whose box takes no commands
 /// (`CREATE_ANNOUNCEMENT_POST` in 355622).
 pub fn announcement_composer(experiments: &Experiments, me: Snowflake) -> bool {
     experiments.apex_user(me, "2026-02-announcement-composer").is_some_and(|a| a.variant == 1)
 }
 
-/// The attach menu offers App Launcher in place of Use Apps (`eR` in
+/// The attach menu offers App Launcher in place of Use Apps (`eD` in
 /// 316576): where the Apps button was turned off and that choice counts.
 pub fn attach_launcher(customizable: bool, prefs: Prefs) -> bool {
     customizable && !prefs.apps
@@ -31,14 +31,14 @@ pub fn attach_launcher(customizable: bool, prefs: Prefs) -> bool {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Bar {
     /// The box shows: the channel takes our messages. Where it doesn't, the
-    /// client's buttons draw nothing (`disabled`, `nT` in 989161) and
+    /// client's buttons draw nothing (`disabled`, `nE` in 989161) and
     /// Neucord's notice bar stands in for the box.
     pub open: bool,
     /// The box edits a message. The client's edit box (`EDIT` in 355622)
     /// has the emoji button and none of the others.
     pub editing: bool,
     /// A voice recording waits in the channel, which the client draws in
-    /// place of the box and the whole bar (`tY` in 989161).
+    /// place of the box and the whole bar (`tH` in 989161).
     pub recording: bool,
     /// A slash command is active (`getActiveCommand`): the client draws no
     /// GIF or sticker button beside it (`null == K`).
@@ -79,7 +79,7 @@ pub struct Shown {
     pub apps: bool,
     /// The send button, last in the row after a separator (`eu`).
     pub send: bool,
-    /// The send button can be pressed: `j` in 290153 greys it with nothing to
+    /// The send button can be pressed: `j` in 12764 greys it with nothing to
     /// send. An active command is something to send: the client's box then
     /// holds the command's text.
     pub send_enabled: bool,
@@ -87,7 +87,7 @@ pub struct Shown {
     /// takes. A command has none (`tk` in 989161).
     pub count: bool,
     /// The command's app icon, in the attach button's place (`eY` in
-    /// 699344).
+    /// 5206).
     pub app_icon: bool,
 }
 

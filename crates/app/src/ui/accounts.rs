@@ -1,5 +1,5 @@
 //! The accounts on this device, as the official client's switcher has them:
-//! the account menu's Switch Accounts submenu (166783), the Manage Accounts
+//! the account menu's Switch Accounts submenu (288944), the Manage Accounts
 //! dialog (623161, 970573) and the list the login page shows while accounts
 //! are stored but none is logged in (341010).
 //!
@@ -436,7 +436,7 @@ impl App {
     }
 
     /// Switch Accounts in our profile popout: the accounts, ticking the
-    /// shown one, then Manage Accounts (166783).
+    /// shown one, then Manage Accounts (288944).
     pub(super) fn switch_menu(&self) -> gio::Menu {
         let menu = gio::Menu::new();
         menu.append_section(None, &self.switch_items);

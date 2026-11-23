@@ -232,7 +232,7 @@ impl Rest {
     }
 
     /// For the login endpoints while `signed_in`'s account stays logged in,
-    /// as when the client adds an account. Its HTTP layer (526227) gives
+    /// as when the client adds an account. Its HTTP layer (555084) gives
     /// every request the current token unless one is set, so the two-factor
     /// and QR requests carry it; the password login sets the header empty
     /// (`login` in 830215, for `isMultiAccount`).
@@ -423,7 +423,7 @@ impl Rest {
     }
 
     /// Post a recorded voice message: no text, `IS_VOICE_MESSAGE`, and the one
-    /// uploaded recording (`eE` in 841817).
+    /// uploaded recording (`em` in 841817).
     pub async fn send_voice_message(
         &self,
         channel: Snowflake,
@@ -1395,7 +1395,7 @@ fn vote_body(answers: &[u32]) -> Value {
 
 /// Whether the message box holds nothing a message could carry: no text
 /// but spaces or a bare `@silent` (which is a flag, not text), no file and no
-/// sticker (`j` in 290153, which greys the send button; Enter sends nothing
+/// sticker (`j` in 12764, which greys the send button; Enter sends nothing
 /// then either).
 pub fn nothing_to_send(text: &str, files: usize, sticker: bool) -> bool {
     scheduled::split_silent(crate::message_text::trim(text), 0).0.is_empty() && files == 0 && !sticker
@@ -1545,7 +1545,7 @@ fn base_headers(
 ) -> Vec<(&'static str, String)> {
     let mut headers = vec![("X-Discord-Locale", identity::LOCALE.to_owned())];
     // Every request to the API carries the properties, signed in or not
-    // (`prepareRequest` in 526227). Without them, logging in turns down valid
+    // (`prepareRequest` in 555084). Without them, logging in turns down valid
     // two-factor codes.
     headers.push(("X-Super-Properties", identity::super_properties()));
     // As the client's `prepareRequest` sets it, when it finds a zone.

@@ -66,7 +66,7 @@ pub(super) enum Keep {
 
 /// The widgets for slash commands, around the message box.
 pub(super) struct Slash {
-    /// Above the message box while a command is in it (`tF` in 989161): the
+    /// Above the message box while a command is in it (`tV` in 989161): the
     /// option the caret is in, or the command.
     pub(super) bar: gtk::Box,
     pub(super) title: gtk::Label,
@@ -75,7 +75,7 @@ pub(super) struct Slash {
     status: gtk::Label,
     /// The command's app, in the attach button's place.
     pub(super) icon: adw::Avatar,
-    /// "+2 options" after the box (`e6` in 84046).
+    /// "+2 options" after the box (`e3` in 84046).
     pub(super) more: gtk::Label,
     pub(super) active: RefCell<Option<Active>>,
     /// The box is being changed by the line's own code, whose changes the
@@ -181,7 +181,7 @@ pub(super) trait CommandTarget {
 }
 
 impl CommandTarget for MessageTarget {
-    /// The message the row shows (`commandTargetId` in 761304).
+    /// The message the row shows (`commandTargetId` in 333881).
     fn subject(&self) -> Option<Subject> {
         let message = self.shown();
         Some(Subject { channel: message.channel_id, kind: command_type::MESSAGE, target: message.id })
@@ -487,7 +487,7 @@ impl App {
 
     /// A reply started or ended: the `/` list follows it at once, fetching
     /// nothing. A bare `/`'s list is the client's command browser, whose
-    /// filters follow the reply (`eu` in 989161) and which fetches only as it
+    /// filters follow the reply (`ed` in 989161) and which fetches only as it
     /// opens (`ee`, `et` in 264322); a typed list is asked again whenever
     /// `PendingReplyStore` changes, one of the stores of `B` in 496533 that
     /// 152210 listens to, without `allowFetch` (31498).
@@ -817,7 +817,7 @@ impl App {
         }
     }
 
-    /// Check the line and run the command (`eX` in 84046, then `A` in
+    /// Check the line and run the command (`e$` in 84046, then `A` in
     /// 545152 and `handleCommand` in 870801). Options that fail keep it in
     /// the box: required ones without a pill get an empty one at the end
     /// (`insertCommandOption`), the first that fails is selected and the box

@@ -151,7 +151,7 @@ impl App {
     }
 
     /// The Apps button: open the launcher for the open channel, or close it
-    /// if it is open there (`_` in 290153).
+    /// if it is open there (`_` in 12764).
     pub(super) fn toggle_launcher(self: &Rc<Self>) {
         let just_closed = self.launcher.closed.get().is_some_and(|at| at.elapsed() < CLOSED_BY_PRESS);
         let channel = self.account.state.borrow().channel;

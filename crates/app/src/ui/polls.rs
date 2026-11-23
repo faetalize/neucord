@@ -21,7 +21,7 @@ use crate::timelines;
 /// Custom emoji beside an answer (the official client's size).
 const EMOJI: i32 = 22;
 
-/// "End Poll Now" on our own poll, which the client (761304) offers until
+/// "End Poll Now" on our own poll, which the client (333881) offers until
 /// its expiry; the poll ending is what its message update says.
 pub(super) const END_POLL: Entry<super::chat::MessageTarget> = Entry::Item(Item {
     name: "end-poll",

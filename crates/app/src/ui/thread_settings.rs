@@ -1,7 +1,7 @@
 //! Edit Thread and Edit Post: the form that changes a thread's name, its
 //! slowmode, when it archives itself, who may invite to a private one, and
 //! whether it hides its media. The client opens its channel settings on the
-//! thread (200273, 336541); here it is a dialog. What it saves is in
+//! thread (200273, 603280); here it is a dialog. What it saves is in
 //! [`discord::threads::settings_body`], who may open it in
 //! [`discord::permissions::can_edit_thread`].
 
@@ -74,7 +74,7 @@ impl Form {
 }
 
 /// The choices of a drop-down: the form's values, with the thread's own
-/// first when it isn't one of them (`nG` in 336541 does the same).
+/// first when it isn't one of them (`nO` in 603280 does the same).
 fn choices(values: &[u32], current: u32) -> Vec<u32> {
     let mut all = values.to_vec();
     if !all.contains(&current) {

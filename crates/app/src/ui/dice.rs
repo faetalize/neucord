@@ -1,5 +1,5 @@
 //! A roll of the dice, from /roll-dice or a link to one: shown above the
-//! message box while it rolls and once it lands (`tJ` in 989161), then sent
+//! message box while it rolls and once it lands (`tY` in 989161), then sent
 //! as a message (`DiceRollLifecycleManager`, 545185). One roll at a time,
 //! in the open channel only; leaving the channel ends it, and a roll still
 //! rolling then sends nothing.

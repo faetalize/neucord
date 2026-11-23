@@ -14,7 +14,7 @@ that nothing else tracks, or keeping a module id, anchor or name correct. A
 line that explains a choice in Neucord or warns the next reader is a code
 comment, not an entry. If in doubt, ask FAE!!!
 
-Last checked against: stable 673919.
+Last checked against: stable 679544.
 
 ## Running a check
 
@@ -53,7 +53,7 @@ changed for unrelated reasons only needs a note in the issue.
   488926, the role order `AT` in 7864, and `b` in 838111.
 - **A timeout leaves only reading**, and administrators see no notice
   (`Guild::timeout_left`). Client: 316031 (the `communicationDisabledUntil`
-  check), 488926 (the cut), `renderMessageBanner` in 699344 (the notice
+  check), 488926 (the cut), `renderMessageBanner` in 5206 (the notice
   unless `can(ADMINISTRATOR, guild)`), and the 10-second expiry sweep in
   592713 (`clearGuildMemberTimeout`).
 - **When a slowmode cooldown starts** (`Slowmode` in `cooldowns.rs`). The
@@ -67,13 +67,13 @@ changed for unrelated reasons only needs a note in the issue.
   sets from `retry_after` on a refusal; the thread sidebar (134357, with
   `isThreadCreation`) and the forum's forms (371115, 745431) read it.
 - **When we say we're typing, and who is listed** (`typing.rs`).
-  `handleTextareaChange` in 699344 sends for any change to a box that isn't
+  `handleTextareaChange` in 5206 sends for any change to a box that isn't
   empty, unless the text starts with `/` or is the `+:name:` reaction
   shortcut, and stops when the box is emptied. 134357 (anchor
   `isBlockedOrIgnored`) lists everyone typing but us and whom we blocked or
   ignored (`typing::shown`).
 - **What replaces the message box** (`update_notice_bar`). Client:
-  `renderMessageBanner` in 699344 picks the banners. Otherwise the box is
+  `renderMessageBanner` in 5206 picks the banners. Otherwise the box is
   wrapped by 544990 in DMs (the system DM, a blocked user) and by 678655 in
   servers, where membership screening shows for a `pending` member when the
   server has `MEMBER_VERIFICATION_GATE_ENABLED` (anchor
@@ -102,7 +102,7 @@ changed for unrelated reasons only needs a note in the issue.
   `CREATE_PRIVATE_THREADS`), and that the attach button outlives the message
   box turned off for want of Send Messages, as long as either thread
   permission holds (`canCreateThreads` in 989161, anchor
-  `requireCreateTherads`); the form in 420018 (anchor
+  `requireCreateTherads`); the form in 903137 (anchor
   `useDefaultThreadName`), which wants a name unless the thread is from a
   message and caps it at 100; the default name `V` in 971389 (anchor
   `rawTitle`), the archive time `Gl` in 268761 (anchor
@@ -186,7 +186,7 @@ changed for unrelated reasons only needs a note in the issue.
   answers can be tapped, which button shows and when Vote is enabled, which
   a quarantine or a timeout turns off); the counts changing before Discord
   answers, `D` in 180662 (anchor `optimistic`: what we had and drop goes
-  first, then the new picks); and who is offered End Poll Now, in 761304
+  first, then the new picks); and who is offered End Poll Now, in 333881
   (anchor `end-poll-early`: our own poll, until its expiry).
 - **Pressing buttons and picking from menus** (`interaction.rs`, `Rest::interact`,
   `permissions::components_blocked`, `ui/components.rs`). The endpoint, the
@@ -219,7 +219,7 @@ changed for unrelated reasons only needs a note in the issue.
   offer commands: the Apps item, 173500
   (anchor `command-search`), shows in `TEXTUAL` channels (478437) but not
   media threads, with the user commands in 107632 and the message commands in
-  761304; and Use Apps in the attach menu, 316576 (anchor
+  333881; and Use Apps in the attach menu, 316576 (anchor
   `canUseApplicationCommands`), which a pending reply hides, and which the
   App Launcher replaces while the Apps button is off.
 - **What the message box's `@` list offers** (`chat_mentions` in
@@ -229,7 +229,7 @@ changed for unrelated reasons only needs a note in the issue.
   roles and `@everyone` and `@here` (`e7` and `ta` in 496533, anchor
   `canMentionAnyGuildUser`) where `canMentionEveryone` in 152210 holds (a
   private channel, Mention @everyone there, or our membership pending); a
-  member counts once joined and past screening (`eg` in 997625), people
+  member counts once joined and past screening (`eT` in 997625), people
   rank by `eN` there (anchor `getGlobalName`), roles by match-sorter
   (896170, anchor `CASE_SENSITIVE_EQUAL`), and `@everyone` and `@here`
   match by `fuzzysearch` (91871).
@@ -237,9 +237,9 @@ changed for unrelated reasons only needs a note in the issue.
   read, and how: the parser in 626551 (anchor `brightMagenta`): the style
   codes it takes, in what order a sequence's resets and sets apply, that every
   escape sequence is dropped and that `ESC[m` does nothing. What is drawn is
-  `OT` in 768947 (anchor `textDecorationLine`): colours, bold, italic,
+  `OT` in 980045 (anchor `textDecorationLine`): colours, bold, italic,
   underline, strikethrough and overline, and no dim, reverse or hidden. The
-  block is `ansi` when 768947's `py` (lowercased) says so. The colours are
+  block is `ansi` when 980045's `py` (lowercased) says so. The colours are
   Neucord's own, from libadwaita's palette, not the client's theme.
 - **A sticker's image and its details** (`Sticker::image`, `still`, `link`,
   `stickers::MESSAGE_DETAILS`). The address is `zg` in 378058 (anchor
@@ -247,11 +247,11 @@ changed for unrelated reasons only needs a note in the issue.
   and a power of two, Lottie as its JSON; a preview takes a GIF as its PNG and
   an APNG with `passthrough=false`, except on Android. An APNG in a message
   comes animated. Right-clicking a sticker in Developer Mode shows Message
-  Details in place of Copy Message ID: 761304 (anchor `message-details`).
+  Details in place of Copy Message ID: 333881 (anchor `message-details`).
 - **Forum and media channels take no message** (the forum page in
   `select_channel`, `permissions::can_send`, `update_notice_bar`). Neucord
   shows the post list there, no box, and refuses to send, whatever Send
-  Messages says. Client: 420018 renders a forum view instead of the chat
+  Messages says. Client: 903137 renders a forum view instead of the chat
   for `isForumLikeChannel` (anchor `"forum channels must exist within a
   guild"`), so no message box.
 - **When a forum's post list asks for what it shows** (`forum.rs`,
@@ -293,9 +293,9 @@ changed for unrelated reasons only needs a note in the issue.
   (`ChannelMemberStore`) are watched. Not watched: the rows asked for as the
   list scrolls, `NJ` in 361610 (anchor `GUILD_SUBSCRIPTIONS_CHANNEL`), the
   first page and the five channels kept (36124), the 50 ms wait
-  (`updateSubscription` in 420018, anchor `updateMaxContentFeedRowSeen`), the
+  (`updateSubscription` in 903137, anchor `updateMaxContentFeedRowSeen`), the
   hash that names a list (`v3` in 181370, called by the store's `D`), and
-  which channels have a list: `renderSidebar` in 420018 (anchor
+  which channels have a list: `renderSidebar` in 903137 (anchor
   `private-channel-recipients`), with a group DM's order in `sS`.
 - **How much history is fetched** (`discord::history`, `Page::query`).
   `FONT_SIZES`, the page around a message (`focusMessage`) and how many
@@ -385,7 +385,7 @@ changed for unrelated reasons only needs a note in the issue.
   files are converted as they are added, before the limits are checked,
   `N` in 111542 (anchor `imageConversionEvaluated`); and the PNG to WebP
   rules, which stay PNG when animated, transparent, indexed or not sRGB, or
-  when the lossless WebP differs or is larger (`g` in 673060, anchor
+  when the lossless WebP differs or is larger (`w` in 673060, anchor
   `pixel_hash_mismatch`, and its ICC reader in 499091). Not watched: the message's
   attachment, `OW` in 292348 (anchor `uploaded_filename`), which names
   `id` by position, `description` once set (the edit dialog hands it over
@@ -436,7 +436,7 @@ changed for unrelated reasons only needs a note in the issue.
   bitmask when the user has one, else that table). A message takes 4000
   characters with the perk, else 2000 (135621, anchor `? 4e3 : 2e3`). A longer one is turned
   back (710272, anchor `MESSAGE_LENGTH_UPSELL`): a new message once trimmed
-  (`handleSendMessage` in 699344), an edit as it stands. The counter shows
+  (`handleSendMessage` in 5206), an edit as it stands. The counter shows
   from a tenth of the limit left, and past 2000 with the perk (263582,
   anchor `showsUpsell`). A file takes at least 20 MiB
   (409481), a server gives 10 MiB unless its features raise it (`o2` in
@@ -472,7 +472,7 @@ changed for unrelated reasons only needs a note in the issue.
   is `YB` in 631576, anchor `STICKER_PACKS_FETCH_START`); the request and
   the hour they stay loaded (`StickersPackStore`) are watched. A pick sends
   at once only from an empty box with no files and no sticker waiting, else
-  the sticker waits and goes with the message (`nE` in 989161, anchor
+  the sticker waits and goes with the message (`nm` in 989161, anchor
   `getStickerPreview`).
 - **Reacting** (`reactions.rs`, `Rest::add_reaction`, `ui/reactions.rs`,
   `ui/reactors.rs`). The counting on a message (`addReaction`,
@@ -487,7 +487,7 @@ changed for unrelated reasons only needs a note in the issue.
   but a 403, and a 403 ends it (`TOO_MANY_REACTIONS` also warns). Who may
   react is `A` in 707985 (anchor `disableReactionUpdates`); the message menu
   (Add Reaction, View Reactions, Remove Reactions, Remove All Reactions;
-  Manage Messages for the last two) is `en` and the entries in 761304
+  Manage Messages for the last two) is `en` and the entries in 333881
   (anchor `add-reaction`); who reacted asks for 3 once a pointer has rested
   500 ms on a reaction (`eM` in 30492) and 100 a page in the list (112753,
   anchor `loadMore`). `+:name:` is `reaction` in 751258 (anchor
@@ -501,8 +501,8 @@ changed for unrelated reasons only needs a note in the issue.
   suggestions are asked once for each query the results show, when they scroll
   to within 1180 px of their end (`handleScroll` in 884037). A pick sends the
   link as the message at once, with a reply, leaving the box, its files and a
-  waiting sticker alone, or with Shift puts it in the box (`nu` in 989161,
-  anchor `source_object: "GIF Picker"`; `handleSendMessage` in 699344, anchor
+  waiting sticker alone, or with Shift puts it in the box (`nd` in 989161,
+  anchor `source_object: "GIF Picker"`; `handleSendMessage` in 5206, anchor
   `isGif`). Either way a result with an id is reported, `{id, q}` (`g4` in
   497685).
 - **When a popout asks for a profile, and what** (`profile.rs`,
@@ -588,7 +588,7 @@ changed for unrelated reasons only needs a note in the issue.
     `wg` and `T` (497685) file an attachment under its link without `ex`, `is`
     and `hm`, and store a Discord link of `.webp`, `.avif` or `.gif` as an
     animated WebP.
-  - 761304 (anchor `quickreact-`) offers up to four quick reactions from 822123
+  - 333881 (anchor `quickreact-`) offers up to four quick reactions from 822123
     (`getEmojiInPriorityOrder`), without Nitro-locked emoji and five faces,
     sent with the location "Message Context Menu".
   - The picker opening loads the settings (863576), and so does the GIF
@@ -600,7 +600,7 @@ changed for unrelated reasons only needs a note in the issue.
   `defaultDiversityChild`) shows and sends an emoji's variant for the tone.
 - **The server privacy rows** (`Privacy::direct_messages`,
   `Privacy::message_requests`, `ui/privacy.rs`). The schema, the enums and
-  the flag bits are watched. Not watched, all in 212909 (anchors
+  the flag bits are watched. Not watched, all in 404997 (anchors
   `PERMISSIONS_MESSAGE_REQUESTS_SETTING`, `FRIEND_REQUESTS_EVERYONE_SETTING`):
   what each row shows and disables, `useValue` and `useDisabled`; that
   changing a default asks whether to apply it to every server, and writes
@@ -654,7 +654,7 @@ changed for unrelated reasons only needs a note in the issue.
   Mark Unread is 439147 (anchor `Marking unread`): the ack goes to the newest
   loaded message before it, with the mentions after it. A thread's mute and
   level go to its member settings (`setNotificationSettings` in 7909,
-  watched). The items and where they show: 507238 and 871638 (anchor
+  watched). The items and where they show: 507238 and 587369 (anchor
   `mark-guild-read`) for servers, 865815 (`mark-folder-read`) for folders,
   995102 (which folds a muted category), 288104 and 511904 (one item for Mark
   As Read and Mark Unread, greyed or swapped by the unread rules; anchor
@@ -662,7 +662,7 @@ changed for unrelated reasons only needs a note in the issue.
   messages. Which channels the sidebar lists, by Hide Muted Channels (153594)
   and folds: `computeState` in 791513 (anchor `hideMutedChannels`).
 - **The unread count** (`badge.rs`, `State::rail_signature`), on the icon and
-  in the title. The sum and the dot are in the app component of 526227
+  in the title. The sum and the dot are in the app component of 555084
   (anchor `getDisableUnreadBadge`): every server's and DM's mentions plus
   friend requests, or a dot when that is 0 and a server is unread. The title
   prefix is `notificationCount` in 726249, and Linux's icon takes only the
@@ -688,7 +688,7 @@ changed for unrelated reasons only needs a note in the issue.
 - **Which threads the sidebar lists** (`threads::listed`). The stores are
   watched (`ActiveJoinedThreadsStore`, with `k` deciding unread and
   relevant; `ActiveThreadsStore`; `JoinedThreadsStore`). The list itself is
-  `eT` in 791513 (anchor `-e.joinTimestamp`): relevant threads, newest
+  `eg` in 791513 (anchor `-e.joinTimestamp`): relevant threads, newest
   joined first, the open one added in front; under a muted parent that
   isn't open, only unread ones (`computeState` just above). How long a
   thread stays relevant is in 826767 (anchor
@@ -701,11 +701,11 @@ changed for unrelated reasons only needs a note in the issue.
   browser opens and none was asked for, and the next within 200px of the
   list's end (`R` in 628707), both only with Read Message History. Its
   active sections are `jO` there. The header button is in
-  `renderHeaderToolbar` (420018, anchor `"browser"`): text and announcement
+  `renderHeaderToolbar` (903137, anchor `"browser"`): text and announcement
   channels, and threads outside forums; 494208 disables it behind the age gate.
   `Fr` skips a moderator report channel only once its "show resolved" is off,
   which starts on (212007, anchor `report-to-mod-channel-storage`). A box under a message shows only for
-  a known thread of a message with `HAS_THREAD` (`r8` in 190854).
+  a known thread of a message with `HAS_THREAD` (`as` in 190854).
 - **Where a thread opens** (`threads::Viewed::anchor`). `P` in 123363: its
   start the first time (no read state on any client, not among the
   `viewedThreadIds` kept 90 days), else where we left off if it has unread
@@ -716,7 +716,7 @@ changed for unrelated reasons only needs a note in the issue.
   `useReducedMotion`), where the pointer or `gifAutoPlay` moves them; which
   surface lets its row count as the pointer is each avatar hook call's
   `animateOnHover` (549587 for messages, anchor `ANIMATE_CHAT_AVATAR`). Server
-  icons: the hovered flag into `getIconURL` in 656232 (anchor
+  icons: the hovered flag into `getIconURL` in 255676 (anchor
   `guildbar.AVATAR_SIZE`). Emoji: 565645 (anchor `registerAnimatedElementRef`)
   and the visibility manager in 830178, whose cap of 100 is in the watched
   `handleVisible` and `potentiallyAnimateNewNode`. Stickers: `Qn` in 378058.
@@ -745,7 +745,7 @@ changed for unrelated reasons only needs a note in the issue.
   state (`QuickSwitcherStore`), the channel, server and group DM queries,
   the single-kind refetch, the unread, mention and speaker lists and the
   scoring (997625) are watched. Not watched: the prefixes and what each
-  result opens (`F` and `j` in 793322, anchor `USER_GLOBAL`), `mod+k` and
+  result opens (`V` and `K` in 793322, anchor `USER_GLOBAL`), `mod+k` and
   `mod+t` (161388, anchor `QUICKSWITCHER_SHOW`), and how people rank (the
   worker, 787578, anchor `USER_RESULTS`).
 
@@ -779,7 +779,7 @@ changed for unrelated reasons only needs a note in the issue.
   354777 (`hasSpoilerEmbeds`).
 - **Attachments the client hides** (`Attachment::is_hidden`). Client:
   `renderAttachments` in 190854 drops `IS_THUMBNAIL`.
-- **The message menu** (`MESSAGE` in `ui/menus.rs`). Client: 761304
+- **The message menu** (`MESSAGE` in `ui/menus.rs`). Client: 333881
   builds it; Neucord keeps its sections and order. Where the regulation is
   TIDA, which 207560 decides (anchor `isMediaTakedownRegulation`), the Copy ID
   group comes before the link group (`message` in `menus.rs`). Copy Text
@@ -789,7 +789,7 @@ changed for unrelated reasons only needs a note in the issue.
   `CHANNEL` in 901123. Copy Message ID is 50268, only in Developer Mode
   (`developer_mode` in the JSON user settings). Copy for the selection
   (373963) and Copy Link and Open Link (777933) are desktop-only there.
-  Save File (`save-voice-message-audio` in 761304) is for a voice message
+  Save File (`save-voice-message-audio` in 333881) is for a voice message
   that has an attachment, and takes the first.
   Neucord leaves out the analytics these send (`MESSAGE_LINK_COPIED`,
   `CONTEXT_MENU_LINK_COPIED`). The media group before the links (Copy Image,

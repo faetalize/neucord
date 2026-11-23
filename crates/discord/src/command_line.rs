@@ -856,7 +856,7 @@ fn text_before(line: &Line, text: &[char], index: usize) -> Option<usize> {
     (end > start).then_some(end - 1)
 }
 
-/// Backspace where the caret touches a pill (`R` in 68059, `deleteBackward`):
+/// Backspace where the caret touches a pill (`v` in 68059, `deleteBackward`):
 /// in an empty value, the pill goes; right after a pill, its last char goes
 /// (or the pill, if empty); at a value's start, the char before the pill
 /// goes (or the pill before it, likewise, or the name's last char). `None`
@@ -918,7 +918,7 @@ pub fn delete(line: &Line, text: &str, caret: usize) -> Option<Change> {
     None
 }
 
-/// The hint after the line (`e6` in 84046): how many options aren't in the
+/// The hint after the line (`e3` in 84046): how many options aren't in the
 /// box yet.
 pub fn placeholder(command: &Command, line: &Line) -> Option<String> {
     let left = command.options.iter().filter(|o| !line.pills.iter().any(|p| p.option == o.name)).count();
@@ -1059,7 +1059,7 @@ impl OptionStates {
         self.active = active.map(str::to_owned);
     }
 
-    /// Enter (`eX` in 84046, `cd` in 317681): every option checked, empty
+    /// Enter (`e$` in 84046, `cd` in 317681): every option checked, empty
     /// ones failing; results kept for the options with a pill. The options
     /// that failed: the pills in their order in the box, then the required
     /// options without one.

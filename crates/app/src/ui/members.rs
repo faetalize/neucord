@@ -28,7 +28,7 @@ use crate::images::Row;
 use crate::render;
 
 /// How long the list rests before the ranges it shows are sent, as the
-/// client waits (`updateSubscription`, 420018).
+/// client waits (`updateSubscription`, 903137).
 const SETTLE: Duration = Duration::from_millis(50);
 
 /// What a row is as tall as when it shows nobody yet.
