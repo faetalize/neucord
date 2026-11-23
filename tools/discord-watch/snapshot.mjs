@@ -291,8 +291,19 @@ function normalized(source, fn, { module = false, require: outer, build } = {}) 
       callee.object.name === require &&
       callee.property.name === "d"
     ) {
-      edits.push({ start: n.start, end: n.end, text: "<exports>" });
-      return false;
+      // `n.d(t, {}, { f: function … })` defines exports in place, and those
+      // functions are the module's code: only their names go.
+      const inline = n.arguments[2];
+      if (inline?.type !== "ObjectExpression") {
+        edits.push({ start: n.start, end: n.end, text: "<exports>" });
+        return false;
+      }
+      edits.push({ start: n.start, end: inline.start, text: "<exports>(" });
+      for (const p of inline.properties) {
+        if (p.type === "Property" && !p.shorthand) edits.push({ start: p.key.start, end: p.key.end, text: "<export>" });
+      }
+      edits.push({ start: inline.end, end: n.end, text: ")" });
+      return;
     }
     if (n.type === "MemberExpression" && !n.computed) {
       names.add(n.property);
