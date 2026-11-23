@@ -487,8 +487,11 @@ impl App {
                 Event::ExperimentsUpdate(update) => {
                     let me = {
                         let mut state = self.account.state.borrow_mut();
-                        state.experiments.apply_update(update);
-                        state.me.as_ref().map(|me| me.id)
+                        let me = state.me.as_ref().map(|me| me.id);
+                        if let Some(me) = me {
+                            state.experiments.apply_update(me, update);
+                        }
+                        me
                     };
                     if let Some(me) = me {
                         super::identity::assignments_changed(me, &self.account.state.borrow().experiments);
@@ -717,7 +720,7 @@ impl App {
             state.account = Some(account);
             state.nitro = nitro;
             state.restricted_schedule = restricted_schedule;
-            state.experiments = experiments;
+            state.experiments.ready(user.id, experiments);
             state.session_id = session_id;
             state.gates = gates;
             state.unavailable_guilds = unavailable_guilds;

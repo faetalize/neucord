@@ -748,9 +748,9 @@ mod tests {
         let me = Snowflake(10);
         let mut experiments = Experiments::default();
         assert!(!enabled(&experiments, me), "READY assigned nothing");
-        experiments.apply_update(update(1));
+        experiments.apply_update(me, update(1));
         assert!(enabled(&experiments, me));
-        experiments.apply_update(update(0));
+        experiments.apply_update(me, update(0));
         assert!(!enabled(&experiments, me), "a later assignment replaces the earlier one");
     }
 
