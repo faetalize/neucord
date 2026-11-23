@@ -11,7 +11,6 @@ use std::collections::{HashMap, HashSet};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::experiments::Experiments;
 use crate::model::{Channel, ChannelKind, Overwrite, Role};
 use crate::permissions::Permissions;
 use crate::{Snowflake, User};
@@ -28,17 +27,8 @@ pub enum Surface {
     Sidebar,
 }
 
-/// The experiment that redesigns the panel beside a DM, and with it what
-/// the panel asks for: the variant that enables it is 1 (`rD` in 420018).
-const SIDEBAR_REDESIGN: &str = "2026-06-user-profile-sidebar-redesign";
-
-/// Whether Discord gave the account the redesigned panel.
-pub fn sidebar_redesign(experiments: &Experiments, me: Snowflake) -> bool {
-    experiments.apex_user(me, SIDEBAR_REDESIGN).is_some_and(|a| a.variant == 1)
-}
-
 /// A profile asked for, as the client puts it: the query and what goes in it
-/// (`342296` for a popout, `ok` in 420018 for the panel).
+/// (`342296` for a popout, the panel's renderer in 903137).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Request {
     pub surface: Surface,
@@ -47,8 +37,9 @@ pub struct Request {
     pub guild: Option<Snowflake>,
     pub mutual_guilds: bool,
     pub mutual_friends: bool,
-    /// Only how many friends we share, not who: what the panel asks for
-    /// unless the redesign asks for them.
+    /// Only how many friends we share, not who. The query sends it only
+    /// when the friends aren't asked for (`eO` in 803306), which neither
+    /// the popout nor the panel does.
     pub mutual_friend_count: bool,
     /// The role of theirs that links an account of another service, which
     /// the server's linked roles are told apart by (see [`connections_role`]).
@@ -72,16 +63,15 @@ impl Request {
     }
 
     /// For the panel beside a DM with `user`: their mutual servers, and for
-    /// anyone but a bot their mutual friends, or just how many unless the
-    /// account has the redesign (`redesign`).
-    pub fn sidebar(user: &User, redesign: bool) -> Self {
+    /// anyone but a bot their mutual friends.
+    pub fn sidebar(user: &User) -> Self {
         Request {
             surface: Surface::Sidebar,
             user: user.id,
             guild: None,
             mutual_guilds: true,
-            mutual_friends: !user.bot && redesign,
-            mutual_friend_count: !user.bot && !redesign,
+            mutual_friends: !user.bot,
+            mutual_friend_count: false,
             connections_role: None,
         }
     }
@@ -542,7 +532,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::experiments::murmur3;
 
     const NOW: u64 = 1_000_000;
 
@@ -588,51 +577,30 @@ mod tests {
     }
 
     #[test]
-    fn the_panel_asks_for_a_count_or_the_friends_by_the_experiment() {
-        let person = user(2, false);
-        let plain = Request::sidebar(&person, false);
+    fn the_panel_asks_for_the_friends() {
         assert_eq!(
-            plain.query(),
-            "type=sidebar&with_mutual_guilds=true&with_mutual_friends=false&with_mutual_friends_count=true"
-        );
-        let redesigned = Request::sidebar(&person, true);
-        assert_eq!(
-            redesigned.query(),
+            Request::sidebar(&user(2, false)).query(),
             "type=sidebar&with_mutual_guilds=true&with_mutual_friends=true&with_mutual_friends_count=false"
         );
-        // A bot has no friends to share, whichever it is.
-        let bot = Request::sidebar(&user(3, true), true);
+        // A bot has no friends to share.
         assert_eq!(
-            bot.query(),
+            Request::sidebar(&user(3, true)).query(),
             "type=sidebar&with_mutual_guilds=true&with_mutual_friends=false&with_mutual_friends_count=false"
         );
     }
 
     #[test]
-    fn the_redesign_is_variant_one_of_its_experiment() {
-        let assigned = |variant: i64| {
-            Experiments::from_ready(&json!({
-                "apex_experiments": { "assignments": { "1": { "10": { "assignments": [
-                    [murmur3(SIDEBAR_REDESIGN), variant, 0, 1]
-                ] } } } }
-            }))
-        };
-        assert!(sidebar_redesign(&assigned(1), Snowflake(10)));
-        assert!(!sidebar_redesign(&assigned(0), Snowflake(10)));
-        assert!(!sidebar_redesign(&Experiments::default(), Snowflake(10)), "none assigned");
-    }
-
-    #[test]
     fn a_count_asked_for_and_not_held_asks_again() {
         let mut profiles = Profiles::default();
-        let asked = Request::sidebar(&user(2, false), false);
-        profiles.answered(&asked, Profile::from_value(&answer(2)).unwrap(), NOW);
+        let counted =
+            |id| Request { mutual_friends: false, mutual_friend_count: true, ..Request::sidebar(&user(id, false)) };
+        profiles.answered(&counted(2), Profile::from_value(&answer(2)).unwrap(), NOW);
         // Their count came with the answer.
-        assert_eq!(profiles.plan(&asked, NOW + 1), Fetch::No);
+        assert_eq!(profiles.plan(&counted(2), NOW + 1), Fetch::No);
         let mut value = answer(4);
         value["mutual_friends_count"] = Value::Null;
-        profiles.answered(&Request::sidebar(&user(4, false), false), Profile::from_value(&value).unwrap(), NOW);
-        assert_eq!(profiles.plan(&Request::sidebar(&user(4, false), false), NOW + 1), Fetch::Behind);
+        profiles.answered(&counted(4), Profile::from_value(&value).unwrap(), NOW);
+        assert_eq!(profiles.plan(&counted(4), NOW + 1), Fetch::Behind);
     }
 
     #[test]
@@ -640,7 +608,7 @@ mod tests {
         let mut profiles = Profiles::default();
         let them = Snowflake(2);
         assert!(profiles.wants_friend_list(them), "nothing is known");
-        profiles.answered(&Request::sidebar(&user(2, false), false), Profile::from_value(&answer(2)).unwrap(), NOW);
+        profiles.answered(&Request::sidebar(&user(2, false)), Profile::from_value(&answer(2)).unwrap(), NOW);
         assert_eq!(profiles.mutual_friend_count(them), Some(2));
         assert!(profiles.wants_friend_list(them), "a count and no list");
         profiles.asked_friend_list(them);

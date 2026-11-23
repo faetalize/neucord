@@ -36,11 +36,9 @@ pub(super) struct UserTarget {
 
 /// A banner's width and height as the client draws it: the popout's
 /// (`bannerWidth` and `bannerHeight` of `POPOUT` in 207634), which the panel
-/// takes in the redesign (`specOverrides` in 420018), and the panel's own
-/// (`SIDEBAR`). The popout is as wide as its banner.
-const POPOUT_BANNER: (i32, i32) = (300, 105);
-const PANEL_BANNER: (i32, i32) = (340, 120);
-const WIDTH: i32 = POPOUT_BANNER.0;
+/// takes too (`specOverrides` in 903137). The popout is as wide as its banner.
+const BANNER: (i32, i32) = (300, 105);
+const WIDTH: i32 = BANNER.0;
 const AVATAR: i32 = 80;
 const BADGE: i32 = 20;
 
@@ -211,7 +209,7 @@ impl App {
             host: Host::Popout(popover.clone()),
             target: target.copy(),
             request,
-            banner: POPOUT_BANNER,
+            banner: BANNER,
             note,
             open: RefCell::default(),
             editing: std::cell::Cell::default(),
@@ -320,13 +318,11 @@ impl App {
     /// panel beside it, asking for it as the client's panel does. It is
     /// left as it is if it is already theirs.
     pub(super) fn show_profile_panel(self: &Rc<Self>, channel: Snowflake, host: &gtk::Box) {
-        let (user, redesign) = {
+        let user = {
             let state = self.account.state.borrow();
-            let user = state.private_channels.iter().find(|c| c.id == channel).and_then(|c| c.recipients.first());
-            let (Some(user), Some(me)) = (user.cloned(), state.me()) else { return };
-            let redesign = profile::sidebar_redesign(&state.experiments, me);
-            (user, redesign)
+            state.private_channels.iter().find(|c| c.id == channel).and_then(|c| c.recipients.first()).cloned()
         };
+        let Some(user) = user else { return };
         let same = self.profile_views.borrow().panel.as_ref().is_some_and(|v| v.target.user.id == user.id);
         if same {
             return self.refresh_profile_views();
@@ -334,8 +330,8 @@ impl App {
         let view = Rc::new(View {
             app: Rc::downgrade(self),
             host: Host::Panel(host.clone()),
-            request: Request::sidebar(&user, redesign),
-            banner: if redesign { POPOUT_BANNER } else { PANEL_BANNER },
+            request: Request::sidebar(&user),
+            banner: BANNER,
             target: UserTarget {
                 user,
                 guild: None,
