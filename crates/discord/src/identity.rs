@@ -195,17 +195,12 @@ pub struct TimeSpent {
     client_launch_id: String,
 }
 
-/// What the client keeps of an account between launches, by user id: its
-/// Apex assignments (340344) and its `qos_token` (193799). One for each
-/// account.
+/// What the client keeps of an account between launches, by user id, that
+/// IDENTIFY reads: its `qos_token` (193799). One for each account. The client
+/// keeps its Apex assignments too (340344), which nothing Neucord copies
+/// reads before READY brings them again.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Cache {
-    /// The account's own, as READY sent them
-    /// (`[hash, variant, flags, revision, tracked variant, config]`). Only
-    /// the gateway's choice of capabilities reads them before READY, so
-    /// only the account's own are kept (see [`crate::obfuscation`]).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub assignments: Vec<Value>,
     /// What the last READY's `qos_token` vouched for, which IDENTIFY sends
     /// back (`DerivedQosDataStore`, 193799, kept by user id too).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -224,7 +219,7 @@ impl Cache {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.assignments.is_empty() && self.qos_token.is_none()
+        self.qos_token.is_none()
     }
 }
 
@@ -272,11 +267,6 @@ struct State {
     qos: qos::State,
     /// The account's `qos_token` from READY, see [`Cache::qos_token`].
     qos_token: Option<String>,
-    /// The account's own Apex assignments, see [`Cache`].
-    assignments: Vec<Value>,
-    /// Whether they put the account in the experiment that hides channels,
-    /// which IDENTIFY asks for in its capabilities.
-    obfuscation: bool,
 }
 
 thread_local! {
@@ -299,8 +289,6 @@ impl State {
             launching: true,
             qos: qos::State::default(),
             qos_token: None,
-            assignments: Vec::new(),
-            obfuscation: false,
         }
     }
 
@@ -438,7 +426,7 @@ pub fn is_active() -> bool {
 }
 
 /// A token is in use for `account`, with what was stored for it: the heartbeat
-/// `slot` and its `cache` of assignments. The same account again (a
+/// `slot` and its `cache`. The same account again (a
 /// reconnect) changes nothing. Any other token ends the session (`Q` in
 /// 903063), so the stored slot is the one this run continues only for the
 /// account it was opened for, on the first sign-in of a run.
@@ -448,8 +436,6 @@ pub fn sign_in(account: Option<Snowflake>, slot: Option<Slot>, cache: Cache) {
             let continued = slot.filter(|slot| s.launching && Some(slot.account) == account);
             s.stored = continued.is_some();
             s.heartbeat = continued.map(|slot| slot.session);
-            s.obfuscation = crate::obfuscation::assigned(&cache.assignments);
-            s.assignments = cache.assignments;
             s.qos_token = cache.qos_token;
             s.account = account;
         }
@@ -481,9 +467,7 @@ pub fn sign_out() {
         s.account = None;
         s.heartbeat = None;
         s.stored = false;
-        s.assignments.clear();
         s.qos_token = None;
-        s.obfuscation = false;
         s.active_state_changed()
     }));
 }
@@ -535,27 +519,14 @@ pub(crate) fn qos_token() -> String {
     STATE.with_borrow(|s| qos::token(s.qos.user_active(), s.qos_token.as_deref()))
 }
 
-/// What READY says the account is assigned: the next IDENTIFY goes by it.
-pub fn learn_assignments(assignments: Vec<Value>) {
-    STATE.with_borrow_mut(|s| {
-        s.obfuscation = crate::obfuscation::assigned(&assignments);
-        s.assignments = assignments;
-    });
-}
-
-/// The account's assignments, to keep for the next launch.
+/// What the account keeps, for the next launch.
 pub fn cache() -> Cache {
-    STATE.with_borrow(|s| Cache { assignments: s.assignments.clone(), qos_token: s.qos_token.clone() })
+    STATE.with_borrow(|s| Cache { qos_token: s.qos_token.clone() })
 }
 
 /// The session, to keep for the next launch: none until the account is known.
 pub fn slot() -> Option<Slot> {
     STATE.with_borrow(|s| Some(Slot { account: s.account?, session: s.heartbeat.clone()? }))
-}
-
-/// Whether IDENTIFY asks for hidden channels.
-pub(crate) fn obfuscation() -> bool {
-    STATE.with_borrow(|s| s.obfuscation)
 }
 
 #[cfg(test)]
@@ -631,8 +602,6 @@ mod tests {
             launching: true,
             qos: qos::State::default(),
             qos_token: None,
-            assignments: Vec::new(),
-            obfuscation: false,
         }
     }
 
@@ -753,7 +722,7 @@ mod tests {
 
     #[test]
     fn the_cache_and_the_slot_round_trip_and_forget_what_they_cannot_read() {
-        let cache = Cache { assignments: vec![json!([1, 1, 0, 1])], qos_token: Some("CgA=".into()) };
+        let cache = Cache { qos_token: Some("CgA=".into()) };
         assert_eq!(Cache::from_json(&cache.to_json()), cache);
         assert!(Cache::from_json("not json").is_empty());
         assert!(Cache::from_json("{}").is_empty());
@@ -770,11 +739,12 @@ mod tests {
         }
     }
 
-    fn assigned() -> Cache {
-        Cache {
-            assignments: vec![json!([crate::experiments::murmur3("2026-02-private-channel-hiding"), 1, 0, 1])],
-            qos_token: None,
-        }
+    fn kept() -> Cache {
+        Cache { qos_token: Some("CgA=".into()) }
+    }
+
+    fn qos_token_kept() -> Option<String> {
+        cache().qos_token
     }
 
     fn session() -> Option<String> {
@@ -784,33 +754,33 @@ mod tests {
     #[test]
     fn a_reconnect_keeps_what_the_account_had_and_another_account_has_its_own() {
         let (alice, bob) = (Snowflake(1), Snowflake(2));
-        sign_in(Some(alice), Some(slot_of(1, "alice")), assigned());
-        assert!(obfuscation(), "its stored assignments are what IDENTIFY goes by");
+        sign_in(Some(alice), Some(slot_of(1, "alice")), kept());
+        assert!(qos_token_kept().is_some(), "what it stored is what IDENTIFY goes by");
         assert_eq!(session().as_deref(), Some("alice"), "a relaunch continues the session");
         // The same account connecting again reads nothing over what it holds.
         sign_in(Some(alice), None, Cache::default());
         assert_eq!(session().as_deref(), Some("alice"));
-        assert!(obfuscation());
-        // Another account's token starts from that account's own assignments.
+        assert!(qos_token_kept().is_some());
+        // Another account's token starts from what that account stored.
         sign_in(Some(bob), None, Cache::default());
         assert_eq!(slot(), None);
-        assert!(!obfuscation());
+        assert_eq!(qos_token_kept(), None);
         sign_out();
         assert_eq!(account(), None);
     }
 
     #[test]
-    fn a_first_login_learns_its_account_from_ready_and_what_it_is_assigned() {
+    fn a_first_login_learns_its_account_and_qos_token_from_ready() {
         sign_in(None, None, Cache::default());
-        assert!(!obfuscation(), "nothing stored on a first launch");
+        assert_eq!(qos_token_kept(), None, "nothing stored on a first launch");
         signed_in_as(Snowflake(7));
-        learn_assignments(assigned().assignments);
-        assert_eq!((account(), obfuscation()), (Some(Snowflake(7)), true));
+        learn_qos_token(kept().qos_token);
+        assert_eq!((account(), qos_token_kept()), (Some(Snowflake(7)), kept().qos_token));
         // A reconnect of the same login finds the account known.
         sign_in(Some(Snowflake(7)), None, Cache::default());
-        assert!(obfuscation());
-        learn_assignments(vec![]);
-        assert!(!obfuscation(), "the next IDENTIFY goes by the new assignment");
+        assert!(qos_token_kept().is_some());
+        learn_qos_token(None);
+        assert_eq!(qos_token_kept(), None, "the next IDENTIFY goes by the new READY");
     }
 
     #[test]
@@ -914,7 +884,7 @@ mod tests {
     #[test]
     fn identify_sends_back_what_ready_vouched_for() {
         let token = |t: String| openssl::base64::decode_block(&t).unwrap();
-        let stored = Cache { assignments: Vec::new(), qos_token: Some(openssl::base64::encode_block(&[0x18, 0x07])) };
+        let stored = Cache { qos_token: Some(openssl::base64::encode_block(&[0x18, 0x07])) };
         sign_in(Some(Snowflake(1)), None, stored);
         assert_eq!(token(qos_token()), [0x0a, 0x02, 0x08, 0x01, 0x12, 0x02, 0x18, 0x07], "active, and the stored one");
         set_focused(false);

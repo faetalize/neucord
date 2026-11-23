@@ -1,8 +1,7 @@
 //! What Neucord keeps of its identity for the account that is shown (see
 //! [`discord::identity`]): the activity heartbeat that keeps the session
-//! `client_heartbeat_session_id` names, and the files that carry the session,
-//! the account's experiment assignments and its `qos_token` from one launch
-//! to the next.
+//! `client_heartbeat_session_id` names, and the files that carry the session
+//! and the account's `qos_token` from one launch to the next.
 //!
 //! The client's heartbeat (`SessionHeartbeatScheduler`, 903063) runs while
 //! the app is in use, a token and the window in focus: at once when it
@@ -13,8 +12,8 @@
 //!
 //! The client stores one session, whoever is signed in, and drops it when its
 //! token changes; so one file holds it, tagged with its account. The
-//! assignments and the `qos_token` are kept for each account, as the client's
-//! stores keep them by user id.
+//! `qos_token` is kept for each account, as the client's store keeps it by
+//! user id.
 
 use std::cell::{Cell, RefCell};
 use std::io::Write;
@@ -23,7 +22,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use discord::Snowflake;
-use discord::experiments::Experiments;
 use discord::identity::{self, Cache, Slot};
 use gtk::glib;
 
@@ -33,7 +31,7 @@ thread_local! {
     static LAST_BEAT: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
-/// One file for each account, so no account's assignments are another's.
+/// One file for each account, so no account's `qos_token` is another's.
 /// Private to the user, like what usage keeps.
 fn file_of(id: Snowflake) -> PathBuf {
     glib::user_data_dir().join("neucord").join(format!("identity-{}.json", id.0))
@@ -44,7 +42,7 @@ fn slot_file() -> PathBuf {
     glib::user_data_dir().join("neucord").join("heartbeat.json")
 }
 
-/// Forget an account's assignments for good, as logging it out does.
+/// Forget an account's `qos_token` for good, as logging it out does.
 pub(super) fn forget(id: Snowflake) {
     let _ = std::fs::remove_file(file_of(id));
 }
@@ -81,7 +79,7 @@ fn save() {
 }
 
 /// A token is about to be used for `account` (known unless it is a first
-/// login): its assignments and, on a relaunch of the account the stored
+/// login): its `qos_token` and, on a relaunch of the account the stored
 /// session belongs to, that session, are what IDENTIFY goes by.
 pub(super) fn begin(account: Option<Snowflake>) {
     let changed = identity::account() != account || account.is_none();
@@ -102,24 +100,14 @@ pub(super) fn end() {
     rearm();
 }
 
-/// READY named the account, its assignments and its `qos_token`. The client
-/// opens its session on `CONNECTION_OPEN` too, and tells the gateway of it
-/// (`q`, 903063).
-pub(super) fn ready(me: Snowflake, experiments: &Experiments, qos_token: Option<String>) {
+/// READY named the account and its `qos_token`. The client opens its session
+/// on `CONNECTION_OPEN` too, and tells the gateway of it (`q`, 903063).
+pub(super) fn ready(me: Snowflake, qos_token: Option<String>) {
     identity::signed_in_as(me);
-    identity::learn_assignments(experiments.user_cache(me));
     identity::learn_qos_token(qos_token);
     identity::connection_open();
     save();
     rearm();
-}
-
-/// Assignments arrived after READY (`STATE_UPDATE`): the client folds them
-/// into the store that is kept (`CONNECTION_OPEN_STATE_UPDATE`, 225123 into
-/// 340344), so the next IDENTIFY goes by them.
-pub(super) fn assignments_changed(me: Snowflake, experiments: &Experiments) {
-    identity::learn_assignments(experiments.user_cache(me));
-    save();
 }
 
 /// READY gave the account a new token: the old one's session ends, and the

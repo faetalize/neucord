@@ -1289,7 +1289,7 @@ fn identify(conn: &soup::WebsocketConnection, state: &State) {
 fn identify_payload(token: &str) -> Identify<'_> {
     Identify {
         token,
-        capabilities: obfuscation::capabilities(identity::obfuscation()),
+        capabilities: obfuscation::CAPABILITIES,
         properties: identity::identify_properties(),
         presence: PresenceUpdate { status: "unknown", since: 0, activities: [], afk: false },
         compress: false,
@@ -2623,6 +2623,13 @@ mod tests {
         let at: Vec<usize> = order.iter().map(|key| text.rfind(key).unwrap()).collect();
         assert!(at.is_sorted(), "{text}");
         assert_eq!(identify["d"]["qos_token"], "CgA=", "nobody signed in on this thread: inactive, nothing derived");
+    }
+
+    #[test]
+    fn identify_asks_for_hidden_channels_with_nothing_assigned() {
+        // A first launch, nothing stored or assigned: the client asks anyway.
+        let identify: Value = serde_json::from_str(&request_text(2, &identify_payload("t"))).unwrap();
+        assert_eq!(identify["d"]["capabilities"], 1_767_421);
     }
 
     #[test]

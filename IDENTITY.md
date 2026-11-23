@@ -47,12 +47,9 @@ each would be reconsidered.
   behaviour that wasn't checked; `discord-watch` reports it beside the live
   build and `raise-build` raises it once a week's changes are handled. A
   build some weeks old is what a tab left open sends.
-- **`capabilities`** are the client's, and so is how it decides about hidden
-  channels: from the experiment assignments it stored last time, so a first
-  launch asks for none. Neucord stores the account's own assignments for
-  each account, and `STATE_UPDATE` feeds them as it feeds the client's
-  store. Handling the READY layout those capabilities bring is part of
-  presenting this way, not a feature.
+- **`capabilities`** are the client's, hidden channels included, which it
+  asks for on every launch. Handling the READY layout those capabilities
+  bring is part of presenting this way, not a feature.
 - **The heartbeat session** (`client_heartbeat_session_id`). The client keeps
   one session, whoever is signed in, and drops it whenever its token changes
   (a login, a logout, a switch, a token READY replaces); only a relaunch of
