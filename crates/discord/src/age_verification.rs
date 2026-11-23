@@ -6,19 +6,14 @@
 //! the vendor's page that answers, which the client shows in an iframe and
 //! ends on the messages it posts.
 //!
-//! Not taken: the other modals the client picks by experiment (the v1
-//! methods and `verify`, 962877, 297102 and 929180), Incode's in-page
-//! session (`2026-06-age-verification-incode`), and the suspended-account
-//! variants.
+//! Not taken: Incode's in-page session (`2026-06-age-verification-incode`),
+//! and the suspended-account variants.
 
 use serde_json::{Value, json};
 
 use crate::endpoints::call;
 use crate::{Error, Rest};
 
-/// The experiment that gives the client its expressive modal, which is the
-/// flow built here (`2026-07-expressive-modal-v2`, 462924): variations 1 and 2.
-pub const EXPRESSIVE_MODAL: &str = "2026-07-expressive-modal-v2";
 /// The experiment that gives the client Incode's in-page session instead
 /// (`2026-06-age-verification-incode`, 871309): variation 1.
 pub const INCODE: &str = "2026-06-age-verification-incode";
@@ -119,10 +114,10 @@ impl Started {
 }
 
 /// Whether the account is shown the flow built here: the client's expressive
-/// modal is in its experiment, and Incode's session, which takes the
-/// verification before it, is not.
-pub fn offered(expressive_variant: Option<i64>, incode_variant: Option<i64>) -> bool {
-    matches!(expressive_variant, Some(1 | 2)) && incode_variant != Some(1)
+/// modal, unless Incode's session, which takes the verification before it,
+/// is on (`showAgeVerificationGetStartedModal` in 871309).
+pub fn offered(incode_variant: Option<i64>) -> bool {
+    incode_variant != Some(1)
 }
 
 /// The page the vendor's is shown in, over discord.com as in the client's
@@ -219,12 +214,10 @@ mod tests {
     }
 
     #[test]
-    fn the_flow_is_offered_where_the_client_shows_its_expressive_modal() {
-        assert!(offered(Some(1), None));
-        assert!(offered(Some(2), Some(0)));
-        assert!(!offered(None, None), "not in the experiment");
-        assert!(!offered(Some(0), None), "control");
-        assert!(!offered(Some(1), Some(1)), "Incode's session comes first");
+    fn the_flow_is_offered_unless_incode_comes_first() {
+        assert!(offered(None));
+        assert!(offered(Some(0)));
+        assert!(!offered(Some(1)), "Incode's session comes first");
     }
 
     #[test]

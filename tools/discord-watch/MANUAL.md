@@ -130,8 +130,8 @@ changed for unrelated reasons only needs a note in the issue.
   an account the region gates), and Go Back, `nsfwReturnToSafety` in 778858.
 - **Confirming an age** (`age_verification.rs`, `ui/age_verification.rs`).
   The requests are watched (`AGE_VERIFICATION_METHODS_V2`, `VERIFY_AGE_V2`),
-  and so are `showAgeVerificationGetStartedModal`, which picks the modal by
-  experiment, and `AgeVerificationStore`. Not watched: the modal Neucord
+  and so are `showAgeVerificationGetStartedModal`, which picks the modal
+  (Incode's session by experiment, else this one), and `AgeVerificationStore`. Not watched: the modal Neucord
   follows, 12247 (anchor `AGE_VERIFICATION_METHODS_V2_LOAD_SUCCESS`) with its
   strings; what `verify/v2` is sent (`en` in 295972: `method` and `vendor`);
   and the vendor's page, 662558 (anchors `Verification.Result` and
