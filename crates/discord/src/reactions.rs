@@ -30,13 +30,14 @@ pub enum Kind {
 }
 
 impl Kind {
-    /// What an event's `type` says, or `None` for a poll vote. A missing or
-    /// unknown number counts as normal, as in the client.
+    /// What an event's `type` says, or `None` for one that isn't shown: a
+    /// poll vote, a sound (3), or a missing or unknown number, which the
+    /// client drops too (225123 lets only 0, 1 and 2 through, `H2` in 505527).
     pub fn of_event(value: Option<u64>) -> Option<Kind> {
         match value {
+            Some(0) => Some(Kind::Normal),
             Some(1) => Some(Kind::Burst),
-            Some(2) => None,
-            _ => Some(Kind::Normal),
+            _ => None,
         }
     }
 }
@@ -781,10 +782,11 @@ mod tests {
 
     #[test]
     fn events_name_their_kind() {
-        assert_eq!(Kind::of_event(None), Some(Kind::Normal));
         assert_eq!(Kind::of_event(Some(0)), Some(Kind::Normal));
         assert_eq!(Kind::of_event(Some(1)), Some(Kind::Burst));
         assert_eq!(Kind::of_event(Some(2)), None, "a poll vote has its own events");
+        assert_eq!(Kind::of_event(Some(3)), None, "a sound isn't shown");
+        assert_eq!(Kind::of_event(None), None);
     }
 
     #[test]

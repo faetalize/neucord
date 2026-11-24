@@ -28,8 +28,7 @@ impl App {
     pub(super) fn age_verification_offered(&self) -> bool {
         let state = self.account.state.borrow();
         let Some(me) = state.me() else { return false };
-        let variant = |name: &str| state.experiments.apex_user(me, name).map(|a| a.variant);
-        age_verification::offered(variant(age_verification::EXPRESSIVE_MODAL), variant(age_verification::INCODE))
+        age_verification::offered(state.experiments.apex_user(me, age_verification::INCODE).map(|a| a.variant))
     }
 
     /// The methods dialog, over the window.

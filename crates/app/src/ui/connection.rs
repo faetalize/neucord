@@ -485,13 +485,11 @@ impl App {
                     self.refresh_badges();
                 }
                 Event::ExperimentsUpdate(update) => {
-                    let me = {
+                    {
                         let mut state = self.account.state.borrow_mut();
-                        state.experiments.apply_update(update);
-                        state.me.as_ref().map(|me| me.id)
-                    };
-                    if let Some(me) = me {
-                        super::identity::assignments_changed(me, &self.account.state.borrow().experiments);
+                        if let Some(me) = state.me.as_ref().map(|me| me.id) {
+                            state.experiments.apply_update(me, update);
+                        }
                     }
                     self.refresh_attach();
                 }
@@ -717,7 +715,7 @@ impl App {
             state.account = Some(account);
             state.nitro = nitro;
             state.restricted_schedule = restricted_schedule;
-            state.experiments = experiments;
+            state.experiments.ready(user.id, experiments);
             state.session_id = session_id;
             state.gates = gates;
             state.unavailable_guilds = unavailable_guilds;
@@ -739,7 +737,7 @@ impl App {
         self.wake_member_check();
         {
             let state = self.account.state.borrow();
-            super::identity::ready(user.id, &state.experiments, qos_token);
+            super::identity::ready(user.id, qos_token);
             let limits = state.limits();
             self.images.set_rules(limits.image_ladder(), limits.lazy_images());
         }

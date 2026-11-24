@@ -68,11 +68,6 @@ impl Assignment {
         Some((hash, assignment))
     }
 
-    /// As READY sends it, for keeping.
-    fn to_value(&self, hash: u32) -> Value {
-        serde_json::json!([hash, self.variant, self.flags, self.revision, null, self.config])
-    }
-
     fn is_override(&self) -> bool {
         self.flags & Self::IS_OVERRIDE != 0
     }
@@ -378,30 +373,31 @@ impl Experiments {
         Experiments { apex, user, guild, session_overrides: HashMap::new() }
     }
 
-    /// Our own Apex assignments, as the client keeps them between launches
-    /// (the persisted `ApexExperimentStore`, 340344), in READY's layout.
-    pub fn user_cache(&self, me: Snowflake) -> Vec<Value> {
-        let Some(assignments) = self.apex.get(&(Self::USER, me.0.to_string())) else { return Vec::new() };
-        let mut cached: Vec<_> = assignments.iter().map(|(hash, a)| (*hash, a.to_value(*hash))).collect();
-        cached.sort_by_key(|(hash, _)| *hash);
-        cached.into_iter().map(|(_, value)| value).collect()
+    /// What READY says, for the account `me`: it replaces what was known,
+    /// but the session's overrides end only as [`Self::apply_update`] says.
+    pub fn ready(&mut self, me: Snowflake, ready: Experiments) {
+        let overrides = std::mem::take(&mut self.session_overrides);
+        *self = ready;
+        if !self.has_own(me) {
+            self.session_overrides = overrides;
+        }
     }
 
-    /// [`Self::user_cache`] read back: what [`Self::apex_user`] says for `me`.
-    pub fn from_user_cache(me: Snowflake, cached: &[Value]) -> Experiments {
-        let assignments: HashMap<u32, Assignment> = cached.iter().filter_map(Assignment::from_value).collect();
-        let mut apex = HashMap::new();
-        apex.insert((Self::USER, me.0.to_string()), assignments);
-        Experiments { apex, ..Default::default() }
-    }
-
-    /// Fold in the assignments of a `STATE_UPDATE`: each unit's entry is
-    /// replaced whole and the rest stays, as the client's
+    /// Fold in the assignments of a `STATE_UPDATE` for the account `me`: each
+    /// unit's entry is replaced whole and the rest stays, as the client's
     /// `setExperimentAssignments` does (340344).
-    pub fn apply_update(&mut self, update: Experiments) {
-        // Fresh assignments end the session's overrides (`clearSessionOverrides`).
-        self.session_overrides.clear();
+    pub fn apply_update(&mut self, me: Snowflake, update: Experiments) {
+        // Fresh assignments of our own end the session's overrides
+        // (`clearSessionOverrides`); a server's, or none, leave them.
+        if update.has_own(me) {
+            self.session_overrides.clear();
+        }
         self.apex.extend(update.apex);
+    }
+
+    /// Whether these carry `me`'s own user assignments, even none.
+    fn has_own(&self, me: Snowflake) -> bool {
+        self.apex.contains_key(&(Self::USER, me.0.to_string()))
     }
 
     /// Discord forces `variant` of the experiment `name` for this session
@@ -626,10 +622,31 @@ mod tests {
         assert_eq!(user(&experiments, "2099-01-on"), Some(1), "deleted, the assignment answers again");
         experiments.remove_override("2099-01-never-made");
 
-        experiments.apply_update(Experiments::default());
-        assert_eq!(user(&experiments, "2099-01-new"), None, "fresh assignments clear the rest");
+        let ours = json!({ "1": { "10": { "assignments": [
+            [murmur3("2099-01-on"), 1, 0, 1], [murmur3("2099-01-eligible"), 0, 8, 1]
+        ] } } });
+        experiments.apply_update(ME, Experiments::from_ready(&ready(ours)));
+        assert_eq!(user(&experiments, "2099-01-new"), None, "fresh assignments of ours clear the rest");
         let guild = experiments.apex_guild(ME, Snowflake(20), "2099-01-eligible");
         assert_eq!(guild.map(|a| a.variant), Some(2), "the server's own assignment is back");
+    }
+
+    #[test]
+    fn only_our_own_fresh_assignments_end_the_overrides() {
+        let mut experiments = Experiments::default();
+        let forced = |e: &Experiments| e.apex_user(ME, "2099-01-x").map(|a| a.variant);
+        experiments.override_variant("2099-01-x", 2);
+        // A server's, or another account's, leave them.
+        experiments.apply_update(ME, Experiments::from_ready(&ready(json!({ "3": { "20": { "assignments": [] } } }))));
+        experiments.apply_update(ME, Experiments::from_ready(&ready(json!({ "1": { "11": { "assignments": [] } } }))));
+        assert_eq!(forced(&experiments), Some(2));
+        experiments.ready(ME, Experiments::from_ready(&ready(json!({ "3": { "20": { "assignments": [] } } }))));
+        assert_eq!(forced(&experiments), Some(2), "a READY without ours too");
+        experiments.apply_update(ME, Experiments::from_ready(&ready(json!({ "1": { "10": { "assignments": [] } } }))));
+        assert_eq!(forced(&experiments), None);
+        experiments.override_variant("2099-01-x", 2);
+        experiments.ready(ME, Experiments::from_ready(&ready(json!({ "1": { "10": { "assignments": [] } } }))));
+        assert_eq!(forced(&experiments), None, "a READY with ours");
     }
 
     #[test]
@@ -643,7 +660,7 @@ mod tests {
         };
         let mut experiments = Experiments::from_ready(&launch(1));
         assert_eq!(experiments.apex_user(ME, "2099-01-launch").map(|a| a.variant), Some(1));
-        experiments.apply_update(Experiments::from_ready(&launch(2)));
+        experiments.apply_update(ME, Experiments::from_ready(&launch(2)));
         assert_eq!(experiments.apex_user(ME, "2099-01-launch").map(|a| a.variant), Some(2));
     }
 

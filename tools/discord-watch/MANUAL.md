@@ -130,8 +130,8 @@ changed for unrelated reasons only needs a note in the issue.
   an account the region gates), and Go Back, `nsfwReturnToSafety` in 778858.
 - **Confirming an age** (`age_verification.rs`, `ui/age_verification.rs`).
   The requests are watched (`AGE_VERIFICATION_METHODS_V2`, `VERIFY_AGE_V2`),
-  and so are `showAgeVerificationGetStartedModal`, which picks the modal by
-  experiment, and `AgeVerificationStore`. Not watched: the modal Neucord
+  and so are `showAgeVerificationGetStartedModal`, which picks the modal
+  (Incode's session by experiment, else this one), and `AgeVerificationStore`. Not watched: the modal Neucord
   follows, 12247 (anchor `AGE_VERIFICATION_METHODS_V2_LOAD_SUCCESS`) with its
   strings; what `verify/v2` is sent (`en` in 295972: `method` and `vendor`);
   and the vendor's page, 662558 (anchors `Verification.Result` and
@@ -520,19 +520,16 @@ changed for unrelated reasons only needs a note in the issue.
   (anchor `guild_connections`) with 920268 (anchor `GUILD_APP`) picks
   `connections_role_id`. A note is asked for once a session by 612630 (anchor
   `USER_NOTE_LOAD_START`) wherever one renders, the popout (243166) and the
-  user menu (497600) included. The panel beside a DM (`ok` in 420018, anchor
-  `UserProfileSidebarRenderer`) asks for `type=sidebar` with mutual servers,
-  and for anyone but a bot either the friends or just their count, by the
-  experiment `rD` there (`2026-06-user-profile-sidebar-redesign`, variant 1,
-  read through `experiments.rs`). The list of mutual friends is asked for
+  user menu (497600) included. The panel beside a DM (`ob` in 903137, anchor
+  `type: "sidebar"`) asks for `type=sidebar` with mutual servers, and for
+  anyone but a bot the friends. The list of mutual friends is asked for
   once its section opens and the held one isn't as long as the count (229187,
   anchor `isFetchingFriends`). A decoration's image is the shop's by `sku_id`
   or else the preset's by `asset`, none once it lapses (`D` in 486020, with
   `getCollectiblesItemAssetUrl` in 746002). A banner's `size` is the smallest
   of the list `kr` picks from (776231, anchor `3072, 4096`; `cdn::SIZES`)
   that holds its width times the screen's scale: the popout's `bannerWidth`
-  (watched), the panel's, or the popout's in the redesign (`specOverrides` in
-  420018).
+  (watched), which the panel takes too (`specOverrides` in 903137).
 - **What a settings change puts in the save** (`Setting::written`,
   `SettingsSync::edit`). The save, its timing and the schema are watched
   (`updateAsync`, `markDirty`, `persistChanges`, the protos). Not watched, as

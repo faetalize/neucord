@@ -1289,7 +1289,7 @@ fn identify(conn: &soup::WebsocketConnection, state: &State) {
 fn identify_payload(token: &str) -> Identify<'_> {
     Identify {
         token,
-        capabilities: obfuscation::capabilities(identity::obfuscation()),
+        capabilities: obfuscation::CAPABILITIES,
         properties: identity::identify_properties(),
         presence: PresenceUpdate { status: "unknown", since: 0, activities: [], afk: false },
         compress: false,
@@ -2626,6 +2626,13 @@ mod tests {
     }
 
     #[test]
+    fn identify_asks_for_hidden_channels_with_nothing_assigned() {
+        // A first launch, nothing stored or assigned: the client asks anyway.
+        let identify: Value = serde_json::from_str(&request_text(2, &identify_payload("t"))).unwrap();
+        assert_eq!(identify["d"]["capabilities"], 1_767_421);
+    }
+
+    #[test]
     fn heartbeats_as_the_client_sends_them() {
         assert_eq!(heartbeat_text(None, None), r#"{"op":40,"d":{"seq":0,"qos":null}}"#, "seq 0 before any");
         assert_eq!(
@@ -3402,7 +3409,8 @@ mod tests {
         // 225123 passes `type` and `burst_colors` on with the rest.
         let state = fresh_state();
         let fire = json!({"id": null, "name": "🔥"});
-        let one = json!({"channel_id": "3", "message_id": "9", "user_id": "5", "emoji": fire, "guild_id": "1"});
+        let one =
+            json!({"channel_id": "3", "message_id": "9", "user_id": "5", "emoji": fire, "guild_id": "1", "type": 0});
         dispatch(&state, "MESSAGE_REACTION_ADD", one.clone());
         let Ok(Event::Reaction(reactions::Reacted { channel_id, message_id, user_id, emoji, kind, colors, added })) =
             state.try_recv()
@@ -3430,7 +3438,7 @@ mod tests {
     }
 
     #[test]
-    fn reactions_that_are_poll_votes_or_unreadable_are_dropped() {
+    fn reactions_that_are_votes_sounds_or_unreadable_are_dropped() {
         let state = fresh_state();
         let base = json!({"channel_id": "3", "message_id": "9", "user_id": "5", "emoji": {"name": "🔥"}});
         let with = |key: &str, value: Value| {
@@ -3439,6 +3447,11 @@ mod tests {
             event
         };
         dispatch(&state, "MESSAGE_REACTION_ADD", with("type", json!(2)));
+        // Sound reactions, and any type the client doesn't know.
+        dispatch(&state, "MESSAGE_REACTION_ADD", with("type", json!(3)));
+        dispatch(&state, "MESSAGE_REACTION_REMOVE", with("type", json!(3)));
+        dispatch(&state, "MESSAGE_REACTION_ADD", with("type", json!(9)));
+        dispatch(&state, "MESSAGE_REACTION_ADD", base.clone());
         dispatch(&state, "MESSAGE_REACTION_ADD", with("emoji", json!("🔥")));
         dispatch(&state, "MESSAGE_REACTION_ADD", with("user_id", json!(null)));
         assert!(state.try_recv().is_err());
