@@ -782,12 +782,12 @@ changed for unrelated reasons only needs a note in the issue.
 - **Attachments the client hides** (`Attachment::is_hidden`). Client:
   `renderAttachments` in 190854 drops `IS_THUMBNAIL`.
 - **The message menu** (`MESSAGE` in `ui/menus.rs`). Client: 333881
-  builds it; Neucord keeps its sections and order. Where the regulation is
-  TIDA, which 207560 decides (anchor `isMediaTakedownRegulation`), the Copy ID
-  group comes before the link group (`message` in `menus.rs`). Copy Text
-  copies the content of `getContentMessage` (watched), or the text displays
-  of a components message joined by newlines (`kC` in 257249), and shows only if
-  that isn't empty. Copy Message Link is 345254, with the path from
+  builds it; Neucord keeps its sections and order. The Copy ID group (Message
+  Details, or Copy Message ID without it) comes before the media group, and
+  the link group follows only when Message Details isn't shown (anchor
+  `data-menu-migrated`). Copy Text copies the content of `getContentMessage`
+  (watched), or the text displays of a components message joined by newlines
+  (`kC` in 257249), and shows only if that isn't empty. Copy Message Link is 345254, with the path from
   `CHANNEL` in 901123. Copy Message ID is 50268, only in Developer Mode
   (`developer_mode` in the JSON user settings). Copy for the selection
   (373963) and Copy Link and Open Link (777933) are desktop-only there.

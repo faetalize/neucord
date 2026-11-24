@@ -116,8 +116,6 @@ pub struct Ready {
     /// The `PreloadedUserSettings` they were read from, whole: what changing
     /// a setting starts from (see [`crate::settings_sync`]).
     pub settings_proto: Option<Vec<u8>>,
-    /// See [`crate::regional::media_takedown_regulated`].
-    pub media_takedown_regulated: bool,
     /// A step Discord requires before the account can be used, if any
     /// (see [`crate::account`]).
     pub required_action: Option<String>,
@@ -1557,7 +1555,6 @@ fn ready(parser: &Parser, data: Value, servers: impl Iterator<Item = Value>) {
             settings
         },
         settings_proto: data["user_settings_proto"].as_str().map(settings_proto::decode),
-        media_takedown_regulated: crate::regional::media_takedown_regulated(&data["regional_feature_config"]),
         required_action: data["required_action"].as_str().map(str::to_owned),
         experiments,
         session_id: data["session_id"].as_str().unwrap_or_default().to_owned(),

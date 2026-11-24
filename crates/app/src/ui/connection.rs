@@ -665,7 +665,6 @@ impl App {
             collapsed,
             settings,
             settings_proto,
-            media_takedown_regulated,
             required_action,
             experiments,
             session_id,
@@ -710,7 +709,6 @@ impl App {
             self.images.motion().set_media(settings.media);
             state.settings = settings;
             let offline_save = settings_proto.and_then(|proto| state.sync.connected(proto));
-            state.media_takedown_regulated = media_takedown_regulated;
             state.required_action = required_action;
             state.account = Some(account);
             state.nitro = nitro;

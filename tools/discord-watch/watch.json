@@ -131,7 +131,6 @@
     "LinkType": ["PARENT", "CHILD"],
     "LoginRequiredAction": ["UPDATE_PASSWORD"],
     "MFALevel": ["NONE", "ELEVATED"],
-    "MediaTakedownRegulation": ["TIDA", "UK_STOPNCII", "BRAZIL_ONLINE_SAFETY_OF_WOMEN"],
     "MessageFlags": [
       "CROSSPOSTED",
       "SUPPRESS_EMBEDS",

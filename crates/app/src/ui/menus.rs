@@ -139,34 +139,14 @@ pub(super) type Table<T, C = App> = &'static [&'static [Entry<T, C>]];
 
 /// A message's menu: what Neucord has of the official client's (333881),
 /// in its order. Forward follows Reply, and Create Thread follows it.
-/// The media group (Copy Image, Save Image, Save File) comes before the link
-/// group, which names a link by what it points to.
 /// Pin Message and Unpin Message follow Copy Text, and Apps follows them
 /// and what Neucord has no entry for (Translate, Remind Me), and precedes Copy
-/// Message Link.
-const MESSAGE: Table<MessageTarget> = &[
-    &[chat::COPY_SELECTION],
-    &[reactions::QUICK_REACTIONS, reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
-    &[edits::EDIT, composer::REPLY, forward::MESSAGE_MENU, create_thread::MESSAGE_MENU, create_thread::VIEW_THREAD],
-    &[
-        chat::COPY_TEXT,
-        pins::PIN,
-        pins::UNPIN,
-        slash::MESSAGE_APPS,
-        notify_menus::MARK_UNREAD,
-        chat::COPY_MESSAGE_LINK,
-        polls::END_POLL,
-    ],
-    &[reactions::REMOVE_EMOJI_REACTIONS, reactions::REMOVE_ALL_REACTIONS, edits::DELETE],
-    &[chat::COPY_IMAGE, chat::SAVE_IMAGE, sensitive_report::MARK_NOT_SENSITIVE, attachments::SAVE_FILE],
-    &LINKS,
-    &[chat::COPY_MESSAGE_ID, stickers::MESSAGE_DETAILS],
-];
-
-/// [`MESSAGE`] where the media takedown regulation is TIDA: the client (333881)
-/// puts the Copy ID group (50268) before the media group and the link group
-/// (777933).
-const MESSAGE_REGULATED: Table<MessageTarget> = &[
+/// Message Link. The Copy ID group (50268) comes before the media group (Copy
+/// Image, Save Image, Save File), then the link group (777933), which names a
+/// link by what it points to. The client drops the link group when Message
+/// Details shows, as that holds the emoji's or sticker's image link; here the
+/// link group never offers it (`target.link` is a clicked link or media).
+pub(super) const MESSAGE: Table<MessageTarget> = &[
     &[chat::COPY_SELECTION],
     &[reactions::QUICK_REACTIONS, reactions::ADD_REACTION, reactors::VIEW_REACTIONS],
     &[edits::EDIT, composer::REPLY, forward::MESSAGE_MENU, create_thread::MESSAGE_MENU, create_thread::VIEW_THREAD],
@@ -210,12 +190,6 @@ pub(super) const VIEWER_MEDIA: Table<viewer::Target> = &[
         viewer::OPEN_MEDIA_LINK,
     ],
 ];
-
-/// The message menu for an account: `regulated` is READY's media takedown
-/// regulation being TIDA, which the client orders the last groups by.
-pub(super) fn message(regulated: bool) -> Table<MessageTarget> {
-    if regulated { MESSAGE_REGULATED } else { MESSAGE }
-}
 
 /// What a search result's menu offers of the official client's (847342), in
 /// its order. Copy and Search with Google (a selection) aren't here: a
@@ -1000,23 +974,14 @@ mod tests {
     }
 
     #[test]
-    fn message_menu_puts_the_id_before_the_media_and_links_where_media_takedown_is_regulated() {
-        let ends = |regulated| {
-            let names = names(message(regulated));
-            names[names.len() - 3..].to_vec()
-        };
-        let id = || vec!["copy-message-id", "message-details"];
+    fn message_menu_puts_the_id_before_the_media_and_links() {
+        let names = names(MESSAGE);
         // Mark As Not Sensitive follows Save Image in the media group (333881).
-        let media = || vec!["copy-image", "save-image", "mark-not-sensitive", "save-file"];
-        let links = || {
+        let media = ["copy-image", "save-image", "mark-not-sensitive", "save-file"].to_vec();
+        let links =
             ["copy-link", "copy-image-link", "copy-media-link", "open-link", "open-image-link", "open-media-link"]
-                .to_vec()
-        };
-        assert_eq!(ends(false), [media(), links(), id()]);
-        assert_eq!(ends(true), [id(), media(), links()]);
-        // The three groups move and nothing else does.
-        let n = names(message(false)).len();
-        assert_eq!(names(message(true))[..n - 3], names(message(false))[..n - 3]);
+                .to_vec();
+        assert_eq!(names[names.len() - 3..], [vec!["copy-message-id", "message-details"], media, links]);
     }
 
     #[test]
@@ -1035,7 +1000,7 @@ mod tests {
 
     #[test]
     fn pinning_follows_copy_text_and_precedes_apps_as_in_the_client() {
-        let flat = names(message(false)).concat();
+        let flat = names(MESSAGE).concat();
         let at = |name: &str| flat.iter().position(|n| *n == name).unwrap();
         assert_eq!((at("pin") - at("copy-text"), at("unpin") - at("pin")), (1, 1));
         assert!(at("unpin") < at("apps"));
@@ -1076,13 +1041,10 @@ mod tests {
             assert!(at("create-thread") < at(after));
         };
         // After Forward, which follows Reply.
-        place(message(false), "forward", "copy-text");
-        place(message(true), "forward", "copy-text");
-        for table in [message(false), message(true)] {
-            let names = flat(table);
-            let at = |name: &str| names.iter().position(|n| *n == name).unwrap();
-            assert_eq!(at("forward"), at("reply") + 1);
-        }
+        place(MESSAGE, "forward", "copy-text");
+        let names = flat(MESSAGE);
+        let at = |name: &str| names.iter().position(|n| *n == name).unwrap();
+        assert_eq!(at("forward"), at("reply") + 1);
         // The attach menu: after the uploads, before the poll.
         let attach: Vec<_> = ATTACH[0]
             .iter()
