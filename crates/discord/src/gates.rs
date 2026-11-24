@@ -20,7 +20,8 @@ fn is_adult(status: u64) -> bool {
 /// by default (923457).
 const TEEN_MESSAGE_REQUESTS: u64 = 4;
 /// `SENSITIVE_CONTENT` among them: sensitive media is covered until the
-/// account chooses (923457; asked of the region, not the account's age).
+/// account chooses (923457), unless it is a verified or inferred adult
+/// (`$8` in 36149, read by 632119 and 444802).
 const TEEN_SENSITIVE_CONTENT: u64 = 1;
 /// `GUILD_ACTIVITY_STATUS` among them: activity is shared in large servers
 /// until the account chooses (923457). The client asks only the region, not
@@ -64,7 +65,8 @@ pub struct Gates {
     /// The account's age group isn't known (`b8` in 36149 is false for
     /// `UNVERIFIED`): its age gate asks to confirm it, not to update it.
     pub age_unverified: bool,
-    /// Sensitive media is covered by default (see [`crate::sensitive`]).
+    /// Sensitive media is covered by default (see [`crate::sensitive`]):
+    /// the region's teen default, for an account that isn't an adult.
     pub sensitive_by_default: bool,
     /// `explicit_content_scan_version`: the newest scan Discord runs, if it
     /// says.
@@ -104,7 +106,7 @@ impl Gates {
         self.nsfw_commands_age_gated = age == UNVERIFIED && age_gated & AGE_GATED_COMMANDS != 0;
         self.spaces_age_gated = !is_adult(age) && age_gated & AGE_GATED_SPACES != 0;
         self.age_unverified = age == UNVERIFIED;
-        self.sensitive_by_default = teen_defaults & TEEN_SENSITIVE_CONTENT != 0;
+        self.sensitive_by_default = !is_adult(age) && teen_defaults & TEEN_SENSITIVE_CONTENT != 0;
         self
     }
 }
@@ -150,14 +152,17 @@ mod tests {
     }
 
     #[test]
-    fn sensitive_media_is_covered_by_default_where_the_region_says_whatever_the_age() {
+    fn sensitive_media_is_covered_by_default_where_the_region_says_unless_the_account_is_an_adult() {
         let ready = |age, teen| {
             json!({"user": {"age_verification_status": age},
                    "regional_feature_config": {"teen_by_default_settings": teen},
                    "explicit_content_scan_version": 4})
         };
-        assert!(Gates::from_ready(&ready(3, 1)).sensitive_by_default, "an adult too");
+        assert!(!Gates::from_ready(&ready(3, 1)).sensitive_by_default, "a verified adult");
+        assert!(!Gates::from_ready(&ready(4, 1)).sensitive_by_default, "an inferred adult");
+        assert!(Gates::from_ready(&ready(1, 1)).sensitive_by_default, "an unverified account");
         assert!(Gates::from_ready(&ready(2, 9)).sensitive_by_default);
+        assert!(Gates::from_ready(&ready(3, 1)).with_age(2).sensitive_by_default, "an age group that changes");
         assert!(!Gates::from_ready(&ready(2, 12)).sensitive_by_default);
         assert_eq!(Gates::from_ready(&ready(2, 1)).explicit_content_scan_version, Some(4));
         assert_eq!(Gates::from_ready(&json!({})).explicit_content_scan_version, None);

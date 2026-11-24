@@ -179,8 +179,8 @@ impl Harms {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Rules {
     pub preferences: Preferences,
-    /// The region sets sensitive content for teens by default, which is
-    /// asked of the region, not the account's age (`isSettingTeenByDefault`).
+    /// The region sets sensitive content for teens by default
+    /// (`isSettingTeenByDefault`) and the account isn't an adult.
     pub region_default: bool,
     /// Discord says the account is not an adult's (`nsfwAllowed === false`).
     pub underage: bool,
