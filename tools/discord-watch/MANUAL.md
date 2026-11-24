@@ -220,8 +220,10 @@ changed for unrelated reasons only needs a note in the issue.
   (anchor `command-search`), shows in `TEXTUAL` channels (478437) but not
   media threads, with the user commands in 107632 and the message commands in
   333881; and Use Apps in the attach menu, 316576 (anchor
-  `canUseApplicationCommands`), which a pending reply hides, and which the
-  App Launcher replaces while the Apps button is off.
+  `canUseApplicationCommands`), which a pending reply hides, which needs
+  `f` in 167074 as the Apps button does (`q` in 12764; pending, Send
+  Messages and `UJ` in 406704, all of which hide Neucord's box already),
+  and which the App Launcher replaces while the Apps button is off.
 - **What the message box's `@` list offers** (`chat_mentions` in
   `ui/composer.rs`, `App::mentions`, `mention_list.rs`), and a pill's.
   `queryMentionResults`, `queryChannelUsers` and `queryGuildUsers` are

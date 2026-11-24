@@ -712,8 +712,10 @@ impl App {
     }
 
     /// The open channel, if the client's attach menu would offer Use Apps in
-    /// it now (`canUseApplicationCommands`): the message box shows, nothing
-    /// is being edited or replied to, and commands have a place to run.
+    /// it now (`canUseApplicationCommands` in 316576, `!M && eD`): the
+    /// message box shows, which covers `f` in 167074 (`eD`, see
+    /// `chat_bar::Bar::open`), nothing is being edited or replied to, and
+    /// commands have a place to run.
     pub(super) fn apps_channel(&self) -> Option<Snowflake> {
         let channel = self.account.state.borrow().channel?;
         let replying = self.reply.borrow().as_ref().is_some_and(|r| r.channel == channel);
