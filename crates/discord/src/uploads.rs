@@ -6,7 +6,7 @@
 //! The flow is `CloudUpload` in 48325, which starts as soon as a file is
 //! added to the draft, not when the message is sent. `getUploadPayload` in
 //! 122924 builds the URL request, `OW` in 292348 the message's attachment,
-//! and what is checked before any request is 518960's `R` and 433777's
+//! and what is checked before any request is 518960's `R` and 407876's
 //! `UploaderBase`.
 //!
 //! Images are converted first as the client does ([`crate::images`]); a
@@ -407,7 +407,7 @@ pub fn check_added(limits: &Uploads, queued: &[u64], added: &[u64]) -> Result<()
 }
 
 /// Whether `sizes`, everything the draft holds, may be sent: the count, then
-/// the total, as `compressAndCheckFileSize` (433777) asks.
+/// the total, as `compressAndCheckFileSize` (407876) asks.
 pub fn check_send(limits: &Uploads, sizes: &[u64]) -> Result<(), Refusal> {
     if sizes.len() > limits.files {
         return Err(Refusal::TooMany { max: limits.files });
@@ -580,7 +580,7 @@ impl Default for Backoff {
     }
 }
 
-/// How an upload request failed, for deciding whether to go on (`v` in
+/// How an upload request failed, for deciding whether to go on (`P` in
 /// 48325).
 fn retryable(error: &Error) -> bool {
     match error {
@@ -729,7 +729,7 @@ impl Rest {
             }
             failed += 1;
             // The client's HTTP layer waits, then asks whether it is online
-            // (the hook 526227 gives the HTTP layer, 620632) before it sends again.
+            // (the hook 555084 gives the HTTP layer, 620632) before it sends again.
             glib::timeout_future(backoff.fail()).await;
             network::await_online().await;
         }

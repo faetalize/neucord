@@ -30,7 +30,7 @@ const PAGE: u32 = 100;
 /// How close to the end of the list scrolling asks for the next page.
 const NEAR_END: f64 = 52.0;
 
-/// With the reactions, as the client's menu has it (761304). Super
+/// With the reactions, as the client's menu has it (333881). Super
 /// reactions aren't listed here, so a message with only those has no entry.
 pub(super) const VIEW_REACTIONS: Entry<MessageTarget> = Entry::Item(Item {
     name: "view-reactions",

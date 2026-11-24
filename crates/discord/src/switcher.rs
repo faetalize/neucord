@@ -27,7 +27,7 @@ const LIMIT_NARROWED: usize = 100;
 /// Channels remembered for "Previous Channels".
 pub const HISTORY: usize = 8;
 
-/// What a prefix narrows a query to (`AT` in 926140, and `F` in 793322).
+/// What a prefix narrows a query to (`AT` in 926140, and `V` in 793322).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     /// `@`: people, friends first.
@@ -65,7 +65,7 @@ pub struct Query {
     pub mode: Option<Mode>,
 }
 
-/// Split what was typed into a prefix and a query (`F` in 793322): the mode
+/// Split what was typed into a prefix and a query (`V` in 793322): the mode
 /// follows the first character, and the first prefix character found
 /// anywhere is cut out, so `foo#bar` searches `foobar` everywhere.
 pub fn parse(input: &str) -> Query {
@@ -206,7 +206,7 @@ impl Sources<'_> {
         Some(Hit { kind: Kind::User, id, score: 0.0, comparator: self.user_name(user), sortable: None })
     }
 
-    /// A channel as a result (`$` in 174768): a DM is its person.
+    /// A channel as a result (`X` in 174768): a DM is its person.
     pub fn as_hit(&self, id: Snowflake) -> Option<Hit> {
         let (_, channel) = self.find(id)?;
         let comparator = self.channel_name(channel);
@@ -295,7 +295,7 @@ impl Token {
     }
 }
 
-/// How well `name` (lower case) matches (`eT` in 997625): 10 for the same,
+/// How well `name` (lower case) matches (`eg` in 997625): 10 for the same,
 /// 7 for a start, 5 for a part, 3 where every word is in it, 1 where the
 /// letters follow each other, else 0.
 fn score(name: &str, token: &Token, fuzzy_too: bool) -> f64 {

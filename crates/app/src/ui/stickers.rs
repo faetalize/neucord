@@ -3,7 +3,7 @@
 //! whether we may send a sticker is `discord::stickers` and `limits`; the
 //! picker is `picker`'s, with the emoji picker's menu.
 //!
-//! A pick sends at once from an empty box, as in the client (`nm` in
+//! A pick sends at once from an empty box, as in the client (`ny` in
 //! 989161); with text or files in it, or another sticker waiting, it waits
 //! above the box instead, and goes with the message.
 
@@ -91,7 +91,7 @@ pub(super) const COPY_STICKER_LINK: MenuEntry<Target> = MenuEntry::Item(MenuItem
 });
 
 /// "Message Details" where a sticker was right-clicked, in Developer Mode: the
-/// client (761304) shows it in place of Copy Message ID, with that, the
+/// client (333881) shows it in place of Copy Message ID, with that, the
 /// sticker's id and its image link, and a way to open the link; for a custom
 /// emoji in the text it has the emoji's.
 pub(super) const MESSAGE_DETAILS: MenuEntry<MessageTarget> = MenuEntry::Item(MenuItem {

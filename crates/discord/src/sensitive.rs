@@ -218,7 +218,7 @@ impl Rules {
         }
     }
 
-    /// `E` in 632119, past the settings and the region.
+    /// `A` in 632119, past the settings and the region.
     fn explicit_default(&self, place: Place) -> Redaction {
         use DmFilter::*;
         use Redaction::*;
@@ -262,7 +262,7 @@ impl Rules {
         }
     }
 
-    /// `c` in 444802, past the settings and the region.
+    /// `u` in 444802, past the settings and the region.
     fn gore_default(&self, place: Place) -> Redaction {
         use Redaction::*;
         match (self.underage, place) {

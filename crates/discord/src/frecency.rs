@@ -52,7 +52,7 @@ const RECENT_USES: u32 = 2;
 pub const MAX_FAVORITE_EMOJI: usize = 250;
 
 /// What the client lists as used most for an account with no use of emoji,
-/// and of reactions, until it has some (`eT`, 121681). Listing one counts as
+/// and of reactions, until it has some (`eg`, 121681). Listing one counts as
 /// a use, so a name twice is two.
 const SEEDED_EMOJI: [&str; 10] =
     ["thumbsup", "eyes", "laughing", "watermelon", "fork_and_knife", "yum", "weary", "tired_face", "poop", "100"];

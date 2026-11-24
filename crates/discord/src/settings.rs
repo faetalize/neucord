@@ -276,14 +276,14 @@ impl Notifications {
 
 /// Whether the notification settings offer "A server has an upcoming event":
 /// the client shows the toggle for variants 1 to 3 of the user experiment
-/// `2026-04-upcoming-server-event` and hides it otherwise (212909).
+/// `2026-04-upcoming-server-event` and hides it otherwise (404997).
 pub fn upcoming_event_toggle(experiments: &crate::experiments::Experiments, me: Snowflake) -> bool {
     experiments.apex_user(me, "2026-04-upcoming-server-event").is_some_and(|a| (1..=3).contains(&a.variant))
 }
 
 /// Whether Activity Privacy offers "Share when I update my custom status":
 /// the client shows it for variant 1 of the user experiment
-/// `2026-11-notify-friends-on-custom-status-update` (212909).
+/// `2026-11-notify-friends-on-custom-status-update` (404997).
 pub fn share_custom_status_toggle(experiments: &crate::experiments::Experiments, me: Snowflake) -> bool {
     experiments.apex_user(me, "2026-11-notify-friends-on-custom-status-update").is_some_and(|a| a.variant == 1)
 }
@@ -466,7 +466,7 @@ impl ActivityDefault {
         }
     }
 
-    /// How much is restricted, as the client ranks them (`E`, 365258).
+    /// How much is restricted, as the client ranks them (`A`, 365258).
     pub(crate) fn restraint(self) -> u8 {
         match self {
             Self::Off => 2,
@@ -526,7 +526,7 @@ impl Privacy {
 }
 
 /// What "Direct Messages" says: its title, and under it where it applies
-/// (`vx` and its subtitle in 212909, `b` in 632038). With only server members
+/// (`vx` and its subtitle in 404997, `b` in 632038). With only server members
 /// allowed to send friend requests the one switch is for both. `server` is
 /// none for the account's defaults, else whether the server is a hub.
 pub fn direct_messages_text(only_server_members: bool, server: Option<bool>) -> (&'static str, &'static str) {
@@ -541,7 +541,7 @@ pub fn direct_messages_text(only_server_members: bool, server: Option<bool>) -> 
     (title, note)
 }
 
-/// What is under "Message requests" (`vy` and its subtitle in 212909, `y` in
+/// What is under "Message requests" (`vy` and its subtitle in 404997, `y` in
 /// 632038), for a hub or not.
 pub fn message_requests_note(hub: bool) -> &'static str {
     if hub {
@@ -570,7 +570,7 @@ impl Privacy {
 
     /// "Message requests", on where messages from people we may not know are
     /// filtered into requests. The client turns it on for the accounts it must
-    /// (`useDisabled` and `useValue` of the row in 212909): it cannot be
+    /// (`useDisabled` and `useValue` of the row in 404997): it cannot be
     /// changed where direct messages are off, or by a teen where the region
     /// forces it, or with a parent linked.
     pub fn message_requests(&self, gates: &Gates, server: Option<Snowflake>) -> Row {
@@ -976,7 +976,7 @@ impl Settings {
     }
 
     /// Whether desktop notifications and rings are held back: Do Not Disturb
-    /// or Focus Mode (`eA` in 534765, `K` in 411238 and `i1` in 526227 ask
+    /// or Focus Mode (`tE` in 534765, `K` in 411238 and `i1` in 555084 ask
     /// for both).
     pub fn silenced(&self, now_ms: u64) -> bool {
         self.do_not_disturb() || self.focus_mode(now_ms)

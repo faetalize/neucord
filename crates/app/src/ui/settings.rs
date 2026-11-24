@@ -372,7 +372,7 @@ impl App {
         option_switch(self, &chat_box, "Show send message button", "", &config::SEND_BUTTON, |app, _| {
             app.refresh_chat_bar()
         });
-        // The client's advanced chat bar settings (`tP` in 212909), only for
+        // The client's advanced chat bar settings (`tL` in 404997), only for
         // the accounts whose bar follows them; with no expression picker
         // format, Neucord's is always Flexible, which shows all three.
         if self.chat_bar_customizable() {

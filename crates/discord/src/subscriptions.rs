@@ -63,7 +63,7 @@ pub fn view_ranges(y: f64, height: f64, row_height: f64) -> Ranges {
 }
 
 /// The client's member list row height, which it counts its ranges by
-/// (`rowHeight: 42`, 420018).
+/// (`rowHeight: 42`, 903137).
 const MEMBER_ROW: f64 = 42.0;
 
 /// Less than this a row is no row: a list not laid out yet.

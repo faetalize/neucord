@@ -1,7 +1,7 @@
 //! The privacy rows of the settings window: who may message us from servers
 //! and whether it is a request, who may send friend requests, and how much
 //! of the profile others see. They are the official client's Privacy &
-//! Safety page (212909), saved as it saves them.
+//! Safety page (404997), saved as it saves them.
 //!
 //! Direct messages and message requests are the account's defaults, and
 //! each server can differ (`server_privacy` is a server's own dialog);

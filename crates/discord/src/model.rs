@@ -22,8 +22,8 @@ impl Snowflake {
         ((self.0 >> 22) + Self::DISCORD_EPOCH_MS) as i64
     }
 
-    /// The first snowflake of the millisecond `unix_ms` (`fromTimestamp` in
-    /// 811091): 0 for anything before Discord's epoch.
+    /// The first snowflake of the millisecond `unix_ms` (`s` in
+    /// 363270): 0 for anything before Discord's epoch.
     pub fn from_unix_ms(unix_ms: i64) -> Self {
         Snowflake(((unix_ms - Self::DISCORD_EPOCH_MS as i64).max(0) as u64) << 22)
     }
@@ -1360,7 +1360,7 @@ impl Message {
     }
 
     /// The audio Save File saves from a voice message, or from the one this
-    /// forwards: its first attachment, as the client takes it (761304).
+    /// forwards: its first attachment, as the client takes it (333881).
     pub fn voice_audio(&self) -> Option<Attachment> {
         let forwarded = self.forwarded();
         let message = forwarded.as_ref().unwrap_or(self);
@@ -1505,7 +1505,7 @@ impl Message {
     }
 
     /// What the official client's Copy Text copies (`getContentMessage` in
-    /// 383233, then 761304): the markup as written, of the forwarded message
+    /// 383233, then 333881): the markup as written, of the forwarded message
     /// for a forward, and of the texts for one built from components. `None`
     /// when that is empty.
     pub fn copy_text(&self) -> Option<String> {

@@ -1,5 +1,5 @@
 //! How the client's Notifications settings show one sound of its list
-//! (`a1` in 212909): a switch for the sound, off and not to be touched while
+//! (`a$` in 404997): a switch for the sound, off and not to be touched while
 //! "Disable All Notification Sounds" is on (the sound's own choice is kept
 //! under it) or, for the new message sound, while Focus Mode is on (`jy`,
 //! with `jC.kB` as its `useDisabled`).

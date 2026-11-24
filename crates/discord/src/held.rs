@@ -13,7 +13,7 @@
 //! Every channel is held, a server's too: the client is subscribed to every
 //! server it has held channels of (`threads` stays on even when it goes idle,
 //! 661670), and Neucord subscribes the same way ([`crate::subscriptions`]). A
-//! server's channel we lose View Channel on is marked stale (`Y` in 596344),
+//! server's channel we lose View Channel on is marked stale (`j` in 596344),
 //! which [`Held::forget`] does for it.
 
 use std::collections::{HashMap, HashSet};

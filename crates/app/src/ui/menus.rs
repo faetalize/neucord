@@ -137,7 +137,7 @@ pub(super) enum Style {
 /// A menu's sections, top to bottom, each with its entries in order.
 pub(super) type Table<T, C = App> = &'static [&'static [Entry<T, C>]];
 
-/// A message's menu: what Neucord has of the official client's (761304),
+/// A message's menu: what Neucord has of the official client's (333881),
 /// in its order. Forward follows Reply, and Create Thread follows it.
 /// The media group (Copy Image, Save Image, Save File) comes before the link
 /// group, which names a link by what it points to.
@@ -163,7 +163,7 @@ const MESSAGE: Table<MessageTarget> = &[
     &[chat::COPY_MESSAGE_ID, stickers::MESSAGE_DETAILS],
 ];
 
-/// [`MESSAGE`] where the media takedown regulation is TIDA: the client (761304)
+/// [`MESSAGE`] where the media takedown regulation is TIDA: the client (333881)
 /// puts the Copy ID group (50268) before the media group and the link group
 /// (777933).
 const MESSAGE_REGULATED: Table<MessageTarget> = &[
@@ -298,7 +298,7 @@ pub(super) const CATEGORY: Table<sidebar::ChannelTarget> = &[
     &[notify_menus::MUTE_CATEGORY, notify_menus::UNMUTE_CATEGORY, notify_menus::CHANNEL_NOTIFICATIONS],
 ];
 
-/// A server icon's menu (871638): Mark As Read, then Mute Server,
+/// A server icon's menu (587369): Mark As Read, then Mute Server,
 /// Notification Settings and Hide Muted Channels, which the client groups
 /// together, and Privacy Settings, which it puts after Server Settings (not
 /// here, with the rest of the server's editing). What else the menu holds
@@ -1006,7 +1006,7 @@ mod tests {
             names[names.len() - 3..].to_vec()
         };
         let id = || vec!["copy-message-id", "message-details"];
-        // Mark As Not Sensitive follows Save Image in the media group (761304).
+        // Mark As Not Sensitive follows Save Image in the media group (333881).
         let media = || vec!["copy-image", "save-image", "mark-not-sensitive", "save-file"];
         let links = || {
             ["copy-link", "copy-image-link", "copy-media-link", "open-link", "open-image-link", "open-media-link"]

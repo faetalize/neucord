@@ -79,7 +79,7 @@ fn locale_compare(a: &str, b: &str) -> Ordering {
     a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| b.cmp(a))
 }
 
-/// `t4` in 621377 for the apps of this place: by use, then name, and then
+/// `t3` in 621377 for the apps of this place: by use, then name, and then
 /// the one used last moved first (the first of `apps` when none was used).
 pub fn order_apps<'a>(mut apps: Vec<&'a App>, usage: &AppUsage) -> Vec<&'a App> {
     // The latest use before the sort, over the apps as given: a strict `>`,

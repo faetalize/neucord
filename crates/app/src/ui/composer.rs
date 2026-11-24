@@ -290,7 +290,7 @@ impl App {
         });
         self.reply_bar.append(&cancel);
         area.append(&self.reply_bar);
-        // A long chain of replies is offered a thread, which ends the reply (`tb` in 989161).
+        // A long chain of replies is offered a thread, which ends the reply (`t_` in 989161).
         let start = gtk::Button::builder().label("Create Thread").css_classes(["flat", "link"]).build();
         start.connect_clicked({
             let this = Rc::downgrade(self);
@@ -455,7 +455,7 @@ impl App {
         if key == Key::Up && alone && self.composer.buffer().char_count() == 0 && self.edit_last() {
             return glib::Propagation::Stop;
         }
-        // Files waiting go before the reply (`handleKeyDown` in 699344 clears
+        // Files waiting go before the reply (`handleKeyDown` in 5206 clears
         // them and stops there; the reply, the schedule and a sticker are
         // its caller's), and only with no modifier held.
         let plain = !modifiers.intersects(gtk::accelerator_get_default_mod_mask());

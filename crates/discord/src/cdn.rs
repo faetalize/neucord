@@ -12,7 +12,7 @@ const CDN: &str = "https://cdn.discordapp.com";
 const CDN_HOST: &str = "cdn.discordapp.com";
 
 /// The query of an avatar, icon or emoji (`size`, then `animated` for what
-/// moves, as `g` in 486020 puts them).
+/// moves, as `T` in 486020 puts them).
 fn query(size: u16, animated: bool) -> String {
     if animated { format!("size={size}&animated=true") } else { format!("size={size}") }
 }
@@ -281,7 +281,7 @@ fn is_external(url: &Url) -> bool {
 }
 
 /// An image of Discord's media proxy asked to stay animated, as the GIF
-/// picker's previews are (`b` in 884037): a WebP or AVIF of the proxy's
+/// picker's previews are (`F` in 884037): a WebP or AVIF of the proxy's
 /// `/external/` or of an attachment says `animated=true`, and a GIF there
 /// is asked for as an animated WebP. Any other URL comes back unchanged.
 pub fn animated(url: &str) -> String {

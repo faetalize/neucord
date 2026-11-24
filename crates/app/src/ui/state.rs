@@ -425,7 +425,7 @@ impl State {
     /// A press of ours is over, answered or refused by the request itself
     /// (`failure`). A refusal that says the app's command is out of date
     /// makes the indexes with it stale, as it does for a command we ran
-    /// (`T` in 964363 dispatches the same for a press).
+    /// (`g` in 964363 dispatches the same for a press).
     pub(super) fn end_press(&mut self, nonce: Snowflake, failure: Option<&Failure>) -> Option<Pending> {
         let press = self.interactions.remove(&nonce)?;
         if failure.is_some_and(|f| f.stale_command) {
@@ -772,7 +772,7 @@ impl State {
     }
 
     /// Whose member list the open channel has, as the client chooses
-    /// (`renderSidebar`, 420018): a server's text, announcement, forum and
+    /// (`renderSidebar`, 903137): a server's text, announcement, forum and
     /// media channels, and an announcement thread's parent, which show the
     /// server's members; and a group DM. Other threads show those in them.
     pub(super) fn member_target(&self) -> Option<Target> {
@@ -1327,7 +1327,7 @@ impl State {
     }
 
     /// The channels and threads of `guild` we can't view, whose held messages
-    /// are no good: the client marks them stale (`Y` in 596344) when roles,
+    /// are no good: the client marks them stale (`j` in 596344) when roles,
     /// our member or the channels change.
     pub(super) fn unviewable(&self, guild: Snowflake) -> Vec<Snowflake> {
         let Some(guild) = self.guilds.iter().find(|g| g.id == guild) else { return Vec::new() };

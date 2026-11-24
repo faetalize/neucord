@@ -80,7 +80,7 @@ pub struct Pill<'a> {
 }
 
 /// What a reaction looks like in a payload. Discord sends `count_details`,
-/// and the client reads the counts from it when it is there (`D` in 432005).
+/// and the client reads the counts from it when it is there (`b` in 432005).
 #[derive(Deserialize)]
 struct Raw {
     emoji: Emoji,

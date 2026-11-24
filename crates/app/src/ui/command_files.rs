@@ -41,7 +41,7 @@ impl FileBoxes {
 }
 
 impl Active {
-    /// The name of each option's file (`em` in 84046, `g` in 317681).
+    /// The name of each option's file (`ey` in 84046, `g` in 317681).
     pub(super) fn staged(&self) -> Values {
         self.files.iter().map(|(option, upload)| (option.clone(), upload.name())).collect()
     }

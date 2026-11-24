@@ -1,4 +1,4 @@
-//! The Activity Privacy page of the settings window (212909): what activity
+//! The Activity Privacy page of the settings window (404997): what activity
 //! is shared (and with whom friends are told what), where it is shared by
 //! default and in which servers, and who may join the games played. The
 //! settings are the account's, saved as they change; what Neucord does not

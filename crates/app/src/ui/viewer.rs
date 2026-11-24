@@ -1034,7 +1034,7 @@ pub(super) const SAVE_IMAGE: Entry<Target> = Entry::Item(menus::Item {
 });
 
 /// A video's panel of numbers, ticked while it shows (`video-stats-for-nerds`
-/// in 761304), by the video's link.
+/// in 333881), by the video's link.
 pub(super) const STATS_FOR_NERDS: Entry<Target> = Entry::Item(menus::Item {
     name: "stats-for-nerds",
     label: "Stats for _Nerds",
@@ -1154,7 +1154,7 @@ pub(super) fn launch_uri(app: &Rc<App>, url: &str, parent: Option<&gtk::Window>)
 
 impl App {
     /// Whether the media options (saving, copying, opening links) are hidden
-    /// in `channel`: a post of a forum that says so (`s` in 207133).
+    /// in `channel`: a post of a forum that says so (`A` in 207133).
     pub(super) fn media_options_hidden(&self, channel: discord::Snowflake) -> bool {
         let state = self.account.state.borrow();
         let Some((Some(guild), channel)) = state.find_channel(channel) else { return false };

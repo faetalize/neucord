@@ -210,7 +210,7 @@ impl EmbedMedia {
         Some(Media { original: original.to_owned(), url, width, height, animated, star: None })
     }
 
-    /// An image of a gallery. The client gives each its own star (`ec`,
+    /// An image of a gallery. The client gives each its own star (`em`,
     /// 265705) when it animates: itself, with no video or provider to go by.
     fn gallery_item(&self) -> Option<Media> {
         let mut item = self.proxied()?;

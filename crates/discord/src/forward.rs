@@ -278,7 +278,7 @@ pub fn listing(
     }
 }
 
-/// What the picker shows of the message (`eS` in 92961): its text, and a line
+/// What the picker shows of the message (`eR` in 92961): its text, and a line
 /// for what it holds besides.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Preview {

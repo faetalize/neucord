@@ -4,7 +4,7 @@
 //!
 //! A pick sends the GIF's link as a message at once, whatever the box holds,
 //! which it leaves alone (the client's `isGif` branch in `handleSendMessage`,
-//! 699344). With Shift it puts the link in the box instead.
+//! 5206). With Shift it puts the link in the box instead.
 //!
 //! A pick of a result that has an id, Shift or not, and whatever becomes of
 //! the message, then reports it with `POST /gifs/select` (`g4`, 497685); a
@@ -94,7 +94,7 @@ impl App {
     }
 
     /// Pulse the GIF button after a GIF is favourited, from any star (`er` in
-    /// 290153): its content blinks once (style.css), and it pulses until
+    /// 12764): its content blinks once (style.css), and it pulses until
     /// [`PULSE_MS`] after the last favourite. One meanwhile only restarts the
     /// timer, so the blink doesn't replay. A hidden button, which the client
     /// hasn't mounted, doesn't pulse.
@@ -119,7 +119,7 @@ impl App {
     }
 
     /// Show "Added to Favorites" over the GIF button while it pulses, for the
-    /// account's first two favourite GIFs (`es` in 290153). Favourites not loaded
+    /// account's first two favourite GIFs (`el` in 12764). Favourites not loaded
     /// yet aren't the account's count, and saved nothing.
     pub(super) fn refresh_gif_hint(&self) {
         let shows = self.gif_pulse.borrow().is_some() && self.gif_button.is_mapped() && {
@@ -356,7 +356,7 @@ impl Session {
             move |_| {
                 if let Some(app) = this.app.upgrade() {
                     // The client reports the pick once `onSelectGIF` has only started the send,
-                    // which waits on `handleSendMessage`'s promises (699344), so the report leaves first.
+                    // which waits on `handleSendMessage`'s promises (5206), so the report leaves first.
                     let selection = this.view.borrow().selection(&found);
                     let rest = app.account.state.borrow().rest.clone();
                     if let (Some(body), Some(rest)) = (selection, rest) {

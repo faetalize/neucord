@@ -1,7 +1,7 @@
 //! Restricted hours: a schedule a parent sets through Family Center for a
 //! teen's account (`restricted_schedule` on the user object, class `kX` in
 //! 244284). While one of its rules is active the client holds every desktop
-//! notification and notification sound (`eA` and the message handler in
+//! notification and notification sound (`tE` and the message handler in
 //! 534765) and covers the app with a "come back later" screen.
 
 use serde::Deserialize;

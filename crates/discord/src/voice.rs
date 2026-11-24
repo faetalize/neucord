@@ -62,7 +62,7 @@ pub fn clock_blinks(elapsed_ms: u64, reduced_motion: bool) -> bool {
     (elapsed_ms.saturating_sub(from) / period) % 2 == 1
 }
 
-/// Shorter than this a recording is dropped, not sent (`ea` in 841817).
+/// Shorter than this a recording is dropped, not sent (`er` in 841817).
 const MIN_SECS: f64 = 0.5;
 
 /// The rate, and the length of one Opus packet in samples.
@@ -290,7 +290,7 @@ fn level(pcm: &[i16]) -> u8 {
 }
 
 /// The `waveform` of a message: at most 256 levels, averaged down into
-/// 256 when there are more (934581), as base64 (`el` in 841817).
+/// 256 when there are more (934581), as base64 (`ea` in 841817).
 pub fn waveform(levels: &[u8]) -> String {
     if levels.is_empty() {
         return String::new();
@@ -371,7 +371,7 @@ impl Capture {
 }
 
 /// What the player of a voice message shows and does, a posted one (383055)
-/// and a draft before it is sent (`e7` in 989161) alike: play and pause, a
+/// and a draft before it is sent (`e8` in 989161) alike: play and pause, a
 /// waveform to press or drag through, and a clock that counts down once it
 /// has played.
 #[derive(Clone, Debug, PartialEq)]

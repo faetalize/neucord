@@ -494,7 +494,7 @@ fn detail(
 impl State {
     /// The threads header button: shown for a channel that takes threads and
     /// for a thread, whose parent's threads it lists (`renderHeaderToolbar` in
-    /// 420018), and whether it can be pressed, which it can't while the channel
+    /// 903137), and whether it can be pressed, which it can't while the channel
     /// it lists is behind the age gate (494208, by `ni` in 323073). `None` is
     /// no button.
     pub(super) fn threads_button(&self, agreed: &[Snowflake]) -> Option<bool> {
@@ -655,7 +655,7 @@ impl App {
             .is_some_and(|(_, t)| t.kind.is_thread() && t.parent_id == Some(message.channel_id) && state.can_view(t.id))
     }
 
-    /// The box under a message that started a thread (`r8` in 190854): the
+    /// The box under a message that started a thread (`as` in 190854): the
     /// thread's name and how many messages it holds, opening it. Only for a
     /// thread we know, as there.
     pub(super) fn thread_accessory(self: &Rc<Self>, message: &Message) -> Option<gtk::Widget> {

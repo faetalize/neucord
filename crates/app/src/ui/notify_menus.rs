@@ -533,7 +533,7 @@ pub(super) const CHANNEL_NOTIFICATIONS: Entry<ChannelTarget> = Entry::Item(Item 
     ]),
 });
 
-/// Mark As Read on a server icon (871638), greyed while nothing is unread.
+/// Mark As Read on a server icon (587369), greyed while nothing is unread.
 pub(super) const MARK_GUILD_READ: Entry<GuildTarget> = Entry::Item(Item {
     name: "mark-guild-read",
     label: "Mark As _Read",
@@ -591,7 +591,7 @@ pub(super) const UNMUTE_GUILD: Entry<GuildTarget> = Entry::Item(Item {
     },
 });
 
-/// A server's level and the switches under it (`871638`).
+/// A server's level and the switches under it (`587369`).
 pub(super) const GUILD_NOTIFICATIONS: Entry<GuildTarget> = Entry::Item(Item {
     name: "guild-notifications",
     label: "_Notification Settings",

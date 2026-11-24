@@ -1,6 +1,6 @@
 //! A user's profile, in the popout the client opens from a name, an avatar,
-//! a mention or a member list row (`342296`, drawn by `348434`), in the panel
-//! beside a DM (`ok` in 420018), and the menu on those places
+//! a mention or a member list row (`342296`, drawn by `395377`), in the panel
+//! beside a DM (`ob` in 903137), and the menu on those places
 //! (`user-context`, 107632). Asking for the profile and keeping it is
 //! [`discord::profile`]'s; this draws what it holds.
 
@@ -414,7 +414,7 @@ impl App {
     }
 
     /// Ask for `user`'s mutual friends when the panel's section opens
-    /// (`ob` in 229187), unless they are here or on their way.
+    /// (`A` in 229187), unless they are here or on their way.
     fn ask_friend_list(self: &Rc<Self>, user: Snowflake) {
         let rest = self.account.state.borrow().rest.clone();
         let Some(rest) = rest.filter(|_| self.account.state.borrow().profiles.wants_friend_list(user)) else { return };

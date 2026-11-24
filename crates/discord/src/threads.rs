@@ -40,7 +40,7 @@ pub fn lock_edits(archived: bool, lock: bool) -> Vec<Value> {
     edits
 }
 
-/// A thread's settings the client's form edits (336541): its name, how long
+/// A thread's settings the client's form edits (603280): its name, how long
 /// members wait between messages, when it archives itself, who may invite to
 /// a private one, and whether it hides its media.
 #[derive(Clone, Debug, PartialEq)]
@@ -95,7 +95,7 @@ impl Invalid {
 }
 
 /// The edit the form saves (`saveChannel` in 435183, from `onSave` in
-/// 336541). The client sends the channel record's fields through the getters
+/// 603280). The client sends the channel record's fields through the getters
 /// it has defaults in, so a thread's carries a topic of "", a bitrate of
 /// 64000, a user limit of 0 and no NSFW; whatever the record lacks is left
 /// out.
@@ -234,7 +234,7 @@ impl Viewed {
 pub const PAGE: u32 = 25;
 
 /// The threads the sidebar lists under `parent`, as the client lists them
-/// (`eT` in 791513, from `ActiveJoinedThreadsStore` in 863005): active
+/// (`eg` in 791513, from `ActiveJoinedThreadsStore` in 863005): active
 /// threads we've joined, newest joined first, that are relevant. Under a
 /// muted parent, unless it or one of its threads is open, only those that
 /// are unread. The open thread comes first, listed or not.

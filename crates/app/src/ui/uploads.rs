@@ -504,7 +504,7 @@ impl App {
         let drafts = &self.drafts;
         let channel = self.attach_channel();
         // The menu holds more than files: it shows wherever anything in it does.
-        // A command's app icon takes its place (`eQ` in 699344).
+        // A command's app icon takes its place (`eQ` in 5206).
         drafts.attach.set_visible(
             (channel.is_some()
                 || self.voice_channel().is_some()
@@ -603,7 +603,7 @@ impl App {
             move |view| {
                 let Some(this) = this.upgrade() else { return };
                 // With a command in the box, a file goes to its file option (84046),
-                // which takes one without Attach Files (`nT` in 989161).
+                // which takes one without Attach Files (`nE` in 989161).
                 let pasted = match this.slash.is_active() {
                     true => Some(this.clipboard_pasted().0),
                     false => this.composer_paste().map(|(pasted, _)| pasted),
@@ -1101,7 +1101,7 @@ impl App {
     }
 
     /// Take every file out of the channel's draft, as Escape in the message
-    /// box does (`clearAll`, 699344).
+    /// box does (`clearAll`, 5206).
     pub(super) fn clear_uploads(self: &Rc<Self>, channel: Snowflake) {
         let files = self.drafts.of(channel);
         for upload in files {
