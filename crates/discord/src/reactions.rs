@@ -81,6 +81,8 @@ pub struct Pill<'a> {
 
 /// What a reaction looks like in a payload. Discord sends `count_details`,
 /// and the client reads the counts from it when it is there (`b` in 432005).
+/// What reacted with sounds alone has none left (`D` there): see
+/// [`Raw::shown`].
 #[derive(Deserialize)]
 struct Raw {
     emoji: Emoji,
@@ -104,6 +106,19 @@ struct Details {
     burst: Option<i64>,
     #[serde(default)]
     normal: Option<i64>,
+    /// Any value counts, as `null != vote` does in the client.
+    #[serde(default)]
+    vote: Option<serde::de::IgnoredAny>,
+}
+
+impl Raw {
+    /// Whether the client keeps it in the message (`D` in 432005): not once
+    /// `count_details` has no vote and no normal or super reactions left.
+    fn shown(&self) -> bool {
+        self.count_details
+            .as_ref()
+            .is_none_or(|d| d.vote.is_some() || d.normal.unwrap_or(0).saturating_add(d.burst.unwrap_or(0)) > 0)
+    }
 }
 
 impl From<Raw> for Reaction {
@@ -123,11 +138,12 @@ impl From<Raw> for Reaction {
     }
 }
 
-/// A message's `reactions`. One that doesn't read is left out, not the
-/// whole message.
+/// A message's `reactions`, less those the client leaves out. One that
+/// doesn't read is left out, not the whole message.
 pub(crate) fn list<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Reaction>, D::Error> {
     let values = Option::<Vec<serde_json::Value>>::deserialize(d)?.unwrap_or_default();
-    Ok(values.into_iter().filter_map(|v| Raw::deserialize(v).ok()).map(Reaction::from).collect())
+    let raws = values.into_iter().filter_map(|v| Raw::deserialize(v).ok());
+    Ok(raws.filter(Raw::shown).map(Reaction::from).collect())
 }
 
 impl Emoji {
@@ -622,9 +638,27 @@ mod tests {
     }
 
     #[test]
+    fn a_reaction_of_only_sounds_is_left_out() {
+        let m = message(json!([
+            {"emoji": {"name": "🔊"}, "count": 2, "count_details": {"normal": 0, "burst": 0}},
+            {"emoji": {"name": "🔔"}, "count": 1, "count_details": {}},
+            {"emoji": {"name": "🗳"}, "count": 0, "count_details": {"vote": 3}},
+            {"emoji": {"name": "🙂"}, "count": 0},
+            {"emoji": {"name": "🔥"}, "count_details": {"normal": -1, "burst": 2}},
+        ]));
+        let kept: Vec<_> = m.reactions.iter().map(|r| r.emoji.path()).collect();
+        assert_eq!(kept, ["🗳", "🙂", "🔥"], "kept for a vote, without count_details, or with some left over");
+    }
+
+    #[test]
     fn counts_never_go_below_nothing() {
-        let m = message(json!([{"emoji": {"name": "🔥"}, "count": -2, "count_details": {"normal": -1, "burst": -4}}]));
-        assert_eq!(counts(&m), vec![(0, false, 0, false)]);
+        // Counts that add up to nothing leave the reaction out, so each
+        // negative one sits beside something that keeps it.
+        let m = message(json!([
+            {"emoji": {"name": "🔥"}, "count": -2, "burst_count": -4},
+            {"emoji": {"name": "🙂"}, "count": 5, "count_details": {"normal": -1, "burst": 2}},
+        ]));
+        assert_eq!(counts(&m), vec![(0, false, 0, false), (0, false, 2, false)]);
     }
 
     #[test]
