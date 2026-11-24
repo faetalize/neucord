@@ -1267,6 +1267,27 @@ mod tests {
         assert!(can_send(Some(&guild), &thread, &me, 0));
     }
 
+    /// `f` in 167074, which the Apps button and Use Apps read off the
+    /// message box showing (`chat_bar::Bar::open`).
+    #[test]
+    fn no_sending_where_the_client_disables_messages() {
+        let me = me();
+        let mut guild = guild();
+        guild.roles[2].permissions = Permissions::ADMINISTRATOR;
+        guild.pending = true;
+        assert!(!can_send(Some(&guild), &channel(&[]), &me, 0), "pending, administrators too");
+
+        let posting = channel(&[(GUILD, Permissions::NONE, IN_THREADS)]);
+        let (guild, media) = with_thread(posting.clone(), 19, joined());
+        assert!(!can_send(Some(&guild), &media, &me, 0), "a media thread");
+        let closed = json!({"thread_metadata": {"archived": true, "locked": true}});
+        let (mut guild, thread) = with_thread(posting, 11, closed);
+        assert!(!can_send(Some(&guild), &thread, &me, 0), "an archived locked thread");
+        guild.roles[1].permissions = MANAGE_THREADS;
+        guild.my_roles.push(Snowflake(MOD));
+        assert!(can_send(Some(&guild), &thread, &me, 0), "unless we manage threads");
+    }
+
     #[test]
     fn buttons_and_menus_go_off_where_we_cant_chat() {
         let me = me();

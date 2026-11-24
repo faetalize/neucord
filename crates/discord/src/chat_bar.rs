@@ -32,7 +32,11 @@ pub fn attach_launcher(customizable: bool, prefs: Prefs) -> bool {
 pub struct Bar {
     /// The box shows: the channel takes our messages. Where it doesn't, the
     /// client's buttons draw nothing (`disabled`, `nE` in 989161) and
-    /// Neucord's notice bar stands in for the box.
+    /// Neucord's notice bar stands in for the box. It also stands for `f` in
+    /// 167074, which the Apps button and the attach menu's Use Apps need:
+    /// not pending, Send Messages outside a DM, and not `UJ` in 406704 (a
+    /// media thread, or an archived locked one without Manage Threads),
+    /// whose threads lack Send Messages by the thread rule anyway.
     pub open: bool,
     /// The box edits a message. The client's edit box (`EDIT` in 355622)
     /// has the emoji button and none of the others.
@@ -101,9 +105,10 @@ pub fn shown(bar: Bar, prefs: Prefs) -> Shown {
         emoji: !bar.recording
             && chosen(prefs.emoji)
             && (!bar.command || bar.pill.is_some_and(|kind| kind != crate::commands::option_type::ATTACHMENT)),
-        // `Z`: a box that takes commands (not the edit or announcement
-        // box), with none active. Replying doesn't matter here, only to
-        // the attach menu's Use Apps.
+        // `q` in 12764: a box that takes commands (not the edit or
+        // announcement box), where `f` in 167074 holds (`open`), with none
+        // active. Replying doesn't matter here, only to the attach menu's
+        // Use Apps.
         apps: message && !bar.command && !bar.announcement && chosen(prefs.apps),
         // The client's edit box has no `submit.button`; Neucord's box
         // doubles as it.
