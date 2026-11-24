@@ -2410,10 +2410,9 @@ impl App {
             message,
             row: row.clone().upcast(),
         };
-        let regulated = self.account.state.borrow().media_takedown_regulated;
         // The quick reactions are the account's favourites and use, loaded when the menu opens (`D6`, 822123).
         self.load_frecency(|| {});
-        menus::popup(self, menus::message(regulated), target, row, at);
+        menus::popup(self, menus::MESSAGE, target, row, at);
     }
 
     /// The spoilers revealed in a message's text, remembered while the app

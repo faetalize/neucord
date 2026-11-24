@@ -274,9 +274,6 @@ pub(super) struct State {
     pub(super) presence_timer: u64,
     /// Which wait for a status to end is current; a newer one replaces it.
     pub(super) expiry_timer: u64,
-    /// The message menu's last groups come in the order the client uses
-    /// where the media takedown regulation is TIDA.
-    pub(super) media_takedown_regulated: bool,
     /// Acks waiting to be sent: channel → newest message read.
     pub(super) pending_acks: HashMap<Snowflake, Snowflake>,
     /// How long until we may post again in each channel.
